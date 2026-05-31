@@ -1,7 +1,10 @@
-//! Long-term identity: an ML-DSA-87 signing key plus an X25519 identity key.
+//! Long-term identity: a single ML-DSA-87 signing key. No elliptic curve.
 //!
-//! The public identity's **fingerprint** is `SHA-384(ml_dsa_vk || x25519_pub)`,
-//! rendered as a grouped "safety number" for out-of-band verification.
+//! The public identity's **fingerprint** is `Hash(ml_dsa_vk)` (SHA3-384 by
+//! default), rendered as a grouped "safety number" for out-of-band
+//! verification. Authentication is post-quantum end to end; there is no EC
+//! identity key (the per-session ratchet's hybrid X25519 half is separate and
+//! strictly defense-in-depth — see [`crate::hybrid`]).
 //!
 //! The ML-DSA private key is stored as its 32-byte seed (the FIPS-204
 //! preferred serialization), held in a `Zeroizing` buffer and expanded on use.
@@ -12,59 +15,47 @@ use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, MlDsa87, Signature, SigningKey, VerifyingKey, B32,
 };
 use rand::RngCore;
-use sha2::{Digest, Sha384};
-use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
+use sha3::Digest;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, Result};
+use crate::hash::Hash;
 
-/// Length of an identity fingerprint (SHA-384).
+/// Length of an identity fingerprint (the [`Hash`] output, 48 bytes).
 pub const FINGERPRINT_LEN: usize = 48;
 
-/// A long-term secret identity. Not `Clone` — there should be one.
+/// A long-term secret identity (ML-DSA-87). Not `Clone` — there should be one.
 pub struct IdentityKeyPair {
     /// ML-DSA-87 signing seed (32 bytes), zeroized on drop.
     sig_seed: Zeroizing<[u8; 32]>,
-    /// X25519 identity secret (zeroized on drop via the `zeroize` feature).
-    x25519: XStaticSecret,
     /// Cached public half.
     public: IdentityPublic,
 }
 
-/// The shareable public identity.
+/// The shareable public identity (ML-DSA-87 verifying key).
 #[derive(Clone, PartialEq, Eq)]
 pub struct IdentityPublic {
     /// ML-DSA-87 verifying key, encoded (2592 bytes for category-5).
     pub sig_vk: Vec<u8>,
-    /// X25519 identity public key.
-    pub x25519_pub: [u8; 32],
 }
 
 impl IdentityKeyPair {
     /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {
-        let mut rng = rand::rngs::OsRng;
         let mut seed = Zeroizing::new([0u8; 32]);
-        rng.fill_bytes(seed.as_mut_slice());
-        let x25519 = XStaticSecret::random_from_rng(rng);
-        Self::from_parts(seed, x25519)
+        rand::rngs::OsRng.fill_bytes(seed.as_mut_slice());
+        Self::from_secret_bytes(*seed)
     }
 
-    /// Reconstruct from a stored ML-DSA seed and X25519 secret bytes.
-    pub fn from_secret_bytes(sig_seed: [u8; 32], x25519_secret: [u8; 32]) -> Self {
-        Self::from_parts(Zeroizing::new(sig_seed), XStaticSecret::from(x25519_secret))
-    }
-
-    fn from_parts(sig_seed: Zeroizing<[u8; 32]>, x25519: XStaticSecret) -> Self {
+    /// Reconstruct from a stored ML-DSA seed.
+    pub fn from_secret_bytes(sig_seed: [u8; 32]) -> Self {
+        let sig_seed = Zeroizing::new(sig_seed);
         let signing = signing_key_from_seed(&sig_seed);
         let vk = signing.verifying_key();
         let sig_vk = vk.encode().as_slice().to_vec();
-        let x25519_pub = XPublicKey::from(&x25519).to_bytes();
-        let public = IdentityPublic { sig_vk, x25519_pub };
         Self {
             sig_seed,
-            x25519,
-            public,
+            public: IdentityPublic { sig_vk },
         }
     }
 
@@ -72,14 +63,10 @@ impl IdentityKeyPair {
         &self.public
     }
 
-    /// Export secrets for encrypted-at-rest storage. Caller must protect these.
-    pub fn export_secret(&self) -> ([u8; 32], [u8; 32]) {
-        (*self.sig_seed, self.x25519.to_bytes())
-    }
-
-    /// Borrow the X25519 identity secret (for X3DH-style handshakes).
-    pub fn x25519_secret(&self) -> &XStaticSecret {
-        &self.x25519
+    /// Export the secret seed for encrypted-at-rest storage. Caller must
+    /// protect this.
+    pub fn export_secret(&self) -> [u8; 32] {
+        *self.sig_seed
     }
 
     /// Sign a message with ML-DSA-87 (deterministic variant, empty context).
@@ -91,11 +78,10 @@ impl IdentityKeyPair {
 }
 
 impl IdentityPublic {
-    /// SHA-384 fingerprint over the canonical public-key encoding.
+    /// Fingerprint over the canonical public-key encoding.
     pub fn fingerprint(&self) -> [u8; FINGERPRINT_LEN] {
-        let mut h = Sha384::new();
+        let mut h = Hash::new();
         h.update(&self.sig_vk);
-        h.update(self.x25519_pub);
         let out = h.finalize();
         let mut fp = [0u8; FINGERPRINT_LEN];
         fp.copy_from_slice(&out);
@@ -181,8 +167,8 @@ mod tests {
     #[test]
     fn secret_export_reimport_roundtrip() {
         let id = IdentityKeyPair::generate();
-        let (seed, x) = id.export_secret();
-        let id2 = IdentityKeyPair::from_secret_bytes(seed, x);
+        let seed = id.export_secret();
+        let id2 = IdentityKeyPair::from_secret_bytes(seed);
         assert_eq!(id.public().fingerprint(), id2.public().fingerprint());
         // signature from reimported key verifies under original public id
         let sig = id2.sign(b"same key");

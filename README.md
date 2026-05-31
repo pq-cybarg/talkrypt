@@ -27,20 +27,30 @@ accordingly. The same banner prints with `talkrypt version`.
 
 ## Cryptography (CNSA 2.0 aligned)
 
-| Role            | Algorithm                               |
-|-----------------|-----------------------------------------|
-| KEM (PQ)        | ML-KEM-1024 (FIPS 203)                  |
-| KEM (classical) | X25519 — combined as a **hybrid**       |
-| Signature       | ML-DSA-87 (FIPS 204)                    |
-| AEAD            | AES-256-GCM                             |
-| Hash / KDF      | SHA-384 / HKDF-SHA384                   |
-| Passphrase KDF  | Argon2id (persistent-key sealing)       |
+| Role            | Algorithm                                          |
+|-----------------|----------------------------------------------------|
+| KEM (PQ)        | ML-KEM-1024 (FIPS 203) — primary                   |
+| KEM (classical) | X25519 — hybrid half, defense-in-depth only        |
+| Signature/auth  | ML-DSA-87 (FIPS 204) — pure PQ, no EC              |
+| AEAD            | AES-256-GCM                                         |
+| Hash / KDF      | SHA3-384 / HKDF (or SHA-384 via `cnsa-sha2`)        |
+| Passphrase KDF  | Argon2id (persistent-key sealing)                  |
 
 The asymmetric ratchet step runs **both** an X25519 DH and an ML-KEM-1024
 encapsulation and KDF-combines them, so confidentiality holds if *either*
 primitive is unbroken — and harvest-now-decrypt-later is defeated by the PQ
 half. Per-message keys give **forward secrecy**; fresh ratchet steps give
 **post-compromise recovery**.
+
+### Elliptic curve is never load-bearing
+
+Identity and authentication are **pure post-quantum** (ML-DSA-87 — no EC key).
+The only EC in the E2E layer is X25519 as the *classical half* of the hybrid
+KEM, which strengthens (never weakens) security: breaking X25519 leaves content
+protected by ML-KEM-1024. Tor's own onion/circuit keys (ed25519 / x25519 ntor)
+protect *anonymity*, independent of E2E content confidentiality. The default
+hash is **SHA3-384** (Keccak — the same family ML-KEM/ML-DSA use internally);
+`cnsa-sha2` switches to SHA-384 for strict CNSA 2.0 hash alignment.
 
 ## Architecture
 

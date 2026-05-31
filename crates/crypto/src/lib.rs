@@ -16,6 +16,7 @@
 pub mod aead;
 pub mod error;
 pub mod group;
+pub mod hash;
 pub mod hybrid;
 pub mod identity;
 pub mod kdf;

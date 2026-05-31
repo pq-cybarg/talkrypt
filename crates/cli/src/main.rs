@@ -21,13 +21,15 @@ use talkrypt_transport::{LoopbackFabric, TcpTransport};
 
 const BANNER: &str = "\
 talkrypt 0.1.0 — PQ end-to-end encrypted chat over Tor (Arti)
-Crypto: ML-KEM-1024 + X25519 (hybrid KEM), ML-DSA-87, AES-256-GCM, SHA-384
-        Double Ratchet (forward secrecy + post-compromise recovery)
+Crypto: ML-KEM-1024 (PQ) + X25519 hybrid KEM, ML-DSA-87 auth, AES-256-GCM,
+        SHA3-384/HKDF. Double Ratchet (forward secrecy + post-compromise).
+        Identity & authentication are pure post-quantum (ML-DSA-87); X25519 is
+        only the defense-in-depth half of the hybrid KEM — never load-bearing.
 
-HONESTY: CNSA 2.0 *algorithm-aligned* and CSfC *architecture-aligned*.
-         NOT FIPS-140-validated, NOT CSfC-accredited, NOT NSA-approved —
-         those are external lab/agency processes that source code cannot
-         self-certify. Use accordingly.";
+HONESTY: PQ algorithms aligned with CNSA 2.0 (hash defaults to SHA3/FIPS-202;
+         build with `cnsa-sha2` for strict CNSA SHA-384). CSfC architecture-
+         aligned. NOT FIPS-140-validated, NOT CSfC-accredited, NOT NSA-approved
+         — those are external processes source code cannot self-certify.";
 
 #[derive(Parser)]
 #[command(

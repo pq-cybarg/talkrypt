@@ -32,25 +32,18 @@ pub struct HandshakeResult {
 fn encode_identity(id: &IdentityPublic) -> Vec<u8> {
     let mut w = Writer::new();
     w.put_bytes(&id.sig_vk);
-    w.put_bytes(&id.x25519_pub);
     w.into_vec()
 }
 
 fn decode_identity(r: &mut Reader) -> Result<IdentityPublic> {
     // The identity is written as a single length-prefixed blob (see
-    // `encode_identity` + `put_bytes`); unwrap it, then parse the inner fields.
+    // `encode_identity` + `put_bytes`); unwrap it, then parse the inner field.
     let blob = r.get_vec()?;
     let mut ir = Reader::new(&blob);
     let sig_vk = ir.get_vec()?;
-    let x = ir.get_bytes()?;
-    if x.len() != 32 {
-        return Err(CoreError::Malformed("identity x25519 length"));
-    }
-    let mut x25519_pub = [0u8; 32];
-    x25519_pub.copy_from_slice(x);
     ir.finish()
         .map_err(|_| CoreError::Malformed("identity trailing bytes"))?;
-    Ok(IdentityPublic { sig_vk, x25519_pub })
+    Ok(IdentityPublic { sig_vk })
 }
 
 fn random_nonce() -> [u8; 32] {

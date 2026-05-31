@@ -18,11 +18,20 @@ use crate::kdf::KEY_LEN;
 use crate::noise::NoiseSession;
 use crate::ratchet::Session;
 
-/// Canonical id of the default suite.
-pub const DEFAULT_SUITE_ID: &str = "tk.dr.x25519+mlkem1024.aes256gcm.sha384.mldsa87";
+/// Canonical id of the default suite. The KEM is written PQ-first
+/// (`mlkem1024+x25519`) to signal that ML-KEM is primary and X25519 is the
+/// defense-in-depth hybrid half. The hash token follows the active build
+/// (`sha3-384` by default, `sha384` under the `cnsa-sha2` feature).
+#[cfg(not(feature = "cnsa-sha2"))]
+pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+x25519.aes256gcm.sha3-384.mldsa87";
+#[cfg(feature = "cnsa-sha2")]
+pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+x25519.aes256gcm.sha384.mldsa87";
 
 /// Id of the PQ-Noise suite (session-granularity forward secrecy).
-pub const NOISE_SUITE_ID: &str = "tk.noise.x25519+mlkem1024.aes256gcm.sha384";
+#[cfg(not(feature = "cnsa-sha2"))]
+pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+x25519.aes256gcm.sha3-384";
+#[cfg(feature = "cnsa-sha2")]
+pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+x25519.aes256gcm.sha384";
 
 /// Coarse security level used to enforce a registry floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

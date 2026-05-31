@@ -10,6 +10,7 @@ zeroize.workspace = true
 subtle.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 hkdf.workspace = true
 aes-gcm.workspace = true
 x25519-dalek.workspace = true
@@ -28,6 +29,9 @@ default = []
 # the FIPS build toolchain. This feature selects the backend; it does not by
 # itself constitute validation.
 fips = ["dep:aws-lc-rs"]
+# Use SHA-2 (SHA-384) for the KDF/fingerprint instead of the default SHA3-384,
+# for strict CNSA 2.0 hash alignment.
+cnsa-sha2 = []
 
 [dev-dependencies]
 proptest.workspace = true
