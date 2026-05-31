@@ -3,3 +3,20 @@ name = "talkrypt-crypto"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+talkrypt-wire.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+aes-gcm.workspace = true
+x25519-dalek.workspace = true
+ml-kem.workspace = true
+ml-dsa.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
