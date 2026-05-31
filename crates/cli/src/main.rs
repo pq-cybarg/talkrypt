@@ -65,6 +65,12 @@ enum Cmd {
     },
     /// Print the build and honesty banner.
     Version,
+    /// Print the CSfC architectural preflight checklist.
+    Csfc {
+        /// Model a single-layer (no outer onion) deployment.
+        #[arg(long)]
+        no_onion: bool,
+    },
 }
 
 fn short_fp(fp: &[u8; 48]) -> String {
@@ -98,6 +104,10 @@ async fn main() {
             println!("{BANNER}");
             Ok(())
         }
+        Cmd::Csfc { no_onion } => {
+            print_csfc(no_onion);
+            Ok(())
+        }
         Cmd::Demo => {
             run_demo().await;
             Ok(())
@@ -113,6 +123,38 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Print the CSfC architectural preflight (see docs/CSFC.md).
+fn print_csfc(no_onion: bool) {
+    use talkrypt_core::csfc;
+    let fips = cfg!(feature = "fips");
+    let mut cfg = csfc::recommended(fips);
+    if no_onion {
+        cfg.outer_onion = false;
+    }
+    let report = csfc::preflight(&cfg);
+
+    println!("CSfC architectural preflight (NOT an accreditation)\n");
+    println!("Checkable criteria:");
+    for c in &report.criteria {
+        let mark = if c.satisfied { "PASS" } else { "FAIL" };
+        println!("  [{mark}] {:<26} {}", c.name, c.detail);
+    }
+    println!(
+        "\nAll checkable criteria satisfied: {} (necessary, NOT sufficient){}",
+        report.all_checkable_satisfied(),
+        if fips {
+            ""
+        } else {
+            "  — build with --features fips for the FIPS backend"
+        }
+    );
+    println!("\nRequires an organization, not code:");
+    for o in &report.organizational {
+        println!("  - {o}");
+    }
+    println!("\nSee docs/CSFC.md for the full mapping.");
 }
 
 /// In-process end-to-end demonstration: two cores, real PQ crypto, no network.

@@ -15,3 +15,8 @@ talkrypt-transport.workspace = true
 talkrypt-topology.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time"] }
 clap = { version = "4", features = ["derive"] }
+
+[features]
+default = []
+# Build the inner-layer crypto against the FIPS-validated backend.
+fips = ["talkrypt-crypto/fips"]

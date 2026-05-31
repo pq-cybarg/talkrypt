@@ -6,6 +6,7 @@
 //! stack is testable over the in-memory loopback transport.
 
 pub mod b32;
+pub mod csfc;
 pub mod descriptor;
 pub mod engine;
 pub mod error;
