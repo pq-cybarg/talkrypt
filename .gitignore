@@ -3,6 +3,12 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# --- cargo-fuzz ---
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
+
 # --- key material / secrets: NEVER track ---
 *.key
 *.onion_key

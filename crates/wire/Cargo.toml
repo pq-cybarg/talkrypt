@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+
+# `cfg(kani)` is set by the Kani verifier; declare it so normal builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

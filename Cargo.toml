@@ -3,6 +3,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# `fuzz/` is a cargo-fuzz package built only via `cargo fuzz`, not the workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"

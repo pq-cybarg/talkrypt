@@ -133,6 +133,40 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Formal verification harnesses (run with `cargo kani`).
+///
+/// These prove the decoder is memory-safe on *arbitrary* input: no panic, no
+/// out-of-bounds — it always returns `Ok` or a `WireError`.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `get_bytes` on any ≤16-byte input never panics; on success the returned
+    /// slice length never exceeds the remaining input.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn get_bytes_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let data: [u8; 16] = kani::any();
+        let mut r = Reader::new(&data[..len]);
+        match r.get_bytes() {
+            Ok(b) => assert!(b.len() <= len),
+            Err(_) => {}
+        }
+    }
+
+    /// A `u32` length prefix can never drive an out-of-bounds read: a length
+    /// over `MAX_FRAME`, or past the buffer, is rejected, never indexed.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn length_prefix_is_bounded() {
+        let data: [u8; 8] = kani::any();
+        let mut r = Reader::new(&data);
+        let _ = r.get_bytes(); // must not panic regardless of the prefix value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

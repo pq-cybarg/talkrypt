@@ -1,0 +1,28 @@
+[package]
+name = "talkrypt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+talkrypt-wire = { path = "../crates/wire" }
+talkrypt-core = { path = "../crates/core" }
+
+[[bin]]
+name = "wire_reader"
+path = "fuzz_targets/wire_reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "descriptor_parser"
+path = "fuzz_targets/descriptor_parser.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

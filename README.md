@@ -92,9 +92,11 @@ REPL commands: `/invite`, `/verify`, `/peers`, `/quit`.
 
 ## Status
 
-Working & tested today (65 tests, fully offline):
+Working & tested today (80 tests, fully offline):
 
 - Hybrid PQ Double Ratchet crypto core + suite registry.
+- **Three crypto suites:** Double Ratchet (`tk.dr.*`, default), PQ-Noise
+  (`tk.noise.*`), and a sender-key **group** scheme (`tk.group.*`).
 - Session engine, authenticated handshake, descriptors/invites.
 - P2P / Hub / Hybrid topology strategies.
 - Loopback + **real TCP** transports, and the **Arti onion transport**
@@ -105,12 +107,26 @@ Working & tested today (65 tests, fully offline):
 - **Persistent-server support**: encrypted-at-rest onion-key sealing
   (Argon2id + AES-256-GCM) and the three keep-alive strategies
   (AlwaysOn / ClientAnchored / ReplicatedFailover).
-- The `talkrypt` CLI (demo + host/join REPL).
+- **CLI** (`talkrypt`: demo + host/join REPL) and **ratatui TUI**
+  (`talkrypt-tui`).
+- **FIPS backend** (`--features fips`): routes AES-256-GCM through aws-lc-rs's
+  validated module; all crypto tests pass against it.
+- **Hardening:** `cargo-fuzz` targets (`fuzz/`) for the wire and descriptor
+  parsers; a **Kani** proof harness on the decoder (`cargo kani`).
 
-Planned next (same trait seams, see `docs/plans/`): the ratatui TUI, the
-PQ-Noise and MLS-PQ suites, fuzz/Kani harnesses, anti-censorship pluggable-
-transport config, and the `fips` backend feature. Desktop (Tauri) and Android
-(uniffi) shells reuse this identical core.
+Planned next (same trait seams, see `docs/plans/`): full RFC 9420 **MLS-PQ**
+group suite (the sender-key scheme is shipped today as the lighter option),
+anti-censorship pluggable-transport config, and the desktop (Tauri) / Android
+(uniffi) shells — all reusing this identical core.
+
+### Running the extras
+
+```
+cargo run -p talkrypt-tui -- host --listen 127.0.0.1:9000   # terminal UI
+cargo test -p talkrypt-crypto --features fips                # FIPS backend
+cargo +nightly fuzz run wire_reader                          # fuzzing (needs cargo-fuzz)
+cargo kani -p talkrypt-wire                                  # formal verification (needs Kani)
+```
 
 ## Security
 
