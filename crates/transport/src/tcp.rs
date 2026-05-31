@@ -7,13 +7,12 @@
 //!
 //! The transport carries only opaque ciphertext — it sees no plaintext or keys.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 use async_trait::async_trait;
-use talkrypt_wire::MAX_FRAME;
 
+use crate::framing::{read_frame, write_frame};
 use crate::{
     Endpoint, FrameReader, FrameWriter, Listener, Result, Stream, Transport, TransportError,
     TransportStatus,
@@ -21,38 +20,6 @@ use crate::{
 
 fn io<E: std::fmt::Display>(e: E) -> TransportError {
     TransportError::Io(e.to_string())
-}
-
-async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, frame: &[u8]) -> Result<()> {
-    if frame.len() > MAX_FRAME {
-        return Err(TransportError::Io("frame exceeds MAX_FRAME".into()));
-    }
-    w.write_all(&(frame.len() as u32).to_be_bytes())
-        .await
-        .map_err(io)?;
-    w.write_all(frame).await.map_err(io)?;
-    w.flush().await.map_err(io)?;
-    Ok(())
-}
-
-async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Err(TransportError::Closed)
-        }
-        Err(e) => return Err(io(e)),
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_FRAME {
-        return Err(TransportError::Io("frame exceeds MAX_FRAME".into()));
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)
-        .await
-        .map_err(|_| TransportError::Closed)?;
-    Ok(buf)
 }
 
 /// A connected TCP stream carrying length-framed messages.

@@ -10,11 +10,18 @@
 //!   * `ArtiTransport` (crate `tor` feature, Phase 7) — real Tor circuits and
 //!     ephemeral/persistent onion services.
 
+pub mod framing;
 pub mod loopback;
 pub mod tcp;
 
+#[cfg(feature = "tor")]
+pub mod arti;
+
 pub use loopback::{LoopbackFabric, LoopbackTransport};
 pub use tcp::TcpTransport;
+
+#[cfg(feature = "tor")]
+pub use arti::{ArtiTransport, OnionPersistence};
 
 use async_trait::async_trait;
 use thiserror::Error;

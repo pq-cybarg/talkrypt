@@ -7,8 +7,22 @@ license.workspace = true
 [dependencies]
 talkrypt-wire.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time", "macros"] }
 thiserror.workspace = true
+
+# --- optional: real Tor transport via Arti (enabled by the `tor` feature) ---
+arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service"], optional = true }
+tor-hsservice = { version = "0.42", optional = true }
+tor-cell = { version = "0.42", optional = true }
+tor-rtcompat = { version = "0.42", default-features = false, features = ["tokio", "rustls"], optional = true }
+futures = { version = "0.3", optional = true }
+tempfile = { version = "3", optional = true }
+safelog = { version = "0.8", optional = true }
+
+[features]
+default = []
+# Pulls in the (large) Arti dependency tree and enables ArtiTransport.
+tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

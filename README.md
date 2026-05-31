@@ -92,16 +92,25 @@ REPL commands: `/invite`, `/verify`, `/peers`, `/quit`.
 
 ## Status
 
-Working today: the full crypto core, the session engine, P2P/Hub/Hybrid
-topology strategies, loopback + TCP transports, and the CLI — all tested and
-runnable end to end.
+Working & tested today (65 tests, fully offline):
 
-Planned (same trait seams, see `docs/plans/`): the real Arti onion transport
-(ephemeral + persistent onions, restricted-discovery client auth,
-anti-censorship pluggable transports), the persistent-server keep-alive modes,
-the ratatui TUI, the PQ-Noise and MLS-PQ suites, fuzz/Kani harnesses, and the
-`fips` backend feature. Desktop (Tauri) and Android (uniffi) shells reuse this
-identical core.
+- Hybrid PQ Double Ratchet crypto core + suite registry.
+- Session engine, authenticated handshake, descriptors/invites.
+- P2P / Hub / Hybrid topology strategies.
+- Loopback + **real TCP** transports, and the **Arti onion transport**
+  (`--features tor`): `dial` over Tor, `launch_onion_service` hosting,
+  ephemeral + persistent onion key modes. The live onion path is exercised by
+  an `#[ignore]` integration test (needs a real Tor bootstrap):
+  `cargo test -p talkrypt-transport --features tor -- --ignored`.
+- **Persistent-server support**: encrypted-at-rest onion-key sealing
+  (Argon2id + AES-256-GCM) and the three keep-alive strategies
+  (AlwaysOn / ClientAnchored / ReplicatedFailover).
+- The `talkrypt` CLI (demo + host/join REPL).
+
+Planned next (same trait seams, see `docs/plans/`): the ratatui TUI, the
+PQ-Noise and MLS-PQ suites, fuzz/Kani harnesses, anti-censorship pluggable-
+transport config, and the `fips` backend feature. Desktop (Tauri) and Android
+(uniffi) shells reuse this identical core.
 
 ## Security
 
