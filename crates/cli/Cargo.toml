@@ -7,3 +7,11 @@ license.workspace = true
 [[bin]]
 name = "talkrypt"
 path = "src/main.rs"
+
+[dependencies]
+talkrypt-core.workspace = true
+talkrypt-crypto.workspace = true
+talkrypt-transport.workspace = true
+talkrypt-topology.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time"] }
+clap = { version = "4", features = ["derive"] }

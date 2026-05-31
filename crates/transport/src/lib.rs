@@ -11,8 +11,10 @@
 //!     ephemeral/persistent onion services.
 
 pub mod loopback;
+pub mod tcp;
 
 pub use loopback::{LoopbackFabric, LoopbackTransport};
+pub use tcp::TcpTransport;
 
 use async_trait::async_trait;
 use thiserror::Error;

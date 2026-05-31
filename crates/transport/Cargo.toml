@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 talkrypt-wire.workspace = true
 async-trait.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 thiserror.workspace = true
 
 [dev-dependencies]

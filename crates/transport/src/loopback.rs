@@ -71,10 +71,13 @@ fn duplex() -> (LoopStream, LoopStream) {
     )
 }
 
+/// Maps an endpoint to the sender that delivers inbound streams to its listener.
+type ListenerMap = HashMap<Endpoint, mpsc::UnboundedSender<Box<dyn Stream>>>;
+
 /// Shared switchboard mapping endpoints to their listener queues.
 #[derive(Clone, Default)]
 pub struct LoopbackFabric {
-    inner: Arc<Mutex<HashMap<Endpoint, mpsc::UnboundedSender<Box<dyn Stream>>>>>,
+    inner: Arc<Mutex<ListenerMap>>,
 }
 
 impl LoopbackFabric {

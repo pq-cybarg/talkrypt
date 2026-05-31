@@ -57,10 +57,13 @@ impl ChatMessage {
     }
 }
 
+type SharedSession = Arc<AsyncMutex<Box<dyn SessionHandle>>>;
+type SharedWriter = Arc<AsyncMutex<Box<dyn FrameWriter>>>;
+
 struct Peer {
     fingerprint: [u8; 48],
-    writer: Arc<AsyncMutex<Box<dyn FrameWriter>>>,
-    session: Arc<AsyncMutex<Box<dyn SessionHandle>>>,
+    writer: SharedWriter,
+    session: SharedSession,
 }
 
 struct Inner {
@@ -128,26 +131,21 @@ impl Core {
         let inner = self.inner.clone();
         let mut listener = listener;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok(mut stream) => {
-                        let hs = handshake::respond(
-                            stream.as_mut(),
-                            &inner.identity,
-                            inner.suite.as_ref(),
-                            inner.root0,
-                        )
-                        .await;
-                        match hs {
-                            Ok(hs) => register(&inner, stream, hs),
-                            Err(e) => {
-                                let _ = inner
-                                    .events_tx
-                                    .send(Event::Error(format!("inbound handshake failed: {e}")));
-                            }
-                        }
+            while let Ok(mut stream) = listener.accept().await {
+                let hs = handshake::respond(
+                    stream.as_mut(),
+                    &inner.identity,
+                    inner.suite.as_ref(),
+                    inner.root0,
+                )
+                .await;
+                match hs {
+                    Ok(hs) => register(&inner, stream, hs),
+                    Err(e) => {
+                        let _ = inner
+                            .events_tx
+                            .send(Event::Error(format!("inbound handshake failed: {e}")));
                     }
-                    Err(_) => break,
                 }
             }
         });
@@ -176,10 +174,7 @@ impl Core {
             text: text.to_string(),
         };
         let bytes = msg.encode();
-        let targets: Vec<(
-            Arc<AsyncMutex<Box<dyn SessionHandle>>>,
-            Arc<AsyncMutex<Box<dyn FrameWriter>>>,
-        )> = {
+        let targets: Vec<(SharedSession, SharedWriter)> = {
             let peers = self.inner.peers.lock().unwrap();
             peers
                 .iter()
