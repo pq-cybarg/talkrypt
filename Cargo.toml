@@ -1,0 +1,43 @@
+# talkrypt workspace
+# E2E-encrypted, post-quantum, forward-secret IRC-like chat over Tor (Arti).
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# crypto primitives (CNSA 2.0 algorithm set, RustCrypto pure-Rust)
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ml-kem = "0.2"
+ml-dsa = "0.1"
+# support
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "io-util", "time"] }
+async-trait = "0.1"
+# dev
+proptest = "1"
+
+# internal
+talkrypt-wire = { path = "crates/wire" }
+talkrypt-crypto = { path = "crates/crypto" }
+talkrypt-transport = { path = "crates/transport" }
+talkrypt-core = { path = "crates/core" }
+talkrypt-topology = { path = "crates/topology" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,38 @@
+# --- build artifacts ---
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# --- key material / secrets: NEVER track ---
+*.key
+*.onion_key
+*.secret
+*.pem
+*.p8
+*.pfx
+hs_ed25519_secret_key
+*identity*.bin
+*.seed
+/keys/
+/secrets/
+/state/
+/.talkrypt/
+*.sealed
+
+# --- local config that may hold secrets or endpoints ---
+config.local.*
+*.local.toml
+.env
+.env.*
+
+# --- runtime / logs (we avoid logging, but belt-and-suspenders) ---
+*.log
+/logs/
+
+# --- OS / editor cruft (also an opsec hygiene matter) ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
