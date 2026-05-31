@@ -15,10 +15,14 @@ use std::sync::Arc;
 use crate::error::{CryptoError, Result};
 use crate::hybrid::{RatchetPublic, RatchetSecret};
 use crate::kdf::KEY_LEN;
+use crate::noise::NoiseSession;
 use crate::ratchet::Session;
 
 /// Canonical id of the default suite.
 pub const DEFAULT_SUITE_ID: &str = "tk.dr.x25519+mlkem1024.aes256gcm.sha384.mldsa87";
+
+/// Id of the PQ-Noise suite (session-granularity forward secrecy).
+pub const NOISE_SUITE_ID: &str = "tk.noise.x25519+mlkem1024.aes256gcm.sha384";
 
 /// Coarse security level used to enforce a registry floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -131,6 +135,60 @@ impl SessionHandle for Session {
     }
 }
 
+// ----- Built-in: PQ-Noise suite (session-granularity forward secrecy) -----
+
+/// PQ-Noise suite: one hybrid step, then symmetric chains. See [`crate::noise`].
+#[derive(Default)]
+pub struct NoiseSuite;
+
+impl CryptoSuite for NoiseSuite {
+    fn descriptor(&self) -> SuiteDescriptor {
+        SuiteDescriptor {
+            id: NOISE_SUITE_ID.to_string(),
+            version: 1,
+            level: SecurityLevel::PostQuantumHybrid,
+            params: Vec::new(),
+        }
+    }
+
+    fn generate_prekey(&self) -> (Vec<u8>, PrekeySecretHandle) {
+        let (secret, public) = RatchetSecret::generate();
+        let pub_bytes = public.encode();
+        // Noise responder needs only the secret half.
+        (pub_bytes, PrekeySecretHandle(Box::new(secret)))
+    }
+
+    fn begin_session(
+        &self,
+        root0: [u8; KEY_LEN],
+        peer_prekey: &[u8],
+    ) -> Result<Box<dyn SessionHandle>> {
+        let peer = RatchetPublic::decode(peer_prekey)?;
+        Ok(Box::new(NoiseSession::initiator(root0, peer)))
+    }
+
+    fn accept_session(
+        &self,
+        root0: [u8; KEY_LEN],
+        prekey_secret: PrekeySecretHandle,
+    ) -> Result<Box<dyn SessionHandle>> {
+        let secret = prekey_secret
+            .0
+            .downcast::<RatchetSecret>()
+            .map_err(|_| CryptoError::Malformed("prekey secret type mismatch"))?;
+        Ok(Box::new(NoiseSession::responder(root0, *secret)))
+    }
+}
+
+impl SessionHandle for NoiseSession {
+    fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        NoiseSession::encrypt(self, plaintext)
+    }
+    fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>> {
+        NoiseSession::decrypt(self, message)
+    }
+}
+
 // ----- Registry -----
 
 /// A compile-time registry of available suites, with a security floor.
@@ -148,11 +206,14 @@ impl SuiteRegistry {
         }
     }
 
-    /// Registry preloaded with the built-in default suite.
+    /// Registry preloaded with all built-in pairwise suites (Double Ratchet
+    /// and PQ-Noise). The Double Ratchet remains the default.
     pub fn with_defaults() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(DoubleRatchetSuite))
             .expect("default suite meets floor");
+        r.register(Arc::new(NoiseSuite))
+            .expect("noise suite meets floor");
         r
     }
 
@@ -202,7 +263,9 @@ mod tests {
     fn default_registry_has_double_ratchet() {
         let reg = SuiteRegistry::with_defaults();
         assert!(reg.get(DEFAULT_SUITE_ID).is_ok());
-        assert_eq!(reg.ids(), vec![DEFAULT_SUITE_ID.to_string()]);
+        assert!(reg.get(NOISE_SUITE_ID).is_ok());
+        assert!(reg.ids().contains(&DEFAULT_SUITE_ID.to_string()));
+        assert!(reg.ids().contains(&NOISE_SUITE_ID.to_string()));
     }
 
     #[test]

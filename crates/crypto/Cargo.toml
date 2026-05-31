@@ -18,5 +18,16 @@ ml-dsa.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 
+# Optional FIPS-validatable AEAD/hash backend (enabled by the `fips` feature).
+aws-lc-rs = { version = "1", optional = true }
+
+[features]
+default = []
+# Route AES-256-GCM through aws-lc-rs (its FIPS-validated module). For an
+# actual FIPS 140-3 build, additionally enable `aws-lc-rs/fips`, which requires
+# the FIPS build toolchain. This feature selects the backend; it does not by
+# itself constitute validation.
+fips = ["dep:aws-lc-rs"]
+
 [dev-dependencies]
 proptest.workspace = true

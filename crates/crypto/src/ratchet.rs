@@ -17,9 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use aes_gcm::aead::{Aead, Payload};
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
+use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
 use crate::hybrid::{RatchetPublic, RatchetSecret};
 use crate::kdf::{kdf_ck, kdf_mk, kdf_rk, KEY_LEN};
@@ -294,20 +292,6 @@ fn combine(dh: &[u8; 32], kem: &[u8; 32]) -> Vec<u8> {
     ikm.extend_from_slice(dh);
     ikm.extend_from_slice(kem);
     ikm
-}
-
-fn aead_seal(key: &[u8; KEY_LEN], nonce: &[u8; 12], pt: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::Malformed("aead key"))?;
-    cipher
-        .encrypt(Nonce::from_slice(nonce), Payload { msg: pt, aad })
-        .map_err(|_| CryptoError::Malformed("aead seal"))
-}
-
-fn aead_open(key: &[u8; KEY_LEN], nonce: &[u8; 12], ct: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::Malformed("aead key"))?;
-    cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad })
-        .map_err(|_| CryptoError::DecryptionFailed)
 }
 
 #[cfg(test)]
