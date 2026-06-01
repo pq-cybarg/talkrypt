@@ -52,9 +52,13 @@ decoder, uniform AEAD failure).
   scraping of a live session) — no software prevents reading plaintext on a
   fully owned device.
 - **Global passive traffic-confirmation against Tor** itself.
-- **TreeKEM** has the CGKA, dynamic membership (Add/Remove/Welcome, with removal
-  forward-secrecy), and per-epoch messaging; **RFC 9420 wire framing / interop**
-  and suite registration are the remaining MLS work (`docs/plans/0002-mls-pq.md`).
+- **TreeKEM group chat** is integrated through the engine: dynamic
+  Add/Remove/Welcome (removal forward-secrecy), epoch-sequenced commits
+  (concurrent joins converge), roster-based sender attribution, and
+  descriptor-driven selection. **RFC 9420 byte-level wire conformance + interop
+  test vectors** against another MLS implementation remain (require external
+  vectors; `docs/plans/0002-mls-pq.md`). The host is a group member and a
+  trusted relay/coordinator (a non-member pure-relay hub is future work).
 - **Transient symmetric secrets** in live session state are not all
   zeroized-on-drop yet; long-term secrets are.
 - **GUI bundles** (Android APK, desktop) are integration-documented, not built
