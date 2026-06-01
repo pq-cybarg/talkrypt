@@ -1,0 +1,23 @@
+[package]
+name = "talkrypt-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "talkrypt_ffi"
+# `lib` for bindgen + host tests; cdylib/staticlib for Android/iOS/desktop linking.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+talkrypt-core.workspace = true
+talkrypt-crypto.workspace = true
+talkrypt-transport.workspace = true
+talkrypt-topology.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "net"] }
+thiserror.workspace = true
+uniffi = { version = "0.31", features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
