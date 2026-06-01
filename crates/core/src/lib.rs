@@ -11,7 +11,9 @@ pub mod descriptor;
 pub mod engine;
 pub mod error;
 pub mod handshake;
+pub mod relay;
 
 pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{Core, Event, GroupRole};
 pub use error::{CoreError, Result};
+pub use relay::RelayHub;

@@ -155,6 +155,67 @@ pub enum GroupRole {
     Member,
 }
 
+/// Where a routed frame should go, in **relayed** group mode (where a
+/// non-member relay forwards between participants). The relay never reads the
+/// inner group plaintext — it only routes the (still-encrypted) inner frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// To every participant except the sender.
+    Broadcast,
+    /// To one participant.
+    Peer([u8; 48]),
+    /// To the group's committer (the founder member).
+    Committer,
+}
+
+/// A frame wrapped for relaying: routing intent + the original sender's
+/// fingerprint (stamped by the relay) + the inner [`Frame`] bytes.
+pub(crate) struct Routed {
+    pub(crate) to: Route,
+    pub(crate) from: [u8; 48],
+    pub(crate) inner: Vec<u8>,
+}
+
+impl Routed {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        match self.to {
+            Route::Broadcast => w.put_u8(0),
+            Route::Peer(fp) => {
+                w.put_u8(1);
+                w.put_bytes(&fp);
+            }
+            Route::Committer => w.put_u8(2),
+        }
+        w.put_bytes(&self.from);
+        w.put_bytes(&self.inner);
+        w.into_vec()
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Routed> {
+        let mut r = Reader::new(bytes);
+        let to = match r.get_u8().ok()? {
+            0 => Route::Broadcast,
+            1 => Route::Peer(read_fp(&mut r)?),
+            2 => Route::Committer,
+            _ => return None,
+        };
+        let from = read_fp(&mut r)?;
+        let inner = r.get_vec().ok()?;
+        Some(Routed { to, from, inner })
+    }
+}
+
+fn read_fp(r: &mut Reader) -> Option<[u8; 48]> {
+    let v = r.get_bytes().ok()?;
+    if v.len() != 48 {
+        return None;
+    }
+    let mut fp = [0u8; 48];
+    fp.copy_from_slice(v);
+    Some(fp)
+}
+
 type SharedSession = Arc<AsyncMutex<Box<dyn SessionHandle>>>;
 type SharedWriter = Arc<AsyncMutex<Box<dyn FrameWriter>>>;
 
@@ -181,6 +242,9 @@ struct Inner {
     roster: Mutex<HashMap<u32, [u8; 48]>>,
     /// Commits received ahead of our epoch, keyed by the epoch they apply to.
     pending_commits: Mutex<BTreeMap<u32, Vec<u8>>>,
+    /// In relayed mode, frames are wrapped in [`Routed`] and a non-member relay
+    /// fans them out (the participant never fans out itself).
+    relayed: bool,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -197,12 +261,19 @@ impl Core {
         transport: Arc<dyn Transport>,
         descriptor: ChatDescriptor,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
-        Self::build(identity, suite, transport, descriptor, GroupRole::None)
+        Self::build(
+            identity,
+            suite,
+            transport,
+            descriptor,
+            GroupRole::None,
+            false,
+        )
     }
 
-    /// Build a TreeKEM group chat. The `Host` founds the group and coordinates
-    /// membership; a `Member` joins via the Welcome it receives after dialing
-    /// the host. Plain pairwise chats use [`Core::new`].
+    /// Build a host-coordinated TreeKEM group chat. The `Host` founds the group,
+    /// coordinates membership, AND relays group messages (it is a member and can
+    /// read them). For a relay that cannot read, see [`Core::new_relayed_group`].
     pub fn new_group(
         identity: IdentityKeyPair,
         suite: Arc<dyn CryptoSuite>,
@@ -215,7 +286,27 @@ impl Core {
         } else {
             GroupRole::Member
         };
-        Self::build(identity, suite, transport, descriptor, role)
+        Self::build(identity, suite, transport, descriptor, role, false)
+    }
+
+    /// Build a TreeKEM group chat that runs over a **non-member relay**
+    /// ([`RelayHub`]): the committer (`is_committer`) founds the group and a
+    /// member joins, but all frames are forwarded by a relay that never holds
+    /// the group key and so cannot read group plaintext. Each participant dials
+    /// the relay with [`Core::connect`].
+    pub fn new_relayed_group(
+        identity: IdentityKeyPair,
+        suite: Arc<dyn CryptoSuite>,
+        transport: Arc<dyn Transport>,
+        descriptor: ChatDescriptor,
+        is_committer: bool,
+    ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let role = if is_committer {
+            GroupRole::Host
+        } else {
+            GroupRole::Member
+        };
+        Self::build(identity, suite, transport, descriptor, role, true)
     }
 
     fn build(
@@ -224,6 +315,7 @@ impl Core {
         transport: Arc<dyn Transport>,
         descriptor: ChatDescriptor,
         role: GroupRole,
+        relayed: bool,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
         let root0 = descriptor.derive_root();
         let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -253,6 +345,7 @@ impl Core {
             leaf_keypair: Mutex::new(leaf_keypair),
             roster: Mutex::new(roster),
             pending_commits: Mutex::new(BTreeMap::new()),
+            relayed,
         });
         (Core { inner }, events_rx)
     }
@@ -323,20 +416,24 @@ impl Core {
             roster.remove(&leaf);
             roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
         };
-        for (s, w, fp) in collect_peers(&self.inner) {
-            if fp != fingerprint {
-                let _ = send_frame_to(
-                    &s,
-                    &w,
-                    &Frame::Commit {
-                        from_epoch,
-                        bytes: commit_bytes.clone(),
-                    },
-                )
-                .await;
-                let _ = send_frame_to(&s, &w, &Frame::Roster(roster_snapshot.clone())).await;
-            }
-        }
+        // Broadcast the membership commit + new roster. The removed member, if
+        // still connected, receives the commit but cannot apply it (it lacks the
+        // new path secret), so it advances no further and stays locked out.
+        route(
+            &self.inner,
+            Frame::Commit {
+                from_epoch,
+                bytes: commit_bytes,
+            },
+            Route::Broadcast,
+        )
+        .await;
+        route(
+            &self.inner,
+            Frame::Roster(roster_snapshot),
+            Route::Broadcast,
+        )
+        .await;
         Ok(())
     }
 
@@ -381,7 +478,8 @@ impl Core {
         let fp = hs.peer_identity.fingerprint();
         register(&self.inner, stream, hs);
 
-        // A joining group member sends its KeyPackage to the host it dialed.
+        // A joining group member sends its KeyPackage toward the committer
+        // (directly to the host, or via the relay in relayed mode).
         if self.inner.role == GroupRole::Member {
             let kp_bytes = self
                 .inner
@@ -390,9 +488,23 @@ impl Core {
                 .unwrap()
                 .as_ref()
                 .map(|k| k.key_package().encode());
-            if let (Some(kpb), Some((s, w))) = (kp_bytes, peer_handles(&self.inner, fp)) {
-                let _ = send_frame_to(&s, &w, &Frame::KeyPackage(kpb)).await;
+            if let Some(kpb) = kp_bytes {
+                route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
             }
+        } else if self.inner.relayed && self.inner.role == GroupRole::Host {
+            // A relayed committer is the session initiator toward the relay but
+            // would otherwise send nothing first — which leaves the relay (a
+            // ratchet responder) unable to forward to it. Send the initial
+            // roster to prime the session (and announce the committer).
+            let snapshot: Vec<(u32, [u8; 48])> = self
+                .inner
+                .roster
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(l, f)| (*l, *f))
+                .collect();
+            route(&self.inner, Frame::Roster(snapshot), Route::Broadcast).await;
         }
         Ok(fp)
     }
@@ -401,21 +513,26 @@ impl Core {
     /// peer; in a group chat it is encrypted once under the group epoch and
     /// fanned out (the host relays to all members).
     pub async fn send(&self, text: &str) -> Result<()> {
-        let frame = match self.inner.role {
-            GroupRole::None => Frame::Chat {
-                channel: self.inner.descriptor.channel.clone(),
-                text: text.to_string(),
-            },
-            GroupRole::Host | GroupRole::Member => {
-                let mut g = self.inner.group.lock().await;
-                match g.as_mut() {
-                    Some(grp) => Frame::GroupMsg(grp.encrypt(text.as_bytes())?),
-                    None => return Err(crate::error::CoreError::GroupNotReady),
+        match self.inner.role {
+            GroupRole::None => {
+                let frame = Frame::Chat {
+                    channel: self.inner.descriptor.channel.clone(),
+                    text: text.to_string(),
+                };
+                for (session, writer, _) in collect_peers(&self.inner) {
+                    let _ = send_payload(&session, &writer, &frame.encode()).await;
                 }
             }
-        };
-        for (session, writer, _) in collect_peers(&self.inner) {
-            let _ = send_frame_to(&session, &writer, &frame).await;
+            GroupRole::Host | GroupRole::Member => {
+                let frame = {
+                    let mut g = self.inner.group.lock().await;
+                    match g.as_mut() {
+                        Some(grp) => Frame::GroupMsg(grp.encrypt(text.as_bytes())?),
+                        None => return Err(crate::error::CoreError::GroupNotReady),
+                    }
+                };
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
         }
         Ok(())
     }
@@ -441,20 +558,52 @@ fn peer_handles(inner: &Arc<Inner>, fp: [u8; 48]) -> Option<(SharedSession, Shar
         .map(|p| (p.session.clone(), p.writer.clone()))
 }
 
-/// Encrypt a frame under a peer's pairwise session and send it.
-async fn send_frame_to(
+/// Encrypt a pairwise payload (a `Frame` or a `Routed` envelope) and send it.
+async fn send_payload(
     session: &SharedSession,
     writer: &SharedWriter,
-    frame: &Frame,
+    payload: &[u8],
 ) -> Result<()> {
-    let bytes = frame.encode();
     let ct = {
         let mut s = session.lock().await;
-        s.encrypt(&bytes)?
+        s.encrypt(payload)?
     };
     let mut w = writer.lock().await;
     w.send_frame(&ct).await?;
     Ok(())
+}
+
+/// Route a frame to its destination. In **relayed** mode the frame is wrapped
+/// in a [`Routed`] envelope and sent to the single relay peer, which fans it
+/// out. In host-coordinated mode it is sent directly to the resolved peers.
+async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
+    if inner.relayed {
+        let routed = Routed {
+            to,
+            from: inner.identity.public().fingerprint(),
+            inner: frame.encode(),
+        };
+        let payload = routed.encode();
+        // A relayed participant's only peer is the relay.
+        for (s, w, _) in collect_peers(inner) {
+            let _ = send_payload(&s, &w, &payload).await;
+        }
+    } else {
+        let payload = frame.encode();
+        match to {
+            Route::Peer(fp) => {
+                if let Some((s, w)) = peer_handles(inner, fp) {
+                    let _ = send_payload(&s, &w, &payload).await;
+                }
+            }
+            // Broadcast/Committer: the host's peers are exactly the members.
+            Route::Broadcast | Route::Committer => {
+                for (s, w, _) in collect_peers(inner) {
+                    let _ = send_payload(&s, &w, &payload).await;
+                }
+            }
+        }
+    }
 }
 
 /// Register a freshly-handshaked peer: store it and spawn its reader task.
@@ -501,16 +650,27 @@ async fn reader_loop(
                 continue;
             }
         };
-        match Frame::decode(&pt) {
+        // In relayed mode the pairwise payload is a Routed envelope; unwrap it
+        // and use the relay-stamped original sender. Otherwise the payload is a
+        // Frame straight from the pairwise peer.
+        let (from, frame_bytes) = if inner.relayed {
+            match Routed::decode(&pt) {
+                Some(r) => (r.from, r.inner),
+                None => continue,
+            }
+        } else {
+            (fingerprint, pt)
+        };
+        match Frame::decode(&frame_bytes) {
             Some(Frame::Chat { channel, text }) => {
                 let _ = inner.events_tx.send(Event::Message {
-                    from: fingerprint,
+                    from,
                     channel,
                     text,
                 });
             }
             Some(Frame::KeyPackage(b)) if inner.role == GroupRole::Host => {
-                handle_keypackage(&inner, fingerprint, b).await;
+                handle_keypackage(&inner, from, b).await;
             }
             Some(Frame::Welcome(b)) if inner.role == GroupRole::Member => {
                 handle_welcome(&inner, b).await;
@@ -523,7 +683,7 @@ async fn reader_loop(
                 *roster = entries.into_iter().collect();
             }
             Some(Frame::GroupMsg(b)) => {
-                handle_group_msg(&inner, fingerprint, b).await;
+                handle_group_msg(&inner, from, b).await;
             }
             _ => { /* frame not valid for this role; ignore */ }
         }
@@ -562,26 +722,19 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
         roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
     };
 
-    if let Some((s, w)) = peer_handles(inner, from) {
-        let _ = send_frame_to(&s, &w, &Frame::Welcome(welcome_bytes)).await;
-    }
-    for (s, w, fp) in collect_peers(inner) {
-        if fp != from {
-            let _ = send_frame_to(
-                &s,
-                &w,
-                &Frame::Commit {
-                    from_epoch,
-                    bytes: commit_bytes.clone(),
-                },
-            )
-            .await;
-        }
-    }
-    // Everyone (incl. the new member) gets the updated roster.
-    for (s, w, _) in collect_peers(inner) {
-        let _ = send_frame_to(&s, &w, &Frame::Roster(roster_snapshot.clone())).await;
-    }
+    // Welcome to the joiner; Commit to everyone (the joiner drops it as stale,
+    // since it starts at the post-commit epoch); roster to everyone.
+    route(inner, Frame::Welcome(welcome_bytes), Route::Peer(from)).await;
+    route(
+        inner,
+        Frame::Commit {
+            from_epoch,
+            bytes: commit_bytes,
+        },
+        Route::Broadcast,
+    )
+    .await;
+    route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -657,10 +810,12 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
             });
         }
     }
-    if inner.role == GroupRole::Host {
+    // In host-coordinated mode the host relays to the other members. In relayed
+    // mode the non-member relay does the fan-out, so participants never re-relay.
+    if !inner.relayed && inner.role == GroupRole::Host {
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
-                let _ = send_frame_to(&s, &w, &Frame::GroupMsg(gct.clone())).await;
+                let _ = send_payload(&s, &w, &Frame::GroupMsg(gct.clone()).encode()).await;
             }
         }
     }
