@@ -248,14 +248,16 @@ async fn run_host(
     let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
     let transport = Arc::new(TcpTransport::new(listen));
 
-    // Advertise the configured bind address in the descriptor.
-    let desc = ChatDescriptor::new(
+    // Advertise the configured bind address in the descriptor, including
+    // whether this is a group chat (so joiners auto-detect from the invite).
+    let mut desc = ChatDescriptor::new(
         kind,
         Persistence::Ephemeral,
         DEFAULT_SUITE_ID,
         vec![listen.to_string()],
         channel,
     );
+    desc.group = group;
     let (core, rx) = if group {
         Core::new_group(
             IdentityKeyPair::generate(),
@@ -297,7 +299,9 @@ async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Erro
     }
     let suite = SuiteRegistry::with_defaults().get(&desc.suite_id)?;
     let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
-    let (core, rx) = if group {
+    // The invite descriptor declares group mode; --group can also force it.
+    let want_group = group || desc.group;
+    let (core, rx) = if want_group {
         Core::new_group(
             IdentityKeyPair::generate(),
             suite,
@@ -311,7 +315,11 @@ async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Erro
 
     println!(
         "joining {} {} chat on channel {}",
-        if group { "TreeKEM group" } else { "pairwise" },
+        if want_group {
+            "TreeKEM group"
+        } else {
+            "pairwise"
+        },
         fmt_topology(desc.topology),
         desc.channel
     );

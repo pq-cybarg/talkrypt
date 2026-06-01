@@ -642,6 +642,14 @@ impl TreeKemGroup {
         self.recvs.clear();
     }
 
+    /// Read the sender's leaf index from a group message without decrypting,
+    /// for attribution against a roster. `None` if the framing is malformed.
+    pub fn sender_leaf(message: &[u8]) -> Option<u32> {
+        let mut r = talkrypt_wire::Reader::new(message);
+        let _epoch = r.get_u32().ok()?;
+        r.get_u32().ok()
+    }
+
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let (next, mk_seed) = kdf_ck(&self.send_chain);
         let (key, nonce) = kdf_mk(&mk_seed);

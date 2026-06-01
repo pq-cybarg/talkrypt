@@ -87,6 +87,8 @@ pub struct ChatDescriptor {
     pub invite_token: Vec<u8>,
     /// Initial channel name.
     pub channel: String,
+    /// Whether this is a TreeKEM group chat (host coordinates membership).
+    pub group: bool,
 }
 
 impl ChatDescriptor {
@@ -109,6 +111,7 @@ impl ChatDescriptor {
             endpoints,
             invite_token,
             channel: channel.into(),
+            group: false,
         }
     }
 
@@ -135,6 +138,7 @@ impl ChatDescriptor {
         }
         w.put_bytes(&self.invite_token);
         w.put_bytes(self.channel.as_bytes());
+        w.put_u8(self.group as u8);
         w.into_vec()
     }
 
@@ -158,6 +162,7 @@ impl ChatDescriptor {
         }
         let invite_token = r.get_vec()?;
         let channel = string(r.get_bytes()?)?;
+        let group = r.get_u8()? != 0;
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -169,6 +174,7 @@ impl ChatDescriptor {
             endpoints,
             invite_token,
             channel,
+            group,
         })
     }
 

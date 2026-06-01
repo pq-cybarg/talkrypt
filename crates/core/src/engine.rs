@@ -14,6 +14,7 @@
 //!
 //! The engine is transport-agnostic: loopback for tests, TCP/Arti for real.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -51,11 +52,20 @@ pub enum Event {
 /// pairwise message (P2P/non-group); the rest coordinate TreeKEM group chat,
 /// where `GroupMsg` payloads are additionally encrypted under the group epoch.
 enum Frame {
-    Chat { channel: String, text: String },
+    Chat {
+        channel: String,
+        text: String,
+    },
     KeyPackage(Vec<u8>),
     Welcome(Vec<u8>),
-    Commit(Vec<u8>),
+    /// A membership commit tagged with the epoch it applies to (for ordering).
+    Commit {
+        from_epoch: u32,
+        bytes: Vec<u8>,
+    },
     GroupMsg(Vec<u8>),
+    /// Full leaf→fingerprint roster snapshot, for message attribution.
+    Roster(Vec<(u32, [u8; 48])>),
 }
 
 impl Frame {
@@ -75,13 +85,22 @@ impl Frame {
                 w.put_u8(2);
                 w.put_bytes(b);
             }
-            Frame::Commit(b) => {
+            Frame::Commit { from_epoch, bytes } => {
                 w.put_u8(3);
-                w.put_bytes(b);
+                w.put_u32(*from_epoch);
+                w.put_bytes(bytes);
             }
             Frame::GroupMsg(b) => {
                 w.put_u8(4);
                 w.put_bytes(b);
+            }
+            Frame::Roster(entries) => {
+                w.put_u8(5);
+                w.put_u32(entries.len() as u32);
+                for (leaf, fp) in entries {
+                    w.put_u32(*leaf);
+                    w.put_bytes(fp);
+                }
             }
         }
         w.into_vec()
@@ -96,8 +115,29 @@ impl Frame {
             },
             1 => Frame::KeyPackage(r.get_vec().ok()?),
             2 => Frame::Welcome(r.get_vec().ok()?),
-            3 => Frame::Commit(r.get_vec().ok()?),
+            3 => Frame::Commit {
+                from_epoch: r.get_u32().ok()?,
+                bytes: r.get_vec().ok()?,
+            },
             4 => Frame::GroupMsg(r.get_vec().ok()?),
+            5 => {
+                let n = r.get_u32().ok()?;
+                if n > 100_000 {
+                    return None;
+                }
+                let mut entries = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let leaf = r.get_u32().ok()?;
+                    let fpv = r.get_bytes().ok()?;
+                    if fpv.len() != 48 {
+                        return None;
+                    }
+                    let mut fp = [0u8; 48];
+                    fp.copy_from_slice(fpv);
+                    entries.push((leaf, fp));
+                }
+                Frame::Roster(entries)
+            }
             _ => return None,
         };
         Some(frame)
@@ -137,6 +177,10 @@ struct Inner {
     group: AsyncMutex<Option<TreeKemGroup>>,
     /// A joining member's leaf key, consumed when its Welcome arrives.
     leaf_keypair: Mutex<Option<LeafKeyPair>>,
+    /// leaf → member fingerprint, for attributing relayed group messages.
+    roster: Mutex<HashMap<u32, [u8; 48]>>,
+    /// Commits received ahead of our epoch, keyed by the epoch they apply to.
+    pending_commits: Mutex<BTreeMap<u32, Vec<u8>>>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -191,6 +235,11 @@ impl Core {
             GroupRole::Member => Some(LeafKeyPair::generate()),
             _ => None,
         };
+        // The host founds the group at leaf 0; seed the roster with itself.
+        let mut roster = HashMap::new();
+        if role == GroupRole::Host {
+            roster.insert(0u32, identity.public().fingerprint());
+        }
         let inner = Arc::new(Inner {
             identity,
             suite,
@@ -202,6 +251,8 @@ impl Core {
             role,
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
+            roster: Mutex::new(roster),
+            pending_commits: Mutex::new(BTreeMap::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -224,6 +275,69 @@ impl Core {
     /// The chat descriptor (shareable invite).
     pub fn descriptor(&self) -> &ChatDescriptor {
         &self.inner.descriptor
+    }
+
+    /// The current leaf→fingerprint roster (group chats).
+    pub fn roster(&self) -> Vec<(u32, [u8; 48])> {
+        self.inner
+            .roster
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(l, f)| (*l, *f))
+            .collect()
+    }
+
+    /// Host only: remove a group member by fingerprint and broadcast the
+    /// membership commit. The removed member cannot derive the new epoch, so it
+    /// cannot read any subsequent message (forward secrecy against removal).
+    pub async fn remove_member(&self, fingerprint: [u8; 48]) -> Result<()> {
+        if self.inner.role != GroupRole::Host {
+            return Ok(());
+        }
+        let leaf = self
+            .inner
+            .roster
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, fp)| **fp == fingerprint)
+            .map(|(l, _)| *l);
+        let Some(leaf) = leaf else { return Ok(()) };
+
+        let tagged = {
+            let mut g = self.inner.group.lock().await;
+            match g.as_mut() {
+                Some(grp) => {
+                    let from_epoch = grp.epoch();
+                    grp.remove(leaf).ok().map(|c| (from_epoch, c.encode()))
+                }
+                None => None,
+            }
+        };
+        let Some((from_epoch, commit_bytes)) = tagged else {
+            return Ok(());
+        };
+        let roster_snapshot = {
+            let mut roster = self.inner.roster.lock().unwrap();
+            roster.remove(&leaf);
+            roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
+        };
+        for (s, w, fp) in collect_peers(&self.inner) {
+            if fp != fingerprint {
+                let _ = send_frame_to(
+                    &s,
+                    &w,
+                    &Frame::Commit {
+                        from_epoch,
+                        bytes: commit_bytes.clone(),
+                    },
+                )
+                .await;
+                let _ = send_frame_to(&s, &w, &Frame::Roster(roster_snapshot.clone())).await;
+            }
+        }
+        Ok(())
     }
 
     /// Start accepting inbound connections (spawns a background accept loop).
@@ -401,8 +515,12 @@ async fn reader_loop(
             Some(Frame::Welcome(b)) if inner.role == GroupRole::Member => {
                 handle_welcome(&inner, b).await;
             }
-            Some(Frame::Commit(b)) if inner.role == GroupRole::Member => {
-                handle_commit(&inner, b).await;
+            Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
+                handle_commit(&inner, from_epoch, bytes).await;
+            }
+            Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
+                let mut roster = inner.roster.lock().unwrap();
+                *roster = entries.into_iter().collect();
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, fingerprint, b).await;
@@ -420,23 +538,49 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
         Ok(kp) => kp,
         Err(_) => return,
     };
-    let bytes = {
+    // Hold the group lock across add + leaf assignment so concurrent joins get
+    // distinct, ordered epochs. The commit is tagged with the epoch it applies
+    // to, so members apply commits in order even if delivery reorders them.
+    let result = {
         let mut g = inner.group.lock().await;
         match g.as_mut() {
-            Some(grp) => grp.add(&kp).ok().map(|(_, c, w)| (c.encode(), w.encode())),
+            Some(grp) => {
+                let from_epoch = grp.epoch();
+                grp.add(&kp)
+                    .ok()
+                    .map(|(leaf, c, w)| (leaf, from_epoch, c.encode(), w.encode()))
+            }
             None => None,
         }
     };
-    let Some((commit_bytes, welcome_bytes)) = bytes else {
+    let Some((leaf, from_epoch, commit_bytes, welcome_bytes)) = result else {
         return;
     };
+    let roster_snapshot = {
+        let mut roster = inner.roster.lock().unwrap();
+        roster.insert(leaf, from);
+        roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
+    };
+
     if let Some((s, w)) = peer_handles(inner, from) {
         let _ = send_frame_to(&s, &w, &Frame::Welcome(welcome_bytes)).await;
     }
     for (s, w, fp) in collect_peers(inner) {
         if fp != from {
-            let _ = send_frame_to(&s, &w, &Frame::Commit(commit_bytes.clone())).await;
+            let _ = send_frame_to(
+                &s,
+                &w,
+                &Frame::Commit {
+                    from_epoch,
+                    bytes: commit_bytes.clone(),
+                },
+            )
+            .await;
         }
+    }
+    // Everyone (incl. the new member) gets the updated roster.
+    for (s, w, _) in collect_peers(inner) {
+        let _ = send_frame_to(&s, &w, &Frame::Roster(roster_snapshot.clone())).await;
     }
 }
 
@@ -459,12 +603,36 @@ async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
     }
 }
 
-/// Member: apply a membership commit to advance the epoch.
-async fn handle_commit(inner: &Arc<Inner>, commit_bytes: Vec<u8>) {
-    if let Ok(commit) = Commit::decode(&commit_bytes) {
+/// Member: apply a membership commit in epoch order. Commits that arrive ahead
+/// of our epoch are buffered until their turn (so concurrent joins are safe).
+async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8>) {
+    {
+        let mut pending = inner.pending_commits.lock().unwrap();
+        pending.insert(from_epoch, commit_bytes);
+    }
+    loop {
         let mut g = inner.group.lock().await;
-        if let Some(grp) = g.as_mut() {
-            let _ = grp.apply_commit(&commit);
+        let Some(grp) = g.as_mut() else { return };
+        let cur = grp.epoch();
+        let next = {
+            let mut pending = inner.pending_commits.lock().unwrap();
+            // Drop anything already applied.
+            let stale: Vec<u32> = pending.range(..cur).map(|(k, _)| *k).collect();
+            for k in stale {
+                pending.remove(&k);
+            }
+            pending.remove(&cur)
+        };
+        match next {
+            Some(bytes) => match Commit::decode(&bytes) {
+                Ok(commit) => {
+                    if grp.apply_commit(&commit).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            },
+            None => return, // nothing applicable yet; wait for the missing commit
         }
     }
 }
@@ -477,8 +645,13 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     };
     if let Some(pt) = opened {
         if let Ok(text) = String::from_utf8(pt) {
+            // Attribute to the original sender via the roster (the `from` peer
+            // may just be the relaying host), falling back to the relay peer.
+            let sender = TreeKemGroup::sender_leaf(&gct)
+                .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+                .unwrap_or(from);
             let _ = inner.events_tx.send(Event::Message {
-                from,
+                from: sender,
                 channel: inner.descriptor.channel.clone(),
                 text,
             });
@@ -597,9 +770,84 @@ mod tests {
         assert_eq!(next_message(&mut m2_rx).await.0, "hello group");
 
         // A member sends; the host displays it and relays to the other member.
+        // Attribution: the message is credited to m1, not the relaying host.
         m1.send("from m1").await.unwrap();
-        assert_eq!(next_message(&mut host_rx).await.0, "from m1");
-        assert_eq!(next_message(&mut m2_rx).await.0, "from m1");
+        let (text, from) = next_message(&mut host_rx).await;
+        assert_eq!(text, "from m1");
+        assert_eq!(from, m1.fingerprint(), "host must attribute to m1");
+        let (text2, from2) = next_message(&mut m2_rx).await;
+        assert_eq!(text2, "from m1");
+        assert_eq!(from2, m1.fingerprint(), "m2 must attribute to m1, not host");
+    }
+
+    /// Two members join nearly simultaneously: the host serializes adds and
+    /// tags commits with their epoch, so buffered out-of-order delivery still
+    /// converges. After a settle, all three message successfully.
+    #[tokio::test]
+    async fn concurrent_joins_converge() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#cj",
+        );
+        let (host, _h) = group_core(&fabric, "h", &desc, true);
+        host.host().await.unwrap();
+
+        let (m1, mut m1_rx) = group_core(&fabric, "cj1", &desc, false);
+        let (m2, mut m2_rx) = group_core(&fabric, "cj2", &desc, false);
+        // Connect both without waiting between them.
+        m1.connect("h").await.unwrap();
+        m2.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        host.send("converged?").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "converged?");
+        assert_eq!(next_message(&mut m2_rx).await.0, "converged?");
+    }
+
+    /// A removed member cannot read messages sent after its removal.
+    #[tokio::test]
+    async fn removed_member_is_locked_out() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["rh".into()],
+            "#rm",
+        );
+        let (host, _h) = group_core(&fabric, "rh", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "rm1", &desc, false);
+        m1.connect("rh").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let (m2, mut m2_rx) = group_core(&fabric, "rm2", &desc, false);
+        m2.connect("rh").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Host removes m2, then sends a message.
+        host.remove_member(m2.fingerprint()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        host.send("after removal").await.unwrap();
+
+        // m1 (still a member) receives it...
+        assert_eq!(next_message(&mut m1_rx).await.0, "after removal");
+        // ...m2 (removed) must NOT be able to read any group message.
+        let got = timeout(Duration::from_millis(500), async {
+            loop {
+                if let Event::Message { text, .. } = m2_rx.recv().await.unwrap() {
+                    break text;
+                }
+            }
+        })
+        .await;
+        assert!(
+            got.is_err(),
+            "removed member must not receive group messages"
+        );
     }
 
     #[tokio::test]
