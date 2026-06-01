@@ -24,11 +24,14 @@ use std::collections::HashMap;
 use hkdf::Hkdf;
 use rand::RngCore;
 
+use std::collections::BTreeMap;
+
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
 use crate::hash::Hash;
 use crate::hybrid::{RatchetPublic, RatchetSecret};
-use crate::kdf::kdf_mk;
+use crate::kdf::{kdf_ck, kdf_mk};
+use crate::ratchet::MAX_SKIP;
 
 type Secret = [u8; 32];
 
@@ -278,6 +281,166 @@ pub fn apply_update(
     Err(CryptoError::Malformed("no common ancestor with updater"))
 }
 
+/// A usable PQ group messenger over the TreeKEM CGKA.
+///
+/// Each **epoch** has a group secret (initially from the shared root node
+/// secret, then rotated by every commit). Within an epoch, each member's
+/// messages ride a per-sender symmetric chain derived deterministically from
+/// `(epoch_secret, sender_leaf)` — so every member can derive every sender's
+/// chain with no extra key exchange. Forward secrecy comes from the chains;
+/// post-compromise security from committing an update (new epoch secret).
+pub struct TreeKemGroup {
+    tree: Tree,
+    public: PublicTree,
+    me: MemberState,
+    epoch: u32,
+    epoch_secret: Secret,
+    send_chain: Secret,
+    send_n: u32,
+    recvs: HashMap<usize, RecvChain>,
+}
+
+#[derive(Clone)]
+struct RecvChain {
+    chain: Secret,
+    n: u32,
+    skipped: BTreeMap<u32, Secret>,
+}
+
+impl TreeKemGroup {
+    /// Join the group at its initial epoch. All members compute the same
+    /// initial epoch secret from the shared root node secret.
+    pub fn new(tree: Tree, public: PublicTree, me: MemberState) -> Result<Self> {
+        let root_secret = *me
+            .secrets
+            .get(&tree.root())
+            .ok_or(CryptoError::Malformed("member missing root secret"))?;
+        let mut g = Self {
+            tree,
+            public,
+            me,
+            epoch: 0,
+            epoch_secret: derive_commit_secret(&root_secret),
+            send_chain: [0u8; 32],
+            send_n: 0,
+            recvs: HashMap::new(),
+        };
+        g.reset_epoch();
+        Ok(g)
+    }
+
+    fn reset_epoch(&mut self) {
+        self.send_chain = sender_chain(&self.epoch_secret, self.me.leaf);
+        self.send_n = 0;
+        self.recvs.clear();
+    }
+
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    pub fn group_secret(&self) -> Secret {
+        self.epoch_secret
+    }
+
+    /// Encrypt a message to the group in the current epoch.
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let (next, mk_seed) = kdf_ck(&self.send_chain);
+        let (key, nonce) = kdf_mk(&mk_seed);
+        let n = self.send_n;
+        let aad = msg_aad(self.epoch, self.me.leaf, n);
+        let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
+        self.send_chain = next;
+        self.send_n += 1;
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(self.epoch);
+        w.put_u32(self.me.leaf as u32);
+        w.put_u32(n);
+        w.put_bytes(&ct);
+        Ok(w.into_vec())
+    }
+
+    /// Decrypt a group message. Rejects messages from a different epoch.
+    pub fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>> {
+        let mut r = talkrypt_wire::Reader::new(message);
+        let epoch = r.get_u32()?;
+        let leaf = r.get_u32()? as usize;
+        let n = r.get_u32()?;
+        let ct = r.get_vec()?;
+        r.finish()?;
+        if epoch != self.epoch {
+            return Err(CryptoError::DecryptionFailed);
+        }
+        let aad = msg_aad(epoch, leaf, n);
+        let epoch_secret = self.epoch_secret;
+        let recv = self.recvs.entry(leaf).or_insert_with(|| RecvChain {
+            chain: sender_chain(&epoch_secret, leaf),
+            n: 0,
+            skipped: BTreeMap::new(),
+        });
+
+        if let Some(seed) = recv.skipped.remove(&n) {
+            let (key, nonce) = kdf_mk(&seed);
+            return aead_open(&key, &nonce, &ct, &aad);
+        }
+        if n < recv.n {
+            return Err(CryptoError::DecryptionFailed); // replay
+        }
+        if (n - recv.n) as usize > MAX_SKIP {
+            return Err(CryptoError::TooManySkipped(MAX_SKIP));
+        }
+        while recv.n < n {
+            let (next, seed) = kdf_ck(&recv.chain);
+            recv.skipped.insert(recv.n, seed);
+            recv.chain = next;
+            recv.n += 1;
+        }
+        let (next, mk_seed) = kdf_ck(&recv.chain);
+        let (key, nonce) = kdf_mk(&mk_seed);
+        let pt = aead_open(&key, &nonce, &ct, &aad)?;
+        recv.chain = next;
+        recv.n += 1;
+        Ok(pt)
+    }
+
+    /// Commit an update: rotate our path, advance the epoch, and return the
+    /// `UpdatePath` to broadcast so other members can follow.
+    pub fn commit(&mut self) -> Result<UpdatePath> {
+        let (up, commit) = update(&self.tree, &mut self.public, &mut self.me)?;
+        self.epoch += 1;
+        self.epoch_secret = commit;
+        self.reset_epoch();
+        Ok(up)
+    }
+
+    /// Apply another member's committed update: advance to the new epoch.
+    pub fn apply_commit(&mut self, up: &UpdatePath) -> Result<()> {
+        let commit = apply_update(&self.tree, &mut self.public, &mut self.me, up)?;
+        self.epoch += 1;
+        self.epoch_secret = commit;
+        self.reset_epoch();
+        Ok(())
+    }
+}
+
+/// Deterministic per-sender chain seed for an epoch, bound to the sender leaf.
+fn sender_chain(epoch_secret: &Secret, leaf: usize) -> Secret {
+    let hk = Hkdf::<Hash>::new(None, epoch_secret);
+    let mut out = [0u8; 32];
+    let mut info = b"talkrypt-treekem-sender".to_vec();
+    info.extend_from_slice(&(leaf as u32).to_be_bytes());
+    hk.expand(&info, &mut out).expect("hkdf sender chain");
+    out
+}
+
+fn msg_aad(epoch: u32, leaf: usize, n: u32) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_u32(epoch);
+    w.put_u32(leaf as u32);
+    w.put_u32(n);
+    w.into_vec()
+}
+
 fn derive_parent_secret(child: &Secret) -> Secret {
     expand(child, b"talkrypt-treekem-parent")
 }
@@ -392,5 +555,72 @@ mod tests {
         let mut m1 = members[1].clone();
         let c1 = apply_update(&tree, &mut public, &mut m1, &up).unwrap();
         assert_eq!(c0, c1);
+    }
+
+    fn groups(n: usize) -> Vec<TreeKemGroup> {
+        let tree = Tree::new(n);
+        let (public, members) = init_group(&tree);
+        members
+            .into_iter()
+            .map(|m| TreeKemGroup::new(tree.clone(), public.clone(), m).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn group_messaging_all_share_initial_epoch() {
+        let mut g = groups(3);
+        // Everyone starts in the same epoch with the same group secret.
+        assert_eq!(g[0].group_secret(), g[1].group_secret());
+        assert_eq!(g[1].group_secret(), g[2].group_secret());
+
+        let msg = g[0].encrypt(b"hello tree group").unwrap();
+        assert_eq!(g[1].decrypt(&msg).unwrap(), b"hello tree group");
+        assert_eq!(g[2].decrypt(&msg).unwrap(), b"hello tree group");
+    }
+
+    #[test]
+    fn commit_rotates_epoch_and_messaging_continues() {
+        let mut g = groups(4);
+        let before = g[0].group_secret();
+
+        // Member 2 commits an update; everyone follows to the new epoch.
+        let up = g[2].commit().unwrap();
+        for i in [0, 1, 3] {
+            g[i].apply_commit(&up).unwrap();
+        }
+        for gi in &g {
+            assert_eq!(gi.epoch(), 1);
+        }
+        // Post-compromise: the group secret rotated.
+        assert_ne!(before, g[0].group_secret());
+        assert_eq!(g[0].group_secret(), g[3].group_secret());
+
+        // Messaging works in the new epoch.
+        let msg = g[3].encrypt(b"new epoch").unwrap();
+        assert_eq!(g[0].decrypt(&msg).unwrap(), b"new epoch");
+        assert_eq!(g[1].decrypt(&msg).unwrap(), b"new epoch");
+    }
+
+    #[test]
+    fn group_out_of_order_and_replay() {
+        let mut g = groups(2);
+        let m0 = g[0].encrypt(b"0").unwrap();
+        let m1 = g[0].encrypt(b"1").unwrap();
+        let m2 = g[0].encrypt(b"2").unwrap();
+        assert_eq!(g[1].decrypt(&m2).unwrap(), b"2");
+        assert_eq!(g[1].decrypt(&m0).unwrap(), b"0");
+        assert_eq!(g[1].decrypt(&m1).unwrap(), b"1");
+        assert!(g[1].decrypt(&m0).is_err()); // replay
+    }
+
+    #[test]
+    fn stale_epoch_message_rejected() {
+        let mut g = groups(2);
+        let stale = g[0].encrypt(b"old").unwrap();
+        // g[1] commits, advancing only its own epoch view.
+        let up = g[1].commit().unwrap();
+        g[0].apply_commit(&up).unwrap();
+        // The pre-commit message is from epoch 0; both are now epoch 1.
+        assert!(g[1].decrypt(&stale).is_err());
     }
 }
