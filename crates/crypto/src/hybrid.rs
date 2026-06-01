@@ -13,12 +13,14 @@
 //! primitive is unbroken — so a future break of X25519 does not retroactively
 //! expose traffic, and ML-KEM covers harvest-now-decrypt-later.
 
+use hkdf::Hkdf;
 use ml_kem::kem::{Decapsulate, Encapsulate};
-use ml_kem::{Encoded, EncodedSizeUser, KemCore, MlKem1024};
+use ml_kem::{Encoded, EncodedSizeUser, KemCore, MlKem1024, B32};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::error::{CryptoError, Result};
+use crate::hash::Hash;
 
 type KemEk = <MlKem1024 as KemCore>::EncapsulationKey;
 type KemDk = <MlKem1024 as KemCore>::DecapsulationKey;
@@ -51,6 +53,32 @@ impl RatchetSecret {
         let x = XStaticSecret::random_from_rng(rng);
         let x_pub = XPublicKey::from(&x).to_bytes();
         let (kem_dk, kem_ek) = MlKem1024::generate(&mut rng);
+        let public = RatchetPublic {
+            x_pub,
+            kem_ek: kem_ek.as_bytes().as_slice().to_vec(),
+        };
+        (RatchetSecret { x, kem_dk }, public)
+    }
+
+    /// Deterministically derive a hybrid ratchet key from a 32-byte secret.
+    ///
+    /// Used by TreeKEM, where a node's key pair must be reproducible from the
+    /// node secret. The seed is HKDF-expanded into the X25519 secret and the
+    /// ML-KEM `(d, z)` generation seeds, so the same secret always yields the
+    /// same key pair.
+    pub fn derive_deterministic(seed: &[u8; 32]) -> (RatchetSecret, RatchetPublic) {
+        let hk = Hkdf::<Hash>::new(None, seed);
+        let mut okm = [0u8; 96];
+        hk.expand(b"talkrypt-treekem-node", &mut okm)
+            .expect("hkdf expand node key");
+        let mut x_bytes = [0u8; 32];
+        x_bytes.copy_from_slice(&okm[..32]);
+        let d = B32::try_from(&okm[32..64]).expect("32");
+        let z = B32::try_from(&okm[64..96]).expect("32");
+
+        let x = XStaticSecret::from(x_bytes);
+        let x_pub = XPublicKey::from(&x).to_bytes();
+        let (kem_dk, kem_ek) = MlKem1024::generate_deterministic(&d, &z);
         let public = RatchetPublic {
             x_pub,
             kem_ek: kem_ek.as_bytes().as_slice().to_vec(),

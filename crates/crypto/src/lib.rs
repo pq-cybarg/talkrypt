@@ -23,6 +23,7 @@ pub mod kdf;
 pub mod noise;
 pub mod ratchet;
 pub mod suite;
+pub mod treekem;
 
 pub use error::{CryptoError, Result};
 pub use group::{GroupSession, MemberId};

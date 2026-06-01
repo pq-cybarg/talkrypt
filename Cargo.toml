@@ -22,7 +22,7 @@ sha3 = "0.10"
 hkdf = "0.12"
 aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
-ml-kem = "0.2"
+ml-kem = { version = "0.2", features = ["deterministic"] }
 ml-dsa = "0.1"
 # support
 thiserror = "1"

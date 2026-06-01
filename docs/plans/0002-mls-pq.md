@@ -1,9 +1,17 @@
 # MLS-PQ (TreeKEM) group suite — scoped plan
 
-> **Status: planned sub-project, not yet built.** Groups work *today* via the
-> shipped sender-key suite (`tk.group.*`). This document scopes the heavier
-> TreeKEM/MLS upgrade as its own spec→plan→implement cycle, deliberately *not*
-> rushed — a subtly-wrong CGKA is worse than an honestly-deferred one.
+> **Status: TreeKEM key-agreement core BUILT (`crate::treekem`); MLS framing
+> and membership flows remain.** The CGKA heart — balanced tree, hybrid-PQ node
+> keys, path re-keying with convergence + post-compromise security — is
+> implemented and tested (tree math for sizes 1–17; every member converges on
+> the same group secret for sizes 2–8 under any updater). Sender-key groups
+> (`tk.group.*`) also remain available as the lighter option.
+>
+> **Done:** phases 1–3 below (tree math, hybrid TreeKEM node keys, update/apply
+> key agreement). **Remaining:** epoch key schedule with transcript binding,
+> Add/Remove/Welcome with blank-node handling, RFC 9420 wire framing, and suite
+> registration. These are deliberately not rushed — a subtly-wrong CGKA is
+> worse than an honestly-deferred one.
 
 ## Why a second group suite
 
