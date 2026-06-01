@@ -184,3 +184,25 @@ mod tests {
         assert_ne!(ss_enc, ss_other);
     }
 }
+
+#[cfg(test)]
+mod kat {
+    use super::*;
+    use sha3::{Digest, Sha3_256};
+
+    /// Known-answer vector locking the hybrid public-key wire format. A change
+    /// to the encoding, key sizes, or the deterministic-derivation labels
+    /// breaks this. (1608 = 4+32 X25519 || 4+1568 ML-KEM-1024 encapsulation key.)
+    #[test]
+    fn ratchet_public_wire_kat() {
+        let (_, pubk) = RatchetSecret::derive_deterministic(&[7u8; 32]);
+        let enc = pubk.encode();
+        assert_eq!(enc.len(), 1608, "hybrid public-key wire length");
+        let digest = Sha3_256::digest(&enc);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "6cd0127130e7319190f97f7d904ff68966f3c2cbc3d1a1dfa4e69f93563ed58b",
+            "hybrid public-key KAT digest (talkrypt-mlspq wire v1)"
+        );
+    }
+}

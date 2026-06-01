@@ -54,11 +54,15 @@ decoder, uniform AEAD failure).
 - **Global passive traffic-confirmation against Tor** itself.
 - **TreeKEM group chat** is integrated through the engine: dynamic
   Add/Remove/Welcome (removal forward-secrecy), epoch-sequenced commits
-  (concurrent joins converge), roster-based sender attribution, and
-  descriptor-driven selection. **RFC 9420 byte-level wire conformance + interop
-  test vectors** against another MLS implementation remain (require external
-  vectors; `docs/plans/0002-mls-pq.md`). The host is a group member and a
-  trusted relay/coordinator (a non-member pure-relay hub is future work).
+  (concurrent joins converge), roster-based sender attribution, descriptor-driven
+  selection, and a **non-member relay** (`RelayHub`) that forwards ciphertext
+  without holding the group key. The wire format is **frozen + KAT-locked**
+  (`docs/WIRE.md`).
+- **Not RFC 9420 conformant** (`docs/CONFORMANCE.md`): talkrypt's group layer is
+  a post-quantum construction with its own compact wire format, so it does not
+  interoperate with standard MLS. A classical/standardized-PQ ciphersuite, MLS
+  TLS-presentation framing, and the official interop test vectors remain future
+  work.
 - **Transient symmetric secrets** in live session state are not all
   zeroized-on-drop yet; long-term secrets are.
 - **GUI bundles** (Android APK, desktop) are integration-documented, not built

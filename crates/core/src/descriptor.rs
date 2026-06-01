@@ -256,3 +256,33 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod kat {
+    use super::*;
+
+    /// Known-answer vector locking the descriptor wire format (talkrypt-mlspq
+    /// wire v1). A canonical descriptor with fixed fields must always produce
+    /// this exact `talkrypt://` URI; any change to the field order, tags, or
+    /// base32 encoding breaks it.
+    #[test]
+    fn descriptor_uri_kat() {
+        let d = ChatDescriptor {
+            version: 1,
+            topology: TopologyKind::P2P,
+            persistence: Persistence::Ephemeral,
+            suite_id: "tk.dr.kat".to_string(),
+            suite_params: vec![],
+            endpoints: vec![],
+            invite_token: vec![0u8; 32],
+            channel: "#kat".to_string(),
+            group: false,
+        };
+        assert_eq!(
+            d.to_uri(),
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaa"
+        );
+        // And it must round-trip back to the same descriptor.
+        assert_eq!(ChatDescriptor::from_uri(&d.to_uri()).unwrap(), d);
+    }
+}
