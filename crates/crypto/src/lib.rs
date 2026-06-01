@@ -20,6 +20,7 @@ pub mod hash;
 pub mod hybrid;
 pub mod identity;
 pub mod kdf;
+pub mod mls;
 pub mod noise;
 pub mod ratchet;
 pub mod suite;
