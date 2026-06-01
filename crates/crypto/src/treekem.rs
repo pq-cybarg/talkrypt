@@ -131,7 +131,7 @@ impl LeafKeyPair {
 }
 
 /// A membership change carried by a commit.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Proposal {
     Add {
         leaf: u32,
@@ -144,7 +144,7 @@ enum Proposal {
 
 /// The result of a commit: structural proposals, the committer's re-keyed path
 /// public keys, and path secrets encrypted to each copath resolution node.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Commit {
     proposals: Vec<Proposal>,
     pub_updates: Vec<(Node, RatchetPublic)>,
@@ -154,7 +154,7 @@ pub struct Commit {
 }
 
 /// Everything a joiner needs to enter the group at the post-commit epoch.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Welcome {
     capacity: u32,
     public: Vec<(Node, RatchetPublic)>,
@@ -162,6 +162,185 @@ pub struct Welcome {
     epoch: u32,
     your_leaf: u32,
     commit: Commit,
+}
+
+// ---- wire serialization (talkrypt-compact; not RFC 9420 framing) ----
+
+fn put_node(w: &mut talkrypt_wire::Writer, n: &Node) {
+    w.put_u32(n.lo);
+    w.put_u32(n.span);
+}
+fn get_node(r: &mut talkrypt_wire::Reader) -> Result<Node> {
+    Ok(Node {
+        lo: r.get_u32()?,
+        span: r.get_u32()?,
+    })
+}
+
+impl KeyPackage {
+    pub fn encode(&self) -> Vec<u8> {
+        self.leaf_public.encode()
+    }
+    pub fn decode(bytes: &[u8]) -> Result<KeyPackage> {
+        Ok(KeyPackage {
+            leaf_public: RatchetPublic::decode(bytes)?,
+        })
+    }
+}
+
+impl Proposal {
+    fn put(&self, w: &mut talkrypt_wire::Writer) {
+        match self {
+            Proposal::Add { leaf, leaf_public } => {
+                w.put_u8(0);
+                w.put_u32(*leaf);
+                w.put_bytes(&leaf_public.encode());
+            }
+            Proposal::Remove { leaf } => {
+                w.put_u8(1);
+                w.put_u32(*leaf);
+            }
+        }
+    }
+    fn get(r: &mut talkrypt_wire::Reader) -> Result<Proposal> {
+        match r.get_u8()? {
+            0 => Ok(Proposal::Add {
+                leaf: r.get_u32()?,
+                leaf_public: RatchetPublic::decode(r.get_bytes()?)?,
+            }),
+            1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
+            _ => Err(CryptoError::Malformed("bad proposal tag")),
+        }
+    }
+}
+
+const MAX_TREE_ITEMS: u32 = 1 << 20;
+
+fn get_count(r: &mut talkrypt_wire::Reader) -> Result<u32> {
+    let n = r.get_u32()?;
+    if n > MAX_TREE_ITEMS {
+        return Err(CryptoError::Malformed("treekem count too large"));
+    }
+    Ok(n)
+}
+
+impl Commit {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(self.proposals.len() as u32);
+        for p in &self.proposals {
+            p.put(&mut w);
+        }
+        w.put_u32(self.pub_updates.len() as u32);
+        for (n, p) in &self.pub_updates {
+            put_node(&mut w, n);
+            w.put_bytes(&p.encode());
+        }
+        w.put_u32(self.path.len() as u32);
+        for n in &self.path {
+            put_node(&mut w, n);
+        }
+        w.put_u32(self.ciphertexts.len() as u32);
+        for (a, b, blob) in &self.ciphertexts {
+            put_node(&mut w, a);
+            put_node(&mut w, b);
+            w.put_bytes(blob);
+        }
+        w.put_u32(self.new_capacity);
+        w.into_vec()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Commit> {
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let c = Self::read(&mut r)?;
+        r.finish()?;
+        Ok(c)
+    }
+
+    fn read(r: &mut talkrypt_wire::Reader) -> Result<Commit> {
+        let np = get_count(r)?;
+        let mut proposals = Vec::with_capacity(np as usize);
+        for _ in 0..np {
+            proposals.push(Proposal::get(r)?);
+        }
+        let nu = get_count(r)?;
+        let mut pub_updates = Vec::with_capacity(nu as usize);
+        for _ in 0..nu {
+            let node = get_node(r)?;
+            let p = RatchetPublic::decode(r.get_bytes()?)?;
+            pub_updates.push((node, p));
+        }
+        let npath = get_count(r)?;
+        let mut path = Vec::with_capacity(npath as usize);
+        for _ in 0..npath {
+            path.push(get_node(r)?);
+        }
+        let nc = get_count(r)?;
+        let mut ciphertexts = Vec::with_capacity(nc as usize);
+        for _ in 0..nc {
+            let a = get_node(r)?;
+            let b = get_node(r)?;
+            let blob = r.get_vec()?;
+            ciphertexts.push((a, b, blob));
+        }
+        let new_capacity = r.get_u32()?;
+        Ok(Commit {
+            proposals,
+            pub_updates,
+            path,
+            ciphertexts,
+            new_capacity,
+        })
+    }
+}
+
+impl Welcome {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(self.capacity);
+        w.put_u32(self.public.len() as u32);
+        for (n, p) in &self.public {
+            put_node(&mut w, n);
+            w.put_bytes(&p.encode());
+        }
+        w.put_u32(self.occupied.len() as u32);
+        for o in &self.occupied {
+            w.put_u8(*o as u8);
+        }
+        w.put_u32(self.epoch);
+        w.put_u32(self.your_leaf);
+        w.put_bytes(&self.commit.encode());
+        w.into_vec()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Welcome> {
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let capacity = r.get_u32()?;
+        let np = get_count(&mut r)?;
+        let mut public = Vec::with_capacity(np as usize);
+        for _ in 0..np {
+            let node = get_node(&mut r)?;
+            let p = RatchetPublic::decode(r.get_bytes()?)?;
+            public.push((node, p));
+        }
+        let no = get_count(&mut r)?;
+        let mut occupied = Vec::with_capacity(no as usize);
+        for _ in 0..no {
+            occupied.push(r.get_u8()? != 0);
+        }
+        let epoch = r.get_u32()?;
+        let your_leaf = r.get_u32()?;
+        let commit = Commit::decode(r.get_bytes()?)?;
+        r.finish()?;
+        Ok(Welcome {
+            capacity,
+            public,
+            occupied,
+            epoch,
+            your_leaf,
+            commit,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -663,6 +842,24 @@ mod tests {
         let m = a.encrypt(b"secret after removal").unwrap();
         assert_eq!(b.decrypt(&m).unwrap(), b"secret after removal");
         assert!(c.decrypt(&m).is_err());
+    }
+
+    #[test]
+    fn commit_and_welcome_wire_roundtrip() {
+        let mut a = TreeKemGroup::create();
+        let kp = LeafKeyPair::generate();
+        let (_leaf, commit, welcome) = a.add(&kp.key_package()).unwrap();
+
+        let commit2 = Commit::decode(&commit.encode()).unwrap();
+        assert!(commit == commit2);
+        let welcome2 = Welcome::decode(&welcome.encode()).unwrap();
+        assert!(welcome == welcome2);
+        let kp2 = KeyPackage::decode(&kp.key_package().encode()).unwrap();
+        assert_eq!(kp2.leaf_public, kp.key_package().leaf_public);
+
+        // A joiner can actually use the serialized-then-deserialized Welcome.
+        let b = TreeKemGroup::join_with_welcome(kp, &welcome2).unwrap();
+        assert_eq!(a.group_secret(), b.group_secret());
     }
 
     #[test]
