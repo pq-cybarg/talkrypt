@@ -124,10 +124,19 @@ Working & tested today (80 tests, fully offline):
 - **Hardening:** `cargo-fuzz` targets (`fuzz/`) for the wire and descriptor
   parsers; a **Kani** proof harness on the decoder (`cargo kani`).
 
-Planned next (same trait seams, see `docs/plans/`): full RFC 9420 **MLS-PQ**
-group suite (the sender-key scheme is shipped today as the lighter option),
-anti-censorship pluggable-transport config, and the desktop (Tauri) / Android
-(uniffi) shells — all reusing this identical core.
+- **Anti-censorship:** bridges + pluggable transports (obfs4, snowflake) on the
+  Arti transport (`bootstrap_with`) for reaching Tor where it is blocked.
+- **Shared FFI** (`talkrypt-ffi`, uniffi): one binding (`TalkryptClient`) that
+  the Android app and a desktop shell both consume — verified end to end. See
+  [`docs/PLATFORMS.md`](docs/PLATFORMS.md) for Android (cargo-ndk, GrapheneOS /
+  Solana Seeker sideload) and desktop (Tauri / native) integration.
+- **CSfC alignment:** `talkrypt csfc` preflight + [`docs/CSFC.md`](docs/CSFC.md).
+
+Planned next (scoped in `docs/plans/`): full RFC 9420 **MLS-PQ** TreeKEM group
+suite (`0002-mls-pq.md` — the sender-key scheme is shipped today as the lighter
+option; the heavier CGKA is deliberately not rushed), and the GUI bundles for
+Android/desktop (the Rust core + FFI they sit on are built and tested). All
+reuse this identical core.
 
 ### Running the extras
 
