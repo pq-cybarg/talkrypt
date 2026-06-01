@@ -21,7 +21,7 @@ pub use loopback::{LoopbackFabric, LoopbackTransport};
 pub use tcp::TcpTransport;
 
 #[cfg(feature = "tor")]
-pub use arti::{ArtiTransport, OnionPersistence};
+pub use arti::{AntiCensorship, ArtiTransport, OnionPersistence, PluggableTransport};
 
 use async_trait::async_trait;
 use thiserror::Error;

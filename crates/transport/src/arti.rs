@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use arti_client::config::CfgPath;
+use arti_client::config::pt::TransportConfigBuilder;
+use arti_client::config::{BridgeConfigBuilder, CfgPath};
 use arti_client::{DataStream, TorClient, TorClientConfig};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -53,6 +54,25 @@ pub enum OnionPersistence {
     Persistent { state_dir: PathBuf },
 }
 
+/// A pluggable transport binary (e.g. obfs4, snowflake) for anti-censorship.
+#[derive(Clone, Debug)]
+pub struct PluggableTransport {
+    /// Protocol names this binary provides, e.g. `["obfs4"]` or `["snowflake"]`.
+    pub protocols: Vec<String>,
+    /// Path or name of the PT client binary (e.g. `/usr/bin/lyrebird`).
+    pub binary_path: String,
+}
+
+/// Anti-censorship configuration: bridges + pluggable transports, for reaching
+/// Tor where direct access is blocked.
+#[derive(Clone, Debug, Default)]
+pub struct AntiCensorship {
+    /// Full bridge lines, e.g. `"Bridge obfs4 1.2.3.4:443 <FP> cert=... iat-mode=0"`.
+    pub bridge_lines: Vec<String>,
+    /// Pluggable transports to launch and use for those bridges.
+    pub transports: Vec<PluggableTransport>,
+}
+
 /// A Tor transport backed by a bootstrapped Arti client.
 pub struct ArtiTransport {
     client: TorClient<PreferredRuntime>,
@@ -65,7 +85,16 @@ pub struct ArtiTransport {
 impl ArtiTransport {
     /// Bootstrap a Tor client and prepare to host/dial onion services.
     pub async fn bootstrap(persistence: OnionPersistence, nickname: &str) -> Result<Self> {
-        let (config, tempdir) = build_config(&persistence)?;
+        Self::bootstrap_with(persistence, nickname, None).await
+    }
+
+    /// Bootstrap with optional anti-censorship (bridges + pluggable transports).
+    pub async fn bootstrap_with(
+        persistence: OnionPersistence,
+        nickname: &str,
+        anti_censorship: Option<&AntiCensorship>,
+    ) -> Result<Self> {
+        let (config, tempdir) = build_config(&persistence, anti_censorship)?;
         let client = TorClient::create_bootstrapped(config)
             .await
             .map_err(|e| io(format!("tor bootstrap failed: {e}")))?;
@@ -83,27 +112,56 @@ impl ArtiTransport {
     }
 }
 
-fn build_config(p: &OnionPersistence) -> Result<(TorClientConfig, Option<tempfile::TempDir>)> {
+fn build_config(
+    p: &OnionPersistence,
+    anti_censorship: Option<&AntiCensorship>,
+) -> Result<(TorClientConfig, Option<tempfile::TempDir>)> {
     let mut builder = TorClientConfig::builder();
-    match p {
+    let tempdir = match p {
         OnionPersistence::Ephemeral => {
             let td = tempfile::tempdir().map_err(io)?;
             builder
                 .storage()
                 .state_dir(CfgPath::new_literal(td.path().join("state")))
                 .cache_dir(CfgPath::new_literal(td.path().join("cache")));
-            let config = builder.build().map_err(io)?;
-            Ok((config, Some(td)))
+            Some(td)
         }
         OnionPersistence::Persistent { state_dir } => {
             builder
                 .storage()
                 .state_dir(CfgPath::new_literal(state_dir.join("state")))
                 .cache_dir(CfgPath::new_literal(state_dir.join("cache")));
-            let config = builder.build().map_err(io)?;
-            Ok((config, None))
+            None
+        }
+    };
+
+    if let Some(ac) = anti_censorship {
+        for line in &ac.bridge_lines {
+            let bridge: BridgeConfigBuilder = line
+                .parse()
+                .map_err(|e| io(format!("bad bridge line: {e}")))?;
+            builder.bridges().bridges().push(bridge);
+        }
+        for pt in &ac.transports {
+            let mut transport = TransportConfigBuilder::default();
+            let protocols = pt
+                .protocols
+                .iter()
+                .map(|p| {
+                    p.parse()
+                        .map_err(|e| io(format!("bad PT protocol '{p}': {e}")))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            transport
+                .protocols(protocols)
+                .path(CfgPath::new(pt.binary_path.clone()))
+                .run_on_startup(true);
+            builder.bridges().transports().push(transport);
         }
     }
+
+    let config = builder.build().map_err(io)?;
+    Ok((config, tempdir))
 }
 
 /// A framed Arti stream, pre-split into read/write halves (always `Unpin`).
