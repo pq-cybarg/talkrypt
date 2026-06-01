@@ -146,11 +146,17 @@ core.
 ### Running the extras
 
 ```
-cargo run -p talkrypt-tui -- host --listen 127.0.0.1:9000   # terminal UI
+cargo run -p talkrypt-cli -- host --group --channel '#team'  # found a TreeKEM group
+cargo run -p talkrypt-cli -- join --group 'talkrypt://...'   # members join via Welcome
+cargo run -p talkrypt-tui -- host --listen 127.0.0.1:9000    # terminal UI
 cargo test -p talkrypt-crypto --features fips                # FIPS backend
 cargo +nightly fuzz run wire_reader                          # fuzzing (needs cargo-fuzz)
 cargo kani -p talkrypt-wire                                  # formal verification (needs Kani)
 ```
+
+**Group chat** (`--group`) founds a TreeKEM group on the host, which coordinates
+membership (Add/Welcome) and relays per-epoch-encrypted messages to all members;
+verified across processes over TCP.
 
 ## Security
 

@@ -12,6 +12,8 @@ pub enum CoreError {
     Handshake(&'static str),
     #[error("peer identity verification failed")]
     PeerAuthFailed,
+    #[error("not in the group yet (still joining)")]
+    GroupNotReady,
     #[error("unknown crypto suite '{0}'; enable this suite to join this chat")]
     UnknownSuite(String),
     #[error("crypto error: {0}")]

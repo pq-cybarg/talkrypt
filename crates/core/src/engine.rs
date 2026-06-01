@@ -296,7 +296,7 @@ impl Core {
                 let mut g = self.inner.group.lock().await;
                 match g.as_mut() {
                     Some(grp) => Frame::GroupMsg(grp.encrypt(text.as_bytes())?),
-                    None => return Ok(()), // not yet joined; drop
+                    None => return Err(crate::error::CoreError::GroupNotReady),
                 }
             }
         };

@@ -57,11 +57,17 @@ enum Cmd {
         /// Channel name.
         #[arg(long, default_value = "#general")]
         channel: String,
+        /// Found a TreeKEM group chat (this node is the coordinator/relay).
+        #[arg(long)]
+        group: bool,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
         /// The invite URI (talkrypt://...).
         uri: String,
+        /// Join as a TreeKEM group member (host must be a --group host).
+        #[arg(long)]
+        group: bool,
     },
     /// Print the build and honesty banner.
     Version,
@@ -116,8 +122,9 @@ async fn main() {
             listen,
             topology,
             channel,
-        } => run_host(&listen, &topology, &channel).await,
-        Cmd::Join { uri } => run_join(&uri).await,
+            group,
+        } => run_host(&listen, &topology, &channel, group).await,
+        Cmd::Join { uri, group } => run_join(&uri, group).await,
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -234,6 +241,7 @@ async fn run_host(
     listen: &str,
     topology: &str,
     channel: &str,
+    group: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let kind = topology_from(topology);
@@ -248,10 +256,23 @@ async fn run_host(
         vec![listen.to_string()],
         channel,
     );
-    let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone());
+    let (core, rx) = if group {
+        Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            transport,
+            desc.clone(),
+            true,
+        )
+    } else {
+        Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone())
+    };
     core.host().await?;
 
-    println!("hosting {topology} chat on {listen}");
+    println!(
+        "hosting {} {topology} chat on {listen}",
+        if group { "TreeKEM group" } else { "pairwise" }
+    );
     println!(
         "your safety number: {}",
         core.identity_public().safety_number()
@@ -263,7 +284,7 @@ async fn run_host(
     repl(core, rx).await
 }
 
-async fn run_join(uri: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let desc = ChatDescriptor::from_uri(uri)?;
     if desc.suite_id != DEFAULT_SUITE_ID {
@@ -276,10 +297,21 @@ async fn run_join(uri: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     let suite = SuiteRegistry::with_defaults().get(&desc.suite_id)?;
     let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
-    let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone());
+    let (core, rx) = if group {
+        Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            transport,
+            desc.clone(),
+            false,
+        )
+    } else {
+        Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone())
+    };
 
     println!(
-        "joining {} chat on channel {}",
+        "joining {} {} chat on channel {}",
+        if group { "TreeKEM group" } else { "pairwise" },
         fmt_topology(desc.topology),
         desc.channel
     );
