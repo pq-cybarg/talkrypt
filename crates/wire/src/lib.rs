@@ -11,8 +11,14 @@
 use thiserror::Error;
 
 /// Largest single length-prefixed field we will ever read (16 MiB).
-/// Chat messages and crypto headers are kilobytes at most; this is a generous
-/// ceiling that still bounds memory against a hostile length prefix.
+///
+/// This is the **jumbo-frame ceiling**: text messages and crypto headers are
+/// kilobytes, but large ("jumbo") payloads — big group state, attachments — are
+/// supported up to this bound, which still caps memory against a hostile length
+/// prefix. The decoder reads the full payload regardless of how the OS segments
+/// the underlying byte stream (network MTU / Ethernet jumbo frames are an
+/// OS/NIC concern, transparent to this layer). Verified by multi-MB round-trip
+/// tests through the ratchet and the TCP transport.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]

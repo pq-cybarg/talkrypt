@@ -316,6 +316,16 @@ mod tests {
     }
 
     #[test]
+    fn jumbo_message_roundtrips() {
+        // Large ("jumbo") payloads must encrypt/decrypt intact — a 4 MiB
+        // message, well within MAX_FRAME, round-trips byte-for-byte.
+        let (mut alice, mut bob) = pair();
+        let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i * 31 + 7) as u8).collect();
+        let ct = alice.encrypt(&big).unwrap();
+        assert_eq!(bob.decrypt(&ct).unwrap(), big);
+    }
+
+    #[test]
     fn full_duplex_conversation() {
         let (mut alice, mut bob) = pair();
         let m1 = alice.encrypt(b"hi").unwrap();

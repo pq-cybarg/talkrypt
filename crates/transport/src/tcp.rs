@@ -158,4 +158,24 @@ mod tests {
         cw.send_frame(b"split-hello").await.unwrap();
         assert_eq!(sr.recv_frame().await.unwrap(), b"split-hello");
     }
+
+    #[tokio::test]
+    async fn jumbo_frame_roundtrips_over_tcp() {
+        // A large ("jumbo") frame, under MAX_FRAME, transfers intact: the
+        // length-prefixed framing reads the full payload regardless of how the
+        // OS segments the underlying stream.
+        let server = TcpTransport::new("127.0.0.1:0");
+        let mut listener = server.listen().await.unwrap();
+        let bound = listener.endpoint();
+        let blob: Vec<u8> = (0..6 * 1024 * 1024).map(|i| (i * 17 + 5) as u8).collect();
+        let expected = blob.clone();
+        let accept = tokio::spawn(async move {
+            let mut s = listener.accept().await.unwrap();
+            s.recv_frame().await.unwrap()
+        });
+        let client = TcpTransport::new("127.0.0.1:0");
+        let mut cs = client.dial(&bound).await.unwrap();
+        cs.send_frame(&blob).await.unwrap();
+        assert_eq!(accept.await.unwrap(), expected);
+    }
 }
