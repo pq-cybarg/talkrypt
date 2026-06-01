@@ -6,4 +6,5 @@
 //! `docs/CONFORMANCE.md`; each module here passes the corresponding official
 //! `mls-implementations` test vectors.
 
+pub mod schedule;
 pub mod treemath;

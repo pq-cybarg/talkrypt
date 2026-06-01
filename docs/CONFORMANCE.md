@@ -1,9 +1,36 @@
-# RFC 9420 (MLS) conformance — mapping & honest divergence
+# RFC 9420 (MLS) conformance — status, mapping & honest divergence
 
-**Bottom line:** talkrypt's group chat implements the *mechanisms* of MLS
-(TreeKEM CGKA, Add/Remove/Welcome, an epoch key schedule) but is **not** an
-RFC 9420-conformant implementation, and cannot interoperate with one. This is
-deliberate and is stated plainly here rather than papered over.
+## What is RFC 9420 conformant **today** (proven vs official vectors)
+
+`talkrypt-crypto::mls` implements standards-track MLS components and validates
+them against the MLS working group's **official test vectors**
+(`mlswg/mls-implementations`), ciphersuite 1
+(`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`):
+
+| Component | Vector file | Status |
+|---|---|---|
+| Tree math (log2/level/root/left/right/parent/sibling) | `tree-math.json` | ✅ passes (n=1,2,4,8) |
+| `ExpandWithLabel`, `DeriveSecret`, `RefHash` + varint encoding | `crypto-basics.json` | ✅ passes |
+| Epoch key schedule (extract → welcome/epoch → all 9 derived secrets) | `key-schedule.json` | ✅ passes |
+
+These are real RFC 9420 conformance results, in CI as `#[test]`s. This is the
+cryptographic core of MLS, working — **not** deferred.
+
+## What remains for full protocol conformance
+
+The standards-track wire protocol layers build on the above and are the next
+increment: the **secret tree**, **message-protection** framing
+(`MLSMessage`/`FramedContent`), **Welcome**/`GroupInfo`/`GroupSecrets`, the
+TreeKEM **update-path** under the RFC ciphersuite, and an **interop** run
+against another implementation. Each has an official vector file to validate
+against the same way.
+
+## Note on the PQ group (`treekem.rs`)
+
+talkrypt's *shipped, default* group is post-quantum (ML-KEM-1024 + X25519,
+ML-DSA-87, SHA3-384) — deliberately **not** an RFC 9420 ciphersuite, so it does
+not interoperate with classical MLS. The `mls` module above is the standards
+path; the two coexist. The text below maps concepts between them.
 
 ## Why it is not RFC 9420 conformant
 
