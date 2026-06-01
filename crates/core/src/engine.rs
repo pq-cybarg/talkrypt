@@ -289,11 +289,41 @@ mod tests {
         endpoint: &str,
         desc: &ChatDescriptor,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
-        let suite = SuiteRegistry::with_defaults()
-            .get(DEFAULT_SUITE_ID)
-            .unwrap();
+        core_on_suite(fabric, endpoint, desc, DEFAULT_SUITE_ID)
+    }
+
+    fn core_on_suite(
+        fabric: &LoopbackFabric,
+        endpoint: &str,
+        desc: &ChatDescriptor,
+        suite_id: &str,
+    ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let suite = SuiteRegistry::with_defaults().get(suite_id).unwrap();
         let transport = Arc::new(fabric.transport(endpoint));
         Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone())
+    }
+
+    /// The engine is suite-agnostic: the same end-to-end flow works over the
+    /// PQ-Noise suite, not just the default Double Ratchet.
+    #[tokio::test]
+    async fn engine_works_over_noise_suite() {
+        use talkrypt_crypto::NOISE_SUITE_ID;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            NOISE_SUITE_ID,
+            vec!["bob".into()],
+            "#noise",
+        );
+        let (bob, mut bob_rx) = core_on_suite(&fabric, "bob", &desc, NOISE_SUITE_ID);
+        let (alice, _a) = core_on_suite(&fabric, "alice", &desc, NOISE_SUITE_ID);
+        bob.host().await.unwrap();
+        alice.connect("bob").await.unwrap();
+        alice.send("over pq-noise").await.unwrap();
+        let (text, from) = next_message(&mut bob_rx).await;
+        assert_eq!(text, "over pq-noise");
+        assert_eq!(from, alice.fingerprint());
     }
 
     #[tokio::test]
