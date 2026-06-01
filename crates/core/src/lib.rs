@@ -13,5 +13,5 @@ pub mod error;
 pub mod handshake;
 
 pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
-pub use engine::{Core, Event};
+pub use engine::{Core, Event, GroupRole};
 pub use error::{CoreError, Result};
