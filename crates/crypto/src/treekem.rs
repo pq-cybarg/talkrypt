@@ -1,30 +1,36 @@
-//! TreeKEM continuous group key agreement (the cryptographic core of MLS-PQ).
+//! TreeKEM continuous group key agreement with dynamic membership — the
+//! cryptographic core of MLS-PQ.
 //!
-//! A balanced binary tree has one member per leaf. Every node carries a hybrid
-//! (X25519 + ML-KEM-1024) key pair *derived deterministically* from a node
-//! secret. A member holds the secrets of exactly the nodes on its path to the
-//! root; everyone knows all public keys.
+//! Members occupy leaves of a binary tree whose capacity is a power of two.
+//! Every populated node carries a hybrid (X25519 + ML-KEM-1024) key pair
+//! derived deterministically from a node secret; a member holds the secrets of
+//! the non-blank nodes on its path to the root, and everyone knows all public
+//! keys. **Blank** nodes (no key) are resolved to the set of highest non-blank
+//! descendants covering their subtree — the *resolution* — which is what path
+//! secrets get encrypted to.
 //!
-//! When a member **updates** (re-keys), it generates a fresh chain of path
-//! secrets from its leaf to the root and, for each node on the path, encrypts
-//! the new path secret to the *copath sibling* — whose secret every member of
-//! that sibling's subtree already holds. Each member decrypts at the level
-//! where its path meets the updater's, then KDF-chains up to the same new root
-//! secret. This gives the whole group a fresh shared secret in O(log N) and
-//! **post-compromise security**: a compromised member heals the group by
-//! updating.
+//! Nodes are identified by the **leaf range** `(lo, span)` they cover, so
+//! indices stay stable when the tree doubles to admit more members.
 //!
-//! Scope: this is the TreeKEM key-agreement core with update operations. The
-//! Welcome/Add/Remove flows and RFC 9420 wire framing are the remaining MLS
-//! work (see `docs/plans/0002-mls-pq.md`). Groups also ship today via the
-//! simpler sender-key suite in [`crate::group`].
+//! Operations:
+//!   * **create / key_package / add / join_with_welcome** — a member commits an
+//!     Add, encrypting the new group secret to existing members (UpdatePath)
+//!     and to the joiner's leaf key (Welcome).
+//!   * **remove** — blank the leaving leaf and re-key, so the removed member
+//!     cannot derive the new group secret (forward secrecy against removal).
+//!   * **commit / apply_commit** — advance the epoch; messaging rides per-epoch
+//!     per-sender chains (forward secrecy within an epoch; post-compromise
+//!     security across commits).
+//!
+//! Scope: this is the TreeKEM key schedule + membership. RFC 9420 wire framing
+//! and proposal batching beyond Add/Remove remain future work
+//! (`docs/plans/0002-mls-pq.md`). The simpler sender-key group
+//! ([`crate::group`]) remains available.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use hkdf::Hkdf;
 use rand::RngCore;
-
-use std::collections::BTreeMap;
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
@@ -35,269 +41,127 @@ use crate::ratchet::MAX_SKIP;
 
 type Secret = [u8; 32];
 
-/// A balanced binary tree over `n` leaves (members).
-#[derive(Clone, Debug)]
-pub struct Tree {
-    n_leaves: usize,
-    parent: Vec<Option<usize>>,
-    children: Vec<Option<(usize, usize)>>,
-    leaf_node: Vec<usize>,
-    root: usize,
+/// A tree node identified by the leaf range `[lo, lo+span)` it covers.
+/// `span` is always a power of two; `span == 1` is a leaf.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct Node {
+    lo: u32,
+    span: u32,
 }
 
-impl Tree {
-    /// Build a balanced tree for `n` members (`n >= 1`).
-    pub fn new(n: usize) -> Tree {
-        assert!(n >= 1, "group needs at least one member");
-        let mut b = Builder {
-            parent: Vec::new(),
-            children: Vec::new(),
-            leaf_node: vec![usize::MAX; n],
-        };
-        let leaves: Vec<usize> = (0..n).collect();
-        let root = b.build(&leaves);
-        Tree {
-            n_leaves: n,
-            parent: b.parent,
-            children: b.children,
-            leaf_node: b.leaf_node,
-            root,
+impl Node {
+    fn leaf(i: u32) -> Node {
+        Node { lo: i, span: 1 }
+    }
+    fn children(&self) -> Option<(Node, Node)> {
+        if self.span == 1 {
+            None
+        } else {
+            let h = self.span / 2;
+            Some((
+                Node {
+                    lo: self.lo,
+                    span: h,
+                },
+                Node {
+                    lo: self.lo + h,
+                    span: h,
+                },
+            ))
         }
     }
-
-    pub fn member_count(&self) -> usize {
-        self.n_leaves
-    }
-
-    /// The root node index.
-    pub fn root(&self) -> usize {
-        self.root
-    }
-
-    fn sibling(&self, node: usize) -> Option<usize> {
-        let p = self.parent[node]?;
-        let (l, r) = self.children[p].expect("internal node has children");
-        Some(if l == node { r } else { l })
-    }
-
-    /// Path of node indices from a member's leaf up to (and including) the root.
-    fn path_to_root(&self, leaf: usize) -> Vec<usize> {
-        let mut path = vec![self.leaf_node[leaf]];
-        let mut cur = self.leaf_node[leaf];
-        while let Some(p) = self.parent[cur] {
-            path.push(p);
-            cur = p;
+    fn parent(&self, capacity: u32) -> Option<Node> {
+        if self.span >= capacity {
+            return None;
         }
-        path
-    }
-
-    /// Is `node` an ancestor of (or equal to) the given member's leaf?
-    fn covers(&self, node: usize, leaf: usize) -> bool {
-        let mut cur = self.leaf_node[leaf];
-        loop {
-            if cur == node {
-                return true;
-            }
-            match self.parent[cur] {
-                Some(p) => cur = p,
-                None => return false,
-            }
-        }
-    }
-}
-
-struct Builder {
-    parent: Vec<Option<usize>>,
-    children: Vec<Option<(usize, usize)>>,
-    leaf_node: Vec<usize>,
-}
-
-impl Builder {
-    fn new_node(&mut self) -> usize {
-        let id = self.parent.len();
-        self.parent.push(None);
-        self.children.push(None);
-        id
-    }
-
-    fn build(&mut self, leaves: &[usize]) -> usize {
-        if leaves.len() == 1 {
-            let id = self.new_node();
-            self.leaf_node[leaves[0]] = id;
-            return id;
-        }
-        let mid = leaves.len().div_ceil(2);
-        let l = self.build(&leaves[..mid]);
-        let r = self.build(&leaves[mid..]);
-        let id = self.new_node();
-        self.children[id] = Some((l, r));
-        self.parent[l] = Some(id);
-        self.parent[r] = Some(id);
-        id
-    }
-}
-
-/// The public state shared by every member: all node public keys.
-#[derive(Clone, Default)]
-pub struct PublicTree {
-    publics: HashMap<usize, RatchetPublic>,
-}
-
-/// One member's private view: the secrets of the nodes on its path.
-#[derive(Clone)]
-pub struct MemberState {
-    pub leaf: usize,
-    secrets: HashMap<usize, Secret>,
-}
-
-/// An update broadcast: new public keys for the updater's path, and the new
-/// path secret for each path node encrypted to that node's copath sibling.
-#[derive(Clone)]
-pub struct UpdatePath {
-    updater_leaf: usize,
-    publics: Vec<(usize, RatchetPublic)>,
-    encrypted: Vec<(usize, Vec<u8>)>, // (path node, sealed path secret for copath)
-}
-
-/// Initialize a group: generate every node's secret, returning the public tree
-/// plus each member's private path view. Models the post-Welcome state; real
-/// MLS distributes these via encrypted Welcome messages.
-pub fn init_group(tree: &Tree) -> (PublicTree, Vec<MemberState>) {
-    let mut rng = rand::rngs::OsRng;
-    let total = tree.parent.len();
-    let mut node_secret = vec![[0u8; 32]; total];
-    let mut publics = HashMap::new();
-    for (node, secret) in node_secret.iter_mut().enumerate() {
-        rng.fill_bytes(secret);
-        let (_, public) = RatchetSecret::derive_deterministic(secret);
-        publics.insert(node, public);
-    }
-    let members = (0..tree.n_leaves)
-        .map(|leaf| {
-            let secrets = tree
-                .path_to_root(leaf)
-                .into_iter()
-                .map(|n| (n, node_secret[n]))
-                .collect();
-            MemberState { leaf, secrets }
+        let ps = self.span * 2;
+        Some(Node {
+            lo: self.lo - (self.lo % ps),
+            span: ps,
         })
-        .collect();
-    (PublicTree { publics }, members)
-}
-
-/// Perform an update from `member`. Returns the broadcast `UpdatePath` and the
-/// new group (commit) secret; mutates `member` and `public` to the new keys.
-pub fn update(
-    tree: &Tree,
-    public: &mut PublicTree,
-    member: &mut MemberState,
-) -> Result<(UpdatePath, Secret)> {
-    let path = tree.path_to_root(member.leaf);
-
-    // Fresh path-secret chain: leaf secret random, each parent derived from it.
-    let mut path_secrets = vec![[0u8; 32]; path.len()];
-    rand::rngs::OsRng.fill_bytes(&mut path_secrets[0]);
-    for i in 1..path.len() {
-        path_secrets[i] = derive_parent_secret(&path_secrets[i - 1]);
     }
-
-    // New public keys for every node on the path.
-    let mut publics = Vec::with_capacity(path.len());
-    for (i, &node) in path.iter().enumerate() {
-        let (_, pubk) = RatchetSecret::derive_deterministic(&path_secrets[i]);
-        public.publics.insert(node, pubk.clone());
-        member.secrets.insert(node, path_secrets[i]);
-        publics.push((node, pubk));
-    }
-
-    // Encrypt each ancestor's new path secret to its copath sibling.
-    let mut encrypted = Vec::new();
-    for i in 1..path.len() {
-        let copath = tree
-            .sibling(path[i - 1])
-            .expect("non-root path node has a sibling");
-        let copath_pub = public
-            .publics
-            .get(&copath)
-            .ok_or(CryptoError::Malformed("missing copath public"))?;
-        let blob = seal_secret(copath_pub, &path_secrets[i])?;
-        encrypted.push((path[i], blob));
-    }
-
-    let commit = derive_commit_secret(&path_secrets[path.len() - 1]);
-    Ok((
-        UpdatePath {
-            updater_leaf: member.leaf,
-            publics,
-            encrypted,
-        },
-        commit,
-    ))
-}
-
-/// Apply an update from another member. Returns the new group (commit) secret,
-/// which must equal the updater's.
-pub fn apply_update(
-    tree: &Tree,
-    public: &mut PublicTree,
-    member: &mut MemberState,
-    update: &UpdatePath,
-) -> Result<Secret> {
-    // Adopt all new public keys on the updater's path.
-    for (node, pubk) in &update.publics {
-        public.publics.insert(*node, pubk.clone());
-    }
-
-    let updater_path = tree.path_to_root(update.updater_leaf);
-
-    // Find the level where our path meets the updater's: the lowest ancestor
-    // of the updater whose copath sibling covers us.
-    for i in 1..updater_path.len() {
-        let copath = tree.sibling(updater_path[i - 1]).expect("has sibling");
-        if tree.covers(copath, member.leaf) {
-            // We hold `copath`'s secret -> reconstruct its key -> decapsulate.
-            let copath_secret = member
-                .secrets
-                .get(&copath)
-                .ok_or(CryptoError::Malformed("missing held copath secret"))?;
-            let (rsecret, _) = RatchetSecret::derive_deterministic(copath_secret);
-            let blob = update
-                .encrypted
-                .iter()
-                .find(|(node, _)| *node == updater_path[i])
-                .map(|(_, b)| b)
-                .ok_or(CryptoError::Malformed("missing encrypted path secret"))?;
-            let mut ps = open_secret(&rsecret, blob)?;
-
-            // Store this node's secret, then chain up to the root.
-            member.secrets.insert(updater_path[i], ps);
-            for &node in &updater_path[i + 1..] {
-                ps = derive_parent_secret(&ps);
-                member.secrets.insert(node, ps);
+    fn sibling(&self) -> Node {
+        if (self.lo / self.span).is_multiple_of(2) {
+            Node {
+                lo: self.lo + self.span,
+                span: self.span,
             }
-            return Ok(derive_commit_secret(&ps));
+        } else {
+            Node {
+                lo: self.lo - self.span,
+                span: self.span,
+            }
         }
     }
-    Err(CryptoError::Malformed("no common ancestor with updater"))
+    #[cfg(test)]
+    fn covers(&self, leaf: u32) -> bool {
+        self.lo <= leaf && leaf < self.lo + self.span
+    }
 }
 
-/// A usable PQ group messenger over the TreeKEM CGKA.
-///
-/// Each **epoch** has a group secret (initially from the shared root node
-/// secret, then rotated by every commit). Within an epoch, each member's
-/// messages ride a per-sender symmetric chain derived deterministically from
-/// `(epoch_secret, sender_leaf)` — so every member can derive every sender's
-/// chain with no extra key exchange. Forward secrecy comes from the chains;
-/// post-compromise security from committing an update (new epoch secret).
-pub struct TreeKemGroup {
-    tree: Tree,
-    public: PublicTree,
-    me: MemberState,
+fn root_of(capacity: u32) -> Node {
+    Node {
+        lo: 0,
+        span: capacity,
+    }
+}
+
+/// A joiner's pre-published leaf public key.
+#[derive(Clone)]
+pub struct KeyPackage {
+    pub leaf_public: RatchetPublic,
+}
+
+/// A joiner's private leaf key, kept until they process their Welcome.
+pub struct LeafKeyPair {
+    secret: Secret,
+}
+
+impl LeafKeyPair {
+    /// Generate a fresh leaf key for joining a group. Share `key_package()`.
+    pub fn generate() -> LeafKeyPair {
+        let mut secret = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut secret);
+        LeafKeyPair { secret }
+    }
+    pub fn key_package(&self) -> KeyPackage {
+        let (_, leaf_public) = RatchetSecret::derive_deterministic(&self.secret);
+        KeyPackage { leaf_public }
+    }
+}
+
+/// A membership change carried by a commit.
+#[derive(Clone)]
+enum Proposal {
+    Add {
+        leaf: u32,
+        leaf_public: RatchetPublic,
+    },
+    Remove {
+        leaf: u32,
+    },
+}
+
+/// The result of a commit: structural proposals, the committer's re-keyed path
+/// public keys, and path secrets encrypted to each copath resolution node.
+#[derive(Clone)]
+pub struct Commit {
+    proposals: Vec<Proposal>,
+    pub_updates: Vec<(Node, RatchetPublic)>,
+    path: Vec<Node>,                         // committer's path, leaf -> root
+    ciphertexts: Vec<(Node, Node, Vec<u8>)>, // (path node, target resolution node, blob)
+    new_capacity: u32,
+}
+
+/// Everything a joiner needs to enter the group at the post-commit epoch.
+#[derive(Clone)]
+pub struct Welcome {
+    capacity: u32,
+    public: Vec<(Node, RatchetPublic)>,
+    occupied: Vec<bool>,
     epoch: u32,
-    epoch_secret: Secret,
-    send_chain: Secret,
-    send_n: u32,
-    recvs: HashMap<usize, RecvChain>,
+    your_leaf: u32,
+    commit: Commit,
 }
 
 #[derive(Clone)]
@@ -307,64 +171,318 @@ struct RecvChain {
     skipped: BTreeMap<u32, Secret>,
 }
 
+/// One member's full view of a TreeKEM group.
+pub struct TreeKemGroup {
+    capacity: u32,
+    public: HashMap<Node, RatchetPublic>,
+    occupied: Vec<bool>,
+    me: u32,
+    secrets: HashMap<Node, Secret>,
+    epoch: u32,
+    epoch_secret: Secret,
+    send_chain: Secret,
+    send_n: u32,
+    recvs: HashMap<u32, RecvChain>,
+}
+
 impl TreeKemGroup {
-    /// Join the group at its initial epoch. All members compute the same
-    /// initial epoch secret from the shared root node secret.
-    pub fn new(tree: Tree, public: PublicTree, me: MemberState) -> Result<Self> {
-        let root_secret = *me
-            .secrets
-            .get(&tree.root())
-            .ok_or(CryptoError::Malformed("member missing root secret"))?;
-        let mut g = Self {
-            tree,
-            public,
-            me,
+    /// Create a new group as its founder (leaf 0), capacity 2.
+    pub fn create() -> TreeKemGroup {
+        let capacity = 2;
+        let mut leaf_secret = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
+
+        let mut g = TreeKemGroup {
+            capacity,
+            public: HashMap::new(),
+            occupied: vec![false; capacity as usize],
+            me: 0,
+            secrets: HashMap::new(),
             epoch: 0,
-            epoch_secret: derive_commit_secret(&root_secret),
+            epoch_secret: [0u8; 32],
             send_chain: [0u8; 32],
             send_n: 0,
             recvs: HashMap::new(),
         };
+        g.occupied[0] = true;
+        // Set the founder's whole path (leaf -> root) from a fresh secret chain.
+        let path = g.path_to_root(0);
+        let mut ps = leaf_secret;
+        for (i, node) in path.iter().enumerate() {
+            if i > 0 {
+                ps = derive_parent_secret(&ps);
+            }
+            let (_, pubk) = RatchetSecret::derive_deterministic(&ps);
+            g.public.insert(*node, pubk);
+            g.secrets.insert(*node, ps);
+        }
+        let root_secret = *g.secrets.get(&root_of(capacity)).expect("root secret");
+        g.epoch_secret = derive_commit_secret(&root_secret);
         g.reset_epoch();
-        Ok(g)
-    }
-
-    fn reset_epoch(&mut self) {
-        self.send_chain = sender_chain(&self.epoch_secret, self.me.leaf);
-        self.send_n = 0;
-        self.recvs.clear();
+        g
     }
 
     pub fn epoch(&self) -> u32 {
         self.epoch
     }
-
+    pub fn member_count(&self) -> usize {
+        self.occupied.iter().filter(|o| **o).count()
+    }
     pub fn group_secret(&self) -> Secret {
         self.epoch_secret
     }
+    pub fn my_leaf(&self) -> u32 {
+        self.me
+    }
 
-    /// Encrypt a message to the group in the current epoch.
+    // ---- tree helpers ----
+
+    fn path_to_root(&self, leaf: u32) -> Vec<Node> {
+        let mut path = vec![Node::leaf(leaf)];
+        let mut cur = Node::leaf(leaf);
+        while let Some(p) = cur.parent(self.capacity) {
+            path.push(p);
+            cur = p;
+        }
+        path
+    }
+
+    fn is_blank(&self, node: &Node) -> bool {
+        !self.public.contains_key(node)
+    }
+
+    /// Highest non-blank nodes covering `node`'s subtree.
+    fn resolution(&self, node: Node) -> Vec<Node> {
+        if !self.is_blank(&node) {
+            return vec![node];
+        }
+        match node.children() {
+            None => Vec::new(),
+            Some((l, r)) => {
+                let mut v = self.resolution(l);
+                v.extend(self.resolution(r));
+                v
+            }
+        }
+    }
+
+    fn first_free_leaf(&self) -> Option<u32> {
+        self.occupied.iter().position(|o| !*o).map(|i| i as u32)
+    }
+
+    fn double_capacity(&mut self) {
+        self.capacity *= 2;
+        self.occupied.resize(self.capacity as usize, false);
+        // Existing node ids (span <= old capacity) remain valid; the new root
+        // and the new half start blank.
+    }
+
+    // ---- membership ----
+
+    /// Add a member from their key package. Returns the assigned leaf, the
+    /// `Commit` to broadcast to existing members, and the `Welcome` for the
+    /// joiner. Advances the epoch.
+    pub fn add(&mut self, kp: &KeyPackage) -> Result<(u32, Commit, Welcome)> {
+        if self.first_free_leaf().is_none() {
+            self.double_capacity();
+        }
+        let leaf = self.first_free_leaf().expect("free leaf after doubling");
+        let proposals = vec![Proposal::Add {
+            leaf,
+            leaf_public: kp.leaf_public.clone(),
+        }];
+        self.apply_proposals(&proposals);
+        let commit = self.rekey_path(proposals)?;
+
+        let welcome = Welcome {
+            capacity: self.capacity,
+            public: self.public.iter().map(|(n, p)| (*n, p.clone())).collect(),
+            occupied: self.occupied.clone(),
+            epoch: self.epoch,
+            your_leaf: leaf,
+            commit: commit.clone(),
+        };
+        Ok((leaf, commit, welcome))
+    }
+
+    /// Remove a member. The removed member cannot derive the new group secret.
+    pub fn remove(&mut self, leaf: u32) -> Result<Commit> {
+        let proposals = vec![Proposal::Remove { leaf }];
+        self.apply_proposals(&proposals);
+        self.rekey_path(proposals)
+    }
+
+    fn apply_proposals(&mut self, proposals: &[Proposal]) {
+        for p in proposals {
+            match p {
+                Proposal::Add { leaf, leaf_public } => {
+                    self.occupied[*leaf as usize] = true;
+                    self.public.insert(Node::leaf(*leaf), leaf_public.clone());
+                    // Blank the new leaf's ancestors so the committer re-keys.
+                    self.blank_path_above(*leaf);
+                }
+                Proposal::Remove { leaf } => {
+                    self.occupied[*leaf as usize] = false;
+                    self.secrets.remove(&Node::leaf(*leaf));
+                    self.public.remove(&Node::leaf(*leaf));
+                    self.blank_path_above(*leaf);
+                }
+            }
+        }
+    }
+
+    fn blank_path_above(&mut self, leaf: u32) {
+        let mut cur = Node::leaf(leaf);
+        while let Some(p) = cur.parent(self.capacity) {
+            self.public.remove(&p);
+            self.secrets.remove(&p);
+            cur = p;
+        }
+    }
+
+    /// Re-key the committer's path: fresh secrets leaf->root, encrypt each
+    /// ancestor's path secret to the resolution of its copath, set the new
+    /// epoch secret. Returns the broadcastable `Commit`.
+    fn rekey_path(&mut self, proposals: Vec<Proposal>) -> Result<Commit> {
+        let path = self.path_to_root(self.me);
+        let mut path_secrets = vec![[0u8; 32]; path.len()];
+        rand::rngs::OsRng.fill_bytes(&mut path_secrets[0]);
+        for i in 1..path.len() {
+            path_secrets[i] = derive_parent_secret(&path_secrets[i - 1]);
+        }
+
+        let mut pub_updates = Vec::with_capacity(path.len());
+        for (i, node) in path.iter().enumerate() {
+            let (_, pubk) = RatchetSecret::derive_deterministic(&path_secrets[i]);
+            self.public.insert(*node, pubk.clone());
+            self.secrets.insert(*node, path_secrets[i]);
+            pub_updates.push((*node, pubk));
+        }
+
+        let mut ciphertexts = Vec::new();
+        for i in 1..path.len() {
+            let copath = path[i - 1].sibling();
+            for target in self.resolution(copath) {
+                let target_pub = self
+                    .public
+                    .get(&target)
+                    .ok_or(CryptoError::Malformed("resolution node has no key"))?;
+                let blob = seal_secret(target_pub, &path_secrets[i])?;
+                ciphertexts.push((path[i], target, blob));
+            }
+        }
+
+        let commit_secret = derive_commit_secret(&path_secrets[path.len() - 1]);
+        self.epoch += 1;
+        self.epoch_secret = commit_secret;
+        self.reset_epoch();
+
+        Ok(Commit {
+            proposals,
+            pub_updates,
+            path,
+            ciphertexts,
+            new_capacity: self.capacity,
+        })
+    }
+
+    /// Apply a commit produced by another member; advances to its epoch.
+    pub fn apply_commit(&mut self, commit: &Commit) -> Result<()> {
+        if commit.new_capacity > self.capacity {
+            self.capacity = commit.new_capacity;
+            self.occupied.resize(self.capacity as usize, false);
+        }
+        self.apply_proposals(&commit.proposals);
+        let secret = self.process_update_path(commit)?;
+        self.epoch += 1;
+        self.epoch_secret = secret;
+        self.reset_epoch();
+        Ok(())
+    }
+
+    /// Join a group from a Welcome message using the matching leaf key.
+    pub fn join_with_welcome(keypair: LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
+        let mut g = TreeKemGroup {
+            capacity: welcome.capacity,
+            public: welcome.public.iter().cloned().collect(),
+            occupied: welcome.occupied.clone(),
+            me: welcome.your_leaf,
+            secrets: HashMap::new(),
+            epoch: welcome.epoch,
+            epoch_secret: [0u8; 32],
+            send_chain: [0u8; 32],
+            send_n: 0,
+            recvs: HashMap::new(),
+        };
+        // We hold only our own leaf secret to start.
+        g.secrets
+            .insert(Node::leaf(welcome.your_leaf), keypair.secret);
+        let secret = g.process_update_path(&welcome.commit)?;
+        g.epoch_secret = secret;
+        g.reset_epoch();
+        Ok(g)
+    }
+
+    /// Adopt the committer's new path public keys, decrypt the path secret at
+    /// the level where our path meets theirs, and chain to the root secret.
+    fn process_update_path(&mut self, commit: &Commit) -> Result<Secret> {
+        for (node, pubk) in &commit.pub_updates {
+            self.public.insert(*node, pubk.clone());
+        }
+        let path = &commit.path;
+        for i in 1..path.len() {
+            let copath = path[i - 1].sibling();
+            // Which resolution node of the copath do we hold a secret for?
+            for target in self.resolution(copath) {
+                if let Some(secret) = self.secrets.get(&target).copied() {
+                    let (rsecret, _) = RatchetSecret::derive_deterministic(&secret);
+                    let blob = commit
+                        .ciphertexts
+                        .iter()
+                        .find(|(p, t, _)| *p == path[i] && *t == target)
+                        .map(|(_, _, b)| b)
+                        .ok_or(CryptoError::Malformed("no ciphertext for held target"))?;
+                    let mut ps = open_secret(&rsecret, blob)?;
+                    self.secrets.insert(path[i], ps);
+                    for node in &path[i + 1..] {
+                        ps = derive_parent_secret(&ps);
+                        self.secrets.insert(*node, ps);
+                    }
+                    return Ok(derive_commit_secret(&ps));
+                }
+            }
+        }
+        Err(CryptoError::Malformed("no common ancestor with committer"))
+    }
+
+    // ---- epoch messaging ----
+
+    fn reset_epoch(&mut self) {
+        self.send_chain = sender_chain(&self.epoch_secret, self.me);
+        self.send_n = 0;
+        self.recvs.clear();
+    }
+
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let (next, mk_seed) = kdf_ck(&self.send_chain);
         let (key, nonce) = kdf_mk(&mk_seed);
         let n = self.send_n;
-        let aad = msg_aad(self.epoch, self.me.leaf, n);
+        let aad = msg_aad(self.epoch, self.me, n);
         let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
         self.send_chain = next;
         self.send_n += 1;
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(self.epoch);
-        w.put_u32(self.me.leaf as u32);
+        w.put_u32(self.me);
         w.put_u32(n);
         w.put_bytes(&ct);
         Ok(w.into_vec())
     }
 
-    /// Decrypt a group message. Rejects messages from a different epoch.
     pub fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>> {
         let mut r = talkrypt_wire::Reader::new(message);
         let epoch = r.get_u32()?;
-        let leaf = r.get_u32()? as usize;
+        let leaf = r.get_u32()?;
         let n = r.get_u32()?;
         let ct = r.get_vec()?;
         r.finish()?;
@@ -384,71 +502,34 @@ impl TreeKemGroup {
             return aead_open(&key, &nonce, &ct, &aad);
         }
         if n < recv.n {
-            return Err(CryptoError::DecryptionFailed); // replay
+            return Err(CryptoError::DecryptionFailed);
         }
         if (n - recv.n) as usize > MAX_SKIP {
             return Err(CryptoError::TooManySkipped(MAX_SKIP));
         }
         while recv.n < n {
-            let (next, seed) = kdf_ck(&recv.chain);
+            let (nx, seed) = kdf_ck(&recv.chain);
             recv.skipped.insert(recv.n, seed);
-            recv.chain = next;
+            recv.chain = nx;
             recv.n += 1;
         }
-        let (next, mk_seed) = kdf_ck(&recv.chain);
+        let (nx, mk_seed) = kdf_ck(&recv.chain);
         let (key, nonce) = kdf_mk(&mk_seed);
         let pt = aead_open(&key, &nonce, &ct, &aad)?;
-        recv.chain = next;
+        recv.chain = nx;
         recv.n += 1;
         Ok(pt)
     }
-
-    /// Commit an update: rotate our path, advance the epoch, and return the
-    /// `UpdatePath` to broadcast so other members can follow.
-    pub fn commit(&mut self) -> Result<UpdatePath> {
-        let (up, commit) = update(&self.tree, &mut self.public, &mut self.me)?;
-        self.epoch += 1;
-        self.epoch_secret = commit;
-        self.reset_epoch();
-        Ok(up)
-    }
-
-    /// Apply another member's committed update: advance to the new epoch.
-    pub fn apply_commit(&mut self, up: &UpdatePath) -> Result<()> {
-        let commit = apply_update(&self.tree, &mut self.public, &mut self.me, up)?;
-        self.epoch += 1;
-        self.epoch_secret = commit;
-        self.reset_epoch();
-        Ok(())
-    }
 }
 
-/// Deterministic per-sender chain seed for an epoch, bound to the sender leaf.
-fn sender_chain(epoch_secret: &Secret, leaf: usize) -> Secret {
-    let hk = Hkdf::<Hash>::new(None, epoch_secret);
-    let mut out = [0u8; 32];
-    let mut info = b"talkrypt-treekem-sender".to_vec();
-    info.extend_from_slice(&(leaf as u32).to_be_bytes());
-    hk.expand(&info, &mut out).expect("hkdf sender chain");
-    out
-}
-
-fn msg_aad(epoch: u32, leaf: usize, n: u32) -> Vec<u8> {
-    let mut w = talkrypt_wire::Writer::new();
-    w.put_u32(epoch);
-    w.put_u32(leaf as u32);
-    w.put_u32(n);
-    w.into_vec()
-}
+// ---- KDF + HPKE-style helpers ----
 
 fn derive_parent_secret(child: &Secret) -> Secret {
     expand(child, b"talkrypt-treekem-parent")
 }
-
 fn derive_commit_secret(root: &Secret) -> Secret {
     expand(root, b"talkrypt-treekem-commit")
 }
-
 fn expand(secret: &Secret, label: &[u8]) -> Secret {
     let hk = Hkdf::<Hash>::new(None, secret);
     let mut out = [0u8; 32];
@@ -456,7 +537,23 @@ fn expand(secret: &Secret, label: &[u8]) -> Secret {
     out
 }
 
-/// Encrypt a 32-byte secret to a public key (KEM + AEAD).
+fn sender_chain(epoch_secret: &Secret, leaf: u32) -> Secret {
+    let hk = Hkdf::<Hash>::new(None, epoch_secret);
+    let mut out = [0u8; 32];
+    let mut info = b"talkrypt-treekem-sender".to_vec();
+    info.extend_from_slice(&leaf.to_be_bytes());
+    hk.expand(&info, &mut out).expect("hkdf sender chain");
+    out
+}
+
+fn msg_aad(epoch: u32, leaf: u32, n: u32) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_u32(n);
+    w.into_vec()
+}
+
 fn seal_secret(pubk: &RatchetPublic, secret: &Secret) -> Result<Vec<u8>> {
     let (kem_ct, ss) = pubk.encapsulate()?;
     let (key, nonce) = kdf_mk(&ss);
@@ -475,10 +572,10 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
     let ss = rsecret.decapsulate(&kem_ct)?;
     let (key, nonce) = kdf_mk(&ss);
     let pt = aead_open(&key, &nonce, &aead_ct, b"tk-treekem")?;
-    let mut out = [0u8; 32];
     if pt.len() != 32 {
         return Err(CryptoError::Malformed("treekem path secret length"));
     }
+    let mut out = [0u8; 32];
     out.copy_from_slice(&pt);
     Ok(out)
 }
@@ -487,140 +584,123 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
 mod tests {
     use super::*;
 
+    /// Add a fresh member to an existing group; returns the joiner's group.
+    fn add_member(
+        committer: &mut TreeKemGroup,
+        followers: &mut [&mut TreeKemGroup],
+    ) -> TreeKemGroup {
+        let kp = LeafKeyPair::generate();
+        let (_leaf, commit, welcome) = committer.add(&kp.key_package()).unwrap();
+        for f in followers.iter_mut() {
+            f.apply_commit(&commit).unwrap();
+        }
+        TreeKemGroup::join_with_welcome(kp, &welcome).unwrap()
+    }
+
     #[test]
-    fn tree_math_is_consistent() {
-        for n in 1..=17 {
-            let tree = Tree::new(n);
-            // Every leaf reaches the root; sibling-of-sibling is identity.
-            for leaf in 0..n {
-                let path = tree.path_to_root(leaf);
-                assert_eq!(*path.last().unwrap(), tree.root, "n={n} leaf={leaf}");
-                assert_eq!(path[0], tree.leaf_node[leaf]);
-                for &node in &path {
-                    if let Some(sib) = tree.sibling(node) {
-                        assert_eq!(tree.sibling(sib), Some(node));
-                    }
-                }
+    fn node_math_is_consistent() {
+        let cap = 8;
+        for leaf in 0..cap {
+            let mut cur = Node::leaf(leaf);
+            let mut hops = 0;
+            while let Some(p) = cur.parent(cap) {
+                assert!(p.covers(leaf));
+                assert_eq!(cur.sibling().sibling(), cur);
+                cur = p;
+                hops += 1;
             }
-        }
-    }
-
-    /// The heart of CGKA: after any member updates, every member derives the
-    /// SAME new group secret.
-    fn check_update_converges(n: usize, updater: usize) {
-        let tree = Tree::new(n);
-        let (mut public, mut members) = init_group(&tree);
-
-        // Updater re-keys.
-        let (update_path, committed) = {
-            let m = &mut members[updater];
-            super::update(&tree, &mut public, m).unwrap()
-        };
-
-        // Every other member applies and must reach the same secret.
-        for leaf in 0..n {
-            if leaf == updater {
-                continue;
-            }
-            let mut m = members[leaf].clone();
-            let got = apply_update(&tree, &mut public.clone(), &mut m, &update_path).unwrap();
-            assert_eq!(got, committed, "n={n} updater={updater} member={leaf}");
+            assert_eq!(cur, root_of(cap));
+            assert_eq!(hops, 3); // log2(8)
         }
     }
 
     #[test]
-    fn update_converges_for_many_sizes() {
-        for n in 2..=8 {
-            for updater in 0..n {
-                check_update_converges(n, updater);
-            }
-        }
+    fn founder_then_add_converges() {
+        let mut a = TreeKemGroup::create();
+        let b = add_member(&mut a, &mut []);
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_eq!(a.member_count(), 2);
+        assert_eq!(b.member_count(), 2);
     }
 
     #[test]
-    fn post_compromise_secret_changes_each_update() {
-        let tree = Tree::new(5);
-        let (mut public, mut members) = init_group(&tree);
-        let (_u1, c1) = update(&tree, &mut public, &mut members[0]).unwrap();
-        let (_u2, c2) = update(&tree, &mut public, &mut members[1]).unwrap();
-        // Fresh randomness each update -> the group secret heals/rotates.
-        assert_ne!(c1, c2);
+    fn three_members_message_each_other() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let c = add_member(&mut a, &mut [&mut b]);
+        // All three share the epoch secret.
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_eq!(a.group_secret(), c.group_secret());
+
+        let mut a = a;
+        let mut b = b;
+        let mut c = c;
+        let m = a.encrypt(b"hi group").unwrap();
+        assert_eq!(b.decrypt(&m).unwrap(), b"hi group");
+        assert_eq!(c.decrypt(&m).unwrap(), b"hi group");
+        let m2 = c.encrypt(b"from c").unwrap();
+        assert_eq!(a.decrypt(&m2).unwrap(), b"from c");
+        assert_eq!(b.decrypt(&m2).unwrap(), b"from c");
     }
 
     #[test]
-    fn two_member_group_agrees() {
-        let tree = Tree::new(2);
-        let (mut public, mut members) = init_group(&tree);
-        let (up, c0) = update(&tree, &mut public, &mut members[0]).unwrap();
-        let mut m1 = members[1].clone();
-        let c1 = apply_update(&tree, &mut public, &mut m1, &up).unwrap();
-        assert_eq!(c0, c1);
-    }
+    fn remove_denies_removed_member() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        let secret_before = c.group_secret();
 
-    fn groups(n: usize) -> Vec<TreeKemGroup> {
-        let tree = Tree::new(n);
-        let (public, members) = init_group(&tree);
-        members
-            .into_iter()
-            .map(|m| TreeKemGroup::new(tree.clone(), public.clone(), m).unwrap())
-            .collect()
-    }
+        // A removes C; B follows.
+        let commit = a.remove(c.my_leaf()).unwrap();
+        b.apply_commit(&commit).unwrap();
 
-    #[test]
-    fn group_messaging_all_share_initial_epoch() {
-        let mut g = groups(3);
-        // Everyone starts in the same epoch with the same group secret.
-        assert_eq!(g[0].group_secret(), g[1].group_secret());
-        assert_eq!(g[1].group_secret(), g[2].group_secret());
+        // A and B converge on a new secret; C is stuck at the old one.
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_ne!(a.group_secret(), secret_before);
+        assert_ne!(a.group_secret(), c.group_secret());
 
-        let msg = g[0].encrypt(b"hello tree group").unwrap();
-        assert_eq!(g[1].decrypt(&msg).unwrap(), b"hello tree group");
-        assert_eq!(g[2].decrypt(&msg).unwrap(), b"hello tree group");
-    }
-
-    #[test]
-    fn commit_rotates_epoch_and_messaging_continues() {
-        let mut g = groups(4);
-        let before = g[0].group_secret();
-
-        // Member 2 commits an update; everyone follows to the new epoch.
-        let up = g[2].commit().unwrap();
-        for i in [0, 1, 3] {
-            g[i].apply_commit(&up).unwrap();
-        }
-        for gi in &g {
-            assert_eq!(gi.epoch(), 1);
-        }
-        // Post-compromise: the group secret rotated.
-        assert_ne!(before, g[0].group_secret());
-        assert_eq!(g[0].group_secret(), g[3].group_secret());
-
-        // Messaging works in the new epoch.
-        let msg = g[3].encrypt(b"new epoch").unwrap();
-        assert_eq!(g[0].decrypt(&msg).unwrap(), b"new epoch");
-        assert_eq!(g[1].decrypt(&msg).unwrap(), b"new epoch");
+        // A message in the new epoch is undecryptable by the removed member.
+        let m = a.encrypt(b"secret after removal").unwrap();
+        assert_eq!(b.decrypt(&m).unwrap(), b"secret after removal");
+        assert!(c.decrypt(&m).is_err());
     }
 
     #[test]
     fn group_out_of_order_and_replay() {
-        let mut g = groups(2);
-        let m0 = g[0].encrypt(b"0").unwrap();
-        let m1 = g[0].encrypt(b"1").unwrap();
-        let m2 = g[0].encrypt(b"2").unwrap();
-        assert_eq!(g[1].decrypt(&m2).unwrap(), b"2");
-        assert_eq!(g[1].decrypt(&m0).unwrap(), b"0");
-        assert_eq!(g[1].decrypt(&m1).unwrap(), b"1");
-        assert!(g[1].decrypt(&m0).is_err()); // replay
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let m0 = a.encrypt(b"0").unwrap();
+        let m1 = a.encrypt(b"1").unwrap();
+        let m2 = a.encrypt(b"2").unwrap();
+        assert_eq!(b.decrypt(&m2).unwrap(), b"2");
+        assert_eq!(b.decrypt(&m0).unwrap(), b"0");
+        assert_eq!(b.decrypt(&m1).unwrap(), b"1");
+        assert!(b.decrypt(&m0).is_err()); // replay
     }
 
     #[test]
     fn stale_epoch_message_rejected() {
-        let mut g = groups(2);
-        let stale = g[0].encrypt(b"old").unwrap();
-        // g[1] commits, advancing only its own epoch view.
-        let up = g[1].commit().unwrap();
-        g[0].apply_commit(&up).unwrap();
-        // The pre-commit message is from epoch 0; both are now epoch 1.
-        assert!(g[1].decrypt(&stale).is_err());
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let stale = a.encrypt(b"old epoch").unwrap();
+        // Adding a third member advances the epoch for both a and b.
+        let _c = add_member(&mut a, &mut [&mut b]);
+        assert!(b.decrypt(&stale).is_err());
+    }
+
+    #[test]
+    fn capacity_doubles_past_two_members() {
+        // create=2 capacity; adding a 3rd forces a doubling to 4.
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let c = add_member(&mut a, &mut [&mut b]);
+        assert!(a.capacity >= 4);
+        assert_eq!(a.group_secret(), c.group_secret());
+        // Add a 4th, still converging.
+        let mut b = b;
+        let mut c = c;
+        let d = add_member(&mut a, &mut [&mut b, &mut c]);
+        assert_eq!(a.group_secret(), d.group_secret());
+        assert_eq!(a.member_count(), 4);
     }
 }

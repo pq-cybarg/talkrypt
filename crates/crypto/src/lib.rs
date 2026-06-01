@@ -34,4 +34,4 @@ pub use suite::{
     CryptoSuite, DoubleRatchetSuite, NoiseSuite, SecurityLevel, SuiteDescriptor, SuiteRegistry,
     DEFAULT_SUITE_ID, NOISE_SUITE_ID,
 };
-pub use treekem::{Tree, TreeKemGroup};
+pub use treekem::{Commit, KeyPackage, LeafKeyPair, TreeKemGroup, Welcome};

@@ -1,17 +1,17 @@
 # MLS-PQ (TreeKEM) group suite — scoped plan
 
-> **Status: TreeKEM key-agreement core BUILT (`crate::treekem`); MLS framing
-> and membership flows remain.** The CGKA heart — balanced tree, hybrid-PQ node
-> keys, path re-keying with convergence + post-compromise security — is
-> implemented and tested (tree math for sizes 1–17; every member converges on
-> the same group secret for sizes 2–8 under any updater). Sender-key groups
-> (`tk.group.*`) also remain available as the lighter option.
+> **Status: TreeKEM CGKA + dynamic membership BUILT (`crate::treekem`); RFC 9420
+> wire conformance remains.** Implemented and tested: range-identified tree with
+> blank-node **resolution**, hybrid-PQ node keys, path re-keying, epoch key
+> schedule + per-epoch group messaging, and **Add / Remove / Welcome** with
+> capacity doubling. Verified: founder→add convergence, multi-member messaging,
+> capacity doubling, and **removal forward-secrecy** (a removed member cannot
+> derive or decrypt the post-removal epoch).
 >
-> **Done:** phases 1–3 below (tree math, hybrid TreeKEM node keys, update/apply
-> key agreement). **Remaining:** epoch key schedule with transcript binding,
-> Add/Remove/Welcome with blank-node handling, RFC 9420 wire framing, and suite
-> registration. These are deliberately not rushed — a subtly-wrong CGKA is
-> worse than an honestly-deferred one.
+> **Done:** phases 1–4 + Welcome/membership. **Remaining:** RFC 9420 wire
+> framing + proposal batching, epoch transcript-hash binding, suite registration
+> as `tk.mls.*`, and conformance against RFC test vectors. Sender-key groups
+> (`tk.group.*`) remain the lighter option.
 
 ## Why a second group suite
 

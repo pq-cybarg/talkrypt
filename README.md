@@ -107,10 +107,11 @@ Working & tested today (80 tests, fully offline):
 - Hybrid PQ Double Ratchet crypto core + suite registry.
 - **Crypto suites:** Double Ratchet (`tk.dr.*`, default), PQ-Noise
   (`tk.noise.*`), a sender-key **group** scheme (`tk.group.*`), and a
-  **TreeKEM CGKA core** (`crate::treekem`) — the cryptographic heart of MLS-PQ:
-  hybrid-PQ node keys with O(log N) path re-keying, group-secret convergence,
-  and post-compromise security (membership/Welcome flows are the remaining
-  MLS work — see `docs/plans/0002-mls-pq.md`).
+  **TreeKEM CGKA with dynamic membership** (`crate::treekem`) — the
+  cryptographic heart of MLS-PQ: hybrid-PQ node keys, blank-node resolution,
+  O(log N) path re-keying, per-epoch group messaging, and **Add / Remove /
+  Welcome** with capacity doubling and removal forward-secrecy. (RFC 9420 wire
+  framing is the remaining MLS work — see `docs/plans/0002-mls-pq.md`.)
 - Session engine, authenticated handshake, descriptors/invites.
 - P2P / Hub / Hybrid topology strategies.
 - Loopback + **real TCP** transports, and the **Arti onion transport**
@@ -137,7 +138,7 @@ Working & tested today (80 tests, fully offline):
 - **CSfC alignment:** `talkrypt csfc` preflight + [`docs/CSFC.md`](docs/CSFC.md).
 
 Planned next (scoped in `docs/plans/`): complete the **MLS-PQ** suite on the
-TreeKEM core (`0002-mls-pq.md` — epoch schedule, Add/Remove/Welcome, RFC 9420
+TreeKEM core (`0002-mls-pq.md` — RFC 9420
 wire framing, suite registration), and the GUI bundles for Android/desktop (the
 Rust core + FFI they sit on are built and tested). All reuse this identical
 core.
