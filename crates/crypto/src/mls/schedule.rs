@@ -27,9 +27,19 @@ fn put_varint(out: &mut Vec<u8>, v: u64) {
 }
 
 /// Append an `opaque x<V>` field: varint length prefix then the bytes.
-fn put_opaque(out: &mut Vec<u8>, data: &[u8]) {
+pub(crate) fn put_opaque(out: &mut Vec<u8>, data: &[u8]) {
     put_varint(out, data.len() as u64);
     out.extend_from_slice(data);
+}
+
+/// Build a labeled content blob `{ opaque label<V> = "MLS 1.0 "+label;
+/// opaque content<V> }` — the body that `SignWithLabel`/`EncryptWithLabel`
+/// sign/encrypt over.
+pub(crate) fn labeled_content(label: &str, content: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_opaque(&mut b, &[b"MLS 1.0 ", label.as_bytes()].concat());
+    put_opaque(&mut b, content);
+    b
 }
 
 /// `ExpandWithLabel(secret, label, context, length)` =

@@ -8,4 +8,5 @@
 
 pub mod schedule;
 pub mod secret_tree;
+pub mod sign;
 pub mod treemath;
