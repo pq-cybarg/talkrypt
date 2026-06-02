@@ -82,3 +82,31 @@ Publication is layered and never forced: (1) peers must agree on the posture
 (it's in the private invite, bound into the root); (2) the invite field is
 optional; (3) the beacon / server advertisement is **opt-in, default off**.
 Private users emit no beacon and the relay learns nothing.
+
+## Using it
+
+```sh
+# Default (PQ-pure, padded, zero EC):
+talkrypt host --channel '#general'
+
+# Hybrid defense-in-depth:
+talkrypt host --posture hybrid
+
+# Require an explicit choice (mandatory-posture setting; no silent default):
+talkrypt host --require-posture --posture pq-pure
+
+# Publish a sealed scheme advertisement (opt-in; prints an opaque blob):
+talkrypt host --advertise full        # or: fingerprint | off (default)
+
+# Joining resolves the chat's scheme by fingerprint; a scheme this build
+# doesn't have registered is refused:
+talkrypt join talkrypt://...
+```
+
+The TUI (`talkrypt-tui host --posture ...`) and the FFI
+(`TalkryptClient.host(listen, channel, posture)`) expose the same selection.
+
+**Build gating** (`offered_profiles`): every build offers padded PQ-pure (the
+default) and hybrid; the posture-leaking *compact* variant is dropped from
+`--features fips` builds. `--features cnsa-sha2` switches the hash token
+(`sha3-384` → `sha384`) in every suite id.

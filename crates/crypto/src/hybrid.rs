@@ -504,7 +504,12 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// These KATs pin the exact bytes of deterministically-derived keys, which
+// depend on the KDF — so they are specific to the default SHA-3/KMAC256 build.
+// (The build-independent wire lengths and round-trips are covered in `mod
+// tests`.) Under `cnsa-sha2`, derivation uses HKDF-SHA384 and would yield
+// different digests, so these are gated to the default build.
+#[cfg(all(test, not(feature = "cnsa-sha2")))]
 mod kat {
     use super::*;
     use sha3::{Digest, Sha3_256};
