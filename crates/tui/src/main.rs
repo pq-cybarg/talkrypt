@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use talkrypt_core::{ChatDescriptor, Core, Event as CoreEvent, Persistence, TopologyKind};
-use talkrypt_crypto::{IdentityKeyPair, SuiteRegistry, DEFAULT_SUITE_ID};
+use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry};
 use talkrypt_topology::for_kind;
 use talkrypt_transport::TcpTransport;
 
@@ -37,6 +37,9 @@ enum Cmd {
         topology: String,
         #[arg(long, default_value = "#general")]
         channel: String,
+        /// KEM posture: pq-pure (default) | hybrid | pq-pure-compact.
+        #[arg(long, default_value = "pq-pure")]
+        posture: String,
     },
     Join {
         uri: String,
@@ -47,27 +50,42 @@ fn short_fp(fp: &[u8; 48]) -> String {
     fp[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Parse a `--posture` value into a KEM profile (mirrors the CLI).
+fn posture_from(s: &str) -> Option<KemProfile> {
+    match s.to_ascii_lowercase().as_str() {
+        "pq-pure" | "pqpure" | "pure" => Some(KemProfile::pq_pure()),
+        "hybrid" => Some(KemProfile::hybrid()),
+        "pq-pure-compact" | "compact" => Some(KemProfile::pq_pure_compact()),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // ----- bootstrap the engine -----
-    let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
+    let reg = SuiteRegistry::with_defaults();
     let (core, mut core_rx, mut app) = match cli.cmd {
         Cmd::Host {
             listen,
             topology,
             channel,
+            posture,
         } => {
             let kind = match topology.as_str() {
                 "hub" => TopologyKind::Hub,
                 "hybrid" => TopologyKind::Hybrid,
                 _ => TopologyKind::P2P,
             };
+            let profile = posture_from(&posture)
+                .ok_or_else(|| format!("unknown posture {posture:?}"))?;
+            let suite_id = dr_suite_id(profile);
+            let suite = reg.get(&suite_id)?;
             let desc = ChatDescriptor::new(
                 kind,
                 Persistence::Ephemeral,
-                DEFAULT_SUITE_ID,
+                &suite_id,
                 vec![listen.clone()],
                 &channel,
             );
@@ -76,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             core.host().await?;
             let mut app = App::new(
                 channel,
-                format!("{topology} · hosting {listen} · {DEFAULT_SUITE_ID}"),
+                format!("{topology} · hosting {listen} · {suite_id}"),
             );
             app.safety_number = core.identity_public().safety_number();
             app.push(format!("hosting on {listen} — share this invite:"));
@@ -85,6 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Join { uri } => {
             let desc = ChatDescriptor::from_uri(&uri)?;
+            // Resolve the chat's scheme by fingerprint (must be registered here).
+            let suite = reg.get_by_scheme_hash(&desc.scheme_hash()).map_err(|_| {
+                format!(
+                    "this chat's scheme '{}' is not registered in this build",
+                    desc.resolved_suite_id()
+                )
+            })?;
+            let suite_id = desc.resolved_suite_id().to_string();
             let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone());
             for_kind(desc.topology)
@@ -92,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             let mut app = App::new(
                 desc.channel.clone(),
-                format!("joined · peers: {} · {DEFAULT_SUITE_ID}", core.peer_count()),
+                format!("joined · peers: {} · {suite_id}", core.peer_count()),
             );
             app.safety_number = core.identity_public().safety_number();
             app.push(format!(

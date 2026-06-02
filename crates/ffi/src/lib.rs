@@ -17,7 +17,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
-use talkrypt_crypto::{IdentityKeyPair, SuiteRegistry, DEFAULT_SUITE_ID};
+use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry};
 use talkrypt_topology::for_kind;
 use talkrypt_transport::TcpTransport;
 
@@ -80,6 +80,16 @@ fn map_event(e: Event) -> FfiEvent {
     }
 }
 
+/// Parse a posture string into a KEM profile (mirrors the CLI/TUI).
+fn posture_from(s: &str) -> Option<KemProfile> {
+    match s.to_ascii_lowercase().as_str() {
+        "pq-pure" | "pqpure" | "pure" | "" => Some(KemProfile::pq_pure()),
+        "hybrid" => Some(KemProfile::hybrid()),
+        "pq-pure-compact" | "compact" => Some(KemProfile::pq_pure_compact()),
+        _ => None,
+    }
+}
+
 /// A talkrypt chat client, exported to other languages.
 #[derive(uniffi::Object)]
 pub struct TalkryptClient {
@@ -91,17 +101,21 @@ pub struct TalkryptClient {
 #[uniffi::export]
 impl TalkryptClient {
     /// Create and host a new chat; returns a client whose `invite_uri` can be
-    /// shared with peers.
+    /// shared with peers. `posture` selects the KEM posture: `pq-pure`
+    /// (default/zero-EC), `hybrid`, or `pq-pure-compact`; an empty/unknown
+    /// value falls back to PQ-pure.
     #[uniffi::constructor]
-    pub fn host(listen: String, channel: String) -> Result<Arc<Self>, FfiError> {
+    pub fn host(listen: String, channel: String, posture: String) -> Result<Arc<Self>, FfiError> {
         let rt = Runtime::new().map_err(FfiError::from)?;
+        let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
+        let suite_id = dr_suite_id(profile);
         let suite = SuiteRegistry::with_defaults()
-            .get(DEFAULT_SUITE_ID)
+            .get(&suite_id)
             .map_err(FfiError::from)?;
         let desc = ChatDescriptor::new(
             TopologyKind::P2P,
             Persistence::Ephemeral,
-            DEFAULT_SUITE_ID,
+            &suite_id,
             vec![listen.clone()],
             channel,
         );
@@ -120,8 +134,10 @@ impl TalkryptClient {
     pub fn join(uri: String) -> Result<Arc<Self>, FfiError> {
         let rt = Runtime::new().map_err(FfiError::from)?;
         let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+        // Resolve the chat's scheme by fingerprint (handles blank/optional
+        // posture and custom schemes); must be registered in this build.
         let suite = SuiteRegistry::with_defaults()
-            .get(&desc.suite_id)
+            .get_by_scheme_hash(&desc.scheme_hash())
             .map_err(FfiError::from)?;
         let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
         let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone());
@@ -177,7 +193,7 @@ mod tests {
     #[test]
     fn ffi_host_join_send_receive() {
         let addr = "127.0.0.1:19922".to_string();
-        let host = TalkryptClient::host(addr, "#ffi".into()).expect("host");
+        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into()).expect("host");
         let uri = host.invite_uri();
         assert!(uri.starts_with("talkrypt://"));
         assert!(!host.safety_number().is_empty());
