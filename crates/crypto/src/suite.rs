@@ -48,6 +48,32 @@ pub fn noise_suite_id(profile: KemProfile) -> String {
     format!("tk.noise.{}.aes256gcm.{}", kem_token(profile), HASH_TOKEN)
 }
 
+/// The KEM profiles this build offers at chat creation — a **build-gated**
+/// policy. Two invariants hold in every build:
+///   * **PQ-pure (padded) is present** — the zero-EC default.
+///   * **Hybrid is present** — IETF defense-in-depth must always be available.
+///
+/// The compact (unpadded) PQ-pure variant reveals the posture to a relay by
+/// frame size, so it is **omitted from high-assurance (`fips`) builds**; other
+/// builds offer it for bandwidth-sensitive chats. (The `cnsa-sha2` feature
+/// independently changes the hash token in every suite id.) Profiles a build
+/// does not offer simply cannot be created locally; a peer can still be joined
+/// if its scheme is otherwise registered.
+pub fn offered_profiles() -> Vec<KemProfile> {
+    #[cfg(not(feature = "fips"))]
+    {
+        vec![
+            KemProfile::pq_pure(),
+            KemProfile::hybrid(),
+            KemProfile::pq_pure_compact(),
+        ]
+    }
+    #[cfg(feature = "fips")]
+    {
+        vec![KemProfile::pq_pure(), KemProfile::hybrid()]
+    }
+}
+
 /// Length of a scheme fingerprint (SHA3-256).
 pub const SCHEME_HASH_LEN: usize = 32;
 
@@ -313,24 +339,22 @@ impl SuiteRegistry {
         }
     }
 
-    /// Registry preloaded with all built-in pairwise suites across every KEM
-    /// profile. The default is PQ-pure (padded); the **hybrid** Double-Ratchet
-    /// suite is always registered (defense-in-depth must remain available in
-    /// every build), as is a compact (unpadded) PQ-pure variant for bandwidth-
-    /// sensitive chats. PQ-Noise is offered in the default and hybrid profiles.
+    /// Registry preloaded with the built-in pairwise suites this build offers
+    /// (see [`offered_profiles`]). The default is PQ-pure (padded); the
+    /// **hybrid** Double-Ratchet suite is always registered — defense-in-depth
+    /// must remain available in every build. PQ-Noise is offered in the
+    /// non-compact profiles.
     pub fn with_defaults() -> Self {
         let mut r = Self::new();
-        for profile in [
-            KemProfile::pq_pure(),         // default
-            KemProfile::hybrid(),          // mandatory defense-in-depth
-            KemProfile::pq_pure_compact(), // bandwidth-sensitive, posture-visible
-        ] {
+        for profile in offered_profiles() {
             r.register(Arc::new(DoubleRatchetSuite::with_profile(profile)))
                 .expect("double-ratchet suite meets floor");
-        }
-        for profile in [KemProfile::pq_pure(), KemProfile::hybrid()] {
-            r.register(Arc::new(NoiseSuite::with_profile(profile)))
-                .expect("noise suite meets floor");
+            // PQ-Noise mirrors the DR profiles except the unpadded compact one
+            // (Noise is for short sessions where the 36-byte saving is moot).
+            if profile.pad_pure || profile.posture == KemPosture::Hybrid {
+                r.register(Arc::new(NoiseSuite::with_profile(profile)))
+                    .expect("noise suite meets floor");
+            }
         }
         r
     }
@@ -405,16 +429,28 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_includes_hybrid_and_pure_variants() {
-        // Hybrid must be available in every build; compact-pure too.
+    fn default_registry_includes_hybrid_and_pure() {
+        // Invariant in EVERY build: hybrid (defense-in-depth) and padded
+        // PQ-pure (the default) are always offered.
         let reg = SuiteRegistry::with_defaults();
         assert!(reg.get(&dr_suite_id(KemProfile::hybrid())).is_ok());
         assert!(reg.get(&dr_suite_id(KemProfile::pq_pure())).is_ok());
-        assert!(reg.get(&dr_suite_id(KemProfile::pq_pure_compact())).is_ok());
         // The default is PQ-pure (zero EC).
         assert_eq!(DEFAULT_SUITE_ID, dr_suite_id(KemProfile::pq_pure()));
         assert!(DEFAULT_SUITE_ID.contains("mlkem1024+pad"));
         assert!(!DEFAULT_SUITE_ID.contains("x25519"));
+    }
+
+    #[test]
+    fn offered_profiles_honors_build_invariants() {
+        let offered = offered_profiles();
+        assert!(offered.contains(&KemProfile::hybrid()), "hybrid always offered");
+        assert!(offered.contains(&KemProfile::pq_pure()), "padded pure always offered");
+        // The posture-leaking compact variant is gated out of fips builds.
+        #[cfg(feature = "fips")]
+        assert!(!offered.contains(&KemProfile::pq_pure_compact()));
+        #[cfg(not(feature = "fips"))]
+        assert!(offered.contains(&KemProfile::pq_pure_compact()));
     }
 
     #[test]
