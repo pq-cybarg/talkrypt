@@ -1,9 +1,11 @@
-//! Hybrid post-quantum Double Ratchet.
+//! Post-quantum Double Ratchet (posture-selectable).
 //!
 //! Structure follows the Signal Double Ratchet, but the asymmetric ("DH")
-//! ratchet step is replaced by the hybrid primitive in [`crate::hybrid`]:
-//! each step combines an X25519 DH with an ML-KEM-1024 encapsulation. The
-//! ML-KEM ciphertext travels in the message header.
+//! ratchet step is replaced by the posture-selectable primitive in
+//! [`crate::hybrid`]: each step performs an ML-KEM-1024 encapsulation and,
+//! under [`KemPosture::Hybrid`], additionally an X25519 DH. The ML-KEM
+//! ciphertext travels in the message header. The posture (PQ-pure by default,
+//! or hybrid) is fixed for the session by the chosen suite.
 //!
 //! Guarantees:
 //!   * **Forward secrecy** — symmetric chain keys are one-way (HKDF), and
@@ -19,7 +21,7 @@ use std::collections::BTreeMap;
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
-use crate::hybrid::{RatchetPublic, RatchetSecret};
+use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
 use crate::kdf::{kdf_ck, kdf_mk, kdf_rk, KEY_LEN};
 
 /// Maximum number of skipped message keys retained (per session). Bounds the
@@ -50,9 +52,9 @@ impl Header {
         w.into_vec()
     }
 
-    fn decode(bytes: &[u8]) -> Result<Header> {
+    fn decode(profile: KemProfile, bytes: &[u8]) -> Result<Header> {
         let mut r = talkrypt_wire::Reader::new(bytes);
-        let ratchet_pub = RatchetPublic::decode(r.get_bytes()?)?;
+        let ratchet_pub = RatchetPublic::decode(profile, r.get_bytes()?)?;
         let ct = r.get_vec()?;
         let pn = r.get_u32()?;
         let n = r.get_u32()?;
@@ -69,6 +71,8 @@ impl Header {
 /// A Double Ratchet session with one peer.
 #[derive(Clone)]
 pub struct Session {
+    /// KEM profile (posture + wire padding), fixed by the suite for the session.
+    profile: KemProfile,
     root: [u8; KEY_LEN],
 
     // Sending side.
@@ -95,6 +99,7 @@ impl Session {
     /// signed prekey public.
     pub fn initiator(root0: [u8; KEY_LEN], peer_prekey: RatchetPublic) -> Session {
         Session {
+            profile: peer_prekey.profile,
             root: root0,
             self_ratchet: None,
             self_ratchet_pub: None,
@@ -117,6 +122,7 @@ impl Session {
         prekey_public: RatchetPublic,
     ) -> Session {
         Session {
+            profile: prekey_secret.profile(),
             root: root0,
             self_ratchet: Some(prekey_secret),
             self_ratchet_pub: Some(prekey_public),
@@ -174,7 +180,7 @@ impl Session {
         let aad = r.get_vec()?;
         let ciphertext = r.get_vec()?;
         r.finish()?;
-        let header = Header::decode(&aad)?;
+        let header = Header::decode(self.profile, &aad)?;
 
         // 1. A previously-skipped key for this exact (chain, n)?
         if let Some(pt) = self.try_skipped(&header, &ciphertext, &aad)? {
@@ -212,10 +218,8 @@ impl Session {
             .peer_ratchet
             .clone()
             .ok_or(CryptoError::Malformed("no peer ratchet key"))?;
-        let (new_secret, new_public) = RatchetSecret::generate();
-        let dh = new_secret.dh(&peer.x_pub);
-        let (ct, kem_ss) = peer.encapsulate()?;
-        let ikm = combine(&dh, &kem_ss);
+        let (new_secret, new_public) = RatchetSecret::generate(self.profile);
+        let (ct, ikm) = new_secret.step_to(&peer)?;
         let (root, ck) = kdf_rk(&self.root, &ikm);
 
         self.root = root;
@@ -235,9 +239,7 @@ impl Session {
             .self_ratchet
             .as_ref()
             .ok_or(CryptoError::Malformed("no self ratchet key"))?;
-        let dh = self_r.dh(&header.ratchet_pub.x_pub);
-        let kem_ss = self_r.decapsulate(&header.ct)?;
-        let ikm = combine(&dh, &kem_ss);
+        let ikm = self_r.step_from(&header.ratchet_pub, &header.ct)?;
         let (root, ck) = kdf_rk(&self.root, &ikm);
 
         self.root = root;
@@ -286,23 +288,20 @@ impl Session {
     }
 }
 
-/// Concatenate the two shared secrets into HKDF input keying material.
-fn combine(dh: &[u8; 32], kem: &[u8; 32]) -> Vec<u8> {
-    let mut ikm = Vec::with_capacity(64);
-    ikm.extend_from_slice(dh);
-    ikm.extend_from_slice(kem);
-    ikm
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Build an initiator/responder pair sharing a root and the responder's
-    /// prekey, mirroring what the handshake layer will set up.
+    /// prekey, mirroring what the handshake layer will set up. PQ-pure is the
+    /// default posture; a hybrid pair is exercised separately below.
     fn pair() -> (Session, Session) {
+        pair_with(KemProfile::pq_pure())
+    }
+
+    fn pair_with(profile: KemProfile) -> (Session, Session) {
         let root0 = [42u8; KEY_LEN];
-        let (prekey_secret, prekey_public) = RatchetSecret::generate();
+        let (prekey_secret, prekey_public) = RatchetSecret::generate(profile);
         let alice = Session::initiator(root0, prekey_public.clone());
         let bob = Session::responder(root0, prekey_secret, prekey_public);
         (alice, bob)

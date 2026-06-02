@@ -33,7 +33,7 @@ use rand::RngCore;
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
-use crate::hybrid::{RatchetPublic, RatchetSecret};
+use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
 use crate::kdf::{kdf_ck, kdf_mk};
 use crate::ratchet::MAX_SKIP;
 
@@ -110,20 +110,35 @@ pub struct KeyPackage {
     pub leaf_public: RatchetPublic,
 }
 
-/// A joiner's private leaf key, kept until they process their Welcome.
+/// A joiner's private leaf key, kept until they process their Welcome. Bound to
+/// the group's [`KemProfile`] so the published leaf key matches the group.
 pub struct LeafKeyPair {
+    profile: KemProfile,
     secret: Secret,
 }
 
 impl LeafKeyPair {
-    /// Generate a fresh leaf key for joining a group. Share `key_package()`.
+    /// Generate a fresh leaf key for joining a group, using the group's default
+    /// (PQ-pure) profile. Share `key_package()`.
     pub fn generate() -> LeafKeyPair {
+        LeafKeyPair::generate_with(KemProfile::default())
+    }
+
+    /// Generate a fresh leaf key for a specific KEM profile (must match the
+    /// group being joined).
+    pub fn generate_with(profile: KemProfile) -> LeafKeyPair {
         let mut secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut secret);
-        LeafKeyPair { secret }
+        LeafKeyPair { profile, secret }
     }
+
+    /// The KEM profile this leaf key is bound to.
+    pub fn profile(&self) -> KemProfile {
+        self.profile
+    }
+
     pub fn key_package(&self) -> KeyPackage {
-        let (_, leaf_public) = RatchetSecret::derive_deterministic(&self.secret);
+        let (_, leaf_public) = RatchetSecret::derive_deterministic(self.profile, &self.secret);
         KeyPackage { leaf_public }
     }
 }
@@ -179,9 +194,9 @@ impl KeyPackage {
     pub fn encode(&self) -> Vec<u8> {
         self.leaf_public.encode()
     }
-    pub fn decode(bytes: &[u8]) -> Result<KeyPackage> {
+    pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<KeyPackage> {
         Ok(KeyPackage {
-            leaf_public: RatchetPublic::decode(bytes)?,
+            leaf_public: RatchetPublic::decode(profile, bytes)?,
         })
     }
 }
@@ -200,11 +215,11 @@ impl Proposal {
             }
         }
     }
-    fn get(r: &mut talkrypt_wire::Reader) -> Result<Proposal> {
+    fn get(profile: KemProfile, r: &mut talkrypt_wire::Reader) -> Result<Proposal> {
         match r.get_u8()? {
             0 => Ok(Proposal::Add {
                 leaf: r.get_u32()?,
-                leaf_public: RatchetPublic::decode(r.get_bytes()?)?,
+                leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
             }),
             1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
@@ -248,24 +263,24 @@ impl Commit {
         w.into_vec()
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Commit> {
+    pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<Commit> {
         let mut r = talkrypt_wire::Reader::new(bytes);
-        let c = Self::read(&mut r)?;
+        let c = Self::read(profile, &mut r)?;
         r.finish()?;
         Ok(c)
     }
 
-    fn read(r: &mut talkrypt_wire::Reader) -> Result<Commit> {
+    fn read(profile: KemProfile, r: &mut talkrypt_wire::Reader) -> Result<Commit> {
         let np = get_count(r)?;
         let mut proposals = Vec::with_capacity(np as usize);
         for _ in 0..np {
-            proposals.push(Proposal::get(r)?);
+            proposals.push(Proposal::get(profile, r)?);
         }
         let nu = get_count(r)?;
         let mut pub_updates = Vec::with_capacity(nu as usize);
         for _ in 0..nu {
             let node = get_node(r)?;
-            let p = RatchetPublic::decode(r.get_bytes()?)?;
+            let p = RatchetPublic::decode(profile, r.get_bytes()?)?;
             pub_updates.push((node, p));
         }
         let npath = get_count(r)?;
@@ -311,14 +326,14 @@ impl Welcome {
         w.into_vec()
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Welcome> {
+    pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<Welcome> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let capacity = r.get_u32()?;
         let np = get_count(&mut r)?;
         let mut public = Vec::with_capacity(np as usize);
         for _ in 0..np {
             let node = get_node(&mut r)?;
-            let p = RatchetPublic::decode(r.get_bytes()?)?;
+            let p = RatchetPublic::decode(profile, r.get_bytes()?)?;
             public.push((node, p));
         }
         let no = get_count(&mut r)?;
@@ -328,7 +343,7 @@ impl Welcome {
         }
         let epoch = r.get_u32()?;
         let your_leaf = r.get_u32()?;
-        let commit = Commit::decode(r.get_bytes()?)?;
+        let commit = Commit::decode(profile, r.get_bytes()?)?;
         r.finish()?;
         Ok(Welcome {
             capacity,
@@ -350,6 +365,8 @@ struct RecvChain {
 
 /// One member's full view of a TreeKEM group.
 pub struct TreeKemGroup {
+    /// KEM profile (posture + wire padding) for every node key in this group.
+    profile: KemProfile,
     capacity: u32,
     public: HashMap<Node, RatchetPublic>,
     occupied: Vec<bool>,
@@ -363,13 +380,20 @@ pub struct TreeKemGroup {
 }
 
 impl TreeKemGroup {
-    /// Create a new group as its founder (leaf 0), capacity 2.
+    /// Create a new group as its founder (leaf 0), capacity 2, using the
+    /// default (PQ-pure) KEM profile.
     pub fn create() -> TreeKemGroup {
+        TreeKemGroup::create_with(KemProfile::default())
+    }
+
+    /// Create a new group with a specific KEM profile (posture + wire padding).
+    pub fn create_with(profile: KemProfile) -> TreeKemGroup {
         let capacity = 2;
         let mut leaf_secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
 
         let mut g = TreeKemGroup {
+            profile,
             capacity,
             public: HashMap::new(),
             occupied: vec![false; capacity as usize],
@@ -389,7 +413,7 @@ impl TreeKemGroup {
             if i > 0 {
                 ps = derive_parent_secret(&ps);
             }
-            let (_, pubk) = RatchetSecret::derive_deterministic(&ps);
+            let (_, pubk) = RatchetSecret::derive_deterministic(profile, &ps);
             g.public.insert(*node, pubk);
             g.secrets.insert(*node, ps);
         }
@@ -410,6 +434,11 @@ impl TreeKemGroup {
     }
     pub fn my_leaf(&self) -> u32 {
         self.me
+    }
+    /// The KEM profile (posture + wire padding) of every node key in this group.
+    /// Needed to decode incoming `KeyPackage`/`Commit`/`Welcome` wire bytes.
+    pub fn profile(&self) -> KemProfile {
+        self.profile
     }
 
     // ---- tree helpers ----
@@ -530,7 +559,7 @@ impl TreeKemGroup {
 
         let mut pub_updates = Vec::with_capacity(path.len());
         for (i, node) in path.iter().enumerate() {
-            let (_, pubk) = RatchetSecret::derive_deterministic(&path_secrets[i]);
+            let (_, pubk) = RatchetSecret::derive_deterministic(self.profile, &path_secrets[i]);
             self.public.insert(*node, pubk.clone());
             self.secrets.insert(*node, path_secrets[i]);
             pub_updates.push((*node, pubk));
@@ -580,6 +609,7 @@ impl TreeKemGroup {
     /// Join a group from a Welcome message using the matching leaf key.
     pub fn join_with_welcome(keypair: LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
         let mut g = TreeKemGroup {
+            profile: keypair.profile,
             capacity: welcome.capacity,
             public: welcome.public.iter().cloned().collect(),
             occupied: welcome.occupied.clone(),
@@ -612,7 +642,7 @@ impl TreeKemGroup {
             // Which resolution node of the copath do we hold a secret for?
             for target in self.resolution(copath) {
                 if let Some(secret) = self.secrets.get(&target).copied() {
-                    let (rsecret, _) = RatchetSecret::derive_deterministic(&secret);
+                    let (rsecret, _) = RatchetSecret::derive_deterministic(self.profile, &secret);
                     let blob = commit
                         .ciphertexts
                         .iter()
@@ -770,17 +800,39 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
 mod tests {
     use super::*;
 
-    /// Add a fresh member to an existing group; returns the joiner's group.
+    /// Add a fresh member to an existing group; returns the joiner's group. The
+    /// joiner's leaf key is generated with the committer's profile so the
+    /// published key matches the group.
     fn add_member(
         committer: &mut TreeKemGroup,
         followers: &mut [&mut TreeKemGroup],
     ) -> TreeKemGroup {
-        let kp = LeafKeyPair::generate();
+        let kp = LeafKeyPair::generate_with(committer.profile());
         let (_leaf, commit, welcome) = committer.add(&kp.key_package()).unwrap();
         for f in followers.iter_mut() {
             f.apply_commit(&commit).unwrap();
         }
         TreeKemGroup::join_with_welcome(kp, &welcome).unwrap()
+    }
+
+    /// Every KEM profile — hybrid, padded PQ-pure, compact PQ-pure — must form a
+    /// working group: members converge on the epoch secret and can message.
+    #[test]
+    fn all_profiles_group_converges() {
+        for profile in [
+            KemProfile::hybrid(),
+            KemProfile::pq_pure(),
+            KemProfile::pq_pure_compact(),
+        ] {
+            let mut a = TreeKemGroup::create_with(profile);
+            let mut b = add_member(&mut a, &mut []);
+            let mut c = add_member(&mut a, &mut [&mut b]);
+            assert_eq!(a.group_secret(), b.group_secret());
+            assert_eq!(a.group_secret(), c.group_secret());
+            let m = a.encrypt(b"profile check").unwrap();
+            assert_eq!(b.decrypt(&m).unwrap(), b"profile check");
+            assert_eq!(c.decrypt(&m).unwrap(), b"profile check");
+        }
     }
 
     #[test]
@@ -855,11 +907,12 @@ mod tests {
         let kp = LeafKeyPair::generate();
         let (_leaf, commit, welcome) = a.add(&kp.key_package()).unwrap();
 
-        let commit2 = Commit::decode(&commit.encode()).unwrap();
+        let prof = a.profile();
+        let commit2 = Commit::decode(prof, &commit.encode()).unwrap();
         assert!(commit == commit2);
-        let welcome2 = Welcome::decode(&welcome.encode()).unwrap();
+        let welcome2 = Welcome::decode(prof, &welcome.encode()).unwrap();
         assert!(welcome == welcome2);
-        let kp2 = KeyPackage::decode(&kp.key_package().encode()).unwrap();
+        let kp2 = KeyPackage::decode(prof, &kp.key_package().encode()).unwrap();
         assert_eq!(kp2.leaf_public, kp.key_package().leaf_public);
 
         // A joiner can actually use the serialized-then-deserialized Welcome.

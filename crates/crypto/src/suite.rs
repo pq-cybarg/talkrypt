@@ -13,33 +13,65 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::{CryptoError, Result};
-use crate::hybrid::{RatchetPublic, RatchetSecret};
+use crate::hybrid::{KemPosture, KemProfile, RatchetPublic, RatchetSecret};
 use crate::kdf::KEY_LEN;
 use crate::noise::NoiseSession;
 use crate::ratchet::Session;
 
-/// Canonical id of the default suite. The KEM is written PQ-first
-/// (`mlkem1024+x25519`) to signal that ML-KEM is primary and X25519 is the
-/// defense-in-depth hybrid half. The hash token follows the active build
-/// (`sha3-384` by default, `sha384` under the `cnsa-sha2` feature).
+/// Hash token for the active build (`sha3-384` by default, `sha384` under the
+/// `cnsa-sha2` feature).
 #[cfg(not(feature = "cnsa-sha2"))]
-pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+x25519.aes256gcm.sha3-384.mldsa87";
+const HASH_TOKEN: &str = "sha3-384";
 #[cfg(feature = "cnsa-sha2")]
-pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+x25519.aes256gcm.sha384.mldsa87";
+const HASH_TOKEN: &str = "sha384";
 
-/// Id of the PQ-Noise suite (session-granularity forward secrecy).
+/// KEM token for a profile. PQ-pure is written bare (`mlkem1024`); the padded
+/// variant appends `+pad` (a wire option, not a different KEM); hybrid appends
+/// the non-load-bearing `+x25519` defense-in-depth half.
+fn kem_token(profile: KemProfile) -> &'static str {
+    match (profile.posture, profile.pad_pure) {
+        (KemPosture::Hybrid, _) => "mlkem1024+x25519",
+        (KemPosture::PqPure, true) => "mlkem1024+pad",
+        (KemPosture::PqPure, false) => "mlkem1024",
+    }
+}
+
+/// Canonical Double-Ratchet suite id for a KEM profile, e.g.
+/// `tk.dr.mlkem1024+pad.aes256gcm.sha3-384.mldsa87`. Identity is ML-DSA-87 in
+/// every profile (pure PQ, zero EC).
+pub fn dr_suite_id(profile: KemProfile) -> String {
+    format!("tk.dr.{}.aes256gcm.{}.mldsa87", kem_token(profile), HASH_TOKEN)
+}
+
+/// Canonical PQ-Noise suite id for a KEM profile.
+pub fn noise_suite_id(profile: KemProfile) -> String {
+    format!("tk.noise.{}.aes256gcm.{}", kem_token(profile), HASH_TOKEN)
+}
+
+/// Canonical id of the **default** suite: PQ-pure (zero EC), padded on the wire
+/// to be frame-length-indistinguishable from hybrid. Hybrid and compact-pure
+/// suites exist too — see [`dr_suite_id`] — but this is what a chat uses when
+/// the creator states no preference.
 #[cfg(not(feature = "cnsa-sha2"))]
-pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+x25519.aes256gcm.sha3-384";
+pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+pad.aes256gcm.sha3-384.mldsa87";
 #[cfg(feature = "cnsa-sha2")]
-pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+x25519.aes256gcm.sha384";
+pub const DEFAULT_SUITE_ID: &str = "tk.dr.mlkem1024+pad.aes256gcm.sha384.mldsa87";
+
+/// Id of the default PQ-Noise suite (session-granularity forward secrecy).
+#[cfg(not(feature = "cnsa-sha2"))]
+pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+pad.aes256gcm.sha3-384";
+#[cfg(feature = "cnsa-sha2")]
+pub const NOISE_SUITE_ID: &str = "tk.noise.mlkem1024+pad.aes256gcm.sha384";
 
 /// Coarse security level used to enforce a registry floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SecurityLevel {
     /// Classical-only or sub-128-bit PQ. Rejected by default.
     Weak,
-    /// Hybrid PQ at NIST category 3+. The default floor.
-    PostQuantumHybrid,
+    /// PQ at NIST category 3+ — ML-KEM-1024 based, whether pure or hybrid
+    /// (the X25519 half adds defense-in-depth but does not change the floor).
+    /// The default floor.
+    PostQuantum,
 }
 
 /// Self-describing metadata a suite advertises (carried in chat descriptors).
@@ -55,6 +87,14 @@ pub struct SuiteDescriptor {
 /// A complete end-to-end crypto construction.
 pub trait CryptoSuite: Send + Sync {
     fn descriptor(&self) -> SuiteDescriptor;
+
+    /// The KEM profile (posture + wire padding) this suite uses for ratchet and
+    /// group keys, so group state (TreeKEM) matches the pairwise sessions.
+    /// Defaults to the PQ-pure padded profile; suites with another posture
+    /// override this.
+    fn kem_profile(&self) -> KemProfile {
+        KemProfile::default()
+    }
 
     /// Generate a fresh prekey: returns the public half (to advertise) and an
     /// opaque secret handle (to retain for the responder role).
@@ -85,11 +125,24 @@ pub trait SessionHandle: Send {
     fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>>;
 }
 
-// ----- Built-in: hybrid PQ Double Ratchet suite -----
+// ----- Built-in: PQ Double Ratchet suite (posture-selectable) -----
 
-/// The default suite. Sessions are [`Session`] (see [`crate::ratchet`]).
+/// The Double Ratchet suite, parameterized by [`KemProfile`]. The default
+/// (`KemProfile::pq_pure`) is the zero-EC, padded posture; `with_profile` builds
+/// the hybrid or compact-pure variants. Sessions are [`Session`] (see
+/// [`crate::ratchet`]).
 #[derive(Default)]
-pub struct DoubleRatchetSuite;
+pub struct DoubleRatchetSuite {
+    profile: KemProfile,
+}
+
+impl DoubleRatchetSuite {
+    /// Build the suite for a specific KEM profile (hybrid / padded-pure /
+    /// compact-pure).
+    pub fn with_profile(profile: KemProfile) -> Self {
+        Self { profile }
+    }
+}
 
 struct DrPrekeySecret {
     secret: RatchetSecret,
@@ -99,15 +152,19 @@ struct DrPrekeySecret {
 impl CryptoSuite for DoubleRatchetSuite {
     fn descriptor(&self) -> SuiteDescriptor {
         SuiteDescriptor {
-            id: DEFAULT_SUITE_ID.to_string(),
+            id: dr_suite_id(self.profile),
             version: 1,
-            level: SecurityLevel::PostQuantumHybrid,
+            level: SecurityLevel::PostQuantum,
             params: Vec::new(),
         }
     }
 
+    fn kem_profile(&self) -> KemProfile {
+        self.profile
+    }
+
     fn generate_prekey(&self) -> (Vec<u8>, PrekeySecretHandle) {
-        let (secret, public) = RatchetSecret::generate();
+        let (secret, public) = RatchetSecret::generate(self.profile);
         let pub_bytes = public.encode();
         let handle = PrekeySecretHandle(Box::new(DrPrekeySecret { secret, public }));
         (pub_bytes, handle)
@@ -118,7 +175,7 @@ impl CryptoSuite for DoubleRatchetSuite {
         root0: [u8; KEY_LEN],
         peer_prekey: &[u8],
     ) -> Result<Box<dyn SessionHandle>> {
-        let peer = RatchetPublic::decode(peer_prekey)?;
+        let peer = RatchetPublic::decode(self.profile, peer_prekey)?;
         Ok(Box::new(Session::initiator(root0, peer)))
     }
 
@@ -146,22 +203,36 @@ impl SessionHandle for Session {
 
 // ----- Built-in: PQ-Noise suite (session-granularity forward secrecy) -----
 
-/// PQ-Noise suite: one hybrid step, then symmetric chains. See [`crate::noise`].
+/// PQ-Noise suite: one asymmetric step, then symmetric chains, parameterized by
+/// [`KemProfile`]. See [`crate::noise`].
 #[derive(Default)]
-pub struct NoiseSuite;
+pub struct NoiseSuite {
+    profile: KemProfile,
+}
+
+impl NoiseSuite {
+    /// Build the suite for a specific KEM profile.
+    pub fn with_profile(profile: KemProfile) -> Self {
+        Self { profile }
+    }
+}
 
 impl CryptoSuite for NoiseSuite {
     fn descriptor(&self) -> SuiteDescriptor {
         SuiteDescriptor {
-            id: NOISE_SUITE_ID.to_string(),
+            id: noise_suite_id(self.profile),
             version: 1,
-            level: SecurityLevel::PostQuantumHybrid,
+            level: SecurityLevel::PostQuantum,
             params: Vec::new(),
         }
     }
 
+    fn kem_profile(&self) -> KemProfile {
+        self.profile
+    }
+
     fn generate_prekey(&self) -> (Vec<u8>, PrekeySecretHandle) {
-        let (secret, public) = RatchetSecret::generate();
+        let (secret, public) = RatchetSecret::generate(self.profile);
         let pub_bytes = public.encode();
         // Noise responder needs only the secret half.
         (pub_bytes, PrekeySecretHandle(Box::new(secret)))
@@ -172,7 +243,7 @@ impl CryptoSuite for NoiseSuite {
         root0: [u8; KEY_LEN],
         peer_prekey: &[u8],
     ) -> Result<Box<dyn SessionHandle>> {
-        let peer = RatchetPublic::decode(peer_prekey)?;
+        let peer = RatchetPublic::decode(self.profile, peer_prekey)?;
         Ok(Box::new(NoiseSession::initiator(root0, peer)))
     }
 
@@ -207,22 +278,33 @@ pub struct SuiteRegistry {
 }
 
 impl SuiteRegistry {
-    /// Empty registry at the post-quantum-hybrid floor.
+    /// Empty registry at the post-quantum floor.
     pub fn new() -> Self {
         Self {
             suites: HashMap::new(),
-            floor: SecurityLevel::PostQuantumHybrid,
+            floor: SecurityLevel::PostQuantum,
         }
     }
 
-    /// Registry preloaded with all built-in pairwise suites (Double Ratchet
-    /// and PQ-Noise). The Double Ratchet remains the default.
+    /// Registry preloaded with all built-in pairwise suites across every KEM
+    /// profile. The default is PQ-pure (padded); the **hybrid** Double-Ratchet
+    /// suite is always registered (defense-in-depth must remain available in
+    /// every build), as is a compact (unpadded) PQ-pure variant for bandwidth-
+    /// sensitive chats. PQ-Noise is offered in the default and hybrid profiles.
     pub fn with_defaults() -> Self {
         let mut r = Self::new();
-        r.register(Arc::new(DoubleRatchetSuite))
-            .expect("default suite meets floor");
-        r.register(Arc::new(NoiseSuite))
-            .expect("noise suite meets floor");
+        for profile in [
+            KemProfile::pq_pure(),         // default
+            KemProfile::hybrid(),          // mandatory defense-in-depth
+            KemProfile::pq_pure_compact(), // bandwidth-sensitive, posture-visible
+        ] {
+            r.register(Arc::new(DoubleRatchetSuite::with_profile(profile)))
+                .expect("double-ratchet suite meets floor");
+        }
+        for profile in [KemProfile::pq_pure(), KemProfile::hybrid()] {
+            r.register(Arc::new(NoiseSuite::with_profile(profile)))
+                .expect("noise suite meets floor");
+        }
         r
     }
 

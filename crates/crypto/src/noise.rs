@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
-use crate::hybrid::{RatchetPublic, RatchetSecret};
+use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
 use crate::kdf::{kdf_ck, kdf_mk, kdf_rk, KEY_LEN};
 use crate::ratchet::MAX_SKIP;
 
@@ -25,6 +25,8 @@ const R2I: &[u8] = b"talkrypt-noise-r2i";
 /// A PQ-Noise session.
 pub struct NoiseSession {
     initiator: bool,
+    /// KEM profile (posture + wire padding), fixed by the suite for the session.
+    profile: KemProfile,
     root0: [u8; KEY_LEN],
     // Initiator: peer's prekey public. Responder: our prekey secret.
     peer_prekey: Option<RatchetPublic>,
@@ -43,6 +45,7 @@ impl NoiseSession {
     pub fn initiator(root0: [u8; KEY_LEN], peer_prekey: RatchetPublic) -> Self {
         Self {
             initiator: true,
+            profile: peer_prekey.profile,
             root0,
             peer_prekey: Some(peer_prekey),
             self_prekey: None,
@@ -59,6 +62,7 @@ impl NoiseSession {
     pub fn responder(root0: [u8; KEY_LEN], prekey_secret: RatchetSecret) -> Self {
         Self {
             initiator: false,
+            profile: prekey_secret.profile(),
             root0,
             peer_prekey: None,
             self_prekey: Some(prekey_secret),
@@ -88,10 +92,9 @@ impl NoiseSession {
             .peer_prekey
             .clone()
             .ok_or(CryptoError::Malformed("noise: no peer prekey"))?;
-        let (eph_secret, eph_public) = RatchetSecret::generate();
-        let dh = eph_secret.dh(&peer.x_pub);
-        let (ct, kem) = peer.encapsulate()?;
-        let session_root = derive_session_root(&self.root0, &dh, &kem);
+        let (eph_secret, eph_public) = RatchetSecret::generate(self.profile);
+        let (ct, ikm) = eph_secret.step_to(&peer)?;
+        let session_root = kdf_rk(&self.root0, &ikm).0;
         let (send, recv) = self.chains_from_root(session_root);
         self.send_chain = Some(send);
         self.recv_chain = Some(recv);
@@ -106,9 +109,8 @@ impl NoiseSession {
             .self_prekey
             .as_ref()
             .ok_or(CryptoError::Malformed("noise: no prekey secret"))?;
-        let dh = prekey.dh(&eph_public.x_pub);
-        let kem = prekey.decapsulate(ct)?;
-        let session_root = derive_session_root(&self.root0, &dh, &kem);
+        let ikm = prekey.step_from(eph_public, ct)?;
+        let session_root = kdf_rk(&self.root0, &ikm).0;
         let (send, recv) = self.chains_from_root(session_root);
         self.send_chain = Some(send);
         self.recv_chain = Some(recv);
@@ -171,7 +173,7 @@ impl NoiseSession {
         let mut hr = talkrypt_wire::Reader::new(&aad);
         let has_header = hr.get_u8()? != 0;
         if has_header {
-            let eph_public = RatchetPublic::decode(hr.get_bytes()?)?;
+            let eph_public = RatchetPublic::decode(self.profile, hr.get_bytes()?)?;
             let eph_ct = hr.get_vec()?;
             if self.recv_chain.is_none() && !self.initiator {
                 self.establish_responder(&eph_public, &eph_ct)?;
@@ -215,6 +217,7 @@ impl Clone for NoiseSession {
     fn clone(&self) -> Self {
         Self {
             initiator: self.initiator,
+            profile: self.profile,
             root0: self.root0,
             peer_prekey: self.peer_prekey.clone(),
             self_prekey: self.self_prekey.clone(),
@@ -229,20 +232,17 @@ impl Clone for NoiseSession {
     }
 }
 
-fn derive_session_root(root0: &[u8; KEY_LEN], dh: &[u8; 32], kem: &[u8; 32]) -> [u8; KEY_LEN] {
-    let mut ikm = Vec::with_capacity(64);
-    ikm.extend_from_slice(dh);
-    ikm.extend_from_slice(kem);
-    kdf_rk(root0, &ikm).0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pair() -> (NoiseSession, NoiseSession) {
+        pair_with(KemProfile::pq_pure())
+    }
+
+    fn pair_with(profile: KemProfile) -> (NoiseSession, NoiseSession) {
         let root0 = [5u8; KEY_LEN];
-        let (sec, pubk) = RatchetSecret::generate();
+        let (sec, pubk) = RatchetSecret::generate(profile);
         (
             NoiseSession::initiator(root0, pubk),
             NoiseSession::responder(root0, sec),
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn wrong_root_cannot_decrypt() {
-        let (sec, pubk) = RatchetSecret::generate();
+        let (sec, pubk) = RatchetSecret::generate(KemProfile::pq_pure());
         let mut a = NoiseSession::initiator([1u8; KEY_LEN], pubk);
         let mut b = NoiseSession::responder([2u8; KEY_LEN], sec);
         let m = a.encrypt(b"secret").unwrap();

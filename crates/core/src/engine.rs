@@ -319,12 +319,15 @@ impl Core {
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
         let root0 = descriptor.derive_root();
         let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Group state uses the same KEM profile as the suite's pairwise
+        // sessions, so TreeKEM node keys and ratchet keys agree posture + wire.
+        let kem_profile = suite.kem_profile();
         let group = match role {
-            GroupRole::Host => Some(TreeKemGroup::create()),
+            GroupRole::Host => Some(TreeKemGroup::create_with(kem_profile)),
             _ => None,
         };
         let leaf_keypair = match role {
-            GroupRole::Member => Some(LeafKeyPair::generate()),
+            GroupRole::Member => Some(LeafKeyPair::generate_with(kem_profile)),
             _ => None,
         };
         // The host founds the group at leaf 0; seed the roster with itself.
@@ -694,22 +697,23 @@ async fn reader_loop(
 /// existing members. (Sequential joins only; concurrent joins need a delivery
 /// service to order commits — see docs/plans/0002-mls-pq.md.)
 async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
-    let kp = match KeyPackage::decode(&kp_bytes) {
-        Ok(kp) => kp,
-        Err(_) => return,
-    };
-    // Hold the group lock across add + leaf assignment so concurrent joins get
-    // distinct, ordered epochs. The commit is tagged with the epoch it applies
-    // to, so members apply commits in order even if delivery reorders them.
+    // Hold the group lock across decode + add + leaf assignment so concurrent
+    // joins get distinct, ordered epochs. The KeyPackage is decoded with the
+    // group's KEM profile (posture + wire padding). The commit is tagged with
+    // the epoch it applies to, so members apply commits in order even if
+    // delivery reorders them.
     let result = {
         let mut g = inner.group.lock().await;
         match g.as_mut() {
-            Some(grp) => {
-                let from_epoch = grp.epoch();
-                grp.add(&kp)
-                    .ok()
-                    .map(|(leaf, c, w)| (leaf, from_epoch, c.encode(), w.encode()))
-            }
+            Some(grp) => match KeyPackage::decode(grp.profile(), &kp_bytes) {
+                Ok(kp) => {
+                    let from_epoch = grp.epoch();
+                    grp.add(&kp)
+                        .ok()
+                        .map(|(leaf, c, w)| (leaf, from_epoch, c.encode(), w.encode()))
+                }
+                Err(_) => None,
+            },
             None => None,
         }
     };
@@ -739,12 +743,14 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
 async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
-    let welcome = match Welcome::decode(&welcome_bytes) {
-        Ok(w) => w,
-        Err(_) => return,
-    };
     let keypair = inner.leaf_keypair.lock().unwrap().take();
     if let Some(kp) = keypair {
+        // Decode the Welcome with the leaf key's KEM profile — both were fixed
+        // by the chat's suite, so they agree.
+        let welcome = match Welcome::decode(kp.profile(), &welcome_bytes) {
+            Ok(w) => w,
+            Err(_) => return,
+        };
         match TreeKemGroup::join_with_welcome(kp, &welcome) {
             Ok(grp) => *inner.group.lock().await = Some(grp),
             Err(e) => {
@@ -777,7 +783,7 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
             pending.remove(&cur)
         };
         match next {
-            Some(bytes) => match Commit::decode(&bytes) {
+            Some(bytes) => match Commit::decode(grp.profile(), &bytes) {
                 Ok(commit) => {
                     if grp.apply_commit(&commit).is_err() {
                         return;
