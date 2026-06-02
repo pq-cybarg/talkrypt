@@ -7,4 +7,5 @@
 //! `mls-implementations` test vectors.
 
 pub mod schedule;
+pub mod secret_tree;
 pub mod treemath;

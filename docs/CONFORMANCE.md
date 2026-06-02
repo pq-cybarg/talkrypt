@@ -12,18 +12,22 @@ them against the MLS working group's **official test vectors**
 | Tree math (log2/level/root/left/right/parent/sibling) | `tree-math.json` | ✅ passes (n=1,2,4,8) |
 | `ExpandWithLabel`, `DeriveSecret`, `RefHash` + varint encoding | `crypto-basics.json` | ✅ passes |
 | Epoch key schedule (extract → welcome/epoch → all 9 derived secrets) | `key-schedule.json` | ✅ passes |
+| Secret tree (leaf descent, handshake/application ratchet keys+nonces, sender-data key/nonce) | `secret-tree.json` | ✅ passes |
 
-These are real RFC 9420 conformance results, in CI as `#[test]`s. This is the
-cryptographic core of MLS, working — **not** deferred.
+These are real RFC 9420 conformance results, in CI as `#[test]`s. The **entire
+MLS key-derivation hierarchy** — tree math → key schedule → secret tree →
+per-message keys — is working and validated against official vectors, **not**
+deferred.
 
 ## What remains for full protocol conformance
 
-The standards-track wire protocol layers build on the above and are the next
-increment: the **secret tree**, **message-protection** framing
-(`MLSMessage`/`FramedContent`), **Welcome**/`GroupInfo`/`GroupSecrets`, the
-TreeKEM **update-path** under the RFC ciphersuite, and an **interop** run
-against another implementation. Each has an official vector file to validate
-against the same way.
+The standards-track *wire/message* layers build on the proven key hierarchy
+above and are the next increment: **message-protection** framing
+(`MLSMessage`/`FramedContent`, Ed25519 sign/verify, AES-128-GCM AEAD),
+**Welcome**/`GroupInfo`/`GroupSecrets` (HPKE DHKEM-X25519), the TreeKEM
+**update-path** under the RFC ciphersuite, and an **interop** run against
+another implementation. Each has an official vector file to validate against the
+same way.
 
 ## Note on the PQ group (`treekem.rs`)
 
