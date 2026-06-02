@@ -37,8 +37,11 @@ Crypto: ML-KEM-1024 (PQ) KEM, ML-DSA-87 auth, AES-256-GCM, KMAC256/SHA3.
 
 HONESTY: PQ algorithms aligned with CNSA 2.0 (hash defaults to SHA3/FIPS-202;
          build with `cnsa-sha2` for strict CNSA SHA-384). CSfC architecture-
-         aligned. NOT FIPS-140-validated, NOT CSfC-accredited, NOT NSA-approved
-         — those are external processes source code cannot self-certify.";
+         aligned. NOT FIPS-140-validated, NOT CSfC-accredited, NOT NSA-approved,
+         NOT authorized for any classification level, and NOT independently
+         audited or cryptographically reviewed. Alignment means it uses these
+         algorithms — not that it is certified or fit for real classified or
+         high-stakes data. Experimental, pre-release software.";
 
 #[derive(Parser)]
 #[command(

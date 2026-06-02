@@ -1,8 +1,42 @@
 # talkrypt
 
+> # ⚠️ NOT CERTIFIED · NOT ACCREDITED · NOT AUDITED
+>
+> **Do not use this software to protect real classified, national-security, or
+> life-safety information.** talkrypt implements the *algorithms* named by
+> CNSA 2.0 and follows the CSfC *layered architecture*, but it carries **no
+> certification, validation, or accreditation of any kind**, and it has had **no
+> independent security audit, no external cryptographic review, and no
+> penetration test.** It is experimental, pre-release software.
+>
+> Concretely, talkrypt is **NOT**:
+>
+> - **NOT FIPS 140-validated.** The `--features fips` build *links* a
+>   FIPS-validated AES backend (aws-lc-rs), but that validation belongs to the
+>   *backend vendor*. talkrypt as a whole is **not** a validated cryptographic
+>   module and appears on no validation list.
+> - **NOT CSfC-accredited.** It is architecturally compatible with the layered
+>   model — nothing more. No Components-List listing, no Capability-Package
+>   conformance, no Trusted Integrator, no NSA registration.
+> - **NOT NSA-approved**, and not approved or endorsed by any government,
+>   agency, or standards body.
+> - **NOT certified or authorized for ANY classification level.** The
+>   classification-marking feature is **advisory labeling only** — it is not an
+>   accreditation and confers no authority to store, process, or transmit
+>   classified information at any level.
+> - **NOT independently audited or formally verified.** No third party has
+>   reviewed this code or its cryptographic design. The bundled fuzzing and a
+>   single Kani proof are the authors' own tests, not an audit.
+>
+> **"CNSA 2.0-aligned" means it uses those algorithms — it does NOT mean
+> certified, validated, accredited, or fit for protecting real sensitive data.**
+> Treat every security property claimed below as **unverified** until an
+> independent audit establishes otherwise. Source code cannot self-certify any
+> of these standards; they are external laboratory and agency processes.
+
 A minimalist, IRC-like, **post-quantum end-to-end encrypted** chat that runs
 over Tor (via [Arti](https://gitlab.torproject.org/tpo/core/arti)) onion
-services. Messages are sealed with a hybrid PQ Double Ratchet; the transport
+services. Messages are sealed with a post-quantum Double Ratchet; the transport
 sees only ciphertext.
 
 ```
@@ -13,17 +47,30 @@ $ talkrypt join <uri>    # join from an invite
 
 ## Honesty first
 
-talkrypt uses the **CNSA 2.0** algorithm set and is **architecturally**
-compatible with the CSfC layered model. It is **not**:
+See the **NOT CERTIFIED · NOT ACCREDITED · NOT AUDITED** banner at the top — it
+is the controlling statement and it is not boilerplate. In short: talkrypt uses
+the **CNSA 2.0** algorithm set and is **architecturally** compatible with the
+CSfC layered model, but it is **not** FIPS-140-validated, **not**
+CSfC-accredited, **not** NSA-approved, **not** authorized for any classification
+level, and **not** independently audited. Those are external laboratory / agency
+processes that source code cannot self-certify.
 
-- FIPS-140-validated,
-- CSfC-accredited, or
-- NSA-approved.
+A few specifics so nothing is overread:
 
-Those are external laboratory / agency processes that source code cannot
-self-certify. What you get is a clean, auditable implementation that uses the
-right algorithms and can be built against a FIPS-validated backend. Use it
-accordingly. The same banner prints with `talkrypt version`.
+- **Algorithm alignment ≠ compliance.** Using ML-KEM-1024 / ML-DSA-87 /
+  AES-256 is necessary but nowhere near sufficient for any accreditation.
+- **Classification levels.** CNSA 2.0 is single-tier and approved (as a
+  *standard*) up to TOP SECRET, so talkrypt's parameters are maximal for every
+  level — but "covers the level cryptographically" is *not* authorization to
+  handle data at that level. That authorization is operational (accredited
+  hardware, TEMPEST, personnel, ATO) and outside any source tree.
+- **Markings are advisory.** Classification banners/compartments label content;
+  they do not enforce anything beyond TreeKEM group membership and never change
+  how strongly data is protected.
+- **The `fips` feature** swaps in a validated *backend*; it does not make
+  talkrypt a validated module.
+
+The same disclaimer prints with `talkrypt version`. Use accordingly.
 
 ## Cryptography (CNSA 2.0 aligned)
 
@@ -161,8 +208,16 @@ verified across processes over TCP.
 ## Security
 
 Threat model and design rationale: [`docs/DESIGN.md`](docs/DESIGN.md).
-This software has not been independently audited. Do not rely on it for
-high-stakes confidentiality without one.
+
+**This software has had no independent security audit, no external
+cryptographic review, and no penetration test.** The implementation may contain
+bugs — including ones that completely break the confidentiality, integrity, or
+anonymity properties described above — and none of those properties have been
+verified by anyone outside this project. **Do not rely on talkrypt for
+high-stakes confidentiality, classified information, or any situation where
+disclosure could cause harm, unless and until it has been independently
+audited.** Claims in this README describe *intent and design*, not audited
+guarantees.
 
 ## License
 

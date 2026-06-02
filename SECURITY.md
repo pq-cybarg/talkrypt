@@ -4,8 +4,9 @@
 
 talkrypt nests two independent layers (see `docs/CSFC.md`):
 
-- **Inner — end-to-end content.** Post-quantum hybrid crypto: ML-KEM-1024 +
-  X25519 KEM, ML-DSA-87 authentication, AES-256-GCM, SHA3-384/HKDF.
+- **Inner — end-to-end content.** Post-quantum crypto: ML-KEM-1024 KEM
+  (PQ-pure by default — zero EC; optional `+X25519` hybrid), ML-DSA-87
+  authentication, AES-256-GCM, KMAC256/SHA3 (or SHA-384 via `cnsa-sha2`).
 - **Outer — transport/anonymity.** Tor onion services via Arti (with optional
   bridges + pluggable transports for anti-censorship).
 
@@ -44,10 +45,18 @@ decoder, uniform AEAD failure).
 
 ## Out of scope / known limitations
 
-- **No independent audit.** Do not use for high-stakes confidentiality without
-  one.
-- **Not FIPS-validated / not CSfC-accredited / not NSA-approved** — those are
-  external lab/agency processes (see the banner and `docs/CSFC.md`).
+- **No independent audit, cryptographic review, or penetration test.** None of
+  the properties in this document have been verified by anyone outside this
+  project; the implementation may contain bugs that completely break them. Do
+  not rely on talkrypt for high-stakes confidentiality or classified
+  information without an independent audit. The bundled fuzzing/Kani harness is
+  the authors' own testing, not an audit.
+- **Not FIPS-validated / not CSfC-accredited / not NSA-approved / not authorized
+  for any classification level.** Those are external lab/agency processes that
+  source code cannot self-certify (see the README banner and `docs/CSFC.md`).
+  Classification *markings* are advisory labels only — not authorization.
+  "CNSA 2.0-aligned" means *uses those algorithms*, not certified or fit for
+  real classified/high-stakes use.
 - **Endpoint compromise while running** (keylogger, screen capture, RAM
   scraping of a live session) — no software prevents reading plaintext on a
   fully owned device.
