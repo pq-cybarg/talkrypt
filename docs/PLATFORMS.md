@@ -1,5 +1,11 @@
 # Desktop & mobile (the platform shells)
 
+> This file documents what is **built/integration-ready today**. For the full
+> planned platform matrix (desktop OS helper, the named Linux distros, mobile
+> hardware-keystore bridges, radio/IoT, browser extensions, companion bridges,
+> and the packaging political-filter), see [`ROADMAP.md`](ROADMAP.md) — all of
+> which is planned, not implemented.
+
 Every platform is a **thin shell over the same `talkrypt-core`**, reached
 through the `talkrypt-ffi` crate (uniffi). The security-critical code is
 written once; no platform reimplements crypto or protocol.
