@@ -110,3 +110,23 @@ The TUI (`talkrypt-tui host --posture ...`) and the FFI
 default) and hybrid; the posture-leaking *compact* variant is dropped from
 `--features fips` builds. `--features cnsa-sha2` switches the hash token
 (`sha3-384` → `sha384`) in every suite id.
+
+## Classification markings (advisory)
+
+The crypto is uniform and already maximal for **all** classification levels —
+CNSA 2.0 is single-tier (ML-KEM-1024 / ML-DSA-87 / AES-256) and approved up to
+TOP SECRET, so there is no per-level crypto. What talkrypt adds is optional
+**handling markings**: a per-channel classification level plus advisory SCI
+**compartments** and dissemination **caveats** (`TOP SECRET//SI//NOFORN`).
+
+- **Advisory, not a control.** A label never changes how strongly something is
+  protected. Its *integrity* is protected, though: a marking rides inside the
+  AEAD-encrypted payload (pairwise and group), so it is confidential and
+  tamper-evident. Compartment **access** is enforced by TreeKEM **group
+  membership** (being in the group = holding the key); the compartment name is
+  the advisory label for that boundary.
+- **Build-gated** (`--features markings`): off in consumer builds, on for the
+  intended audience. *Reading and displaying* a received marking always works
+  (a safety property); the feature gates *originating* one. `host
+  --classification secret --caveat NOFORN --compartment SI` marks a channel;
+  every build then shows `[SECRET//SI//NOFORN]` on those messages.

@@ -43,6 +43,8 @@ pub enum FfiEvent {
         from: String,
         channel: String,
         text: String,
+        /// Classification banner (e.g. "SECRET//NOFORN"), or empty if unmarked.
+        marking: String,
     },
     Connected {
         fingerprint: String,
@@ -65,10 +67,12 @@ fn map_event(e: Event) -> FfiEvent {
             from,
             channel,
             text,
+            marking,
         } => FfiEvent::Message {
             from: hex_fp(&from),
             channel,
             text,
+            marking: marking.map(|m| m.banner()).unwrap_or_default(),
         },
         Event::Connected { fingerprint } => FfiEvent::Connected {
             fingerprint: hex_fp(&fingerprint),

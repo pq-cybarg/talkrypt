@@ -12,9 +12,11 @@ pub mod descriptor;
 pub mod engine;
 pub mod error;
 pub mod handshake;
+pub mod marking;
 pub mod relay;
 
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
+pub use marking::{Classification, Marking};
 pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{Core, Event, GroupRole};
 pub use error::{CoreError, Result};

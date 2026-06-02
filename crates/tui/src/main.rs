@@ -162,8 +162,12 @@ async fn run(
         tokio::select! {
             ev = core_rx.recv() => {
                 match ev {
-                    Some(CoreEvent::Message { from, channel, text }) =>
-                        app.push(format!("{channel} {}> {text}", short_fp(&from))),
+                    Some(CoreEvent::Message { from, channel, text, marking }) => {
+                        let tag = marking
+                            .map(|m| format!("[{}] ", m.banner()))
+                            .unwrap_or_default();
+                        app.push(format!("{tag}{channel} {}> {text}", short_fp(&from)));
+                    }
                     Some(CoreEvent::Connected { fingerprint }) =>
                         app.push(format!("* peer connected: {}", short_fp(&fingerprint))),
                     Some(CoreEvent::Disconnected { fingerprint }) =>

@@ -30,6 +30,7 @@ use talkrypt_wire::{Reader, Writer};
 use crate::descriptor::ChatDescriptor;
 use crate::error::Result;
 use crate::handshake::{self, HandshakeResult};
+use crate::marking::{self, Marking};
 
 /// An event emitted by the engine for the UI to render.
 #[derive(Clone, Debug)]
@@ -41,6 +42,10 @@ pub enum Event {
         from: [u8; 48],
         channel: String,
         text: String,
+        /// Advisory classification marking carried (authenticated) with the
+        /// message, if any. Displayed by every build; only originated by builds
+        /// with the `markings` feature.
+        marking: Option<Marking>,
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
@@ -55,6 +60,7 @@ enum Frame {
     Chat {
         channel: String,
         text: String,
+        marking: Option<Marking>,
     },
     KeyPackage(Vec<u8>),
     Welcome(Vec<u8>),
@@ -72,10 +78,15 @@ impl Frame {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
-            Frame::Chat { channel, text } => {
+            Frame::Chat {
+                channel,
+                text,
+                marking,
+            } => {
                 w.put_u8(0);
                 w.put_bytes(channel.as_bytes());
                 w.put_bytes(text.as_bytes());
+                marking::put_opt(&mut w, marking);
             }
             Frame::KeyPackage(b) => {
                 w.put_u8(1);
@@ -112,6 +123,7 @@ impl Frame {
             0 => Frame::Chat {
                 channel: String::from_utf8(r.get_vec().ok()?).ok()?,
                 text: String::from_utf8(r.get_vec().ok()?).ok()?,
+                marking: marking::get_opt(&mut r).ok()?,
             },
             1 => Frame::KeyPackage(r.get_vec().ok()?),
             2 => Frame::Welcome(r.get_vec().ok()?),
@@ -245,6 +257,9 @@ struct Inner {
     /// In relayed mode, frames are wrapped in [`Routed`] and a non-member relay
     /// fans them out (the participant never fans out itself).
     relayed: bool,
+    /// Default marking applied to outgoing messages (from the channel policy in
+    /// the descriptor). `None` in consumer builds / unmarked chats.
+    default_marking: Option<Marking>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -318,6 +333,7 @@ impl Core {
         relayed: bool,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
         let root0 = descriptor.derive_root();
+        let default_marking = descriptor.channel_marking.clone();
         let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         // Group state uses the same KEM profile as the suite's pairwise
         // sessions, so TreeKEM node keys and ratchet keys agree posture + wire.
@@ -349,6 +365,7 @@ impl Core {
             roster: Mutex::new(roster),
             pending_commits: Mutex::new(BTreeMap::new()),
             relayed,
+            default_marking,
         });
         (Core { inner }, events_rx)
     }
@@ -516,21 +533,31 @@ impl Core {
     /// peer; in a group chat it is encrypted once under the group epoch and
     /// fanned out (the host relays to all members).
     pub async fn send(&self, text: &str) -> Result<()> {
+        self.send_marked(text, self.inner.default_marking.clone())
+            .await
+    }
+
+    /// Send `text` carrying an explicit (authenticated) classification marking.
+    /// The marking travels inside the AEAD-protected payload — confidential and
+    /// tamper-evident — for both pairwise and group messages.
+    pub async fn send_marked(&self, text: &str, marking: Option<Marking>) -> Result<()> {
         match self.inner.role {
             GroupRole::None => {
                 let frame = Frame::Chat {
                     channel: self.inner.descriptor.channel.clone(),
                     text: text.to_string(),
+                    marking,
                 };
                 for (session, writer, _) in collect_peers(&self.inner) {
                     let _ = send_payload(&session, &writer, &frame.encode()).await;
                 }
             }
             GroupRole::Host | GroupRole::Member => {
+                let payload = marking::encode_payload(&marking, text);
                 let frame = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
-                        Some(grp) => Frame::GroupMsg(grp.encrypt(text.as_bytes())?),
+                        Some(grp) => Frame::GroupMsg(grp.encrypt(&payload)?),
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
@@ -665,11 +692,16 @@ async fn reader_loop(
             (fingerprint, pt)
         };
         match Frame::decode(&frame_bytes) {
-            Some(Frame::Chat { channel, text }) => {
+            Some(Frame::Chat {
+                channel,
+                text,
+                marking,
+            }) => {
                 let _ = inner.events_tx.send(Event::Message {
                     from,
                     channel,
                     text,
+                    marking,
                 });
             }
             Some(Frame::KeyPackage(b)) if inner.role == GroupRole::Host => {
@@ -803,7 +835,7 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         g.as_mut().and_then(|grp| grp.decrypt(&gct).ok())
     };
     if let Some(pt) = opened {
-        if let Ok(text) = String::from_utf8(pt) {
+        if let Some((marking, text)) = marking::decode_payload(&pt) {
             // Attribute to the original sender via the roster (the `from` peer
             // may just be the relaying host), falling back to the relay peer.
             let sender = TreeKemGroup::sender_leaf(&gct)
@@ -813,6 +845,7 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
                 from: sender,
                 channel: inner.descriptor.channel.clone(),
                 text,
+                marking,
             });
         }
     }
@@ -1066,6 +1099,74 @@ mod tests {
 
         assert_eq!(alice.peer_count(), 1);
         assert_eq!(bob.peer_count(), 1);
+    }
+
+    /// A classification marking rides authenticated inside the message payload:
+    /// the receiver gets it on the `Message` event, for both pairwise and group.
+    #[tokio::test]
+    async fn marking_rides_with_messages_pairwise_and_group() {
+        use crate::marking::{Classification, Marking};
+        let secret = Marking {
+            level: Classification::Secret,
+            compartments: vec!["SI".into()],
+            caveats: vec!["NOFORN".into()],
+        };
+
+        // --- pairwise ---
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["bob".into()],
+            "#general",
+        );
+        let (bob, mut bob_rx) = core_on(&fabric, "bob", &desc);
+        let (alice, _a_rx) = core_on(&fabric, "alice", &desc);
+        bob.host().await.unwrap();
+        alice.connect("bob").await.unwrap();
+
+        alice.send_marked("classified", Some(secret.clone())).await.unwrap();
+        loop {
+            if let Event::Message { text, marking, .. } = next_event(&mut bob_rx).await {
+                assert_eq!(text, "classified");
+                assert_eq!(marking.unwrap().banner(), "SECRET//SI//NOFORN");
+                break;
+            }
+        }
+        // An unmarked send carries no marking.
+        alice.send("plain").await.unwrap();
+        loop {
+            if let Event::Message { text, marking, .. } = next_event(&mut bob_rx).await {
+                assert_eq!(text, "plain");
+                assert!(marking.is_none());
+                break;
+            }
+        }
+
+        // --- group (marking inside the group-epoch ciphertext) ---
+        let gfab = LoopbackFabric::new();
+        let gdesc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#g",
+        );
+        let (host, _h_rx) = group_core(&gfab, "host", &gdesc, true);
+        let (m1, mut m1_rx) = group_core(&gfab, "m1", &gdesc, false);
+        host.host().await.unwrap();
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        host.send_marked("group secret", Some(secret.clone())).await.unwrap();
+        loop {
+            if let Event::Message { text, marking, .. } = next_event(&mut m1_rx).await {
+                if text == "group secret" {
+                    assert_eq!(marking.unwrap().banner(), "SECRET//SI//NOFORN");
+                    break;
+                }
+            }
+        }
     }
 
     #[tokio::test]

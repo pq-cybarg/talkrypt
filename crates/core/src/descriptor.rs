@@ -87,6 +87,9 @@ pub struct ChatDescriptor {
     pub channel: String,
     /// Whether this is a TreeKEM group chat (host coordinates membership).
     pub group: bool,
+    /// Optional channel classification marking/policy (advisory). Present only
+    /// for marked channels; consumer builds leave it `None`.
+    pub channel_marking: Option<crate::marking::Marking>,
 }
 
 impl ChatDescriptor {
@@ -110,6 +113,7 @@ impl ChatDescriptor {
             invite_token,
             channel: channel.into(),
             group: false,
+            channel_marking: None,
         }
     }
 
@@ -165,6 +169,7 @@ impl ChatDescriptor {
         w.put_bytes(&self.invite_token);
         w.put_bytes(self.channel.as_bytes());
         w.put_u8(self.group as u8);
+        crate::marking::put_opt(&mut w, &self.channel_marking);
         w.into_vec()
     }
 
@@ -189,6 +194,7 @@ impl ChatDescriptor {
         let invite_token = r.get_vec()?;
         let channel = string(r.get_bytes()?)?;
         let group = r.get_u8()? != 0;
+        let channel_marking = crate::marking::get_opt(&mut r)?;
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -201,6 +207,7 @@ impl ChatDescriptor {
             invite_token,
             channel,
             group,
+            channel_marking,
         })
     }
 
@@ -328,10 +335,11 @@ mod kat {
             invite_token: vec![0u8; 32],
             channel: "#kat".to_string(),
             group: false,
+            channel_marking: None,
         };
         assert_eq!(
             d.to_uri(),
-            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaa"
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa"
         );
         // And it must round-trip back to the same descriptor.
         assert_eq!(ChatDescriptor::from_uri(&d.to_uri()).unwrap(), d);

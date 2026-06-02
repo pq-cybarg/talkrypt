@@ -15,8 +15,11 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use talkrypt_core::{
-    build_advertisement, AdvertisePolicy, ChatDescriptor, Core, Event, Persistence, TopologyKind,
+    build_advertisement, AdvertisePolicy, ChatDescriptor, Core, Event, Marking, Persistence,
+    TopologyKind,
 };
+#[cfg(feature = "markings")]
+use talkrypt_core::Classification;
 use talkrypt_crypto::{
     dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID,
 };
@@ -82,6 +85,18 @@ enum Cmd {
         /// host stores it as opaque ciphertext.
         #[arg(long, default_value = "off")]
         advertise: String,
+        /// Channel classification (requires the `markings` build): unclassified
+        /// | cui | confidential | secret | top-secret. Marks every message in
+        /// the channel (advisory; carried authenticated in the payload).
+        #[arg(long)]
+        classification: Option<String>,
+        /// Dissemination caveat, repeatable (e.g. NOFORN, ORCON, "REL TO USA").
+        #[arg(long = "caveat")]
+        caveats: Vec<String>,
+        /// SCI compartment label, repeatable (e.g. SI, TK). Access is enforced
+        /// by group membership; the label is advisory.
+        #[arg(long = "compartment")]
+        compartments: Vec<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -150,6 +165,59 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Build the channel marking from CLI flags. Gated by the `markings` feature:
+/// builds without it refuse marking flags (consumer build), builds with it
+/// (the intended audience) honor them.
+#[cfg(feature = "markings")]
+fn resolve_channel_marking(
+    classification: Option<String>,
+    caveats: Vec<String>,
+    compartments: Vec<String>,
+) -> Result<Option<Marking>, Box<dyn std::error::Error>> {
+    match classification {
+        Some(c) => {
+            let level = classification_from(&c).ok_or_else(|| {
+                format!("unknown classification {c:?} (unclassified|cui|confidential|secret|top-secret)")
+            })?;
+            Ok(Some(Marking {
+                level,
+                compartments,
+                caveats,
+            }))
+        }
+        None if !caveats.is_empty() || !compartments.is_empty() => {
+            Err("--caveat/--compartment require --classification".into())
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(not(feature = "markings"))]
+fn resolve_channel_marking(
+    classification: Option<String>,
+    caveats: Vec<String>,
+    compartments: Vec<String>,
+) -> Result<Option<Marking>, Box<dyn std::error::Error>> {
+    if classification.is_some() || !caveats.is_empty() || !compartments.is_empty() {
+        return Err("this build has classification markings disabled; \
+             rebuild with `--features markings` to originate them"
+            .into());
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "markings")]
+fn classification_from(s: &str) -> Option<Classification> {
+    match s.to_ascii_lowercase().as_str() {
+        "unclassified" | "u" => Some(Classification::Unclassified),
+        "cui" => Some(Classification::Cui),
+        "confidential" | "c" => Some(Classification::Confidential),
+        "secret" | "s" => Some(Classification::Secret),
+        "top-secret" | "topsecret" | "ts" => Some(Classification::TopSecret),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -174,16 +242,22 @@ async fn main() {
             posture,
             require_posture,
             advertise,
+            classification,
+            caveats,
+            compartments,
         } => {
-            run_host(
-                &listen,
-                &topology,
-                &channel,
+            run_host(HostArgs {
+                listen,
+                topology,
+                channel,
                 group,
-                posture.as_deref(),
+                posture,
                 require_posture,
-                &advertise,
-            )
+                advertise,
+                classification,
+                caveats,
+                compartments,
+            })
             .await
         }
         Cmd::Join { uri, group } => run_join(&uri, group).await,
@@ -299,20 +373,37 @@ async fn recv_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>) -> O
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_host(
-    listen: &str,
-    topology: &str,
-    channel: &str,
+/// Arguments for `host`, bundled to avoid a long positional signature.
+struct HostArgs {
+    listen: String,
+    topology: String,
+    channel: String,
     group: bool,
-    posture: Option<&str>,
+    posture: Option<String>,
     require_posture: bool,
-    advertise: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    advertise: String,
+    classification: Option<String>,
+    caveats: Vec<String>,
+    compartments: Vec<String>,
+}
+
+async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let HostArgs {
+        listen,
+        topology,
+        channel,
+        group,
+        posture,
+        require_posture,
+        advertise,
+        classification,
+        caveats,
+        compartments,
+    } = args;
     println!("{BANNER}\n");
-    let kind = topology_from(topology);
+    let kind = topology_from(&topology);
     // Mandatory-posture setting: refuse a silent default when required.
-    let profile = match posture {
+    let profile = match posture.as_deref() {
         Some(p) => posture_from(p)
             .ok_or_else(|| format!("unknown posture {p:?} (use pq-pure | hybrid | pq-pure-compact)"))?,
         None if require_posture => {
@@ -322,8 +413,9 @@ async fn run_host(
         }
         None => KemProfile::pq_pure(),
     };
-    let advertise_policy = advertise_from(advertise)
+    let advertise_policy = advertise_from(&advertise)
         .ok_or_else(|| format!("unknown --advertise {advertise:?} (use off | fingerprint | full)"))?;
+    let channel_marking = resolve_channel_marking(classification, caveats, compartments)?;
     let suite_id = dr_suite_id(profile);
     let suite = SuiteRegistry::with_defaults().get(&suite_id)?;
     println!(
@@ -336,7 +428,10 @@ async fn run_host(
             "ML-KEM-1024 only, zero EC; padded to be frame-indistinguishable from hybrid"
         }
     );
-    let transport = Arc::new(TcpTransport::new(listen));
+    if let Some(m) = &channel_marking {
+        println!("classification: {}  (advisory; carried authenticated in every message)", m.banner());
+    }
+    let transport = Arc::new(TcpTransport::new(&listen));
 
     // Advertise the configured bind address in the descriptor, including
     // whether this is a group chat (so joiners auto-detect from the invite).
@@ -345,9 +440,10 @@ async fn run_host(
         Persistence::Ephemeral,
         &suite_id,
         vec![listen.to_string()],
-        channel,
+        &channel,
     );
     desc.group = group;
+    desc.channel_marking = channel_marking;
     let (core, rx) = if group {
         Core::new_group(
             IdentityKeyPair::generate(),
@@ -459,8 +555,12 @@ async fn repl(
                     from,
                     channel,
                     text,
+                    marking,
                 } => {
-                    println!("\r{} {}> {}", channel, short_fp(&from), text);
+                    let tag = marking
+                        .map(|m| format!("[{}] ", m.banner()))
+                        .unwrap_or_default();
+                    println!("\r{tag}{} {}> {}", channel, short_fp(&from), text);
                 }
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));

@@ -45,7 +45,11 @@ KAT: `put_u32(0xDEADBEEF) = DE AD BE EF`; `put_bytes("hi") = 00 00 00 02 68 69`.
 
 `u32 version ‖ u8 topology ‖ u8 persistence ‖ bytes(suite_id) ‖
  bytes(suite_params) ‖ u32 n_endpoints ‖ (bytes(endpoint))* ‖
- bytes(invite_token) ‖ bytes(channel) ‖ u8 group`
+ bytes(invite_token) ‖ bytes(channel) ‖ u8 group ‖ opt(marking)`
+
+`opt(marking)` is `u8 present` then, if present, `bytes(marking)` where a
+marking is `u8 level ‖ u32 n_comp ‖ (bytes(compartment))* ‖ u32 n_cav ‖
+(bytes(caveat))*`. Absent (`00`) for unmarked/consumer chats.
 
 URI form: `talkrypt://` + lowercase RFC 4648 base32 (no padding) of the above.
 KAT (canonical descriptor): see `descriptor_uri_kat`.
