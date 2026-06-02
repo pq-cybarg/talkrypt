@@ -33,7 +33,8 @@ pub use identity::{IdentityKeyPair, IdentityPublic, FINGERPRINT_LEN};
 pub use noise::NoiseSession;
 pub use ratchet::{Session, MAX_SKIP};
 pub use suite::{
-    dr_suite_id, noise_suite_id, CryptoSuite, DoubleRatchetSuite, NoiseSuite, SecurityLevel,
-    SuiteDescriptor, SuiteRegistry, DEFAULT_SUITE_ID, NOISE_SUITE_ID,
+    dr_suite_id, noise_suite_id, scheme_hash, CryptoSuite, DoubleRatchetSuite, NoiseSuite,
+    SecurityLevel, SuiteDescriptor, SuiteRegistry, DEFAULT_SUITE_ID, NOISE_SUITE_ID,
+    SCHEME_HASH_LEN,
 };
 pub use treekem::{Commit, KeyPackage, LeafKeyPair, TreeKemGroup, Welcome};

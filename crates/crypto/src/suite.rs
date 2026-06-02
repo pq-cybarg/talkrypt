@@ -48,6 +48,26 @@ pub fn noise_suite_id(profile: KemProfile) -> String {
     format!("tk.noise.{}.aes256gcm.{}", kem_token(profile), HASH_TOKEN)
 }
 
+/// Length of a scheme fingerprint (SHA3-256).
+pub const SCHEME_HASH_LEN: usize = 32;
+
+/// Canonical **scheme fingerprint**: `SHA3-256(len(id) ‖ id ‖ len(params) ‖
+/// params)`. A "scheme" is a complete crypto construction — its suite id plus
+/// any opaque parameters. This fingerprint is how a chat's scheme is matched
+/// against a receiver's registered schemes, and the identifier carried in
+/// (always-encrypted) beacons. Length-prefixing prevents id/params boundary
+/// ambiguity. SHA3-256 is used regardless of the build's KDF hash, so the
+/// fingerprint is stable across `cnsa-sha2`.
+pub fn scheme_hash(suite_id: &str, params: &[u8]) -> [u8; SCHEME_HASH_LEN] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update((suite_id.len() as u32).to_be_bytes());
+    h.update(suite_id.as_bytes());
+    h.update((params.len() as u32).to_be_bytes());
+    h.update(params);
+    h.finalize().into()
+}
+
 /// Canonical id of the **default** suite: PQ-pure (zero EC), padded on the wire
 /// to be frame-length-indistinguishable from hybrid. Hybrid and compact-pure
 /// suites exist too — see [`dr_suite_id`] — but this is what a chat uses when
@@ -82,6 +102,13 @@ pub struct SuiteDescriptor {
     pub level: SecurityLevel,
     /// Opaque suite-defined parameters.
     pub params: Vec<u8>,
+}
+
+impl SuiteDescriptor {
+    /// This scheme's SHA3-256 fingerprint (see [`scheme_hash`]).
+    pub fn fingerprint(&self) -> [u8; SCHEME_HASH_LEN] {
+        scheme_hash(&self.id, &self.params)
+    }
 }
 
 /// A complete end-to-end crypto construction.
@@ -332,6 +359,24 @@ impl SuiteRegistry {
             .ok_or_else(|| CryptoError::UnknownSuite(id.to_string()))
     }
 
+    /// Look up a suite by its **scheme fingerprint** (SHA3-256). This is how a
+    /// receiver matches a chat's scheme — including a custom one they have
+    /// registered — to a local construction. Returns `UnknownSuite` (with the
+    /// hex fingerprint) if no registered scheme matches, which is exactly the
+    /// "receiver lacks a matching scheme, cannot participate" case.
+    pub fn get_by_scheme_hash(
+        &self,
+        hash: &[u8; SCHEME_HASH_LEN],
+    ) -> Result<Arc<dyn CryptoSuite>> {
+        for suite in self.suites.values() {
+            if &suite.descriptor().fingerprint() == hash {
+                return Ok(suite.clone());
+            }
+        }
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        Err(CryptoError::UnknownSuite(format!("scheme:{hex}")))
+    }
+
     /// Ids of all registered suites.
     pub fn ids(&self) -> Vec<String> {
         let mut v: Vec<String> = self.suites.keys().cloned().collect();
@@ -357,6 +402,48 @@ mod tests {
         assert!(reg.get(NOISE_SUITE_ID).is_ok());
         assert!(reg.ids().contains(&DEFAULT_SUITE_ID.to_string()));
         assert!(reg.ids().contains(&NOISE_SUITE_ID.to_string()));
+    }
+
+    #[test]
+    fn default_registry_includes_hybrid_and_pure_variants() {
+        // Hybrid must be available in every build; compact-pure too.
+        let reg = SuiteRegistry::with_defaults();
+        assert!(reg.get(&dr_suite_id(KemProfile::hybrid())).is_ok());
+        assert!(reg.get(&dr_suite_id(KemProfile::pq_pure())).is_ok());
+        assert!(reg.get(&dr_suite_id(KemProfile::pq_pure_compact())).is_ok());
+        // The default is PQ-pure (zero EC).
+        assert_eq!(DEFAULT_SUITE_ID, dr_suite_id(KemProfile::pq_pure()));
+        assert!(DEFAULT_SUITE_ID.contains("mlkem1024+pad"));
+        assert!(!DEFAULT_SUITE_ID.contains("x25519"));
+    }
+
+    #[test]
+    fn scheme_hash_is_stable_and_distinguishes_schemes() {
+        // Length-prefixing prevents id/params boundary collisions.
+        assert_eq!(scheme_hash("ab", b"c"), scheme_hash("ab", b"c"));
+        assert_ne!(scheme_hash("ab", b"c"), scheme_hash("abc", b""));
+        assert_ne!(scheme_hash("a", b"bc"), scheme_hash("ab", b"c"));
+    }
+
+    #[test]
+    fn lookup_by_scheme_hash_matches_registered_suite() {
+        let reg = SuiteRegistry::with_defaults();
+        let want = reg.get(DEFAULT_SUITE_ID).unwrap();
+        let fp = want.descriptor().fingerprint();
+        let got = reg.get_by_scheme_hash(&fp).unwrap();
+        assert_eq!(got.descriptor().id, want.descriptor().id);
+    }
+
+    #[test]
+    fn unknown_scheme_hash_is_rejected() {
+        // A scheme the receiver hasn't registered → cannot participate.
+        let reg = SuiteRegistry::with_defaults();
+        let bogus = [0xABu8; SCHEME_HASH_LEN];
+        match reg.get_by_scheme_hash(&bogus) {
+            Err(CryptoError::UnknownSuite(s)) => assert!(s.starts_with("scheme:")),
+            Err(e) => panic!("expected UnknownSuite, got error {e}"),
+            Ok(_) => panic!("expected UnknownSuite, got a suite"),
+        }
     }
 
     #[test]

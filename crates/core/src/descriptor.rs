@@ -113,16 +113,39 @@ impl ChatDescriptor {
         }
     }
 
+    /// The effective suite id: the stated one, or the protocol default
+    /// (PQ-pure) when the descriptor leaves it blank. Posture is **optional** in
+    /// an invite — a minimal/private invite need not state it; absent means the
+    /// fixed protocol default so two peers still agree (and nothing extra is
+    /// carried even in the private invite).
+    pub fn resolved_suite_id(&self) -> &str {
+        if self.suite_id.is_empty() {
+            talkrypt_crypto::DEFAULT_SUITE_ID
+        } else {
+            &self.suite_id
+        }
+    }
+
+    /// This chat's **scheme fingerprint** (SHA3-256 over the resolved suite id +
+    /// params). A receiver can only participate if it has a registered scheme
+    /// with this fingerprint. Also the value carried in (always-encrypted)
+    /// beacons.
+    pub fn scheme_hash(&self) -> [u8; talkrypt_crypto::SCHEME_HASH_LEN] {
+        talkrypt_crypto::scheme_hash(self.resolved_suite_id(), &self.suite_params)
+    }
+
     /// Derive the initial session root key from the invite token, bound to the
-    /// suite id. Both peers compute the same value.
+    /// resolved suite id. Both peers compute the same value — and because the
+    /// suite id encodes the KEM posture, a posture mismatch yields a different
+    /// root and the handshake fails closed.
     pub fn derive_root(&self) -> [u8; 32] {
-        // Keyed by the secret invite token; suite id as the domain label.
-        // KMAC256 under SHA-3, HKDF-HMAC-SHA384 under cnsa-sha2 (via mac_kdf).
+        // Keyed by the secret invite token; resolved suite id as the domain
+        // label. KMAC256 under SHA-3, HKDF-HMAC-SHA384 under cnsa-sha2.
         let mut out = [0u8; 32];
         talkrypt_crypto::kdf::mac_kdf(
             &self.invite_token,
             ROOT_SALT,
-            self.suite_id.as_bytes(),
+            self.resolved_suite_id().as_bytes(),
             &mut out,
         );
         out
@@ -241,6 +264,31 @@ mod tests {
     #[test]
     fn invite_token_is_32_bytes() {
         assert_eq!(sample().invite_token.len(), 32);
+    }
+
+    #[test]
+    fn blank_suite_id_resolves_to_default() {
+        let mut d = sample();
+        d.suite_id = String::new();
+        assert_eq!(d.resolved_suite_id(), talkrypt_crypto::DEFAULT_SUITE_ID);
+        // A blank-posture invite and an explicit-default invite derive the same
+        // root (so they interoperate) and share a scheme fingerprint.
+        let mut explicit = d.clone();
+        explicit.suite_id = talkrypt_crypto::DEFAULT_SUITE_ID.to_string();
+        assert_eq!(d.derive_root(), explicit.derive_root());
+        assert_eq!(d.scheme_hash(), explicit.scheme_hash());
+    }
+
+    #[test]
+    fn distinct_postures_have_distinct_scheme_hashes_and_roots() {
+        let mut hybrid = sample();
+        hybrid.suite_id = talkrypt_crypto::dr_suite_id(talkrypt_crypto::KemProfile::hybrid());
+        let mut pure = hybrid.clone();
+        pure.suite_id = talkrypt_crypto::dr_suite_id(talkrypt_crypto::KemProfile::pq_pure());
+        // Same invite token, different posture → different fingerprint and a
+        // different root, so a posture mismatch fails closed.
+        assert_ne!(hybrid.scheme_hash(), pure.scheme_hash());
+        assert_ne!(hybrid.derive_root(), pure.derive_root());
     }
 
     #[test]
