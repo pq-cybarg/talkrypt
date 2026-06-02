@@ -20,8 +20,9 @@ second, independent layer still stands.
 
 ```
             ┌─────────────────────────────────────────────┐
- plaintext  │  INNER LAYER  — E2E hybrid-PQ Double Ratchet  │  AES-256-GCM
-   ───────► │   keys: invite-token PSK + ML-KEM-1024+X25519 │  (RustCrypto / aws-lc-rs)
+ plaintext  │  INNER LAYER  — E2E PQ Double Ratchet          │  AES-256-GCM
+   ───────► │   keys: invite-token PSK + ML-KEM-1024         │  (RustCrypto / aws-lc-rs)
+            │   (posture: PQ-pure default, or +X25519 hybrid)│
             └───────────────────────┬─────────────────────-┘
                                     │ ciphertext only
             ┌───────────────────────▼─────────────────────-┐
@@ -37,9 +38,13 @@ second, independent layer still stands.
   common-mode failure, as CSfC intends.
 - **Independent keys:** inner keys (ratchet) and outer keys (onion/circuit)
   share no material. Breaking one layer's keys does not yield the other's.
-- **Each layer is individually sufficient for confidentiality:** even with Tor
-  fully broken, the inner PQ E2E layer protects message content; even if the
-  inner layer's classical half (X25519) were broken, ML-KEM-1024 holds.
+- **The two CSfC layers are inner-E2E vs. outer-Tor** — *not* the inner KEM's
+  pure-vs-hybrid choice. The inner posture (PQ-pure by default; `+X25519`
+  hybrid optionally) is intra-layer belt-and-suspenders; the CSfC second layer
+  is the outer onion. Each layer is individually sufficient for
+  confidentiality: with Tor fully broken the inner PQ E2E layer still protects
+  content, and the inner layer rests on ML-KEM-1024 against a quantum adversary
+  regardless of posture.
 
 ## Requirement mapping
 
@@ -64,7 +69,8 @@ Legend: ✅ done in code · ◐ partially / buildable · ❌ organizational, not
 *can* check and returns a structured report:
 
 - two distinct layers present (inner E2E + outer onion transport),
-- inner suite at the post-quantum-hybrid floor (no weak suite),
+- inner suite at the post-quantum floor — ML-KEM-1024, PQ-pure or hybrid (no
+  weak suite),
 - FIPS-validated AEAD backend active,
 - ephemeral or sealed-at-rest key handling.
 
@@ -77,5 +83,5 @@ operator sees the full picture rather than a false "compliant" stamp.
   to mirror "two layers each individually sufficient" *within* the E2E payload,
   independent of Tor.
 - A documented build/run **CSfC profile** that hard-fails unless `fips` is on,
-  the suite floor is post-quantum-hybrid, and the outer onion layer is active.
+  the suite floor is post-quantum, and the outer onion layer is active.
 - A written mapping to a specific Capability Package once a target CP is chosen.

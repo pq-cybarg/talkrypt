@@ -16,8 +16,11 @@ pub struct CsfcConfig {
     pub inner_e2e: bool,
     /// Outer independent transport layer present (Tor onion service).
     pub outer_onion: bool,
-    /// Inner suite meets the post-quantum-hybrid floor (no weak suite).
-    pub suite_is_pq_hybrid: bool,
+    /// Inner suite meets the post-quantum floor — ML-KEM-1024 based, whether
+    /// PQ-pure (the default) or hybrid; no weak suite. The pure-vs-hybrid choice
+    /// is an *intra-layer* posture, distinct from the CSfC two-layer
+    /// requirement (the outer onion is the second layer).
+    pub suite_is_post_quantum: bool,
     /// AEAD runs through a FIPS-validated module (`fips` feature).
     pub fips_backend: bool,
     /// Long-term keys are ephemeral or sealed at rest (never plaintext).
@@ -69,12 +72,15 @@ pub fn preflight(cfg: &CsfcConfig) -> PreflightReport {
         Criterion {
             name: "layer-independence",
             satisfied: cfg.inner_e2e && cfg.outer_onion,
-            detail: "inner and outer layers use independent implementations and keys",
+            detail: "inner E2E crypto and the outer Tor onion are independent \
+                     implementations and keys — this layering is the CSfC second \
+                     layer (not the inner hybrid's X25519 half)",
         },
         Criterion {
             name: "post-quantum-suite-floor",
-            satisfied: cfg.suite_is_pq_hybrid,
-            detail: "inner suite is hybrid PQ (ML-KEM-1024 + X25519); no weak suite",
+            satisfied: cfg.suite_is_post_quantum,
+            detail: "inner suite is post-quantum (ML-KEM-1024; PQ-pure default or \
+                     hybrid), CNSA-2.0-aligned; no weak suite",
         },
         Criterion {
             name: "fips-validated-aead",
@@ -109,7 +115,7 @@ pub fn recommended(fips_backend: bool) -> CsfcConfig {
     CsfcConfig {
         inner_e2e: true,
         outer_onion: true,
-        suite_is_pq_hybrid: true,
+        suite_is_post_quantum: true,
         fips_backend,
         keys_protected: true,
     }
@@ -150,7 +156,7 @@ mod tests {
     #[test]
     fn weak_suite_fails_floor() {
         let cfg = CsfcConfig {
-            suite_is_pq_hybrid: false,
+            suite_is_post_quantum: false,
             ..recommended(true)
         };
         assert!(preflight(&cfg)
