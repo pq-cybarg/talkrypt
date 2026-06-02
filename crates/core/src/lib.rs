@@ -5,6 +5,7 @@
 //! invite. Contains no I/O of its own beyond the transport trait, so the whole
 //! stack is testable over the in-memory loopback transport.
 
+pub mod advert;
 pub mod b32;
 pub mod csfc;
 pub mod descriptor;
@@ -13,6 +14,7 @@ pub mod error;
 pub mod handshake;
 pub mod relay;
 
+pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
 pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{Core, Event, GroupRole};
 pub use error::{CoreError, Result};

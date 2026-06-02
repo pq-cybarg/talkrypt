@@ -14,7 +14,9 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
+use talkrypt_core::{
+    build_advertisement, AdvertisePolicy, ChatDescriptor, Core, Event, Persistence, TopologyKind,
+};
 use talkrypt_crypto::{
     dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID,
 };
@@ -66,9 +68,20 @@ enum Cmd {
         group: bool,
         /// KEM posture: pq-pure (default, zero EC) | hybrid (ML-KEM+X25519
         /// defense-in-depth) | pq-pure-compact (pure, no wire padding, posture
-        /// visible to a relay by frame size).
-        #[arg(long, default_value = "pq-pure")]
-        posture: String,
+        /// visible to a relay by frame size). Omit to use the PQ-pure default
+        /// (unless --require-posture is set).
+        #[arg(long)]
+        posture: Option<String>,
+        /// Require an explicit --posture (no silent default). The chat's
+        /// "mandatory posture prompt" setting: refuse to create without a stated
+        /// posture.
+        #[arg(long)]
+        require_posture: bool,
+        /// Publish the chat's scheme at the server (opt-in; default off):
+        /// off | fingerprint | full. Sealed (PQ + AES-256-GCM); a pure directory
+        /// host stores it as opaque ciphertext.
+        #[arg(long, default_value = "off")]
+        advertise: String,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -122,6 +135,21 @@ fn posture_from(s: &str) -> Option<KemProfile> {
     }
 }
 
+/// Parse an `--advertise` value into a server-advertisement policy.
+fn advertise_from(s: &str) -> Option<AdvertisePolicy> {
+    match s.to_ascii_lowercase().as_str() {
+        "off" | "none" | "never" => Some(AdvertisePolicy::Off),
+        "fingerprint" | "hash" => Some(AdvertisePolicy::Fingerprint),
+        "full" => Some(AdvertisePolicy::Full),
+        _ => None,
+    }
+}
+
+/// Lowercase hex of a byte slice (for printing opaque advertisement blobs).
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -144,7 +172,20 @@ async fn main() {
             channel,
             group,
             posture,
-        } => run_host(&listen, &topology, &channel, group, &posture).await,
+            require_posture,
+            advertise,
+        } => {
+            run_host(
+                &listen,
+                &topology,
+                &channel,
+                group,
+                posture.as_deref(),
+                require_posture,
+                &advertise,
+            )
+            .await
+        }
         Cmd::Join { uri, group } => run_join(&uri, group).await,
     };
     if let Err(e) = result {
@@ -258,23 +299,35 @@ async fn recv_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>) -> O
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_host(
     listen: &str,
     topology: &str,
     channel: &str,
     group: bool,
-    posture: &str,
+    posture: Option<&str>,
+    require_posture: bool,
+    advertise: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let kind = topology_from(topology);
-    let profile = posture_from(posture).unwrap_or_else(|| {
-        eprintln!("warning: unknown posture {posture:?}; using pq-pure (default)");
-        KemProfile::pq_pure()
-    });
+    // Mandatory-posture setting: refuse a silent default when required.
+    let profile = match posture {
+        Some(p) => posture_from(p)
+            .ok_or_else(|| format!("unknown posture {p:?} (use pq-pure | hybrid | pq-pure-compact)"))?,
+        None if require_posture => {
+            return Err("this chat requires an explicit --posture \
+                 (pq-pure | hybrid | pq-pure-compact); none given"
+                .into());
+        }
+        None => KemProfile::pq_pure(),
+    };
+    let advertise_policy = advertise_from(advertise)
+        .ok_or_else(|| format!("unknown --advertise {advertise:?} (use off | fingerprint | full)"))?;
     let suite_id = dr_suite_id(profile);
     let suite = SuiteRegistry::with_defaults().get(&suite_id)?;
     println!(
-        "posture: {posture} ({suite_id})\n  {}",
+        "posture: {suite_id}\n  {}",
         if profile == KemProfile::hybrid() {
             "ML-KEM-1024 + X25519 (IETF defense-in-depth)"
         } else if profile == KemProfile::pq_pure_compact() {
@@ -318,6 +371,18 @@ async fn run_host(
     );
     println!("\nShare this invite (carries the channel + one-time invite token):\n");
     println!("  {}\n", desc.to_uri());
+
+    // Optional server advertisement: a sealed (PQ + AES-256-GCM) beacon a
+    // directory host can store as opaque ciphertext. Opt-in (default off).
+    if let Some(blob) = build_advertisement(&desc, advertise_policy)? {
+        println!(
+            "server advertisement ({}): sealed, {} bytes — publish at a directory host \
+             (opaque to anyone without the invite token):\n  {}\n",
+            advertise.to_ascii_lowercase(),
+            blob.len(),
+            hex(&blob)
+        );
+    }
     println!("waiting for peers — type a message + enter to send. /help for commands.\n");
 
     repl(core, rx).await
