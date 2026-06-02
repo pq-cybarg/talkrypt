@@ -16,9 +16,26 @@ KAT: `put_u32(0xDEADBEEF) = DE AD BE EF`; `put_bytes("hi") = 00 00 00 02 68 69`.
 
 ## Identity & keys
 
-- **Hybrid public key** `RatchetPublic`: `bytes(x25519_pub[32]) ‖ bytes(mlkem1024_ek[1568])` → **1608 bytes**.
-  KAT (`derive_deterministic([7;32])`, default SHA-3/KMAC256 build): SHA3-256 =
-  `3876ca2f820da022654cbefd2e47648a1d72ba25af704710baf16948cdd47895`.
+- **Ratchet public key** `RatchetPublic` — the wire format depends on the chat's
+  **KEM profile** (posture + wire padding), which both peers know from the suite
+  (it is bound into the root key via `suite_id`, so a mismatch fails closed). A
+  32-byte leading field (X25519 public for hybrid, filler for padded PQ-pure)
+  precedes the ML-KEM key; compact PQ-pure omits it. All KATs are
+  `derive_deterministic([7;32])`, default SHA-3/KMAC256 build, SHA3-256:
+
+  | Profile | Layout | Bytes | KAT digest |
+  |---|---|---|---|
+  | **Hybrid** (`mlkem1024+x25519`) | `bytes(x25519_pub[32]) ‖ bytes(mlkem1024_ek[1568])` | 1608 | `3876ca2f820da022654cbefd2e47648a1d72ba25af704710baf16948cdd47895` |
+  | **PQ-pure padded** (`mlkem1024+pad`, default) | `bytes(filler[32]) ‖ bytes(mlkem1024_ek[1568])` | 1608 | `f91a843ac8a0a8215c2495f6bb554a137ff80abf143ab92e43839161ba87ba84` |
+  | **PQ-pure compact** (`mlkem1024`) | `bytes(mlkem1024_ek[1568])` | 1572 | `bc405fa1e6ba0a8fb5b6829eed88424e4ee2a1cdbd9e10030d6beb20150cc1cb` |
+
+  Padded PQ-pure is **byte-length-identical** to hybrid; the `filler` is random
+  (or, for TreeKEM nodes, KMAC-derived from the node seed) with its high bit
+  cleared so it is **content-indistinguishable** from a real X25519 public
+  (which, as a u-coordinate `< 2^255−19`, always has that bit 0). The filler is
+  inert: it never enters key derivation (PQ-pure IKM is the ML-KEM secret
+  alone). This hides the posture from a relay that can only observe frame sizes.
+  Compact PQ-pure trades that indistinguishability for 36 fewer bytes.
 - **Identity public** (handshake): `bytes(ml_dsa87_vk) ‖ bytes(x25519_id[32])` —
   note: identity authentication is ML-DSA-87 only; there is no X25519 identity
   key (the field is reserved/zero in current builds).
