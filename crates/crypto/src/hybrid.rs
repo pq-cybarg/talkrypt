@@ -13,14 +13,12 @@
 //! primitive is unbroken — so a future break of X25519 does not retroactively
 //! expose traffic, and ML-KEM covers harvest-now-decrypt-later.
 
-use hkdf::Hkdf;
 use ml_kem::kem::{Decapsulate, Encapsulate};
 use ml_kem::{Encoded, EncodedSizeUser, KemCore, MlKem1024, B32};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::error::{CryptoError, Result};
-use crate::hash::Hash;
 
 type KemEk = <MlKem1024 as KemCore>::EncapsulationKey;
 type KemDk = <MlKem1024 as KemCore>::DecapsulationKey;
@@ -63,14 +61,13 @@ impl RatchetSecret {
     /// Deterministically derive a hybrid ratchet key from a 32-byte secret.
     ///
     /// Used by TreeKEM, where a node's key pair must be reproducible from the
-    /// node secret. The seed is HKDF-expanded into the X25519 secret and the
-    /// ML-KEM `(d, z)` generation seeds, so the same secret always yields the
-    /// same key pair.
+    /// node secret. The seed is expanded (KMAC256 under SHA-3, HKDF-SHA384
+    /// under cnsa-sha2, via `mac_kdf`) into the X25519 secret and the ML-KEM
+    /// `(d, z)` generation seeds, so the same secret always yields the same
+    /// key pair.
     pub fn derive_deterministic(seed: &[u8; 32]) -> (RatchetSecret, RatchetPublic) {
-        let hk = Hkdf::<Hash>::new(None, seed);
         let mut okm = [0u8; 96];
-        hk.expand(b"talkrypt-treekem-node", &mut okm)
-            .expect("hkdf expand node key");
+        crate::kdf::mac_kdf(seed, &[], b"talkrypt-treekem-node", &mut okm);
         let mut x_bytes = [0u8; 32];
         x_bytes.copy_from_slice(&okm[..32]);
         let d = B32::try_from(&okm[32..64]).expect("32");
@@ -201,7 +198,7 @@ mod kat {
         let digest = Sha3_256::digest(&enc);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex, "6cd0127130e7319190f97f7d904ff68966f3c2cbc3d1a1dfa4e69f93563ed58b",
+            hex, "3876ca2f820da022654cbefd2e47648a1d72ba25af704710baf16948cdd47895",
             "hybrid public-key KAT digest (talkrypt-mlspq wire v1)"
         );
     }

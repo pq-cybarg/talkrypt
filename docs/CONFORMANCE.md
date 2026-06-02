@@ -19,15 +19,30 @@ MLS key-derivation hierarchy** — tree math → key schedule → secret tree �
 per-message keys — is working and validated against official vectors, **not**
 deferred.
 
-## What remains for full protocol conformance
+## PQ-only signature + HPKE layers (talkrypt-KAT validated)
 
-The standards-track *wire/message* layers build on the proven key hierarchy
-above and are the next increment: **message-protection** framing
-(`MLSMessage`/`FramedContent`, Ed25519 sign/verify, AES-128-GCM AEAD),
-**Welcome**/`GroupInfo`/`GroupSecrets` (HPKE DHKEM-X25519), the TreeKEM
-**update-path** under the RFC ciphersuite, and an **interop** run against
-another implementation. Each has an official vector file to validate against the
-same way.
+The signature and public-key-encryption layers are implemented **post-quantum,
+with zero elliptic curve** — a deliberate divergence from RFC 9420's classical
+ciphersuites (which use Ed25519 + X25519). There are no official PQ-MLS vectors,
+so these are validated by talkrypt KATs:
+
+| Component | Primitive | Status |
+|---|---|---|
+| `SignWithLabel` / `VerifyWithLabel` | **ML-DSA-87** (FIPS 204) | ✅ KAT (deterministic) + roundtrip/tamper |
+| `EncryptWithLabel` / `DecryptWithLabel` (Welcome) | **ML-KEM-1024** HPKE + HKDF-SHA3 + AES-256-GCM | ✅ roundtrip + negative tests |
+
+This is the project's stance: **post-quantum over classical-vector interop**.
+Because the signature/KEM are PQ (not Ed25519/X25519), this MLS does not
+interoperate byte-for-byte with classical MLS — by design.
+
+## What remains
+
+The remaining standards-track *wire/message framing* (`MLSMessage` /
+`FramedContent` / `AuthenticatedContent` assembly, the `GroupInfo`/`GroupSecrets`
+Welcome container, and the TreeKEM update-path tied into this key schedule) is
+the next increment, built on the proven hierarchy above with the PQ primitives.
+Classical-vector interop is explicitly out of scope (it would require the EC
+ciphersuite this project rejects).
 
 ## Note on the PQ group (`treekem.rs`)
 

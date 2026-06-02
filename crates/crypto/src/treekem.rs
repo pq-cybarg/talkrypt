@@ -29,12 +29,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use hkdf::Hkdf;
 use rand::RngCore;
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
-use crate::hash::Hash;
 use crate::hybrid::{RatchetPublic, RatchetSecret};
 use crate::kdf::{kdf_ck, kdf_mk};
 use crate::ratchet::MAX_SKIP;
@@ -718,18 +716,19 @@ fn derive_commit_secret(root: &Secret) -> Secret {
     expand(root, b"talkrypt-treekem-commit")
 }
 fn expand(secret: &Secret, label: &[u8]) -> Secret {
-    let hk = Hkdf::<Hash>::new(None, secret);
     let mut out = [0u8; 32];
-    hk.expand(label, &mut out).expect("hkdf expand");
+    crate::kdf::mac_kdf(secret, &[], label, &mut out);
     out
 }
 
 fn sender_chain(epoch_secret: &Secret, leaf: u32) -> Secret {
-    let hk = Hkdf::<Hash>::new(None, epoch_secret);
     let mut out = [0u8; 32];
-    let mut info = b"talkrypt-treekem-sender".to_vec();
-    info.extend_from_slice(&leaf.to_be_bytes());
-    hk.expand(&info, &mut out).expect("hkdf sender chain");
+    crate::kdf::mac_kdf(
+        epoch_secret,
+        &leaf.to_be_bytes(),
+        b"talkrypt-treekem-sender",
+        &mut out,
+    );
     out
 }
 
@@ -819,8 +818,6 @@ mod tests {
         assert_eq!(a.group_secret(), b.group_secret());
         assert_eq!(a.group_secret(), c.group_secret());
 
-        let mut a = a;
-        let mut b = b;
         let mut c = c;
         let m = a.encrypt(b"hi group").unwrap();
         assert_eq!(b.decrypt(&m).unwrap(), b"hi group");
@@ -902,7 +899,6 @@ mod tests {
         assert!(a.capacity >= 4);
         assert_eq!(a.group_secret(), c.group_secret());
         // Add a 4th, still converging.
-        let mut b = b;
         let mut c = c;
         let d = add_member(&mut a, &mut [&mut b, &mut c]);
         assert_eq!(a.group_secret(), d.group_secret());

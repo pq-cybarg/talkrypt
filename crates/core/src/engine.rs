@@ -1088,9 +1088,10 @@ mod tests {
         // Bob should NOT surface a Message; he gets a decrypt Error instead.
         let mut saw_message = false;
         for _ in 0..3 {
-            match timeout(Duration::from_millis(300), bob_rx.recv()).await {
-                Ok(Some(Event::Message { .. })) => saw_message = true,
-                _ => {}
+            if let Ok(Some(Event::Message { .. })) =
+                timeout(Duration::from_millis(300), bob_rx.recv()).await
+            {
+                saw_message = true;
             }
         }
         assert!(

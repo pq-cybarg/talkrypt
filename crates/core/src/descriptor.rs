@@ -8,9 +8,7 @@
 //! The invite token is the initial shared secret from which the session root
 //! key is derived, so only descriptor holders can complete a handshake.
 
-use hkdf::Hkdf;
 use rand::RngCore;
-use talkrypt_crypto::hash::Hash;
 
 use crate::b32;
 use crate::error::{CoreError, Result};
@@ -118,10 +116,15 @@ impl ChatDescriptor {
     /// Derive the initial session root key from the invite token, bound to the
     /// suite id. Both peers compute the same value.
     pub fn derive_root(&self) -> [u8; 32] {
-        let hk = Hkdf::<Hash>::new(Some(ROOT_SALT), &self.invite_token);
+        // Keyed by the secret invite token; suite id as the domain label.
+        // KMAC256 under SHA-3, HKDF-HMAC-SHA384 under cnsa-sha2 (via mac_kdf).
         let mut out = [0u8; 32];
-        hk.expand(self.suite_id.as_bytes(), &mut out)
-            .expect("hkdf root expand");
+        talkrypt_crypto::kdf::mac_kdf(
+            &self.invite_token,
+            ROOT_SALT,
+            self.suite_id.as_bytes(),
+            &mut out,
+        );
         out
     }
 

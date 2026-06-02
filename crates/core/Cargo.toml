@@ -11,7 +11,6 @@ talkrypt-transport.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
-hkdf.workspace = true
 rand.workspace = true
 
 [dev-dependencies]

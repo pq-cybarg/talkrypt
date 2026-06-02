@@ -420,12 +420,10 @@ mod tests {
         #[test]
         fn prop_arbitrary_direction_schedule(dirs in prop::collection::vec(any::<bool>(), 0..24)) {
             let (mut alice, mut bob) = pair();
-            let mut counter: u32 = 0u32;
             let mut bob_can_send = false;
-            for want_alice in dirs {
+            for (counter, want_alice) in dirs.into_iter().enumerate() {
                 let send_from_alice = want_alice || !bob_can_send;
                 let msg = format!("msg-{counter}");
-                counter += 1;
                 if send_from_alice {
                     let ct = alice.encrypt(msg.as_bytes()).unwrap();
                     prop_assert_eq!(bob.decrypt(&ct).unwrap(), msg.as_bytes());

@@ -12,6 +12,7 @@ rand_core.workspace = true
 sha2.workspace = true
 sha3.workspace = true
 hkdf.workspace = true
+tiny-keccak.workspace = true
 aes-gcm.workspace = true
 x25519-dalek.workspace = true
 ml-kem.workspace = true

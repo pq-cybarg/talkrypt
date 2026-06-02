@@ -17,8 +17,8 @@ KAT: `put_u32(0xDEADBEEF) = DE AD BE EF`; `put_bytes("hi") = 00 00 00 02 68 69`.
 ## Identity & keys
 
 - **Hybrid public key** `RatchetPublic`: `bytes(x25519_pub[32]) ‖ bytes(mlkem1024_ek[1568])` → **1608 bytes**.
-  KAT (`derive_deterministic([7;32])`): SHA3-256 =
-  `6cd0127130e7319190f97f7d904ff68966f3c2cbc3d1a1dfa4e69f93563ed58b`.
+  KAT (`derive_deterministic([7;32])`, default SHA-3/KMAC256 build): SHA3-256 =
+  `3876ca2f820da022654cbefd2e47648a1d72ba25af704710baf16948cdd47895`.
 - **Identity public** (handshake): `bytes(ml_dsa87_vk) ‖ bytes(x25519_id[32])` —
   note: identity authentication is ML-DSA-87 only; there is no X25519 identity
   key (the field is reserved/zero in current builds).

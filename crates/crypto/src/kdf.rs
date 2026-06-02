@@ -1,19 +1,21 @@
-//! HKDF key-derivation helpers for the Double Ratchet.
+//! Key-derivation helpers for the ratchet and the rest of talkrypt's native
+//! crypto.
 //!
-//! Three domains, each with a distinct `info` label so outputs are
+//! Three domains, each with a distinct customization label so outputs are
 //! cryptographically separated:
 //!   * `kdf_rk` — root-key step: (new_root, chain_key) from (root, hybrid_ss)
 //!   * `kdf_ck` — symmetric chain step: (next_chain_key, message_key_seed)
 //!   * `kdf_mk` — message-key expansion: (aead_key, aead_nonce)
 //!
-//! The underlying hash is [`crate::hash::Hash`] — SHA3-384 by default (Keccak,
-//! matching ML-KEM/ML-DSA), or SHA-384 under the `cnsa-sha2` feature. Both give
-//! a 48-byte PRK, ample for the 32-byte key and 12-byte nonce outputs.
+//! **MAC construction.** The default (SHA-3) build uses **KMAC256** (NIST
+//! SP 800-185) — the Keccak-native keyed function — rather than HMAC layered
+//! over SHA-3, which is the right primitive when the hash family is Keccak.
+//! Under the `cnsa-sha2` feature the family is SHA-2, where HMAC is the correct
+//! construction, so it uses HKDF-HMAC-SHA384. The single [`mac_kdf`] primitive
+//! abstracts both. (The RFC 9420 MLS modules deliberately keep HKDF-SHA256, as
+//! that is mandated for conformance with the official MLS test vectors.)
 
-use hkdf::Hkdf;
 use zeroize::Zeroize;
-
-use crate::hash::Hash;
 
 /// 32-byte symmetric key material (AES-256 key, chain key, root key).
 pub const KEY_LEN: usize = 32;
@@ -24,13 +26,32 @@ const INFO_RK: &[u8] = b"talkrypt/v1/rk";
 const INFO_CK: &[u8] = b"talkrypt/v1/ck";
 const INFO_MK: &[u8] = b"talkrypt/v1/mk";
 
-/// Root-key ratchet step. `salt` is the current root key; `ikm` is the fresh
-/// hybrid shared secret from a DH+KEM step. Returns `(new_root, chain_key)`.
+/// Keyed KDF over `(key, msg)` with domain-separation `label`, filling `out`.
+///
+/// Default (SHA-3): **KMAC256** with `label` as the customization string.
+/// `cnsa-sha2`: HKDF-HMAC-SHA384 (Extract(`key` as salt, `msg`) then
+/// Expand(`label`)), which tolerates short keys.
+#[cfg(not(feature = "cnsa-sha2"))]
+pub fn mac_kdf(key: &[u8], msg: &[u8], label: &[u8], out: &mut [u8]) {
+    use tiny_keccak::{Hasher, Kmac};
+    let mut k = Kmac::v256(key, label);
+    k.update(msg);
+    k.finalize(out);
+}
+
+#[cfg(feature = "cnsa-sha2")]
+pub fn mac_kdf(key: &[u8], msg: &[u8], label: &[u8], out: &mut [u8]) {
+    use hkdf::Hkdf;
+    use sha2::Sha384;
+    let hk = Hkdf::<Sha384>::new(Some(key), msg);
+    hk.expand(label, out).expect("hkdf expand");
+}
+
+/// Root-key ratchet step. `root` keys the KDF; `ikm` is the fresh hybrid
+/// shared secret from a DH+KEM step. Returns `(new_root, chain_key)`.
 pub fn kdf_rk(root: &[u8; KEY_LEN], ikm: &[u8]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
-    let hk = Hkdf::<Hash>::new(Some(root), ikm);
     let mut out = [0u8; KEY_LEN * 2];
-    // HKDF-Expand with our label. Length (64) is well under SHA-384's limit.
-    hk.expand(INFO_RK, &mut out).expect("hkdf expand rk");
+    mac_kdf(root, ikm, INFO_RK, &mut out);
     let mut new_root = [0u8; KEY_LEN];
     let mut chain = [0u8; KEY_LEN];
     new_root.copy_from_slice(&out[..KEY_LEN]);
@@ -41,23 +62,17 @@ pub fn kdf_rk(root: &[u8; KEY_LEN], ikm: &[u8]) -> ([u8; KEY_LEN], [u8; KEY_LEN]
 
 /// Symmetric chain-key step. Returns `(next_chain_key, message_key_seed)`.
 pub fn kdf_ck(chain: &[u8; KEY_LEN]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
-    // Use the chain key as IKM with an empty salt; distinct labels separate
-    // the next-chain output from the message-key-seed output.
-    let hk = Hkdf::<Hash>::new(None, chain);
     let mut next = [0u8; KEY_LEN];
     let mut mk_seed = [0u8; KEY_LEN];
-    hk.expand(&[INFO_CK, b"/next"].concat(), &mut next)
-        .expect("hkdf expand ck/next");
-    hk.expand(&[INFO_CK, b"/mk"].concat(), &mut mk_seed)
-        .expect("hkdf expand ck/mk");
+    mac_kdf(chain, &[], &[INFO_CK, b"/next"].concat(), &mut next);
+    mac_kdf(chain, &[], &[INFO_CK, b"/mk"].concat(), &mut mk_seed);
     (next, mk_seed)
 }
 
 /// Expand a message-key seed into an AEAD `(key, nonce)` pair.
 pub fn kdf_mk(mk_seed: &[u8; KEY_LEN]) -> ([u8; KEY_LEN], [u8; NONCE_LEN]) {
-    let hk = Hkdf::<Hash>::new(None, mk_seed);
     let mut okm = [0u8; KEY_LEN + NONCE_LEN];
-    hk.expand(INFO_MK, &mut okm).expect("hkdf expand mk");
+    mac_kdf(mk_seed, &[], INFO_MK, &mut okm);
     let mut key = [0u8; KEY_LEN];
     let mut nonce = [0u8; NONCE_LEN];
     key.copy_from_slice(&okm[..KEY_LEN]);
