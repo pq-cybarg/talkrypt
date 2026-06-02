@@ -23,10 +23,12 @@ use talkrypt_transport::{LoopbackFabric, TcpTransport};
 
 const BANNER: &str = "\
 talkrypt 0.1.0 — PQ end-to-end encrypted chat over Tor (Arti)
-Crypto: ML-KEM-1024 (PQ) + X25519 hybrid KEM, ML-DSA-87 auth, AES-256-GCM,
-        SHA3-384/HKDF. Double Ratchet (forward secrecy + post-compromise).
-        Identity & authentication are pure post-quantum (ML-DSA-87); X25519 is
-        only the defense-in-depth half of the hybrid KEM — never load-bearing.
+Crypto: ML-KEM-1024 (PQ) KEM, ML-DSA-87 auth, AES-256-GCM, KMAC256/SHA3.
+        Double Ratchet (forward secrecy + post-compromise).
+        Default posture is PQ-pure (zero elliptic curve), padded to be
+        frame-indistinguishable from hybrid. `--posture hybrid` adds X25519
+        defense-in-depth (non-load-bearing); identity/auth are pure PQ either
+        way (ML-DSA-87). EC is never load-bearing.
 
 HONESTY: PQ algorithms aligned with CNSA 2.0 (hash defaults to SHA3/FIPS-202;
          build with `cnsa-sha2` for strict CNSA SHA-384). CSfC architecture-
