@@ -15,7 +15,9 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
-use talkrypt_crypto::{IdentityKeyPair, SuiteRegistry, DEFAULT_SUITE_ID};
+use talkrypt_crypto::{
+    dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID,
+};
 use talkrypt_topology::for_kind;
 use talkrypt_transport::{LoopbackFabric, TcpTransport};
 
@@ -60,6 +62,11 @@ enum Cmd {
         /// Found a TreeKEM group chat (this node is the coordinator/relay).
         #[arg(long)]
         group: bool,
+        /// KEM posture: pq-pure (default, zero EC) | hybrid (ML-KEM+X25519
+        /// defense-in-depth) | pq-pure-compact (pure, no wire padding, posture
+        /// visible to a relay by frame size).
+        #[arg(long, default_value = "pq-pure")]
+        posture: String,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -102,6 +109,17 @@ fn fmt_topology(t: TopologyKind) -> &'static str {
     }
 }
 
+/// Parse a `--posture` value into a KEM profile. Unknown values fall back to the
+/// PQ-pure default with a warning printed by the caller.
+fn posture_from(s: &str) -> Option<KemProfile> {
+    match s.to_ascii_lowercase().as_str() {
+        "pq-pure" | "pqpure" | "pure" => Some(KemProfile::pq_pure()),
+        "hybrid" => Some(KemProfile::hybrid()),
+        "pq-pure-compact" | "compact" => Some(KemProfile::pq_pure_compact()),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -123,7 +141,8 @@ async fn main() {
             topology,
             channel,
             group,
-        } => run_host(&listen, &topology, &channel, group).await,
+            posture,
+        } => run_host(&listen, &topology, &channel, group, &posture).await,
         Cmd::Join { uri, group } => run_join(&uri, group).await,
     };
     if let Err(e) = result {
@@ -242,10 +261,26 @@ async fn run_host(
     topology: &str,
     channel: &str,
     group: bool,
+    posture: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let kind = topology_from(topology);
-    let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
+    let profile = posture_from(posture).unwrap_or_else(|| {
+        eprintln!("warning: unknown posture {posture:?}; using pq-pure (default)");
+        KemProfile::pq_pure()
+    });
+    let suite_id = dr_suite_id(profile);
+    let suite = SuiteRegistry::with_defaults().get(&suite_id)?;
+    println!(
+        "posture: {posture} ({suite_id})\n  {}",
+        if profile == KemProfile::hybrid() {
+            "ML-KEM-1024 + X25519 (IETF defense-in-depth)"
+        } else if profile == KemProfile::pq_pure_compact() {
+            "ML-KEM-1024 only, no wire padding — posture visible to a relay by frame size"
+        } else {
+            "ML-KEM-1024 only, zero EC; padded to be frame-indistinguishable from hybrid"
+        }
+    );
     let transport = Arc::new(TcpTransport::new(listen));
 
     // Advertise the configured bind address in the descriptor, including
@@ -253,7 +288,7 @@ async fn run_host(
     let mut desc = ChatDescriptor::new(
         kind,
         Persistence::Ephemeral,
-        DEFAULT_SUITE_ID,
+        &suite_id,
         vec![listen.to_string()],
         channel,
     );
@@ -289,15 +324,18 @@ async fn run_host(
 async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let desc = ChatDescriptor::from_uri(uri)?;
-    if desc.suite_id != DEFAULT_SUITE_ID {
-        return Err(format!(
-            "this chat uses crypto suite '{}', which this build does not have enabled; \
-             enable that suite to join",
-            desc.suite_id
+    // Resolve the chat's scheme by its fingerprint — this is the "receiver must
+    // have a matching registered scheme to participate" check. A blank posture
+    // in the invite resolves to the PQ-pure default.
+    let reg = SuiteRegistry::with_defaults();
+    let suite = reg.get_by_scheme_hash(&desc.scheme_hash()).map_err(|_| {
+        format!(
+            "this chat's crypto scheme '{}' is not registered in this build; \
+             add a matching scheme to join",
+            desc.resolved_suite_id()
         )
-        .into());
-    }
-    let suite = SuiteRegistry::with_defaults().get(&desc.suite_id)?;
+    })?;
+    println!("scheme: {}", desc.resolved_suite_id());
     let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
     // The invite descriptor declares group mode; --group can also force it.
     let want_group = group || desc.group;
