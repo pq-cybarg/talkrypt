@@ -14,6 +14,7 @@
 //! APIs route through a validated backend.
 
 pub mod aead;
+pub mod beacon;
 pub mod error;
 pub mod group;
 pub mod hash;
@@ -26,6 +27,7 @@ pub mod ratchet;
 pub mod suite;
 pub mod treekem;
 
+pub use beacon::BeaconBody;
 pub use error::{CryptoError, Result};
 pub use group::{GroupSession, MemberId};
 pub use hybrid::{KemPosture, KemProfile};
