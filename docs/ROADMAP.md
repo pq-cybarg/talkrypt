@@ -47,6 +47,23 @@ Architectures: **amd64, arm64, armv7** (#532).
 - **GrapheneOS** — covered under Android (#297); benefits from stricter
   sandboxing. TRNG / StrongBox entropy source surfaced separately in #409.
 
+**Status / test hardware.** The Rust core (`wire`, `crypto`, `core`) already
+**cross-compiles to `aarch64-linux-android`** today (verified). The remaining
+mobile work is the on-device hardware-keystore bridge (Kotlin/JNI over Android
+Keystore / StrongBox) + the APK, which needs the Android SDK/NDK/Gradle and a
+device.
+
+Real devices are available for **on-hardware** validation (the only faithful way
+to test StrongBox — emulators expose software Keymaster only): a **Solana
+Seeker** (Seed Vault hardware-backed secure element → maps to the
+`HardwareBacked` custody tier and is relevant to the #409 TRNG/StrongBox source)
+and a **Galaxy A23** (Android Keystore; StrongBox iff the model/chipset provides
+a secure element). The app must **not assume** a tier: it queries
+`KeyInfo.isInsideSecureHardware()` / StrongBox availability at runtime and
+reports the actual `CustodyTier` it achieved, which the #305 parity audit then
+consumes. So a device that lacks StrongBox honestly reports `OsKeystore` (TEE
+Keystore) rather than overclaiming `HardwareBacked`.
+
 ## Radio / IoT class
 
 - **#298 APP-STREAM-IOT** — single-channel radio/IoT clients (LoRa / Meshtastic /
