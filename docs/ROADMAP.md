@@ -129,11 +129,15 @@ implementation — flagged here rather than silently adopted:
    an owner-only Unix socket (macOS/Linux; `chmod 0600` in a `0700` dir) and
    performs only IPC + custody: sealing via `talkrypt_server::keystore`
    (Argon2id + AES-256-GCM), identities via `talkrypt_crypto::IdentityKeyPair`
-   (ML-DSA-87), invite parsing via `talkrypt_core::ChatDescriptor`. The Windows
-   Named-Pipe transport is **deliberately gated off** until it carries an SDDL
-   ACL bound to the current SID (a default-DACL pipe is connectable by any local
-   user) — the helper refuses to expose an under-protected pipe rather than ship
-   an insecure default. Tested end-to-end over a real Unix socket.
+   (ML-DSA-87), invite parsing via `talkrypt_core::ChatDescriptor`. Tested
+   end-to-end over a real Unix socket. The **Windows Named-Pipe transport is now
+   implemented** (`winpipe`): the pipe is created via raw `CreateNamedPipeW`
+   with a security descriptor from an **SDDL ACL bound to the current SID +
+   SYSTEM** (so it is *not* the insecure default-DACL pipe), then wrapped into a
+   tokio `NamedPipeServer`. The SDDL construction is unit-tested cross-platform
+   and the Windows FFI **cross-compiles** for `x86_64-pc-windows-gnu`; the ACL's
+   *enforcement* still needs **real-Windows validation** (Wine doesn't faithfully
+   enforce security descriptors — it's a functional smoke test only).
 2. **Custody tiers / key-custody. → FOUNDATION IN PLACE.** A `CustodyTier`
    model now exists (`talkrypt_helper::custody`): `SoftwareSealed <
    OsKeystore < HardwareBacked`, ordered, with a `Capabilities` protocol op so

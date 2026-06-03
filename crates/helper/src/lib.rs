@@ -24,8 +24,11 @@ pub mod frame;
 pub mod keychain;
 pub mod parity;
 pub mod protocol;
+pub mod sddl;
 pub mod server;
 pub mod store;
+#[cfg(windows)]
+pub mod winpipe;
 
 pub use client::Client;
 pub use custody::{Capabilities, CustodyTier};

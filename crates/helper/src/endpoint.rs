@@ -6,11 +6,11 @@
 //! directory and `chmod 0600`; on Windows it must carry an SDDL ACL restricting
 //! access to the current user's SID (see the Windows note below).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::path::Path;
 
 use crate::error::Result;
-#[cfg(windows)]
-use crate::error::HelperError;
 
 /// Default base directory for the helper's runtime + stored keys.
 pub fn default_base_dir() -> PathBuf {
@@ -79,34 +79,22 @@ mod imp {
 #[cfg(unix)]
 pub use imp::{bind, connect};
 
-// ----- Windows -----
+// ----- Windows: Named Pipe with an SDDL ACL bound to the current SID -----
 //
-// The Named-Pipe path is intentionally NOT enabled yet. A default-DACL named
-// pipe is connectable by any local user, which would expose key custody to
-// other accounts. Enabling it requires building the pipe with an explicit SDDL
-// ACL bound to the current user's SID (via `windows-sys`
-// `Win32::Security`). Until that hardening lands, the helper refuses to expose
-// an under-protected pipe rather than ship an insecure default.
+// See `winpipe`. The pipe is created with a security descriptor granting access
+// only to the current user's SID + SYSTEM, so it is NOT the insecure default
+// pipe. The ACL's *enforcement* must still be validated on real Windows (Wine
+// does not faithfully enforce security descriptors).
 #[cfg(windows)]
-pub fn default_pipe_name() -> String {
-    // The real name must be suffixed with the current user's SID (see note).
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-    format!(r"\\.\pipe\talkrypt-helper-{user}")
+pub fn default_pipe_name() -> Result<String> {
+    Ok(crate::sddl::pipe_name_for_sid(&crate::winpipe::current_user_sid()?))
 }
 
 #[cfg(windows)]
-pub async fn bind(_path: &Path) -> Result<std::convert::Infallible> {
-    Err(HelperError::Unsupported(
-        "Windows Named-Pipe transport pending SDDL/SID ACL hardening; \
-         refusing to expose an under-protected pipe",
-    ))
-}
-
-#[cfg(windows)]
-pub async fn connect(_path: &Path) -> Result<std::convert::Infallible> {
-    Err(HelperError::Unsupported(
-        "Windows Named-Pipe transport not yet implemented",
-    ))
+pub async fn connect(
+    name: &str,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    crate::winpipe::connect(name).await
 }
 
 #[cfg(test)]

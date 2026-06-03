@@ -23,5 +23,17 @@ zeroize.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
 
+# Windows Named-Pipe transport with an SDDL ACL bound to the current SID.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_Memory",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs", "time"] }

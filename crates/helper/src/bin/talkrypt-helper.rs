@@ -20,12 +20,22 @@ async fn main() -> Result<()> {
         Helper::new(store).serve(listener).await
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let name = endpoint::default_pipe_name()?;
+        eprintln!(
+            "talkrypt-helper: listening on {name} (ACL: current SID + SYSTEM). \
+             Reuses the audited talkrypt core; NOT certified or audited. \
+             ACL enforcement must be validated on real Windows.",
+        );
+        Helper::new(store).serve_pipe(name).await
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = store;
         Err(talkrypt_helper::HelperError::Unsupported(
-            "talkrypt-helper currently supports the Unix-socket transport only; \
-             the Windows Named-Pipe transport awaits SDDL/SID ACL hardening",
+            "talkrypt-helper supports the Unix-socket and Windows Named-Pipe transports only",
         ))
     }
 }

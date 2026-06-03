@@ -164,6 +164,27 @@ impl Helper {
             });
         }
     }
+
+    /// Accept loop over the Windows Named Pipe `name`, ACL-restricted to the
+    /// current SID (see [`crate::winpipe`]). Each instance is created with the
+    /// owner-only security descriptor; a fresh instance is staged before the
+    /// connected one is handed off.
+    #[cfg(windows)]
+    pub async fn serve_pipe(self, name: String) -> Result<()> {
+        use crate::winpipe::{create_pipe_instance, OwnedSecurity};
+        let helper = Arc::new(self);
+        let security = OwnedSecurity::owner_only()?;
+        let mut server = create_pipe_instance(&name, &security, true)?;
+        loop {
+            server.connect().await?;
+            let connected = server;
+            server = create_pipe_instance(&name, &security, false)?;
+            let h = helper.clone();
+            tokio::spawn(async move {
+                let _ = h.handle_conn(connected).await;
+            });
+        }
+    }
 }
 
 #[cfg(test)]
