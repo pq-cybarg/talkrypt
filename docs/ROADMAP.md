@@ -81,8 +81,14 @@ this is an imported item to reconcile, not a current component.
 ## Cross-cutting
 
 - **#305 APP-PQ-PARITY** — PQ + custody-tier parity audit across every platform
-  variant above (every platform must reach the same post-quantum + key-custody
-  guarantees, or document the gap).
+  variant above. **Audit primitive built** (`talkrypt_helper::parity`):
+  platforms self-report `Capabilities` (PQ identity? which custody tiers?), and
+  `audit()` produces a verdict — **PQ parity is a hard requirement** (any
+  non-PQ platform fails), while **custody-tier differences are surfaced, not
+  failed** (a phone's Secure Enclave legitimately beats a headless desktop; the
+  gap is reported). Each platform contributes via `local_report`; aggregating
+  the set across machines (CI) and adding the non-desktop reporters is the
+  remaining work.
 
 ## Political filter — packaging inclusion policy (#533)
 
