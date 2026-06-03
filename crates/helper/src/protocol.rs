@@ -23,9 +23,12 @@ pub enum Request {
     Seal { passphrase: Vec<u8>, secret: Vec<u8> },
     /// Unseal a blob produced by `Seal`.
     Unseal { passphrase: Vec<u8>, blob: Vec<u8> },
-    /// Seal `secret` and persist it under `name` (replacing any existing).
+    /// Persist `secret` under `name` at custody `tier` (a [`crate::custody::
+    /// CustodyTier`] tag). `SoftwareSealed` seals with `passphrase`;
+    /// `OsKeystore` hands the secret to the OS keychain (passphrase unused).
     Put {
         name: String,
+        tier: u8,
         passphrase: Vec<u8>,
         secret: Vec<u8>,
     },
@@ -83,11 +86,13 @@ impl Request {
             }
             Request::Put {
                 name,
+                tier,
                 passphrase,
                 secret,
             } => {
                 w.put_u8(3);
                 w.put_bytes(name.as_bytes());
+                w.put_u8(*tier);
                 w.put_bytes(passphrase);
                 w.put_bytes(secret);
             }
@@ -133,6 +138,7 @@ impl Request {
             },
             3 => Request::Put {
                 name: str_bytes(r.get_bytes()?)?,
+                tier: r.get_u8()?,
                 passphrase: r.get_vec()?,
                 secret: r.get_vec()?,
             },
@@ -246,6 +252,7 @@ mod tests {
             },
             Request::Put {
                 name: "id".into(),
+                tier: 0,
                 passphrase: b"pw".to_vec(),
                 secret: b"s".to_vec(),
             },

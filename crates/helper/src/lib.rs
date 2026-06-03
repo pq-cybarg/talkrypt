@@ -20,6 +20,8 @@ pub mod custody;
 pub mod endpoint;
 pub mod error;
 pub mod frame;
+#[cfg(target_os = "macos")]
+pub mod keychain;
 pub mod parity;
 pub mod protocol;
 pub mod server;

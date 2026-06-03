@@ -7,9 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::custody::CustodyTier;
 use crate::error::{HelperError, Result};
 
-/// A directory of sealed key blobs, one file (`<name>.sealed`) per stored key.
+/// Tiered custody of key material. Each key has a one-byte `<name>.tier` marker
+/// recording its [`CustodyTier`]; the bytes live in a sealed file
+/// (`<name>.sealed`, `SoftwareSealed`) or the OS keychain (`OsKeystore`).
 #[derive(Clone)]
 pub struct KeyStore {
     dir: PathBuf,
@@ -27,40 +30,117 @@ impl KeyStore {
         Ok(())
     }
 
-    fn path(&self, name: &str) -> Result<PathBuf> {
+    fn sealed_path(&self, name: &str) -> Result<PathBuf> {
         if !valid_name(name) {
             return Err(HelperError::InvalidName);
         }
         Ok(self.dir.join(format!("{name}.sealed")))
     }
 
-    /// Persist a sealed blob under `name`, replacing any existing one.
-    pub async fn put(&self, name: &str, sealed: &[u8]) -> Result<()> {
-        let path = self.path(name)?;
-        tokio::fs::write(&path, sealed).await?;
-        set_owner_only_file(&path)?;
+    fn tier_path(&self, name: &str) -> Result<PathBuf> {
+        if !valid_name(name) {
+            return Err(HelperError::InvalidName);
+        }
+        Ok(self.dir.join(format!("{name}.tier")))
+    }
+
+    /// Store `blob` under `name` at `tier`, replacing any existing key.
+    ///
+    /// For `SoftwareSealed`, `blob` is the already-sealed ciphertext (written to
+    /// a file). For `OsKeystore`, `blob` is the secret itself, handed to the OS
+    /// keychain (which encrypts at rest). `HardwareBacked` is not yet a backend.
+    pub async fn put(&self, name: &str, tier: CustodyTier, blob: &[u8]) -> Result<()> {
+        match tier {
+            CustodyTier::SoftwareSealed => {
+                let path = self.sealed_path(name)?;
+                tokio::fs::write(&path, blob).await?;
+                set_owner_only_file(&path)?;
+            }
+            CustodyTier::OsKeystore => keychain_set(name, blob)?,
+            CustodyTier::HardwareBacked => {
+                return Err(HelperError::Unsupported("hardware-backed custody"))
+            }
+        }
+        let tpath = self.tier_path(name)?;
+        tokio::fs::write(&tpath, [tier.tag()]).await?;
+        set_owner_only_file(&tpath)?;
         Ok(())
     }
 
-    /// Load the sealed blob stored under `name`.
-    pub async fn get(&self, name: &str) -> Result<Vec<u8>> {
-        let path = self.path(name)?;
-        match tokio::fs::read(&path).await {
-            Ok(b) => Ok(b),
+    /// Load `name`, returning its custody tier and the stored bytes (the sealed
+    /// ciphertext for `SoftwareSealed`, the secret for `OsKeystore`).
+    pub async fn get(&self, name: &str) -> Result<(CustodyTier, Vec<u8>)> {
+        let tier = self.tier_of(name).await?;
+        let bytes = match tier {
+            CustodyTier::SoftwareSealed => match tokio::fs::read(&self.sealed_path(name)?).await {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(HelperError::NotFound)
+                }
+                Err(e) => return Err(e.into()),
+            },
+            CustodyTier::OsKeystore => keychain_get(name)?,
+            CustodyTier::HardwareBacked => {
+                return Err(HelperError::Unsupported("hardware-backed custody"))
+            }
+        };
+        Ok((tier, bytes))
+    }
+
+    /// The custody tier `name` is stored at, or `NotFound`.
+    pub async fn tier_of(&self, name: &str) -> Result<CustodyTier> {
+        match tokio::fs::read(&self.tier_path(name)?).await {
+            Ok(b) if b.len() == 1 => CustodyTier::from_tag(b[0]),
+            Ok(_) => Err(HelperError::NotFound),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(HelperError::NotFound),
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Delete `name` (no error if it doesn't exist).
+    /// Delete `name` from every backend (no error if absent).
     pub async fn delete(&self, name: &str) -> Result<()> {
-        let path = self.path(name)?;
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        // Best-effort across backends so no copy is left behind.
+        remove_if_present(&self.sealed_path(name)?).await?;
+        let _ = keychain_delete(name);
+        remove_if_present(&self.tier_path(name)?).await?;
+        Ok(())
     }
+}
+
+async fn remove_if_present(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ----- OS keychain routing (macOS today) -----
+
+#[cfg(target_os = "macos")]
+fn keychain_set(name: &str, secret: &[u8]) -> Result<()> {
+    crate::keychain::set(name, secret)
+}
+#[cfg(target_os = "macos")]
+fn keychain_get(name: &str) -> Result<Vec<u8>> {
+    crate::keychain::get(name)
+}
+#[cfg(target_os = "macos")]
+fn keychain_delete(name: &str) -> Result<()> {
+    crate::keychain::delete(name)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_set(_name: &str, _secret: &[u8]) -> Result<()> {
+    Err(HelperError::Unsupported("OS keychain custody on this platform"))
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_get(_name: &str) -> Result<Vec<u8>> {
+    Err(HelperError::Unsupported("OS keychain custody on this platform"))
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_delete(_name: &str) -> Result<()> {
+    Ok(())
 }
 
 /// A name must be a single safe path component — no separators, no `.`/`..`,
@@ -115,18 +195,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_get_delete_roundtrip() {
+    async fn software_sealed_put_get_delete_roundtrip() {
         let dir = tmp();
         let store = KeyStore::new(&dir);
         store.ensure_dir().await.unwrap();
 
         assert!(matches!(store.get("k").await, Err(HelperError::NotFound)));
-        store.put("k", b"sealed-bytes").await.unwrap();
-        assert_eq!(store.get("k").await.unwrap(), b"sealed-bytes");
+        store
+            .put("k", CustodyTier::SoftwareSealed, b"sealed-bytes")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("k").await.unwrap(),
+            (CustodyTier::SoftwareSealed, b"sealed-bytes".to_vec())
+        );
+        assert_eq!(store.tier_of("k").await.unwrap(), CustodyTier::SoftwareSealed);
         store.delete("k").await.unwrap();
         assert!(matches!(store.get("k").await, Err(HelperError::NotFound)));
         // delete is idempotent
         store.delete("k").await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn os_keystore_tier_uses_the_real_keychain() {
+        let dir = tmp();
+        let store = KeyStore::new(&dir);
+        store.ensure_dir().await.unwrap();
+        let name = format!("osk{}", std::process::id());
+
+        store
+            .put(&name, CustodyTier::OsKeystore, b"in-the-keychain")
+            .await
+            .unwrap();
+        // The tier marker is on disk; the secret is in the keychain (NOT in a
+        // sealed file — the OS holds it).
+        assert_eq!(store.tier_of(&name).await.unwrap(), CustodyTier::OsKeystore);
+        assert!(!store.dir.join(format!("{name}.sealed")).exists());
+        assert_eq!(
+            store.get(&name).await.unwrap(),
+            (CustodyTier::OsKeystore, b"in-the-keychain".to_vec())
+        );
+        store.delete(&name).await.unwrap();
+        assert!(matches!(store.get(&name).await, Err(HelperError::NotFound)));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -150,7 +263,9 @@ mod tests {
         let store = KeyStore::new(&dir);
         store.ensure_dir().await.unwrap();
         assert!(matches!(
-            store.put("../escape", b"x").await,
+            store
+                .put("../escape", CustodyTier::SoftwareSealed, b"x")
+                .await,
             Err(HelperError::InvalidName)
         ));
         let _ = tokio::fs::remove_dir_all(&dir).await;

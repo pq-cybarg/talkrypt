@@ -39,13 +39,51 @@ async fn end_to_end_over_unix_socket() {
         Response::Capabilities(b) => {
             let caps = talkrypt_helper::Capabilities::decode(&b).unwrap();
             assert!(caps.pq_identity, "identities are post-quantum");
-            assert_eq!(
-                caps.strongest(),
-                Some(talkrypt_helper::CustodyTier::SoftwareSealed),
-                "desktop helper holds keys software-sealed today"
+            assert!(
+                caps.tiers
+                    .contains(&talkrypt_helper::CustodyTier::SoftwareSealed),
+                "software-sealing is always available"
             );
+            // On macOS the Keychain-backed OsKeystore tier is reported too.
+            #[cfg(target_os = "macos")]
+            assert!(caps
+                .tiers
+                .contains(&talkrypt_helper::CustodyTier::OsKeystore));
         }
         other => panic!("expected Capabilities, got {other:?}"),
+    }
+
+    // OS-keystore tier over the wire (macOS Keychain): Put → Get round-trips,
+    // and the secret is NOT in a sealed file (the OS holds it).
+    #[cfg(target_os = "macos")]
+    {
+        let name = format!("osk-e2e-{}", std::process::id());
+        assert_eq!(
+            client
+                .request(Request::Put {
+                    name: name.clone(),
+                    tier: talkrypt_helper::CustodyTier::OsKeystore.tag(),
+                    passphrase: Vec::new(),
+                    secret: b"keychain secret".to_vec(),
+                })
+                .await
+                .unwrap(),
+            Response::Ok
+        );
+        assert_eq!(
+            client
+                .request(Request::Get {
+                    name: name.clone(),
+                    passphrase: Vec::new(),
+                })
+                .await
+                .unwrap(),
+            Response::Secret(b"keychain secret".to_vec())
+        );
+        client
+            .request(Request::Delete { name })
+            .await
+            .unwrap();
     }
 
     // Generate an identity through the helper, then recover its fingerprint.

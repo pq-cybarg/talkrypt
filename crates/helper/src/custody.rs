@@ -68,9 +68,12 @@ impl CustodyTier {
 /// this is how an OS-keystore or hardware bridge is "turned on" for a platform;
 /// a parity audit reads it to find gaps.
 pub fn supported_tiers() -> Vec<CustodyTier> {
-    // Desktop helper today: software sealing only. (cfg-gate additions here as
-    // real OS-keystore / hardware bridges land.)
-    vec![CustodyTier::SoftwareSealed]
+    #[allow(unused_mut)]
+    let mut tiers = vec![CustodyTier::SoftwareSealed];
+    // macOS: the login Keychain backs the OsKeystore tier (see `keychain`).
+    #[cfg(target_os = "macos")]
+    tiers.push(CustodyTier::OsKeystore);
+    tiers
 }
 
 /// The default tier used when none is requested (the strongest supported).
@@ -149,9 +152,16 @@ mod tests {
     }
 
     #[test]
-    fn desktop_supports_only_software_sealing_today() {
-        assert_eq!(supported_tiers(), vec![CustodyTier::SoftwareSealed]);
-        assert_eq!(default_tier(), CustodyTier::SoftwareSealed);
+    fn software_sealing_is_always_supported_plus_platform_tiers() {
+        let tiers = supported_tiers();
+        assert!(tiers.contains(&CustodyTier::SoftwareSealed));
+        // macOS adds the Keychain-backed OsKeystore tier; other platforms not yet.
+        #[cfg(target_os = "macos")]
+        assert!(tiers.contains(&CustodyTier::OsKeystore));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(tiers, vec![CustodyTier::SoftwareSealed]);
+        // The default is the strongest supported tier.
+        assert_eq!(default_tier(), tiers.into_iter().max().unwrap());
         assert!(pq_identity());
     }
 
@@ -160,6 +170,6 @@ mod tests {
         let caps = Capabilities::decode(&encode_capabilities()).unwrap();
         assert!(caps.pq_identity);
         assert_eq!(caps.tiers, supported_tiers());
-        assert_eq!(caps.strongest(), Some(CustodyTier::SoftwareSealed));
+        assert_eq!(caps.strongest(), Some(default_tier()));
     }
 }

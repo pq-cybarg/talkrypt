@@ -124,9 +124,24 @@ implementation — flagged here rather than silently adopted:
    (the #305 "PQ + custody-tier parity" hook). The desktop helper reports
    exactly `SoftwareSealed` today (Argon2id + AES-256-GCM); the stronger tiers
    are explicit slots reported as *unsupported* so a parity audit sees the gap
-   honestly. **Remaining:** the actual OS-keystore bridge (Keychain / DPAPI /
-   Secret Service) and hardware-backed bridges (Secure Enclave / StrongBox /
-   TPM), and mirroring the tier model on the mobile/FFI side.
+   honestly. **macOS `OsKeystore` is now implemented and tested natively** — the
+   login Keychain backs it (`talkrypt_helper::keychain`, via `security-framework`
+   generic passwords; no entitlement needed), with the tier routed through the
+   store and exercised end-to-end over the Unix socket against the real
+   Keychain. **Remaining:** the Windows DPAPI/CNG and Linux Secret-Service
+   bridges; hardware-backed bridges (Secure Enclave / StrongBox / TPM); and
+   mirroring the tier model on the mobile/FFI side.
+
+   Test fidelity note (answering "can emulation cover these?"): **macOS Keychain
+   is tested natively** (real hardware, no emulation). Linux Secret Service is
+   faithfully testable under Docker; a **TPM** tier is faithfully testable under
+   QEMU + `swtpm`; the **Windows** ACL needs a real Windows VM (Wine is *not*
+   faithful for security descriptors). **Secure Enclave / Android StrongBox give
+   false confidence under emulation** (the Android emulator has software
+   Keymaster, not StrongBox; SE is P-256-only and needs entitlements) and must
+   be validated on real hardware — e.g. the project's Solana Seeker (Seed Vault
+   secure element) and Galaxy A23 (StrongBox), via the installed
+   `aarch64-linux-android` cross-target.
 3. **Entropy-source companions (#431–#437).** The "entropy-source class" framing
    implies companions feed RNG/entropy or hold custody. Their trust model and
    how they interact with the PQ KEM/RNG must be specified — a companion that

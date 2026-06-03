@@ -24,6 +24,8 @@ pub enum HelperError {
     InvalidInvite(&'static str),
     #[error("unsupported on this platform: {0}")]
     Unsupported(&'static str),
+    #[error("os keystore error")]
+    Keychain,
 }
 
 pub type Result<T> = std::result::Result<T, HelperError>;

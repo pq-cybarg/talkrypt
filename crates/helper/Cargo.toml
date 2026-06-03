@@ -18,5 +18,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", 
 thiserror.workspace = true
 zeroize.workspace = true
 
+# macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
+# (no entitlement needed, unlike Secure Enclave).
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs", "time"] }

@@ -120,10 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn local_report_is_pq_and_software_sealed() {
+    fn local_report_is_pq_with_platform_tiers() {
         let r = local_report("desktop");
         assert!(r.caps.pq_identity);
-        assert_eq!(r.caps.strongest(), Some(CustodyTier::SoftwareSealed));
+        assert!(r.caps.tiers.contains(&CustodyTier::SoftwareSealed));
+        assert_eq!(r.caps.strongest(), Some(custody::default_tier()));
     }
 
     #[test]

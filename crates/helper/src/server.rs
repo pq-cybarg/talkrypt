@@ -14,6 +14,7 @@ use talkrypt_core::ChatDescriptor;
 use talkrypt_crypto::IdentityKeyPair;
 use talkrypt_server::keystore;
 
+use crate::custody::CustodyTier;
 use crate::error::{HelperError, Result};
 use crate::frame::{read_frame, write_frame};
 use crate::protocol::{Request, Response, PROTOCOL_VERSION};
@@ -56,18 +57,34 @@ impl Helper {
 
             Request::Put {
                 name,
+                tier,
                 passphrase,
                 secret,
             } => {
+                let tier = CustodyTier::from_tag(tier)?;
                 let mut secret = secret;
-                let sealed = keystore::seal(&passphrase, &secret)?;
-                secret.zeroize();
-                self.store.put(&name, &sealed).await?;
+                match tier {
+                    CustodyTier::SoftwareSealed => {
+                        let sealed = keystore::seal(&passphrase, &secret)?;
+                        secret.zeroize();
+                        self.store.put(&name, tier, &sealed).await?;
+                    }
+                    // OsKeystore / HardwareBacked: the backend protects at rest,
+                    // so the secret is handed over directly (no app passphrase).
+                    _ => {
+                        self.store.put(&name, tier, &secret).await?;
+                        secret.zeroize();
+                    }
+                }
                 Response::Ok
             }
             Request::Get { name, passphrase } => {
-                let sealed = self.store.get(&name).await?;
-                Response::Secret(keystore::unseal(&passphrase, &sealed)?)
+                let (tier, bytes) = self.store.get(&name).await?;
+                let secret = match tier {
+                    CustodyTier::SoftwareSealed => keystore::unseal(&passphrase, &bytes)?,
+                    _ => bytes,
+                };
+                Response::Secret(secret)
             }
             Request::Delete { name } => {
                 self.store.delete(&name).await?;
@@ -75,16 +92,24 @@ impl Helper {
             }
 
             Request::GenerateIdentity { name, passphrase } => {
+                // Identities are software-sealed today (a PQ identity seed can't
+                // live in an EC-only Secure Enclave; OS-keystore custody of the
+                // seed is a future option).
                 let id = IdentityKeyPair::generate();
                 let mut seed = id.export_secret();
                 let sealed = keystore::seal(&passphrase, &seed)?;
                 seed.zeroize();
-                self.store.put(&name, &sealed).await?;
+                self.store
+                    .put(&name, CustodyTier::SoftwareSealed, &sealed)
+                    .await?;
                 Response::Fingerprint(id.public().fingerprint().to_vec())
             }
             Request::IdentityFingerprint { name, passphrase } => {
-                let sealed = self.store.get(&name).await?;
-                let mut seed = keystore::unseal(&passphrase, &sealed)?;
+                let (tier, bytes) = self.store.get(&name).await?;
+                let mut seed = match tier {
+                    CustodyTier::SoftwareSealed => keystore::unseal(&passphrase, &bytes)?,
+                    _ => bytes,
+                };
                 let mut seed32: [u8; 32] = seed
                     .as_slice()
                     .try_into()
@@ -184,6 +209,7 @@ mod tests {
         assert_eq!(
             h.dispatch(Request::Put {
                 name: "k".into(),
+                tier: CustodyTier::SoftwareSealed.tag(),
                 passphrase: b"pw".to_vec(),
                 secret: b"v".to_vec(),
             })
