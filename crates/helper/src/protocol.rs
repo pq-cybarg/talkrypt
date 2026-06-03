@@ -41,6 +41,8 @@ pub enum Request {
     /// Parse a `talkrypt://` invite (via the audited core) and report its
     /// resolved scheme id and scheme fingerprint — no secret involved.
     ValidateInvite { uri: String },
+    /// Report this platform's PQ + custody-tier capabilities (roadmap #305).
+    Capabilities,
 }
 
 /// A response from the helper.
@@ -55,6 +57,8 @@ pub enum Response {
     Fingerprint(Vec<u8>),
     /// `(resolved_suite_id, scheme_fingerprint)`.
     Invite { suite_id: String, scheme: Vec<u8> },
+    /// Encoded platform capabilities (see [`crate::custody`]).
+    Capabilities(Vec<u8>),
     Error(String),
 }
 
@@ -110,6 +114,7 @@ impl Request {
                 w.put_u8(8);
                 w.put_bytes(uri.as_bytes());
             }
+            Request::Capabilities => w.put_u8(9),
         }
         w.into_vec()
     }
@@ -149,6 +154,7 @@ impl Request {
             8 => Request::ValidateInvite {
                 uri: str_bytes(r.get_bytes()?)?,
             },
+            9 => Request::Capabilities,
             _ => return Err(HelperError::Protocol("unknown request tag")),
         };
         r.finish()?;
@@ -186,8 +192,12 @@ impl Response {
                 w.put_bytes(suite_id.as_bytes());
                 w.put_bytes(scheme);
             }
-            Response::Error(m) => {
+            Response::Capabilities(b) => {
                 w.put_u8(7);
+                w.put_bytes(b);
+            }
+            Response::Error(m) => {
+                w.put_u8(8);
                 w.put_bytes(m.as_bytes());
             }
         }
@@ -209,7 +219,8 @@ impl Response {
                 suite_id: str_bytes(r.get_bytes()?)?,
                 scheme: r.get_vec()?,
             },
-            7 => Response::Error(str_bytes(r.get_bytes()?)?),
+            7 => Response::Capabilities(r.get_vec()?),
+            8 => Response::Error(str_bytes(r.get_bytes()?)?),
             _ => return Err(HelperError::Protocol("unknown response tag")),
         };
         r.finish()?;
@@ -254,6 +265,7 @@ mod tests {
             Request::ValidateInvite {
                 uri: "talkrypt://x".into(),
             },
+            Request::Capabilities,
         ];
         for req in reqs {
             assert_eq!(Request::decode(&req.encode()).unwrap(), req);
@@ -273,6 +285,7 @@ mod tests {
                 suite_id: "tk.dr".into(),
                 scheme: vec![1u8; 32],
             },
+            Response::Capabilities(vec![1, 0, 0, 0, 1, 0]),
             Response::Error("nope".into()),
         ];
         for resp in resps {

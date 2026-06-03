@@ -111,11 +111,16 @@ implementation — flagged here rather than silently adopted:
    ACL bound to the current SID (a default-DACL pipe is connectable by any local
    user) — the helper refuses to expose an under-protected pipe rather than ship
    an insecure default. Tested end-to-end over a real Unix socket.
-2. **Custody tiers / key-custody.** #305 references "custody-tier parity," and
-   mobile/desktop bridges imply hardware-backed key custody (Secure Enclave,
-   StrongBox, TPM). talkrypt today seals long-term keys with Argon2id +
-   AES-256-GCM at rest; hardware custody and a defined tier model are new and
-   unspecified.
+2. **Custody tiers / key-custody. → FOUNDATION IN PLACE.** A `CustodyTier`
+   model now exists (`talkrypt_helper::custody`): `SoftwareSealed <
+   OsKeystore < HardwareBacked`, ordered, with a `Capabilities` protocol op so
+   every platform reports the tiers it supports plus whether identities are PQ
+   (the #305 "PQ + custody-tier parity" hook). The desktop helper reports
+   exactly `SoftwareSealed` today (Argon2id + AES-256-GCM); the stronger tiers
+   are explicit slots reported as *unsupported* so a parity audit sees the gap
+   honestly. **Remaining:** the actual OS-keystore bridge (Keychain / DPAPI /
+   Secret Service) and hardware-backed bridges (Secure Enclave / StrongBox /
+   TPM), and mirroring the tier model on the mobile/FFI side.
 3. **Entropy-source companions (#431–#437).** The "entropy-source class" framing
    implies companions feed RNG/entropy or hold custody. Their trust model and
    how they interact with the PQ KEM/RNG must be specified — a companion that

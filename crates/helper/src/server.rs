@@ -103,6 +103,8 @@ impl Helper {
                     scheme: desc.scheme_hash().to_vec(),
                 }
             }
+
+            Request::Capabilities => Response::Capabilities(crate::custody::encode_capabilities()),
         })
     }
 

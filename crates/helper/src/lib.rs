@@ -16,6 +16,7 @@
 //! (see the README); it is a clean implementation, nothing more.
 
 pub mod client;
+pub mod custody;
 pub mod endpoint;
 pub mod error;
 pub mod frame;
@@ -24,6 +25,7 @@ pub mod server;
 pub mod store;
 
 pub use client::Client;
+pub use custody::{Capabilities, CustodyTier};
 pub use error::{HelperError, Result};
 pub use protocol::{Request, Response, PROTOCOL_VERSION};
 pub use server::Helper;

@@ -34,6 +34,20 @@ async fn end_to_end_over_unix_socket() {
     let mut client = Client::connect(&sock).await.unwrap();
     assert_eq!(client.ping().await.unwrap(), talkrypt_helper::PROTOCOL_VERSION);
 
+    // Platform capabilities (PQ + custody tiers) report over the wire.
+    match client.request(Request::Capabilities).await.unwrap() {
+        Response::Capabilities(b) => {
+            let caps = talkrypt_helper::Capabilities::decode(&b).unwrap();
+            assert!(caps.pq_identity, "identities are post-quantum");
+            assert_eq!(
+                caps.strongest(),
+                Some(talkrypt_helper::CustodyTier::SoftwareSealed),
+                "desktop helper holds keys software-sealed today"
+            );
+        }
+        other => panic!("expected Capabilities, got {other:?}"),
+    }
+
     // Generate an identity through the helper, then recover its fingerprint.
     let fp = match client
         .request(Request::GenerateIdentity {
