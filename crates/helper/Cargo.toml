@@ -1,0 +1,22 @@
+[package]
+name = "talkrypt-helper"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "talkrypt-helper"
+path = "src/bin/talkrypt-helper.rs"
+
+[dependencies]
+# Reuses the audited talkrypt Rust core — NO second-language reimplementation.
+talkrypt-core.workspace = true
+talkrypt-crypto.workspace = true
+talkrypt-server.workspace = true
+talkrypt-wire.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs"] }
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs", "time"] }

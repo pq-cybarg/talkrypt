@@ -77,8 +77,27 @@ Two options, both over the same FFI/core:
    1:1 to the FFI methods. Building the bundle needs the platform's webview
    libs + the Tauri CLI (documented, not in CI).
 
+## Desktop key-custody helper (`talkrypt-helper`)
+
+The desktop helper sidecar is a **Rust crate that reuses the audited core**
+(`crates/helper`), resolving roadmap decision #1 in favor of the single-core
+principle — no separate Go/second-language helper. The app connects over an
+owner-only **Unix socket** (`<base>/helper.sock`, `chmod 0600`; macOS under
+`~/Library/Application Support/talkrypt`, Linux under `$XDG_RUNTIME_DIR/talkrypt`)
+and issues a small length-prefixed protocol for custody operations: `Seal`/
+`Unseal`, named `Put`/`Get`/`Delete` of sealed blobs, `GenerateIdentity`/
+`IdentityFingerprint` (ML-DSA-87), and `ValidateInvite`. All crypto is the core's
+own code (`talkrypt_server::keystore`, `talkrypt_crypto`, `talkrypt_core`); the
+helper adds only IPC + on-disk custody. Run it with the `talkrypt-helper` binary.
+
+The **Windows Named-Pipe** transport is intentionally not enabled yet — it must
+carry an SDDL ACL bound to the current user's SID before exposure (see
+[`ROADMAP.md`](ROADMAP.md)); until then the helper refuses to open an
+under-protected pipe.
+
 ## Why this shape
 
 A single audited core eliminates the worst risk in cross-platform secure
 messengers: divergent, separately-buggy crypto per platform. Here a fix in
-`talkrypt-crypto` reaches every platform at once.
+`talkrypt-crypto` reaches every platform at once — and the desktop helper is
+part of that same core, not a parallel implementation.

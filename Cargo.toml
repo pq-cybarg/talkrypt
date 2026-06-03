@@ -38,6 +38,7 @@ talkrypt-crypto = { path = "crates/crypto" }
 talkrypt-transport = { path = "crates/transport" }
 talkrypt-core = { path = "crates/core" }
 talkrypt-topology = { path = "crates/topology" }
+talkrypt-server = { path = "crates/server" }
 
 [profile.release]
 opt-level = 3

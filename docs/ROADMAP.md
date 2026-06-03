@@ -99,14 +99,18 @@ attestation**. The deliverable of #533 is the tiering, not yet finalized:
 These items diverge from the shipped design and need an explicit call before
 implementation — flagged here rather than silently adopted:
 
-1. **Separate helper process vs. single Rust core.** The desktop "Go sidecar"
-   pattern adds a second implementation/language for OS-keystore access. talkrypt's
-   stated principle is *one audited core, thin shells* ([`PLATFORMS.md`](PLATFORMS.md)) —
-   a second binary in another language widens the audit surface and the
-   "divergent, separately-buggy" risk the core was meant to avoid. Options:
-   (a) implement the helper in Rust reusing `talkrypt-core`; (b) keep a minimal
-   non-crypto helper (key-store shuttle only, no protocol/crypto) in whatever
-   language; (c) adopt the sidecar as specified. Decision needed.
+1. **Separate helper process vs. single Rust core. → RESOLVED: option (a).**
+   The desktop helper is a **Rust crate (`crates/helper`, `talkrypt-helper`)
+   that reuses the audited core** — no second-language reimplementation, so the
+   audit surface stays unified. It speaks a small length-prefixed protocol over
+   an owner-only Unix socket (macOS/Linux; `chmod 0600` in a `0700` dir) and
+   performs only IPC + custody: sealing via `talkrypt_server::keystore`
+   (Argon2id + AES-256-GCM), identities via `talkrypt_crypto::IdentityKeyPair`
+   (ML-DSA-87), invite parsing via `talkrypt_core::ChatDescriptor`. The Windows
+   Named-Pipe transport is **deliberately gated off** until it carries an SDDL
+   ACL bound to the current SID (a default-DACL pipe is connectable by any local
+   user) — the helper refuses to expose an under-protected pipe rather than ship
+   an insecure default. Tested end-to-end over a real Unix socket.
 2. **Custody tiers / key-custody.** #305 references "custody-tier parity," and
    mobile/desktop bridges imply hardware-backed key custody (Secure Enclave,
    StrongBox, TPM). talkrypt today seals long-term keys with Argon2id +

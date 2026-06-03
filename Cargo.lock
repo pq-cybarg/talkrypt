@@ -4499,6 +4499,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "talkrypt-helper"
+version = "0.1.0"
+dependencies = [
+ "talkrypt-core",
+ "talkrypt-crypto",
+ "talkrypt-server",
+ "talkrypt-wire",
+ "thiserror 1.0.69",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "talkrypt-server"
 version = "0.1.0"
 dependencies = [
