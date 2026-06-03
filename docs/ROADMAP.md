@@ -117,6 +117,11 @@ attestation**. The deliverable of #533 is the tiering, not yet finalized:
 - **Tier 2** — community recipes.
 - **Tier 3** — source-build-only.
 
+The framework (gate criterion, tier definitions, and the per-distro
+classification process) is specified in [`packaging-policy.md`](packaging-policy.md);
+the per-distro classification (each requiring a cited primary source for the
+distro's stance) is the remaining research.
+
 ## Reconcile with the current architecture (open decisions)
 
 These items diverge from the shipped design and need an explicit call before
@@ -151,10 +156,10 @@ implementation — flagged here rather than silently adopted:
    - **macOS** → login Keychain (`keychain`, `security-framework`) — **tested
      natively**, end-to-end over the Unix socket against the real Keychain.
    - **Linux** → Secret Service (`secretservice`, pure-Rust zbus,
-     session-encrypted) — **compiles clean for `x86_64-unknown-linux-gnu`**; a
-     faithful gnome-keyring round-trip harness exists
-     (`docs/linux-secretservice-test.sh`) but the sandbox container's crates.io
-     fetch timed out, so the daemon round-trip is pending a working network.
+     session-encrypted) — **validated faithfully**: a put→get→delete
+     round-trip through the store passes against a **real gnome-keyring daemon**
+     in a Docker container (`docs/linux-secretservice-test.sh`), with the secret
+     held in the keyring (not a sealed file).
    - **Windows** → Credential Manager (`wincred`) — **cross-compiles + links +
      clippy-clean for `x86_64-pc-windows-gnu`**; runtime behaviour pending real
      Windows.
