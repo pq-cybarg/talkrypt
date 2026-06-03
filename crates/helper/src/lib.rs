@@ -25,6 +25,8 @@ pub mod keychain;
 pub mod parity;
 pub mod protocol;
 pub mod sddl;
+#[cfg(target_os = "linux")]
+pub mod secretservice;
 pub mod server;
 pub mod store;
 #[cfg(windows)]

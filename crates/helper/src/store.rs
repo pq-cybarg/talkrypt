@@ -56,7 +56,7 @@ impl KeyStore {
                 tokio::fs::write(&path, blob).await?;
                 set_owner_only_file(&path)?;
             }
-            CustodyTier::OsKeystore => keychain_set(name, blob)?,
+            CustodyTier::OsKeystore => keychain_set(name, blob).await?,
             CustodyTier::HardwareBacked => {
                 return Err(HelperError::Unsupported("hardware-backed custody"))
             }
@@ -79,7 +79,7 @@ impl KeyStore {
                 }
                 Err(e) => return Err(e.into()),
             },
-            CustodyTier::OsKeystore => keychain_get(name)?,
+            CustodyTier::OsKeystore => keychain_get(name).await?,
             CustodyTier::HardwareBacked => {
                 return Err(HelperError::Unsupported("hardware-backed custody"))
             }
@@ -90,7 +90,7 @@ impl KeyStore {
     /// The custody tier `name` is stored at, or `NotFound`.
     pub async fn tier_of(&self, name: &str) -> Result<CustodyTier> {
         match tokio::fs::read(&self.tier_path(name)?).await {
-            Ok(b) if b.len() == 1 => CustodyTier::from_tag(b[0]),
+            Ok(b) if b.len() == 1 => Ok(CustodyTier::from_tag(b[0])?),
             Ok(_) => Err(HelperError::NotFound),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(HelperError::NotFound),
             Err(e) => Err(e.into()),
@@ -101,7 +101,7 @@ impl KeyStore {
     pub async fn delete(&self, name: &str) -> Result<()> {
         // Best-effort across backends so no copy is left behind.
         remove_if_present(&self.sealed_path(name)?).await?;
-        let _ = keychain_delete(name);
+        let _ = keychain_delete(name).await;
         remove_if_present(&self.tier_path(name)?).await?;
         Ok(())
     }
@@ -115,31 +115,48 @@ async fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-// ----- OS keychain routing (macOS today) -----
+// ----- OS-keystore routing -----
+//
+// macOS → Keychain (sync security-framework, wrapped in async); Linux → Secret
+// Service (async D-Bus); other platforms → unsupported. Async so the Linux
+// D-Bus calls fit the same signature as the (fast, sync) macOS ones.
 
 #[cfg(target_os = "macos")]
-fn keychain_set(name: &str, secret: &[u8]) -> Result<()> {
+async fn keychain_set(name: &str, secret: &[u8]) -> Result<()> {
     crate::keychain::set(name, secret)
 }
 #[cfg(target_os = "macos")]
-fn keychain_get(name: &str) -> Result<Vec<u8>> {
+async fn keychain_get(name: &str) -> Result<Vec<u8>> {
     crate::keychain::get(name)
 }
 #[cfg(target_os = "macos")]
-fn keychain_delete(name: &str) -> Result<()> {
+async fn keychain_delete(name: &str) -> Result<()> {
     crate::keychain::delete(name)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn keychain_set(_name: &str, _secret: &[u8]) -> Result<()> {
-    Err(HelperError::Unsupported("OS keychain custody on this platform"))
+#[cfg(target_os = "linux")]
+async fn keychain_set(name: &str, secret: &[u8]) -> Result<()> {
+    crate::secretservice::set(name, secret).await
 }
-#[cfg(not(target_os = "macos"))]
-fn keychain_get(_name: &str) -> Result<Vec<u8>> {
-    Err(HelperError::Unsupported("OS keychain custody on this platform"))
+#[cfg(target_os = "linux")]
+async fn keychain_get(name: &str) -> Result<Vec<u8>> {
+    crate::secretservice::get(name).await
 }
-#[cfg(not(target_os = "macos"))]
-fn keychain_delete(_name: &str) -> Result<()> {
+#[cfg(target_os = "linux")]
+async fn keychain_delete(name: &str) -> Result<()> {
+    crate::secretservice::delete(name).await
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+async fn keychain_set(_name: &str, _secret: &[u8]) -> Result<()> {
+    Err(HelperError::Unsupported("OS keystore custody on this platform"))
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+async fn keychain_get(_name: &str) -> Result<Vec<u8>> {
+    Err(HelperError::Unsupported("OS keystore custody on this platform"))
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+async fn keychain_delete(_name: &str) -> Result<()> {
     Ok(())
 }
 

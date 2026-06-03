@@ -23,6 +23,11 @@ zeroize.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
 
+# Linux OS-keystore custody tier — the desktop Secret Service (D-Bus), via the
+# pure-Rust zbus backend (no system libdbus needed).
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
 # Windows Named-Pipe transport with an SDDL ACL bound to the current SID.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

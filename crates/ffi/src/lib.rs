@@ -36,6 +36,50 @@ impl FfiError {
     }
 }
 
+/// The key-custody tier a platform achieves at runtime (mirrors
+/// [`talkrypt_core::CustodyTier`]). The host detects this — e.g. the Android
+/// app probes StrongBox/TEE availability — and reports it; talkrypt's crypto
+/// never depends on the tier, only its at-rest protection does.
+#[derive(uniffi::Enum)]
+pub enum CustodyTier {
+    SoftwareSealed,
+    OsKeystore,
+    HardwareBacked,
+}
+
+impl From<CustodyTier> for talkrypt_core::CustodyTier {
+    fn from(t: CustodyTier) -> Self {
+        match t {
+            CustodyTier::SoftwareSealed => talkrypt_core::CustodyTier::SoftwareSealed,
+            CustodyTier::OsKeystore => talkrypt_core::CustodyTier::OsKeystore,
+            CustodyTier::HardwareBacked => talkrypt_core::CustodyTier::HardwareBacked,
+        }
+    }
+}
+
+/// Build this platform's **PQ + custody-tier parity report** (an encoded
+/// `Capabilities`) from the strongest tier the host achieved. Identities are
+/// always post-quantum (ML-DSA-87). Tiers are cumulative up to `achieved` (a
+/// device that reaches `HardwareBacked` can also do the weaker tiers), so the
+/// #305 parity audit can compare it against the desktop helper's report.
+#[uniffi::export]
+pub fn custody_report(achieved: CustodyTier) -> Vec<u8> {
+    let achieved: talkrypt_core::CustodyTier = achieved.into();
+    let tiers: Vec<talkrypt_core::CustodyTier> = [
+        talkrypt_core::CustodyTier::SoftwareSealed,
+        talkrypt_core::CustodyTier::OsKeystore,
+        talkrypt_core::CustodyTier::HardwareBacked,
+    ]
+    .into_iter()
+    .filter(|t| *t <= achieved)
+    .collect();
+    talkrypt_core::Capabilities {
+        pq_identity: true,
+        tiers,
+    }
+    .encode()
+}
+
 /// An event delivered to the host UI via `poll_event`.
 #[derive(uniffi::Enum)]
 pub enum FfiEvent {

@@ -14,6 +14,8 @@ pub enum HelperError {
     Closed,
     #[error("keystore: {0}")]
     Keystore(#[from] talkrypt_server::KeystoreError),
+    #[error("core: {0}")]
+    Core(#[from] talkrypt_core::CoreError),
     #[error("wire: {0}")]
     Wire(#[from] talkrypt_wire::WireError),
     #[error("invalid key name (use [A-Za-z0-9._-], no separators)")]
