@@ -21,9 +21,10 @@ pub use talkrypt_core::custody::{Capabilities, CustodyTier};
 pub fn supported_tiers() -> Vec<CustodyTier> {
     #[allow(unused_mut)]
     let mut tiers = vec![CustodyTier::SoftwareSealed];
-    // OS-keystore-backed tier: the macOS login Keychain (`keychain`) or the
-    // Linux Secret Service (`secretservice`) back it.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    // OS-keystore-backed tier: the macOS login Keychain (`keychain`), the Linux
+    // Secret Service (`secretservice`), or Windows Credential Manager
+    // (`wincred`) back it.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     tiers.push(CustodyTier::OsKeystore);
     tiers
 }
@@ -60,11 +61,11 @@ mod tests {
     fn software_sealing_is_always_supported_plus_platform_tiers() {
         let tiers = supported_tiers();
         assert!(tiers.contains(&CustodyTier::SoftwareSealed));
-        // macOS (Keychain) and Linux (Secret Service) add the OsKeystore tier;
-        // other platforms not yet.
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        // macOS (Keychain), Linux (Secret Service), Windows (Credential
+        // Manager) add the OsKeystore tier; other platforms not yet.
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         assert!(tiers.contains(&CustodyTier::OsKeystore));
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         assert_eq!(tiers, vec![CustodyTier::SoftwareSealed]);
         // The default is the strongest supported tier.
         assert_eq!(default_tier(), tiers.into_iter().max().unwrap());

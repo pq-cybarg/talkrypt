@@ -144,14 +144,23 @@ implementation — flagged here rather than silently adopted:
    every platform reports the tiers it supports plus whether identities are PQ
    (the #305 "PQ + custody-tier parity" hook). The desktop helper reports
    exactly `SoftwareSealed` today (Argon2id + AES-256-GCM); the stronger tiers
-   are explicit slots reported as *unsupported* so a parity audit sees the gap
-   honestly. **macOS `OsKeystore` is now implemented and tested natively** — the
-   login Keychain backs it (`talkrypt_helper::keychain`, via `security-framework`
-   generic passwords; no entitlement needed), with the tier routed through the
-   store and exercised end-to-end over the Unix socket against the real
-   Keychain. **Remaining:** the Windows DPAPI/CNG and Linux Secret-Service
-   bridges; hardware-backed bridges (Secure Enclave / StrongBox / TPM); and
-   mirroring the tier model on the mobile/FFI side.
+   are explicit slots; tiers a platform lacks are simply absent so a parity
+   audit sees the gap honestly. The shared tier model (`CustodyTier`,
+   `Capabilities`) now lives in `talkrypt_core` so desktop and mobile feed one
+   parity contract. **`OsKeystore` is implemented on all three desktop OSes:**
+   - **macOS** → login Keychain (`keychain`, `security-framework`) — **tested
+     natively**, end-to-end over the Unix socket against the real Keychain.
+   - **Linux** → Secret Service (`secretservice`, pure-Rust zbus,
+     session-encrypted) — **compiles clean for `x86_64-unknown-linux-gnu`**; a
+     faithful gnome-keyring round-trip harness exists
+     (`docs/linux-secretservice-test.sh`) but the sandbox container's crates.io
+     fetch timed out, so the daemon round-trip is pending a working network.
+   - **Windows** → Credential Manager (`wincred`) — **cross-compiles + links +
+     clippy-clean for `x86_64-pc-windows-gnu`**; runtime behaviour pending real
+     Windows.
+
+   **Remaining:** hardware-backed bridges (Secure Enclave / StrongBox / TPM);
+   wiring the mobile bridge (scaffolded — `docs/android/`, FFI report verified).
 
    Test fidelity note (answering "can emulation cover these?"): **macOS Keychain
    is tested natively** (real hardware, no emulation). Linux Secret Service is
@@ -163,10 +172,16 @@ implementation — flagged here rather than silently adopted:
    be validated on real hardware — e.g. the project's Solana Seeker (Seed Vault
    secure element) and Galaxy A23 (StrongBox), via the installed
    `aarch64-linux-android` cross-target.
-3. **Entropy-source companions (#431–#437).** The "entropy-source class" framing
-   implies companions feed RNG/entropy or hold custody. Their trust model and
-   how they interact with the PQ KEM/RNG must be specified — a companion that
-   influences key generation is security-critical, not a mere shell.
+3. **Entropy-source companions (#431–#437). → TRUST MODEL SPEC'D.** See
+   [`entropy-companions.md`](entropy-companions.md). Governing principle: a
+   companion is **never load-bearing** — the OS CSPRNG stays the sole trusted
+   source and companion entropy is *mixed in* via a robust combiner
+   (`seed = KMAC256(key=os_random, msg=companion_bytes)`), so even a hostile or
+   faulty companion cannot weaken the result. The channel is pinned + PQ/AES
+   encrypted. A custody role (companion *holds* keys, Ledger-style →
+   `HardwareBacked`) is explicitly opt-in and load-bearing. Open: maintainer
+   confirms the default split (entropy-supplement default, custody opt-in)
+   before implementation.
 4. **Web app / browser extensions.** In-browser crypto (MV3 worker, webpage
    channels) is a materially different threat model from native; the isolation
    guarantees (#302) and federation (#303) need their own design + the same

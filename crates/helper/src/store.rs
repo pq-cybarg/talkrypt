@@ -147,15 +147,28 @@ async fn keychain_delete(name: &str) -> Result<()> {
     crate::secretservice::delete(name).await
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+async fn keychain_set(name: &str, secret: &[u8]) -> Result<()> {
+    crate::wincred::set(name, secret)
+}
+#[cfg(windows)]
+async fn keychain_get(name: &str) -> Result<Vec<u8>> {
+    crate::wincred::get(name)
+}
+#[cfg(windows)]
+async fn keychain_delete(name: &str) -> Result<()> {
+    crate::wincred::delete(name)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 async fn keychain_set(_name: &str, _secret: &[u8]) -> Result<()> {
     Err(HelperError::Unsupported("OS keystore custody on this platform"))
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 async fn keychain_get(_name: &str) -> Result<Vec<u8>> {
     Err(HelperError::Unsupported("OS keystore custody on this platform"))
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 async fn keychain_delete(_name: &str) -> Result<()> {
     Ok(())
 }

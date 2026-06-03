@@ -30,6 +30,8 @@ pub mod secretservice;
 pub mod server;
 pub mod store;
 #[cfg(windows)]
+pub mod wincred;
+#[cfg(windows)]
 pub mod winpipe;
 
 pub use client::Client;
