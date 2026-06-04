@@ -565,6 +565,21 @@ async fn repl(
                         .unwrap_or_default();
                     println!("\r{tag}{} {}> {}", channel, short_fp(&from), text);
                 }
+                Event::Identity {
+                    from,
+                    account_fingerprint,
+                    username,
+                    friend,
+                } => {
+                    let name = username.unwrap_or_else(|| "<no username>".into());
+                    let tag = if friend { "friend" } else { "account" };
+                    println!(
+                        "\r* {} {name} (account {}) on device {}",
+                        tag,
+                        short_fp(&account_fingerprint),
+                        short_fp(&from)
+                    );
+                }
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
                 }

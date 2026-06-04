@@ -17,7 +17,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
-use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry};
+use talkrypt_crypto::{
+    dr_suite_id, IdentityChain, IdentityKeyPair, IdentityPublic, KemProfile, SuiteRegistry,
+};
 use talkrypt_topology::for_kind;
 use talkrypt_transport::TcpTransport;
 
@@ -93,6 +95,16 @@ pub enum FfiEvent {
     Connected {
         fingerprint: String,
     },
+    /// A peer resolved its device to an account identity (it presented a
+    /// certificate chain inside the encrypted session). `friend` is true iff the
+    /// account is one the host pinned via `pin_friend` — unforgeable by anyone
+    /// lacking that account's ML-DSA private key.
+    Identity {
+        from: String,
+        account_fingerprint: String,
+        username: String,
+        friend: bool,
+    },
     Disconnected {
         fingerprint: String,
     },
@@ -120,6 +132,17 @@ fn map_event(e: Event) -> FfiEvent {
         },
         Event::Connected { fingerprint } => FfiEvent::Connected {
             fingerprint: hex_fp(&fingerprint),
+        },
+        Event::Identity {
+            from,
+            account_fingerprint,
+            username,
+            friend,
+        } => FfiEvent::Identity {
+            from: hex_fp(&from),
+            account_fingerprint: hex_fp(&account_fingerprint),
+            username: username.unwrap_or_default(),
+            friend,
         },
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
             fingerprint: hex_fp(&fingerprint),
@@ -228,6 +251,31 @@ impl TalkryptClient {
     pub fn poll_event(&self) -> Option<FfiEvent> {
         let mut rx = self.events.lock().unwrap();
         rx.try_recv().ok().map(map_event)
+    }
+
+    /// Pin a friend by their **account public key** (raw ML-DSA-87 verifying-key
+    /// bytes, as exchanged out of band via an invite/QR). A peer whose presented
+    /// chain roots at this account then arrives as an `Identity` event with
+    /// `friend = true`; nobody without the account's private key can forge that.
+    pub fn pin_friend(&self, account_pubkey: Vec<u8>, username: Option<String>) {
+        let account = IdentityPublic {
+            sig_vk: account_pubkey,
+        };
+        self.core.pin_friend(account, username);
+    }
+
+    /// Present an account identity to peers: `chain_bytes` is an encoded
+    /// `IdentityChain` (account→…→this device) and `username` an optional
+    /// self-asserted label. Sent as the first frame *inside* the encrypted
+    /// session. Not calling this leaves the client a pseudonym.
+    pub fn present_identity(
+        &self,
+        chain_bytes: Vec<u8>,
+        username: Option<String>,
+    ) -> Result<(), FfiError> {
+        let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
+        self.core.present_identity(chain, username);
+        Ok(())
     }
 }
 

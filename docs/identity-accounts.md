@@ -134,12 +134,39 @@ valid cert (§2).
 
 ## Putting it on the wire
 
-- The handshake/descriptor gains an **optional** `device_cert` field. Absent →
-  bare device key (pseudonym/rotating). Present → the peer verifies it against a
-  pinned (or directory-resolved) account key and resolves the account.
-- Friends list = pinned account keys + safety numbers (+ optional usernames).
+The certificate chain is sent **inside the established encrypted session**, not
+in the plaintext handshake. The account↔device linkage is *sensitive* — it says
+which devices belong to which account — so it must inherit the session's AEAD
+confidentiality and forward secrecy, never travel in the clear over the
+app-layer handshake. (Constraint: *security for all communications of secure
+material must be ensured.*)
+
+Concretely (`crates/core/src/engine.rs`, `crates/core/src/friends.rs`):
+
+- After the mutual-auth handshake completes and the ratchet/Noise session is up,
+  a node that has called `Core::present_identity(chain, username)` sends a
+  `Frame::Identity` — an encoded `Presentation { chain, username }` — as the
+  **first frame inside the encrypted channel**. A pseudonym presents nothing.
+- The receiver **binds** the chain to the device it already authenticated:
+  `chain.leaf().fingerprint()` must equal the peer's handshake-verified
+  fingerprint. This stops anyone replaying a friend's real chain over their own
+  session. It then verifies the chain and checks its account root against the
+  pinned `FriendStore`, emitting `Event::Identity { from, account_fingerprint,
+  username, friend }`. `friend` is true only for a pinned account — and that is
+  unforgeable without the account's ML-DSA private key.
+- Friends list (`FriendStore`) = pinned account keys + fingerprints (+ optional
+  usernames). `Core::pin_friend` is the trust decision; resolution is pure
+  verification against it.
+- Presentation is gated to plain **pairwise** mode (`GroupRole::None`,
+  non-relayed); group/relayed pairwise channels carry coordination/`Routed`
+  envelopes, not friending.
 - All certs/sigs are ML-DSA-87; account and device fingerprints use SHA3-384 (as
   today's safety numbers). No EC anywhere in this layer.
+
+The same surface is exposed over the FFI (`crates/ffi`): `pin_friend(account_pubkey,
+username)`, `present_identity(chain_bytes, username)`, and an `FfiEvent::Identity`
+variant — so the mobile/desktop apps friend and resolve accounts with the one
+shared core.
 
 ## Decisions (settled)
 
@@ -168,9 +195,18 @@ valid cert (§2).
 The cryptographic core is **built + tested** (`crates/crypto/src/account.rs`):
 `Cert`/`SignedCert`/`IdentityChain` (signature trees), `belongs_to_account`
 (impersonation-proof friend check), `cross_compare` (multi-registry agreement),
-`UsernameClaim`/`SignedClaim`. **Remaining integration:** carry an optional
-`IdentityChain` in the handshake/descriptor so a live session resolves a device
-to an account and checks it against pinned friends; a friends store; registry
-hosting over the onion/persistent-channel transport; and the app UI.
+`UsernameClaim`/`SignedClaim`.
+
+The **engine integration is built + tested** (`crates/core/src/friends.rs`,
+`crates/core/src/engine.rs`): a live session resolves a peer's device to an
+account by verifying an `IdentityChain` it presents inside the encrypted channel,
+bound to the authenticated device, checked against a pinned `FriendStore`, and
+surfaced as `Event::Identity`. Covered by unit tests (binding, impostor, expired,
+segmented, wire roundtrip) and an end-to-end engine test
+(`friending_resolves_account_over_engine`). Exposed over the FFI for the apps.
+
+**Remaining integration:** registry hosting over the onion/persistent-channel
+transport (the `cross_compare` protocol on the wire), and the app UI
+(friends/linking/segment management).
 
 NOT certified / NOT audited — see the project README.

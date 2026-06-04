@@ -21,14 +21,15 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use talkrypt_crypto::suite::SessionHandle;
 use talkrypt_crypto::{
-    Commit, CryptoSuite, IdentityKeyPair, IdentityPublic, KeyPackage, LeafKeyPair, TreeKemGroup,
-    Welcome,
+    Commit, CryptoSuite, IdentityChain, IdentityKeyPair, IdentityPublic, KeyPackage, LeafKeyPair,
+    TreeKemGroup, Welcome,
 };
 use talkrypt_transport::{Endpoint, FrameReader, FrameWriter, Stream, Transport};
 use talkrypt_wire::{Reader, Writer};
 
 use crate::descriptor::ChatDescriptor;
 use crate::error::Result;
+use crate::friends::{self, FriendStore, Presentation};
 use crate::handshake::{self, HandshakeResult};
 use crate::marking::{self, Marking};
 
@@ -46,6 +47,19 @@ pub enum Event {
         /// message, if any. Displayed by every build; only originated by builds
         /// with the `markings` feature.
         marking: Option<Marking>,
+    },
+    /// A peer resolved its authenticated device to an **account** identity (it
+    /// presented a certificate chain inside the encrypted session). `from` is
+    /// the peer's authenticated device fingerprint; `account_fingerprint` is the
+    /// account the chain roots at; `username` is the peer's self-asserted label
+    /// (display only); `friend` is `true` iff that account is a pinned friend
+    /// (unforgeable without the friend's account private key). A peer that
+    /// stays a pseudonym never triggers this event.
+    Identity {
+        from: [u8; 48],
+        account_fingerprint: [u8; 48],
+        username: Option<String>,
+        friend: bool,
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
@@ -72,6 +86,11 @@ enum Frame {
     GroupMsg(Vec<u8>),
     /// Full leaf→fingerprint roster snapshot, for message attribution.
     Roster(Vec<(u32, [u8; 48])>),
+    /// An encoded [`crate::friends::Presentation`] — the peer's account→device
+    /// certificate chain (+ optional username). Sent as the FIRST frame inside
+    /// the encrypted session (never in the plaintext handshake) so the sensitive
+    /// account↔device linkage is AEAD-protected and forward-secret.
+    Identity(Vec<u8>),
 }
 
 impl Frame {
@@ -113,6 +132,10 @@ impl Frame {
                     w.put_bytes(fp);
                 }
             }
+            Frame::Identity(b) => {
+                w.put_u8(6);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -150,6 +173,7 @@ impl Frame {
                 }
                 Frame::Roster(entries)
             }
+            6 => Frame::Identity(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -260,6 +284,13 @@ struct Inner {
     /// Default marking applied to outgoing messages (from the channel policy in
     /// the descriptor). `None` in consumer builds / unmarked chats.
     default_marking: Option<Marking>,
+    /// The account identity presentation (encoded [`Presentation`]) this node
+    /// sends to each peer as the first encrypted frame. `None` ⇒ pseudonym
+    /// (present nothing — unlinkable). Set via [`Core::present_identity`].
+    present_chain: Mutex<Option<Vec<u8>>>,
+    /// Pinned friend accounts. An incoming chain that roots at one of these
+    /// resolves as `friend: true`. Populated via [`Core::pin_friend`].
+    friends: Mutex<FriendStore>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -366,6 +397,8 @@ impl Core {
             pending_commits: Mutex::new(BTreeMap::new()),
             relayed,
             default_marking,
+            present_chain: Mutex::new(None),
+            friends: Mutex::new(FriendStore::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -378,6 +411,44 @@ impl Core {
     /// Our public identity.
     pub fn identity_public(&self) -> &IdentityPublic {
         self.inner.identity.public()
+    }
+
+    /// Present an **account identity** to peers: from now on, every peer we
+    /// connect to (or that connects to us) receives this account→…→device
+    /// certificate `chain` plus an optional `username`, as the first frame
+    /// *inside the encrypted session*. The chain's leaf MUST be this node's
+    /// device key (so the peer can bind it to the key it authenticated).
+    ///
+    /// Call with a chain rooting at your account to appear as that account
+    /// ("linked"); never call it (the default) to stay a pseudonym/rotating
+    /// identity — unlinkable, and unable to claim any friended account.
+    pub fn present_identity(&self, chain: IdentityChain, username: Option<String>) {
+        let encoded = Presentation::new(chain, username).encode();
+        *self.inner.present_chain.lock().unwrap() = Some(encoded);
+    }
+
+    /// Stop presenting an account identity (revert to pseudonym for future
+    /// connections). Existing sessions are unaffected.
+    pub fn clear_identity(&self) {
+        *self.inner.present_chain.lock().unwrap() = None;
+    }
+
+    /// Pin a friend by **account public key** (the trust decision). A peer whose
+    /// presented chain roots at this account will resolve as `friend: true` in
+    /// the [`Event::Identity`] event — and only the real account can produce
+    /// such a chain (ML-DSA-87 unforgeability), so impersonation is impossible.
+    pub fn pin_friend(&self, account: IdentityPublic, username: Option<String>) {
+        self.inner.friends.lock().unwrap().pin(account, username);
+    }
+
+    /// Whether `account` is currently a pinned friend.
+    pub fn is_friend(&self, account: &IdentityPublic) -> bool {
+        self.inner.friends.lock().unwrap().is_pinned(account)
+    }
+
+    /// Number of pinned friend accounts.
+    pub fn friend_count(&self) -> usize {
+        self.inner.friends.lock().unwrap().len()
     }
 
     /// Number of connected peers.
@@ -650,6 +721,21 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult) {
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
+    // If we present an account identity, send the certificate chain as the very
+    // first frame *inside* the encrypted session (never in the plaintext
+    // handshake), so the sensitive account↔device linkage is AEAD-protected.
+    // Only in plain pairwise mode — in group/relayed mode the pairwise channel
+    // carries Routed envelopes / group coordination, not friending.
+    if inner.role == GroupRole::None && !inner.relayed {
+        if let Some(bytes) = inner.present_chain.lock().unwrap().clone() {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+            });
+        }
+    }
+
     tokio::spawn(reader_loop(inner.clone(), reader, session, fingerprint));
 }
 
@@ -720,7 +806,60 @@ async fn reader_loop(
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
             }
+            Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
+                handle_identity(&inner, fingerprint, bytes);
+            }
             _ => { /* frame not valid for this role; ignore */ }
+        }
+    }
+}
+
+/// Current Unix time in seconds (for certificate validity windows). Crypto has
+/// no clock; the engine supplies `now` for `IdentityChain` verification.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A peer presented an account identity inside the encrypted session. Decode it,
+/// **bind** its leaf to the device we already authenticated (`peer_fp`), verify
+/// the chain, check it against pinned friends, and emit [`Event::Identity`].
+///
+/// A presentation that fails to decode, doesn't bind to this peer, or carries a
+/// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
+/// never be mistaken for a verified friend.
+fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
+    let presentation = match Presentation::decode(&bytes) {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = inner
+                .events_tx
+                .send(Event::Error("malformed identity presentation".into()));
+            return;
+        }
+    };
+    let now = now_secs();
+    let resolved = {
+        let store = inner.friends.lock().unwrap();
+        friends::resolve_chain(&store, &presentation.chain, peer_fp, now)
+    };
+    match resolved {
+        Some(res) => {
+            let _ = inner.events_tx.send(Event::Identity {
+                from: peer_fp,
+                account_fingerprint: res.account_fingerprint,
+                username: presentation.username,
+                friend: res.friend,
+            });
+        }
+        None => {
+            // The chain didn't bind to this authenticated device, or was
+            // invalid/expired — refuse to attribute it to any account.
+            let _ = inner
+                .events_tx
+                .send(Event::Error("identity chain did not bind to peer".into()));
         }
     }
 }
@@ -1167,6 +1306,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// End-to-end friending over the engine: Alice links her device to an
+    /// account and presents the chain inside the encrypted session; Bob pins
+    /// that account and resolves Alice's device to a verified **friend**. An
+    /// impostor presenting a chain under a *different* account, even claiming
+    /// the same username, resolves as a non-friend — unforgeable without the
+    /// account key.
+    #[tokio::test]
+    async fn friending_resolves_account_over_engine() {
+        use talkrypt_crypto::IdentityChain;
+
+        async fn next_identity(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        ) -> (Option<String>, bool, [u8; 48]) {
+            loop {
+                if let Event::Identity {
+                    username,
+                    friend,
+                    account_fingerprint,
+                    ..
+                } = next_event(rx).await
+                {
+                    return (username, friend, account_fingerprint);
+                }
+            }
+        }
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["bob".into()],
+            "#friends",
+        );
+
+        // Bob hosts; Alice's account certifies her (engine) device key.
+        let (bob, mut bob_rx) = core_on(&fabric, "bob", &desc);
+        let (alice, _a_rx) = core_on(&fabric, "alice", &desc);
+
+        let alice_account = IdentityKeyPair::generate();
+        let chain = IdentityChain::device(
+            &alice_account,
+            alice.identity_public(),
+            "device:phone",
+            0,
+            0,
+        );
+        alice.present_identity(chain, Some("alice".into()));
+        bob.pin_friend(alice_account.public().clone(), Some("alice".into()));
+
+        bob.host().await.unwrap();
+        alice.connect("bob").await.unwrap();
+
+        let (username, friend, acct_fp) = next_identity(&mut bob_rx).await;
+        assert!(friend, "Alice's pinned account must resolve as a friend");
+        assert_eq!(username.as_deref(), Some("alice"));
+        assert_eq!(acct_fp, alice_account.public().fingerprint());
+
+        // --- impostor: same username, different (unpinned) account ---
+        let ifab = LoopbackFabric::new();
+        let idesc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["bob2".into()],
+            "#friends",
+        );
+        let (bob2, mut bob2_rx) = core_on(&ifab, "bob2", &idesc);
+        let (mallory, _m_rx) = core_on(&ifab, "mallory", &idesc);
+        // Bob2 still only trusts Alice's real account.
+        bob2.pin_friend(alice_account.public().clone(), Some("alice".into()));
+        // Mallory mints a chain under HIS OWN account but claims "alice".
+        let mallory_account = IdentityKeyPair::generate();
+        let fake_chain = IdentityChain::device(
+            &mallory_account,
+            mallory.identity_public(),
+            "device:phone",
+            0,
+            0,
+        );
+        mallory.present_identity(fake_chain, Some("alice".into()));
+
+        bob2.host().await.unwrap();
+        mallory.connect("bob2").await.unwrap();
+
+        let (uname2, friend2, acct_fp2) = next_identity(&mut bob2_rx).await;
+        assert!(!friend2, "impostor must NOT resolve as the pinned friend");
+        assert_eq!(uname2.as_deref(), Some("alice")); // claimed name is advisory
+        assert_ne!(
+            acct_fp2,
+            alice_account.public().fingerprint(),
+            "impostor's account fingerprint differs from the real Alice"
+        );
     }
 
     #[tokio::test]
