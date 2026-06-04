@@ -13,6 +13,7 @@
 //! FIPS-validated module. With the workspace `fips` feature (planned) the same
 //! APIs route through a validated backend.
 
+pub mod account;
 pub mod aead;
 pub mod beacon;
 pub mod error;
@@ -27,6 +28,7 @@ pub mod ratchet;
 pub mod suite;
 pub mod treekem;
 
+pub use account::{belongs_to_account, cross_compare, IdentityChain, SignedCert, SignedClaim};
 pub use beacon::BeaconBody;
 pub use error::{CryptoError, Result};
 pub use group::{GroupSession, MemberId};

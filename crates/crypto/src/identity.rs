@@ -33,7 +33,7 @@ pub struct IdentityKeyPair {
 }
 
 /// The shareable public identity (ML-DSA-87 verifying key).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityPublic {
     /// ML-DSA-87 verifying key, encoded (2592 bytes for category-5).
     pub sig_vk: Vec<u8>,
