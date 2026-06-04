@@ -63,9 +63,24 @@ the bridge:
    certificate chain that roots in Google's hardware-attestation root CA
    (which an emulator's software keymaster cannot produce). The bridge should
    verify that chain before claiming `HardwareBacked` for a TEE-only device.
-3. The connected physical device must be re-attached (it dropped from `adb`
-   during this session) to read the **Seeker's** real StrongBox/Seed-Vault
-   result.
+### On-device result — Solana Seeker (real StrongBox)
+
+The APK was built (`android/build-apk.sh`), installed, and **run on the
+Seeker**; `adb logcat -s talkrypt` reported:
+
+```
+device: Solana Mobile Inc. Seeker | StrongBox feature: true
+detected tier: HARDWARE_BACKED | PQ identity: yes (ML-DSA-87)
+parity report (8 B): 0100000003000102
+```
+
+End-to-end on genuine hardware: `CustodyBridge` created a **StrongBox**-backed
+key on the Seeker's secure element → `HARDWARE_BACKED`, and the shared FFI
+`custody_report` produced `0100000003000102`, which decodes as `core::Capabilities`:
+`01`=PQ-identity true, `00000003`=3 tiers, `00 01 02`=Software < OsKeystore <
+HardwareBacked — the **same parity wire the desktop helper emits**. The mobile
+bridge and the desktop helper now feed one #305 parity contract, validated on
+real StrongBox hardware (not an emulated TEE).
 
 ## Build outline (when wiring the APK)
 

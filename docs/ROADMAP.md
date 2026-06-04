@@ -47,16 +47,17 @@ Architectures: **amd64, arm64, armv7** (#532).
 - **GrapheneOS** — covered under Android (#297); benefits from stricter
   sandboxing. TRNG / StrongBox entropy source surfaced separately in #409.
 
-**Status / test hardware.** The Rust core cross-compiles to
-`aarch64-linux-android`, and the **FFI `.so` now fully links for the device**
-via the installed NDK (`cargo ndk -t arm64-v8a build -p talkrypt-ffi` →
-`libtalkrypt_ffi.so`, ARM aarch64). The remaining mobile work is the
-Gradle/Kotlin app module (uniffi bindings + `CustodyBridge.kt`) + the APK.
-The bridge's detection mechanism was exercised against a real Android runtime
-(emulator): `strongbox_keystore=false` but `hardware_keystore` (TEE) present —
-confirming that StrongBox is the trustworthy signal and **key attestation** is
-the definitive hardware proof (a TEE flag alone is forgeable by an emulator).
-See `docs/android/`.
+**Status / test hardware. → VALIDATED ON REAL HARDWARE.** The full mobile path
+is built and ran on a **Solana Seeker**: a minimal Gradle/Kotlin app
+(`android/`, built via `android/build-apk.sh` — `cargo ndk` `.so` + uniffi
+Kotlin bindings + APK) installed and launched, where `CustodyBridge` created a
+**StrongBox**-backed key on the Seeker's secure element and reported
+`HARDWARE_BACKED` through the shared FFI `custody_report` →
+`0100000003000102` (= `core::Capabilities`: PQ-identity + Software<OsKeystore<
+HardwareBacked). So the mobile bridge and the desktop helper feed **one #305
+parity contract**, confirmed on genuine StrongBox hardware. (An emulator, by
+contrast, advertises a software TEE — hence StrongBox + key attestation are the
+trustworthy signals. See `docs/android/`.)
 
 Real devices are available for **on-hardware** validation (the only faithful way
 to test StrongBox — emulators expose software Keymaster only): a **Solana
