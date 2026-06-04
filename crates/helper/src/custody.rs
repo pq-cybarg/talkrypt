@@ -26,6 +26,11 @@ pub fn supported_tiers() -> Vec<CustodyTier> {
     // (`wincred`) back it.
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     tiers.push(CustodyTier::OsKeystore);
+    // Hardware-backed tier: a TPM 2.0 (Linux, `tpm` feature). Other hardware
+    // bridges (Secure Enclave / StrongBox) report HardwareBacked from their own
+    // platforms (mobile FFI), not here.
+    #[cfg(all(target_os = "linux", feature = "tpm"))]
+    tiers.push(CustodyTier::HardwareBacked);
     tiers
 }
 

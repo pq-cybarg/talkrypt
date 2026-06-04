@@ -14,9 +14,15 @@ talkrypt-core.workspace = true
 talkrypt-crypto.workspace = true
 talkrypt-server.workspace = true
 talkrypt-wire.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs", "process"] }
 thiserror.workspace = true
 zeroize.workspace = true
+
+[features]
+# HardwareBacked custody tier via a TPM 2.0, sealing through the `tpm2-tools`
+# CLI (real TPM2 seal/unseal; no libtss2 build dep). Off by default — needs a
+# TPM (or swtpm) and tpm2-tools at runtime. Linux-targeted.
+tpm = []
 
 # macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
 # (no entitlement needed, unlike Secure Enclave).

@@ -58,7 +58,11 @@ impl KeyStore {
             }
             CustodyTier::OsKeystore => keychain_set(name, blob).await?,
             CustodyTier::HardwareBacked => {
-                return Err(HelperError::Unsupported("hardware-backed custody"))
+                // TPM-seal the secret; the TPM-bound blob goes to a file.
+                let sealed = tpm_seal(blob).await?;
+                let path = self.sealed_path(name)?;
+                tokio::fs::write(&path, &sealed).await?;
+                set_owner_only_file(&path)?;
             }
         }
         let tpath = self.tier_path(name)?;
@@ -81,7 +85,14 @@ impl KeyStore {
             },
             CustodyTier::OsKeystore => keychain_get(name).await?,
             CustodyTier::HardwareBacked => {
-                return Err(HelperError::Unsupported("hardware-backed custody"))
+                let sealed = match tokio::fs::read(&self.sealed_path(name)?).await {
+                    Ok(b) => b,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(HelperError::NotFound)
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                tpm_unseal(&sealed).await?
             }
         };
         Ok((tier, bytes))
@@ -171,6 +182,30 @@ async fn keychain_get(_name: &str) -> Result<Vec<u8>> {
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 async fn keychain_delete(_name: &str) -> Result<()> {
     Ok(())
+}
+
+// ----- HardwareBacked routing (TPM 2.0 on Linux, `tpm` feature) -----
+
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+async fn tpm_seal(secret: &[u8]) -> Result<Vec<u8>> {
+    crate::tpm::seal(secret).await
+}
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+async fn tpm_unseal(blob: &[u8]) -> Result<Vec<u8>> {
+    crate::tpm::unseal(blob).await
+}
+
+#[cfg(not(all(target_os = "linux", feature = "tpm")))]
+async fn tpm_seal(_secret: &[u8]) -> Result<Vec<u8>> {
+    Err(HelperError::Unsupported(
+        "hardware-backed (TPM) custody not built — rebuild on Linux with --features tpm",
+    ))
+}
+#[cfg(not(all(target_os = "linux", feature = "tpm")))]
+async fn tpm_unseal(_blob: &[u8]) -> Result<Vec<u8>> {
+    Err(HelperError::Unsupported(
+        "hardware-backed (TPM) custody not built — rebuild on Linux with --features tpm",
+    ))
 }
 
 /// A name must be a single safe path component — no separators, no `.`/`..`,

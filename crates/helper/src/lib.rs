@@ -29,6 +29,8 @@ pub mod sddl;
 pub mod secretservice;
 pub mod server;
 pub mod store;
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+pub mod tpm;
 #[cfg(windows)]
 pub mod wincred;
 #[cfg(windows)]
