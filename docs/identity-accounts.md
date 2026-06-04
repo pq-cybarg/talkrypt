@@ -141,16 +141,36 @@ valid cert (§2).
 - All certs/sigs are ML-DSA-87; account and device fingerprints use SHA3-384 (as
   today's safety numbers). No EC anywhere in this layer.
 
-## Open decisions (for the maintainer)
+## Decisions (settled)
 
-1. **Username discovery:** keyless/self-asserted (identity = key) vs a
-   directory + **key-transparency log** for name lookup. (Recommend: keyless by
-   default; transparency-log directory as an opt-in for name discovery.)
-2. **Account-key custody:** primary-device-only vs sealed+recovery-phrase vs
-   hardware token. (Recommend: sealed + recovery phrase, reusing the custody
-   tiers, so loss is recoverable without putting the key on every device.)
-3. **Default linkage:** per-contact opt-in (recommend) vs linked-by-default.
-4. Whether to ship **rotating per-conversation** identities in v1 or after the
-   account/friend core.
+1. **Username discovery — keyless default + opt-in registries.** Identity is the
+   account key; the username is a self-asserted label. Optionally a user
+   *registers* on one or more **registries** — a persistent channel (onion) or a
+   custom host following the registry protocol; a user can **spawn a registry
+   from a device**, and later multiplatform apps can host them. Users may
+   register on **more than one**, giving redundancy against any single host being
+   attacked and **unforgeability via cross-compare** (`account::cross_compare`):
+   a name resolves only if every registry agrees on the same self-signed account
+   key. Registration is entirely opt-in.
+2. **Account-key custody — all options.** The account key is an ordinary
+   ML-DSA-87 `IdentityKeyPair`, so its 32-byte seed can live at any custody tier:
+   sealed + recovery phrase, primary-device-only, or a hardware token/companion.
+3. **Linkage — per-contact opt-in**, with three presentation modes (linked /
+   standalone pseudonym / rotating per-conversation).
+4. **Segmented identities / signature trees.** A device may hold multiple
+   segmented identities — sub-keys it certifies under itself (`account → device →
+   segment`) — so one device can present different, mutually-unlinkable
+   identities in different contexts. Modeled by the general `IdentityChain`
+   (any-length path from the account root to a leaf).
+
+## Status
+
+The cryptographic core is **built + tested** (`crates/crypto/src/account.rs`):
+`Cert`/`SignedCert`/`IdentityChain` (signature trees), `belongs_to_account`
+(impersonation-proof friend check), `cross_compare` (multi-registry agreement),
+`UsernameClaim`/`SignedClaim`. **Remaining integration:** carry an optional
+`IdentityChain` in the handshake/descriptor so a live session resolves a device
+to an account and checks it against pinned friends; a friends store; registry
+hosting over the onion/persistent-channel transport; and the app UI.
 
 NOT certified / NOT audited — see the project README.
