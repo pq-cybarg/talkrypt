@@ -41,6 +41,32 @@ Real-hardware validation targets:
 - **Galaxy A23** — Android Keystore; `HardwareBacked` iff its chipset provides a
   secure element/TEE that backs the probe key, else `OsKeystore`.
 
+### Observed (measured via `adb`)
+
+The Android emulator (`sdk_gphone64_arm64`, API 35) reports:
+
+```
+pm has-feature android.hardware.strongbox_keystore  -> false
+pm list features | grep keystore                    -> android.hardware.hardware_keystore=300
+                                                        android.hardware.keystore.app_attest_key
+```
+
+This is the **false-confidence trap made concrete**: the emulator advertises a
+*TEE* (`hardware_keystore`), so a naive `isInsideSecureHardware()` check would
+map it to `HardwareBacked` — but it's software-emulated. Conclusions baked into
+the bridge:
+
+1. **StrongBox** (`strongbox_keystore` feature + `setIsStrongBoxBacked` success)
+   is the only "dedicated secure element" signal → strongest `HardwareBacked`.
+2. A reported TEE alone is not trustworthy on an emulator. The **definitive**
+   hardware proof is **key attestation** — a `KeyGenParameterSpec` attestation
+   certificate chain that roots in Google's hardware-attestation root CA
+   (which an emulator's software keymaster cannot produce). The bridge should
+   verify that chain before claiming `HardwareBacked` for a TEE-only device.
+3. The connected physical device must be re-attached (it dropped from `adb`
+   during this session) to read the **Seeker's** real StrongBox/Seed-Vault
+   result.
+
 ## Build outline (when wiring the APK)
 
 ```bash
@@ -51,5 +77,12 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -o app/src/main/jniLibs \
 # generate uniffi Kotlin bindings into the app source (see docs/PLATFORMS.md),
 # then drop CustodyBridge.kt into the app module.
 ```
+
+**Verified:** `cargo ndk -t arm64-v8a build -p talkrypt-ffi --release` produces
+`libtalkrypt_ffi.so` (`ELF 64-bit ARM aarch64`, stripped) using the installed
+NDK — the FFI (including `custody_report` + the `CustodyTier` enum) links for
+the device. Remaining for an on-device run: the Gradle/Kotlin app module
+(generate the uniffi bindings, add `CustodyBridge.kt`, package the APK), then
+`adb install` and read the real tier on the Seeker.
 
 NOT certified / NOT audited — see the project README.
