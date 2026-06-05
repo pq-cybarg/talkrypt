@@ -32,6 +32,10 @@ android {
 
 dependencies {
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.25'
-    // uniffi 0.31 Kotlin bindings runtime (the only external dep).
+    // uniffi 0.31 Kotlin bindings runtime.
     implementation 'net.java.dev.jna:jna:5.14.0@aar'
+    // ZXing core: render invites / share URLs as scannable QR (encoder only;
+    // no camera). Scanning is delegated to the OS camera via a talkrypt:// deep
+    // link, so no camera permission is needed in-app.
+    implementation 'com.google.zxing:core:3.5.3'
 }

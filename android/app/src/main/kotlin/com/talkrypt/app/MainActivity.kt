@@ -1,6 +1,7 @@
 package com.talkrypt.app
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -15,6 +16,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -36,6 +38,7 @@ class MainActivity : Activity() {
     private var client: TalkryptClient? = null
     private var messages: LinearLayout? = null
     private var scroll: ScrollView? = null
+    private var shareServer: ApkShareServer? = null
 
     // palette
     private val bg = Color.parseColor("#0B0E13")
@@ -52,6 +55,28 @@ class MainActivity : Activity() {
         window.statusBarColor = bg
         window.navigationBarColor = bg
         setContentView(setupScreen())
+        handleDeepLink(intent)
+    }
+
+    // A talkrypt:// link was opened (scanned QR via the OS camera, or tapped).
+    // Auto-join the chat it encodes. singleTask routes re-opens here.
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    private fun handleDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme == "talkrypt") {
+            toast("opening invite…")
+            startJoin(data.toString())
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        shareServer?.stop()
     }
 
     // ---------- setup screen ----------
@@ -94,9 +119,75 @@ class MainActivity : Activity() {
             if (uri.startsWith("talkrypt://")) startJoin(uri) else toast("Paste a talkrypt:// invite")
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
+        // In-person: send this very app to a friend P2P over Wi-Fi/hotspot.
+        col.addView(text("— in person —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
+        col.addView(pillButton("Share app (P2P over Wi-Fi)", panel, fg) {
+            shareApp()
+        }, lp(MATCH_PARENT, dp(50)))
+
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
+    }
+
+    // ---------- P2P app sharing ----------
+    private fun shareApp() {
+        toast("starting local share…")
+        thread {
+            val server = ApkShareServer(ApkShareServer.apkPath(this))
+            val url = server.start()
+            ui.post {
+                if (url == null) {
+                    server.stop()
+                    toast("No Wi-Fi/LAN address — join a Wi-Fi network or hotspot first")
+                    return@post
+                }
+                shareServer?.stop()
+                shareServer = server
+                setContentView(shareScreen(url))
+            }
+        }
+    }
+
+    private fun shareScreen(url: String): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Share talkrypt", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text(
+                "On the same Wi-Fi or hotspot, the other phone scans this code (or opens the URL), " +
+                    "downloads the app, and installs it (allow “install unknown apps” once).",
+                13f, muted,
+            ),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(20)),
+        )
+        addQrInto(col, url, 0.72f)
+        col.addView(text(url, 14f, accent, center = true).also { it.setPadding(0, dp(18), 0, dp(24)) })
+        col.addView(pillButton("Done", panel, fg) {
+            shareServer?.stop(); shareServer = null
+            setContentView(setupScreen())
+        }, lp(MATCH_PARENT, dp(50)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    /** Add a centered QR image of `data` (sized as a fraction of screen width). */
+    private fun addQrInto(parent: LinearLayout, data: String, widthFraction: Float) {
+        val bmp = Qr.bitmap(data) ?: run {
+            parent.addView(text("(QR too large to render — use the text)", 12f, muted, center = true))
+            return
+        }
+        val side = (resources.displayMetrics.widthPixels * widthFraction).toInt()
+        val iv = ImageView(this).apply {
+            setImageBitmap(bmp)
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        val wrap = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(iv, LinearLayout.LayoutParams(side, side))
+        }
+        parent.addView(wrap, lp(MATCH_PARENT, WRAP_CONTENT))
     }
 
     // ---------- chat screen ----------
@@ -186,7 +277,8 @@ class MainActivity : Activity() {
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
                     setContentView(chatScreen(channel, "$posture · safety ${sn.take(11)}"))
-                    system("hosting on $hostPort — share the invite:")
+                    system("hosting — let a friend scan this to join:")
+                    messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")
                     bind(c); poll()
                 }
@@ -227,6 +319,10 @@ class MainActivity : Activity() {
                             addBubble(e.text, mine = false, sender = e.from.take(8),
                                 marking = e.marking.ifEmpty { null })
                         is FfiEvent.Connected -> system("● ${e.fingerprint.take(8)} connected")
+                        is FfiEvent.Identity -> {
+                            val who = e.username.ifEmpty { e.accountFingerprint.take(8) }
+                            system(if (e.friend) "✓ friend $who" else "• account $who (not a friend)")
+                        }
                         is FfiEvent.Disconnected -> system("○ ${e.fingerprint.take(8)} left")
                         is FfiEvent.Error -> system("! ${e.message}")
                     }
