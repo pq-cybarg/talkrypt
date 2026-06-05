@@ -24,8 +24,8 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use talkrypt_core::{
-    build_advertisement, resolve_across, AdvertisePolicy, ChatDescriptor, Core, Event, Marking,
-    Persistence, RegistryClient, RegistryServer, TopologyKind,
+    build_advertisement, resolve_across, AdvertisePolicy, ChatDescriptor, Core, Event, LinkClient,
+    LinkHost, Marking, Persistence, RegistryClient, RegistryServer, TopologyKind,
 };
 #[cfg(feature = "markings")]
 use talkrypt_core::Classification;
@@ -119,6 +119,16 @@ enum Cmd {
         /// the account key is the cryptographic identity). Needs --account.
         #[arg(long)]
         username: Option<String>,
+        /// Persist this device's key at PATH (load if present, else create). A
+        /// stable device key is what a linked account certificate (`--chain`)
+        /// refers to. Omit for an ephemeral per-run device key.
+        #[arg(long)]
+        device: Option<String>,
+        /// Present a linked account certificate chain from PATH (obtained via
+        /// `link-accept`). Resolves you as that account using your `--device`
+        /// key. Mutually exclusive with `--account`.
+        #[arg(long)]
+        chain: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -133,6 +143,40 @@ enum Cmd {
         /// Self-asserted username advertised with the account (needs --account).
         #[arg(long)]
         username: Option<String>,
+        /// Persist this device's key at PATH (see `host --device`).
+        #[arg(long)]
+        device: Option<String>,
+        /// Present a linked account chain from PATH (see `host --chain`).
+        #[arg(long)]
+        chain: Option<String>,
+    },
+    /// Offer to link a new device to your account (you hold the account key).
+    /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
+    LinkOffer {
+        /// Bind address for the new device to connect to (host:port).
+        #[arg(long, default_value = "127.0.0.1:9200")]
+        listen: String,
+        /// Path to your account key (the one that will certify the new device).
+        #[arg(long)]
+        account: String,
+        /// Username to convey to the new device (optional).
+        #[arg(long)]
+        username: Option<String>,
+    },
+    /// Accept a link offer on a NEW device: connect to the offer's URI, get a
+    /// certificate for this device's key, and save the chain for `host --chain`.
+    LinkAccept {
+        /// The linking URI printed by `link-offer`.
+        uri: String,
+        /// Persist this device's key at PATH (created if absent).
+        #[arg(long, default_value = "~/.talkrypt/device.key")]
+        device: String,
+        /// Where to save the received account→device chain.
+        #[arg(long, default_value = "~/.talkrypt/chain.bin")]
+        chain_out: String,
+        /// A label for this device (e.g. laptop, phone).
+        #[arg(long, default_value = "device")]
+        label: String,
     },
     /// Host a username registry (a directory mapping username → account key).
     /// Clients `/register` and `/resolve` against the printed registry URI.
@@ -285,6 +329,8 @@ async fn main() {
             compartments,
             account,
             username,
+            device,
+            chain,
         } => {
             run_host(HostArgs {
                 listen,
@@ -299,6 +345,8 @@ async fn main() {
                 compartments,
                 account,
                 username,
+                device,
+                chain,
             })
             .await
         }
@@ -307,8 +355,21 @@ async fn main() {
             group,
             account,
             username,
-        } => run_join(&uri, group, account, username).await,
+            device,
+            chain,
+        } => run_join(&uri, group, account, username, device, chain).await,
         Cmd::Registry { listen, channel } => run_registry(listen, channel).await,
+        Cmd::LinkOffer {
+            listen,
+            account,
+            username,
+        } => run_link_offer(listen, account, username).await,
+        Cmd::LinkAccept {
+            uri,
+            device,
+            chain_out,
+            label,
+        } => run_link_accept(&uri, device, chain_out, label).await,
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -435,9 +496,67 @@ struct HostArgs {
     compartments: Vec<String>,
     account: Option<String>,
     username: Option<String>,
+    device: Option<String>,
+    chain: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
+
+/// Expand a leading `~/` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Render a short string (an invite or linking URI) as a scannable QR in the
+/// terminal so a phone can scan it in person. Long inputs that don't fit a QR
+/// are silently skipped (the URI text is always printed alongside).
+fn print_qr(data: &str) {
+    if let Ok(code) = qrcode::QrCode::new(data.as_bytes()) {
+        let rendered = code
+            .render::<qrcode::render::unicode::Dense1x2>()
+            .quiet_zone(true)
+            .build();
+        println!("{rendered}");
+    }
+}
+
+/// Resolve the Core's device identity: load/create a persistent device seed at
+/// `path`, or generate an ephemeral one when no path is given.
+fn device_identity(path: &Option<String>) -> Result<IdentityKeyPair, Box<dyn std::error::Error>> {
+    match path {
+        Some(p) => {
+            let p = expand_tilde(p);
+            let (kp, fresh) = open_or_create_account(&p)?; // same 32-byte seed-file format
+            println!(
+                "device key: {} ({p})",
+                if fresh { "new, saved" } else { "loaded" }
+            );
+            Ok(kp)
+        }
+        None => Ok(IdentityKeyPair::generate()),
+    }
+}
+
+/// Save an encoded identity chain to a file.
+fn save_chain(path: &str, chain: &IdentityChain) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, chain.encode())?;
+    Ok(())
+}
+
+/// Load an encoded identity chain from a file.
+fn load_chain(path: &str) -> Result<IdentityChain, Box<dyn std::error::Error>> {
+    Ok(IdentityChain::decode(&std::fs::read(path)?)?)
+}
 
 /// Current Unix time in seconds (certificate validity stamps).
 fn now_secs() -> u64 {
@@ -539,21 +658,64 @@ async fn setup_account(
         println!("identity: pseudonym (unlinkable — no account presented)");
         return Ok(None);
     };
-    let (kp, fresh) = open_or_create_account(path)?;
+    let expanded = expand_tilde(path);
+    let (kp, fresh) = open_or_create_account(&expanded)?;
     present(core, &kp, username.clone()).await;
     println!(
         "identity: account {}{}",
         kp.public().safety_number(),
         if fresh {
-            format!("  (new account saved to {path})")
+            format!("  (new account saved to {expanded})")
         } else {
-            format!("  (loaded from {path})")
+            format!("  (loaded from {expanded})")
         }
     );
     if let Some(u) = username {
         println!("username: {u}  (self-asserted; advertise via a registry to make it discoverable)");
     }
     Ok(Some(kp))
+}
+
+/// Resolve how this session presents itself. A linked `--chain` (a secondary
+/// device certified by an account) takes precedence; otherwise fall back to
+/// `--account` / pseudonym. Returns the account keypair if this device *holds*
+/// one (so it can `/register`); a linked secondary device returns `None`.
+async fn setup_identity(
+    core: &Core,
+    account: &Option<String>,
+    chain: &Option<String>,
+    username: &Option<String>,
+) -> Result<Option<IdentityKeyPair>, Box<dyn std::error::Error>> {
+    if let Some(chain_path) = chain {
+        if account.is_some() {
+            return Err("--chain and --account are mutually exclusive".into());
+        }
+        let ic = load_chain(&expand_tilde(chain_path))?;
+        // The chain must certify THIS device's key (its leaf == our device key),
+        // or peers will reject the binding.
+        let binds = ic.leaf().map(|l| l.fingerprint()) == Some(core.identity_public().fingerprint());
+        if !binds {
+            return Err(
+                "the --chain does not certify this --device key (leaf mismatch); \
+                 use the same --device you linked with"
+                    .into(),
+            );
+        }
+        let account_sn = ic
+            .links
+            .first()
+            .map(|l| l.issuer.safety_number())
+            .unwrap_or_default();
+        core.present_identity(ic, username.clone());
+        core.announce_identity().await;
+        println!("identity: linked device — presenting account chain");
+        println!("account: {account_sn}");
+        if let Some(u) = username {
+            println!("username: {u}");
+        }
+        return Ok(None);
+    }
+    setup_account(core, account, username).await
 }
 
 /// Connect to a registry from its URI and return a client + the parsed
@@ -591,6 +753,8 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         compartments,
         account,
         username,
+        device,
+        chain,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -636,16 +800,11 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     desc.group = group;
     desc.channel_marking = channel_marking;
+    let device_kp = device_identity(&device)?;
     let (core, rx) = if group {
-        Core::new_group(
-            IdentityKeyPair::generate(),
-            suite,
-            transport,
-            desc.clone(),
-            true,
-        )
+        Core::new_group(device_kp, suite, transport, desc.clone(), true)
     } else {
-        Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone())
+        Core::new(device_kp, suite, transport, desc.clone())
     };
     core.host().await?;
 
@@ -671,10 +830,13 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
             hex(&blob)
         );
     }
-    // Account identity: link to an account (presented to peers inside the
-    // encrypted session) or remain an unlinkable pseudonym.
-    let account_kp = setup_account(&core, &account, &username).await?;
-    println!("waiting for peers — type a message + enter to send. /help for commands.\n");
+    // Show the invite as a scannable QR for in-person joining.
+    println!("scan to join (or copy the URI above):\n");
+    print_qr(&desc.to_uri());
+
+    // Identity: linked chain (secondary device) / account / pseudonym.
+    let account_kp = setup_identity(&core, &account, &chain, &username).await?;
+    println!("\nwaiting for peers — type a message + enter to send. /help for commands.\n");
 
     repl(core, rx, ReplState::new(account_kp, username)).await
 }
@@ -684,6 +846,8 @@ async fn run_join(
     group: bool,
     account: Option<String>,
     username: Option<String>,
+    device: Option<String>,
+    chain: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let desc = ChatDescriptor::from_uri(uri)?;
@@ -702,16 +866,11 @@ async fn run_join(
     let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
     // The invite descriptor declares group mode; --group can also force it.
     let want_group = group || desc.group;
+    let device_kp = device_identity(&device)?;
     let (core, rx) = if want_group {
-        Core::new_group(
-            IdentityKeyPair::generate(),
-            suite,
-            transport,
-            desc.clone(),
-            false,
-        )
+        Core::new_group(device_kp, suite, transport, desc.clone(), false)
     } else {
-        Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone())
+        Core::new(device_kp, suite, transport, desc.clone())
     };
 
     println!(
@@ -736,8 +895,8 @@ async fn run_join(
         core.peer_count()
     );
 
-    // Link to an account or stay a pseudonym, then enter the interactive loop.
-    let account_kp = setup_account(&core, &account, &username).await?;
+    // Identity: linked chain (secondary device) / account / pseudonym.
+    let account_kp = setup_identity(&core, &account, &chain, &username).await?;
     repl(core, rx, ReplState::new(account_kp, username)).await
 }
 
@@ -770,6 +929,110 @@ async fn run_registry(listen: String, channel: String) -> Result<(), Box<dyn std
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
+}
+
+/// `link-offer`: the account holder offers to certify a new device. Prints a
+/// one-time linking URI + QR; the new device runs `link-accept`.
+async fn run_link_offer(
+    listen: String,
+    account: String,
+    username: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{BANNER}\n");
+    let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
+    let account_path = expand_tilde(&account);
+    let account_kp = load_account(&account_path)
+        .map_err(|e| format!("could not load account {account_path}: {e}"))?;
+    let account_sn = account_kp.public().safety_number();
+    // A one-time linking descriptor: its random invite token is the in-person
+    // secret carried by the QR. The account key never crosses the wire.
+    let desc = ChatDescriptor::new(
+        TopologyKind::P2P,
+        Persistence::Ephemeral,
+        DEFAULT_SUITE_ID,
+        vec![listen.clone()],
+        "#link",
+    );
+    let transport = Arc::new(TcpTransport::new(&listen));
+    let host = LinkHost::new(
+        account_kp,
+        IdentityKeyPair::generate(),
+        suite,
+        transport,
+        &desc,
+        username.clone(),
+        now_secs(),
+    );
+    host.run().await?;
+
+    println!("linking offer for account {account_sn}");
+    println!("hosting on {listen}\n");
+    println!("On the NEW device, run:\n  talkrypt link-accept '{}'\n", desc.to_uri());
+    print_qr(&desc.to_uri());
+    println!(
+        "\nThe account key never leaves this device — only a signed device cert is\n\
+         sent. After linking, compare the account safety number out of band.\n\
+         Ctrl-C to stop."
+    );
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+/// `link-accept`: on a new device, connect to a link offer, get a certificate
+/// for this device's key, and save the chain for `host --chain`.
+async fn run_link_accept(
+    uri: &str,
+    device: String,
+    chain_out: String,
+    label: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{BANNER}\n");
+    let desc = ChatDescriptor::from_uri(uri)?;
+    let suite = SuiteRegistry::with_defaults()
+        .get_by_scheme_hash(&desc.scheme_hash())
+        .map_err(|_| "this link offer's scheme is not registered in this build")?;
+    let endpoint = desc
+        .endpoints
+        .first()
+        .ok_or("link URI carries no endpoint address")?
+        .clone();
+    let device_path = expand_tilde(&device);
+    let (device_kp, fresh) = open_or_create_account(&device_path)?;
+    println!(
+        "device key: {} ({device_path})",
+        if fresh { "new, saved" } else { "loaded" }
+    );
+    let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+    let linked = LinkClient::request(
+        &device_kp,
+        suite,
+        transport,
+        &desc,
+        &endpoint,
+        label,
+        now_secs(),
+    )
+    .await?;
+
+    let chain_path = expand_tilde(&chain_out);
+    save_chain(&chain_path, &linked.chain)?;
+    println!("\nlinked to account: {}", linked.account.safety_number());
+    if let Some(u) = &linked.username {
+        println!("account username: {u}");
+    }
+    println!("saved account→device chain to {chain_path}");
+    let uname_flag = linked
+        .username
+        .as_deref()
+        .map(|u| format!(" --username {u}"))
+        .unwrap_or_default();
+    println!(
+        "\nNow chat AS this account on this device:\n  \
+         talkrypt host --device {device_path} --chain {chain_path}{uname_flag}\n"
+    );
+    println!("Verify the account safety number above matches the offering device out of band.");
+    Ok(())
 }
 
 /// Mutable interactive state: the linked account (or pseudonym) + its username.

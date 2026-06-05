@@ -15,6 +15,8 @@ talkrypt-transport.workspace = true
 talkrypt-topology.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time"] }
 clap = { version = "4", features = ["derive"] }
+# Render invites / linking URIs as scannable QR in the terminal (in-person pairing).
+qrcode = { version = "0.14", default-features = false }
 
 [features]
 default = []
