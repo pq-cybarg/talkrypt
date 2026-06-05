@@ -103,20 +103,24 @@ class MainActivity : Activity() {
     private fun chatScreen(title: String, subtitle: String): View {
         val root = column(bg)
 
-        // header bar
+        // header bar — MUST be WRAP_CONTENT height. `column()` defaults children
+        // to MATCH_PARENT height, which (with no weight) would expand to fill the
+        // whole screen and push the messages list + input bar off the bottom —
+        // that was the "no text-entry field" bug. Pin explicit heights so only
+        // the messages ScrollView (weight 1) takes the remaining space.
         val header = column(panel).apply { setPadding(dp(20), dp(14), dp(20), dp(14)) }
         header.addView(text(title, 17f, fg, bold = true))
         header.addView(text(subtitle, 12f, muted).also { it.setPadding(0, dp(2), 0, 0) })
-        root.addView(header)
+        root.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // messages
+        // messages — the only weighted child; takes all space between header/bar
         val list = column(bg).apply { setPadding(dp(12), dp(12), dp(12), dp(12)) }
         messages = list
         val sv = ScrollView(this).apply { isFillViewport = true; addView(list) }
         scroll = sv
         root.addView(sv, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // input bar
+        // input bar — pinned to the bottom, WRAP_CONTENT height
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(panel); setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -132,7 +136,7 @@ class MainActivity : Activity() {
             if (t.isNotEmpty()) { input.setText(""); sendMessage(t) }
         }
         bar.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(10) })
-        root.addView(bar)
+        root.addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         applyInsets(root)
         return root
