@@ -23,7 +23,7 @@ pub use advert::{build_advertisement, open_advertisement, AdvertStore, Advertise
 pub use custody::{Capabilities, CustodyTier};
 pub use marking::{Classification, Marking};
 pub use descriptor::{ChannelPassword, ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
-pub use engine::{Core, Event, GroupRole};
+pub use engine::{AccessPolicy, Core, Event, GroupRole};
 pub use friends::{Friend, FriendStore, Presentation, Resolved};
 pub use linking::{LinkClient, LinkHost, Linked};
 pub use registry::{resolve_across, RegistryClient, RegistryServer};

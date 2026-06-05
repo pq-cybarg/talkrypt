@@ -180,6 +180,47 @@ impl Frame {
     }
 }
 
+/// Who may participate in a (pairwise) channel. The host enforces this when a
+/// peer presents its account identity inside the encrypted session.
+///
+/// A **registry-restricted channel** is built from this: the creator populates
+/// [`AccessPolicy::Accounts`] with the account fingerprints registered on a
+/// specific registry (a "beacon") that only the creator knows — so only members
+/// of that registry can be heard, without the registry's address appearing in
+/// the invite.
+#[derive(Clone, Debug, Default)]
+pub enum AccessPolicy {
+    /// Anyone with the invite (and password, if any) may participate.
+    #[default]
+    Open,
+    /// Only these account fingerprints may participate. A peer that presents a
+    /// non-listed account — or never presents one (a pseudonym) — is silenced
+    /// and disconnected.
+    Accounts(std::collections::HashSet<[u8; 48]>),
+}
+
+impl AccessPolicy {
+    fn is_open(&self) -> bool {
+        matches!(self, AccessPolicy::Open)
+    }
+    fn allows(&self, account_fingerprint: &[u8; 48]) -> bool {
+        match self {
+            AccessPolicy::Open => true,
+            AccessPolicy::Accounts(set) => set.contains(account_fingerprint),
+        }
+    }
+}
+
+/// The outcome of evaluating a peer's presented identity against the policy.
+enum IdentityOutcome {
+    /// Allowed (Open, or the account is listed) — peer is approved.
+    Allowed,
+    /// The account is not permitted — the peer must be disconnected.
+    Rejected,
+    /// The presentation was malformed / didn't bind — ignore it.
+    Ignored,
+}
+
 /// Whether this node participates in a TreeKEM group, and as what.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GroupRole {
@@ -296,6 +337,9 @@ struct Inner {
     /// after an out-of-band safety-number check — TOFU friending without pasting
     /// a 2592-byte key. See [`Core::pin_seen_account`].
     seen_accounts: Mutex<HashMap<[u8; 48], IdentityPublic>>,
+    /// Who may participate (pairwise). `Open` by default; a registry-restricted
+    /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
+    access: Mutex<AccessPolicy>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -405,6 +449,7 @@ impl Core {
             present_chain: Mutex::new(None),
             friends: Mutex::new(FriendStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
+            access: Mutex::new(AccessPolicy::Open),
         });
         (Core { inner }, events_rx)
     }
@@ -472,6 +517,24 @@ impl Core {
     /// Number of pinned friend accounts.
     pub fn friend_count(&self) -> usize {
         self.inner.friends.lock().unwrap().len()
+    }
+
+    /// Restrict this (pairwise) channel to the given **account fingerprints**:
+    /// only peers presenting one of these accounts are heard; pseudonyms and
+    /// other accounts are silenced and disconnected. Build the set from a
+    /// registry you alone know to make a *registry-restricted* channel.
+    pub fn restrict_to_accounts(&self, accounts: std::collections::HashSet<[u8; 48]>) {
+        *self.inner.access.lock().unwrap() = AccessPolicy::Accounts(accounts);
+    }
+
+    /// Set an explicit access policy (e.g. back to `Open`).
+    pub fn set_access_policy(&self, policy: AccessPolicy) {
+        *self.inner.access.lock().unwrap() = policy;
+    }
+
+    /// Remove all restrictions (anyone with the invite may participate).
+    pub fn open_access(&self) {
+        *self.inner.access.lock().unwrap() = AccessPolicy::Open;
     }
 
     /// The account public key seen (on a verified, peer-bound chain) for
@@ -838,6 +901,9 @@ async fn reader_loop(
     // The responder presents its identity once, after the first inbound frame
     // makes its ratchet send-ready (see `register`).
     let mut presented = false;
+    // Access gate: a peer is "approved" immediately under an Open policy, else
+    // only after it presents an allowed account (see the Identity arm below).
+    let mut approved = inner.access.lock().unwrap().is_open();
     loop {
         let frame = match reader.recv_frame().await {
             Ok(f) => f,
@@ -882,7 +948,15 @@ async fn reader_loop(
         } else {
             (fingerprint, pt)
         };
-        match Frame::decode(&frame_bytes) {
+        let decoded = Frame::decode(&frame_bytes);
+        // Access gate (pairwise): under a restrictive policy, a peer is heard
+        // only once it presents an allowed account. Until then, drop everything
+        // except its Identity frame (which is what flips `approved`).
+        if inner.role == GroupRole::None && !approved && !matches!(decoded, Some(Frame::Identity(_)))
+        {
+            continue;
+        }
+        match decoded {
             Some(Frame::Chat {
                 channel,
                 text,
@@ -912,11 +986,25 @@ async fn reader_loop(
                 handle_group_msg(&inner, from, b).await;
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
-                handle_identity(&inner, fingerprint, bytes);
+                match handle_identity(&inner, fingerprint, bytes) {
+                    IdentityOutcome::Allowed => approved = true,
+                    IdentityOutcome::Ignored => {}
+                    IdentityOutcome::Rejected => {
+                        // Not permitted on this restricted channel: drop the peer.
+                        inner.peers.lock().unwrap().retain(|p| p.fingerprint != fingerprint);
+                        let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
+                        break;
+                    }
+                }
             }
             _ => { /* frame not valid for this role; ignore */ }
         }
     }
+}
+
+/// First 6 bytes of a fingerprint as hex (for human-readable log lines).
+fn short_hex6(fp: &[u8; 48]) -> String {
+    fp[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Current Unix time in seconds (for certificate validity windows). Crypto has
@@ -935,14 +1023,14 @@ fn now_secs() -> u64 {
 /// A presentation that fails to decode, doesn't bind to this peer, or carries a
 /// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
 /// never be mistaken for a verified friend.
-fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
+fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> IdentityOutcome {
     let presentation = match Presentation::decode(&bytes) {
         Ok(p) => p,
         Err(_) => {
             let _ = inner
                 .events_tx
                 .send(Event::Error("malformed identity presentation".into()));
-            return;
+            return IdentityOutcome::Ignored;
         }
     };
     let now = now_secs();
@@ -952,6 +1040,15 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
     };
     match resolved {
         Some(res) => {
+            // Enforce the access policy: on a restricted channel, a peer whose
+            // account isn't permitted is rejected (caller disconnects it).
+            if !inner.access.lock().unwrap().allows(&res.account_fingerprint) {
+                let _ = inner.events_tx.send(Event::Error(format!(
+                    "rejected non-member account {}",
+                    short_hex6(&res.account_fingerprint)
+                )));
+                return IdentityOutcome::Rejected;
+            }
             // Remember the verified account key so the UI can pin it by
             // fingerprint after an out-of-band safety-number comparison.
             inner
@@ -965,6 +1062,7 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
                 username: presentation.username,
                 friend: res.friend,
             });
+            IdentityOutcome::Allowed
         }
         None => {
             // The chain didn't bind to this authenticated device, or was
@@ -972,6 +1070,7 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
             let _ = inner
                 .events_tx
                 .send(Event::Error("identity chain did not bind to peer".into()));
+            IdentityOutcome::Ignored
         }
     }
 }
@@ -1576,6 +1675,91 @@ mod tests {
         let (alice_sees_friend, acct_b) = next_identity(&mut alice_rx).await;
         assert!(alice_sees_friend, "alice must resolve bob as a friend (reactive)");
         assert_eq!(acct_b, bob_account.public().fingerprint());
+    }
+
+    /// Registry-restricted channel: the host allows only a specific account.
+    /// A peer presenting an allowed account is heard; a peer presenting a
+    /// different account is rejected and its messages never surface.
+    #[tokio::test]
+    async fn access_policy_restricts_to_allowed_accounts() {
+        use std::collections::HashSet;
+        use talkrypt_crypto::IdentityChain;
+
+        async fn try_get_message(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+            dur: Duration,
+        ) -> Option<String> {
+            timeout(dur, async {
+                loop {
+                    match rx.recv().await {
+                        Some(Event::Message { text, .. }) => break text,
+                        Some(_) => continue,
+                        None => break String::new(),
+                    }
+                }
+            })
+            .await
+            .ok()
+        }
+
+        let allowed_account = IdentityKeyPair::generate();
+        let other_account = IdentityKeyPair::generate();
+
+        // --- allowed member is heard ---
+        {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec!["host".into()],
+                "#restricted",
+            );
+            let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+            host.restrict_to_accounts(HashSet::from([allowed_account.public().fingerprint()]));
+            let (member, _m) = core_on(&fabric, "member", &desc);
+            member.present_identity(
+                IdentityChain::device(&allowed_account, member.identity_public(), "d", 0, 0),
+                Some("ok".into()),
+            );
+            host.host().await.unwrap();
+            member.connect("host").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            member.send("i belong here").await.unwrap();
+            assert_eq!(
+                try_get_message(&mut host_rx, Duration::from_secs(2)).await.as_deref(),
+                Some("i belong here"),
+                "allowed account must be heard"
+            );
+        }
+
+        // --- non-member is rejected (message dropped) ---
+        {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec!["host2".into()],
+                "#restricted",
+            );
+            let (host, mut host_rx) = core_on(&fabric, "host2", &desc);
+            host.restrict_to_accounts(HashSet::from([allowed_account.public().fingerprint()]));
+            let (intruder, _i) = core_on(&fabric, "intruder", &desc);
+            intruder.present_identity(
+                IdentityChain::device(&other_account, intruder.identity_public(), "d", 0, 0),
+                Some("nope".into()),
+            );
+            host.host().await.unwrap();
+            intruder.connect("host2").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            intruder.send("let me in").await.unwrap();
+            // The host must NOT surface the intruder's message.
+            assert!(
+                try_get_message(&mut host_rx, Duration::from_millis(600)).await.is_none(),
+                "non-member account must be silenced"
+            );
+        }
     }
 
     #[tokio::test]

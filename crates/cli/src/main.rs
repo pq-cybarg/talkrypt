@@ -135,6 +135,11 @@ enum Cmd {
         /// same `--password`.
         #[arg(long)]
         password: Option<String>,
+        /// Registry-restrict this channel: only accounts registered on the
+        /// registry at this URI may participate (the URI is yours alone and
+        /// never appears in the invite). The allowlist is pulled at startup.
+        #[arg(long)]
+        require_registry: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -342,6 +347,7 @@ async fn main() {
             device,
             chain,
             password,
+            require_registry,
         } => {
             run_host(HostArgs {
                 listen,
@@ -359,6 +365,7 @@ async fn main() {
                 device,
                 chain,
                 password,
+                require_registry,
             })
             .await
         }
@@ -512,6 +519,7 @@ struct HostArgs {
     device: Option<String>,
     chain: Option<String>,
     password: Option<String>,
+    require_registry: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -770,6 +778,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         device,
         chain,
         password,
+        require_registry,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -826,6 +835,28 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         Core::new(device_kp, suite, transport, desc.clone())
     };
     core.host().await?;
+
+    // Registry-restricted channel: pull the allowlist of account fingerprints
+    // from a registry only the host knows; only those accounts will be heard.
+    if let Some(reg_uri) = &require_registry {
+        match registry_connect(reg_uri).await {
+            Ok((mut client, _)) => match client.list().await {
+                Ok(claims) => {
+                    let allowed: std::collections::HashSet<[u8; 48]> = claims
+                        .iter()
+                        .map(|c| c.claim.account.fingerprint())
+                        .collect();
+                    let n = allowed.len();
+                    core.restrict_to_accounts(allowed);
+                    println!(
+                        "access: registry-restricted to {n} account(s) from the configured registry"
+                    );
+                }
+                Err(e) => return Err(format!("could not list the required registry: {e}").into()),
+            },
+            Err(e) => return Err(format!("could not reach the required registry: {e}").into()),
+        }
+    }
 
     println!(
         "hosting {} {topology} chat on {listen}",
