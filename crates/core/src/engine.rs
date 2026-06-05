@@ -291,6 +291,11 @@ struct Inner {
     /// Pinned friend accounts. An incoming chain that roots at one of these
     /// resolves as `friend: true`. Populated via [`Core::pin_friend`].
     friends: Mutex<FriendStore>,
+    /// Account keys seen on presented (verified, peer-bound) chains, keyed by
+    /// account fingerprint. Lets the UI pin a just-seen account by fingerprint
+    /// after an out-of-band safety-number check — TOFU friending without pasting
+    /// a 2592-byte key. See [`Core::pin_seen_account`].
+    seen_accounts: Mutex<HashMap<[u8; 48], IdentityPublic>>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -399,6 +404,7 @@ impl Core {
             default_marking,
             present_chain: Mutex::new(None),
             friends: Mutex::new(FriendStore::new()),
+            seen_accounts: Mutex::new(HashMap::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -433,6 +439,23 @@ impl Core {
         *self.inner.present_chain.lock().unwrap() = None;
     }
 
+    /// Send the current account presentation (if any) to all **already
+    /// connected** peers — so a user can link mid-session, not only on new
+    /// connections. No-op for pseudonyms and in group/relayed mode. The chain
+    /// still travels inside each peer's encrypted session.
+    pub async fn announce_identity(&self) {
+        if self.inner.role != GroupRole::None || self.inner.relayed {
+            return;
+        }
+        let bytes = self.inner.present_chain.lock().unwrap().clone();
+        if let Some(bytes) = bytes {
+            for (session, writer, _) in collect_peers(&self.inner) {
+                let _ = send_payload(&session, &writer, &Frame::Identity(bytes.clone()).encode())
+                    .await;
+            }
+        }
+    }
+
     /// Pin a friend by **account public key** (the trust decision). A peer whose
     /// presented chain roots at this account will resolve as `friend: true` in
     /// the [`Event::Identity`] event — and only the real account can produce
@@ -449,6 +472,55 @@ impl Core {
     /// Number of pinned friend accounts.
     pub fn friend_count(&self) -> usize {
         self.inner.friends.lock().unwrap().len()
+    }
+
+    /// The account public key seen (on a verified, peer-bound chain) for
+    /// `account_fingerprint`, if any. Use its `safety_number()` for an
+    /// out-of-band comparison before pinning.
+    pub fn seen_account(&self, account_fingerprint: [u8; 48]) -> Option<IdentityPublic> {
+        self.inner
+            .seen_accounts
+            .lock()
+            .unwrap()
+            .get(&account_fingerprint)
+            .cloned()
+    }
+
+    /// Pin a just-seen account as a friend by its fingerprint (TOFU after an
+    /// out-of-band safety-number check). Returns `true` if the account was known
+    /// from a prior [`Event::Identity`]; `false` if no such account was seen.
+    pub fn pin_seen_account(&self, account_fingerprint: [u8; 48], username: Option<String>) -> bool {
+        let account = self.seen_account(account_fingerprint);
+        match account {
+            Some(acct) => {
+                self.inner.friends.lock().unwrap().pin(acct, username);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Fingerprints of all accounts seen on verified presentations this session
+    /// (candidates for `pin_seen_account`).
+    pub fn seen_account_fingerprints(&self) -> Vec<[u8; 48]> {
+        self.inner
+            .seen_accounts
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// All pinned friends (account fingerprint + remembered username).
+    pub fn friends(&self) -> Vec<([u8; 48], Option<String>)> {
+        self.inner
+            .friends
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|f| (f.account_fingerprint, f.username.clone()))
+            .collect()
     }
 
     /// Number of connected peers.
@@ -544,7 +616,7 @@ impl Core {
                 )
                 .await;
                 match hs {
-                    Ok(hs) => register(&inner, stream, hs),
+                    Ok(hs) => register(&inner, stream, hs, false),
                     Err(e) => {
                         let _ = inner
                             .events_tx
@@ -567,7 +639,7 @@ impl Core {
         )
         .await?;
         let fp = hs.peer_identity.fingerprint();
-        register(&self.inner, stream, hs);
+        register(&self.inner, stream, hs, true);
 
         // A joining group member sends its KeyPackage toward the committer
         // (directly to the host, or via the relay in relayed mode).
@@ -708,7 +780,14 @@ async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
 }
 
 /// Register a freshly-handshaked peer: store it and spawn its reader task.
-fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult) {
+///
+/// `is_initiator` is whether *we* dialed (ratchet initiator) vs. accepted
+/// (responder). It matters for identity presentation: a ratchet **responder
+/// cannot send until it has received the initiator's first frame**, so an
+/// eager presentation from the responder would be dropped. The initiator
+/// presents immediately (it sends first); the responder presents *reactively*
+/// from the reader loop, right after its session becomes send-ready.
+fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is_initiator: bool) {
     let (writer, reader) = stream.into_split();
     let fingerprint = hs.peer_identity.fingerprint();
     let session = Arc::new(AsyncMutex::new(hs.session));
@@ -721,12 +800,13 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult) {
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
-    // If we present an account identity, send the certificate chain as the very
-    // first frame *inside* the encrypted session (never in the plaintext
-    // handshake), so the sensitive account↔device linkage is AEAD-protected.
-    // Only in plain pairwise mode — in group/relayed mode the pairwise channel
-    // carries Routed envelopes / group coordination, not friending.
-    if inner.role == GroupRole::None && !inner.relayed {
+    // Identity presentation rides as the first frame *inside* the encrypted
+    // session (never in the plaintext handshake), so the sensitive
+    // account↔device linkage is AEAD-protected. Only in plain pairwise mode —
+    // group/relayed pairwise channels carry coordination/`Routed` envelopes.
+    let present_pairwise = inner.role == GroupRole::None && !inner.relayed;
+    if present_pairwise && is_initiator {
+        // Initiator sends first, so it can present right away.
         if let Some(bytes) = inner.present_chain.lock().unwrap().clone() {
             let s = session.clone();
             let w = writer.clone();
@@ -735,8 +815,17 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult) {
             });
         }
     }
+    // The responder presents reactively (see reader_loop): once it has decrypted
+    // the initiator's first frame, its ratchet is send-ready.
+    let present_reactively = present_pairwise && !is_initiator;
 
-    tokio::spawn(reader_loop(inner.clone(), reader, session, fingerprint));
+    tokio::spawn(reader_loop(
+        inner.clone(),
+        reader,
+        session,
+        fingerprint,
+        present_reactively,
+    ));
 }
 
 async fn reader_loop(
@@ -744,7 +833,11 @@ async fn reader_loop(
     mut reader: Box<dyn FrameReader>,
     session: Arc<AsyncMutex<Box<dyn SessionHandle>>>,
     fingerprint: [u8; 48],
+    present_reactively: bool,
 ) {
+    // The responder presents its identity once, after the first inbound frame
+    // makes its ratchet send-ready (see `register`).
+    let mut presented = false;
     loop {
         let frame = match reader.recv_frame().await {
             Ok(f) => f,
@@ -766,6 +859,18 @@ async fn reader_loop(
                 continue;
             }
         };
+        // Now send-ready: if we're a responder with an identity to present, send
+        // it back to this peer exactly once.
+        if present_reactively && !presented {
+            presented = true;
+            // Bind to a local so the std MutexGuard drops before the await.
+            let pending = inner.present_chain.lock().unwrap().clone();
+            if let Some(bytes) = pending {
+                if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                    let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+                }
+            }
+        }
         // In relayed mode the pairwise payload is a Routed envelope; unwrap it
         // and use the relay-stamped original sender. Otherwise the payload is a
         // Frame straight from the pairwise peer.
@@ -847,6 +952,13 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) {
     };
     match resolved {
         Some(res) => {
+            // Remember the verified account key so the UI can pin it by
+            // fingerprint after an out-of-band safety-number comparison.
+            inner
+                .seen_accounts
+                .lock()
+                .unwrap()
+                .insert(res.account_fingerprint, res.account.clone());
             let _ = inner.events_tx.send(Event::Identity {
                 from: peer_fp,
                 account_fingerprint: res.account_fingerprint,
@@ -1401,6 +1513,69 @@ mod tests {
             alice_account.public().fingerprint(),
             "impostor's account fingerprint differs from the real Alice"
         );
+    }
+
+    /// Both sides present an account: the initiator presents eagerly, the
+    /// responder presents *reactively* once its ratchet is send-ready. Each must
+    /// resolve the other as a pinned friend — this is the direction the eager-
+    /// only presentation silently dropped.
+    #[tokio::test]
+    async fn friending_is_bidirectional_initiator_and_responder() {
+        use talkrypt_crypto::IdentityChain;
+
+        async fn next_identity(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        ) -> (bool, [u8; 48]) {
+            loop {
+                if let Event::Identity {
+                    friend,
+                    account_fingerprint,
+                    ..
+                } = next_event(rx).await
+                {
+                    return (friend, account_fingerprint);
+                }
+            }
+        }
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["bob".into()],
+            "#bidi",
+        );
+        let (bob, mut bob_rx) = core_on(&fabric, "bob", &desc); // responder (hosts)
+        let (alice, mut alice_rx) = core_on(&fabric, "alice", &desc); // initiator (dials)
+
+        let bob_account = IdentityKeyPair::generate();
+        let alice_account = IdentityKeyPair::generate();
+        bob.present_identity(
+            IdentityChain::device(&bob_account, bob.identity_public(), "device:bob", 0, 0),
+            Some("bob".into()),
+        );
+        alice.present_identity(
+            IdentityChain::device(&alice_account, alice.identity_public(), "device:alice", 0, 0),
+            Some("alice".into()),
+        );
+        // Each pins the other's account.
+        bob.pin_friend(alice_account.public().clone(), Some("alice".into()));
+        alice.pin_friend(bob_account.public().clone(), Some("bob".into()));
+
+        bob.host().await.unwrap();
+        alice.connect("bob").await.unwrap();
+
+        // Responder (bob) receives the initiator's eager presentation.
+        let (bob_sees_friend, acct_a) = next_identity(&mut bob_rx).await;
+        assert!(bob_sees_friend, "bob must resolve alice as a friend");
+        assert_eq!(acct_a, alice_account.public().fingerprint());
+
+        // Initiator (alice) receives the responder's REACTIVE presentation — the
+        // path the bug dropped.
+        let (alice_sees_friend, acct_b) = next_identity(&mut alice_rx).await;
+        assert!(alice_sees_friend, "alice must resolve bob as a friend (reactive)");
+        assert_eq!(acct_b, bob_account.public().fingerprint());
     }
 
     #[tokio::test]

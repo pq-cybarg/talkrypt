@@ -205,8 +205,28 @@ surfaced as `Event::Identity`. Covered by unit tests (binding, impostor, expired
 segmented, wire roundtrip) and an end-to-end engine test
 (`friending_resolves_account_over_engine`). Exposed over the FFI for the apps.
 
-**Remaining integration:** registry hosting over the onion/persistent-channel
-transport (the `cross_compare` protocol on the wire), and the app UI
-(friends/linking/segment management).
+The **registry is built + tested** (`crates/core/src/registry.rs`): a
+`RegistryServer` serves `register`/`resolve`/`list` over the same authenticated,
+AEAD-encrypted session as chat (a shared registry descriptor supplies the
+handshake root); a `RegistryClient` publishes a self-signed `SignedClaim` and
+resolves names; `resolve_across` runs `cross_compare` over claims gathered from
+several registries so a name resolves only if every registry agrees. Each stored
+binding is signed by the account key, so a hostile registry can omit or refuse a
+name but never fabricate one. Tested over loopback (roundtrip, name-taken
+refusal, multi-registry agreement + equivocation detection).
+
+The **CLI is interactive** (`crates/cli`): a `registry` subcommand hosts a
+directory; `host`/`join` link to a username account (`--account`/`--username`)
+or stay a pseudonym, and the in-session REPL drives friending (`/friend trust` a
+just-seen account after an out-of-band safety-number check — TOFU without
+pasting a 2592-byte key), account management (`/account`, `/username`,
+`/pseudonym`), and registry use (`/register`, `/resolve` with cross-compare).
+Presentation is **ratchet-aware**: the initiator presents eagerly; the responder
+presents reactively once its session is send-ready (a responder cannot send
+before receiving the initiator's first frame).
+
+**Remaining integration:** in-person device pairing / chat-start over QR (and
+optionally BLE/Wi-Fi), and graphical friends/linking/segment management in the
+mobile/desktop apps.
 
 NOT certified / NOT audited — see the project README.

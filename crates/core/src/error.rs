@@ -16,6 +16,8 @@ pub enum CoreError {
     GroupNotReady,
     #[error("unknown crypto suite '{0}'; enable this suite to join this chat")]
     UnknownSuite(String),
+    #[error("registry rejected the request: {0}")]
+    Registry(String),
     #[error("crypto error: {0}")]
     Crypto(#[from] talkrypt_crypto::CryptoError),
     #[error("transport error: {0}")]

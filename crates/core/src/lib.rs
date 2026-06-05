@@ -15,6 +15,7 @@ pub mod error;
 pub mod friends;
 pub mod handshake;
 pub mod marking;
+pub mod registry;
 pub mod relay;
 
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
@@ -23,5 +24,6 @@ pub use marking::{Classification, Marking};
 pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{Core, Event, GroupRole};
 pub use friends::{Friend, FriendStore, Presentation, Resolved};
+pub use registry::{resolve_across, RegistryClient, RegistryServer};
 pub use error::{CoreError, Result};
 pub use relay::RelayHub;

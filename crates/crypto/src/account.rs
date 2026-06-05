@@ -245,6 +245,17 @@ impl UsernameClaim {
         put_u64(&mut w, self.issued);
         w.into_vec()
     }
+    fn read(r: &mut talkrypt_wire::Reader) -> Result<UsernameClaim> {
+        let username = String::from_utf8(r.get_vec()?)
+            .map_err(|_| CryptoError::Malformed("username utf-8"))?;
+        let account = get_pub(r)?;
+        let issued = get_u64(r)?;
+        Ok(UsernameClaim {
+            username,
+            account,
+            issued,
+        })
+    }
 }
 
 /// A [`UsernameClaim`] signed by the account key.
@@ -266,6 +277,24 @@ impl SignedClaim {
     }
     pub fn verify(&self) -> Result<()> {
         self.claim.account.verify(&self.claim.encode_signed(), &self.sig)
+    }
+
+    /// Wire-encode the full signed claim (claim fields + account signature) for
+    /// transmission to/from a registry.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_bytes(&self.claim.encode_signed());
+        w.put_bytes(&self.sig);
+        w.into_vec()
+    }
+    pub fn decode(bytes: &[u8]) -> Result<SignedClaim> {
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let mut cr = talkrypt_wire::Reader::new(r.get_bytes()?);
+        let claim = UsernameClaim::read(&mut cr)?;
+        cr.finish()?;
+        let sig = r.get_vec()?;
+        r.finish()?;
+        Ok(SignedClaim { claim, sig })
     }
 }
 
@@ -403,6 +432,21 @@ mod tests {
         // Wrong username is rejected.
         let c3 = SignedClaim::issue(&account, "bob", NOW);
         assert_eq!(cross_compare("alice", &[c1, c3]), None);
+    }
+
+    #[test]
+    fn signed_claim_wire_roundtrip_and_verifies() {
+        let account = IdentityKeyPair::generate();
+        let claim = SignedClaim::issue(&account, "alice", NOW);
+        let decoded = SignedClaim::decode(&claim.encode()).unwrap();
+        assert_eq!(decoded, claim);
+        assert!(decoded.verify().is_ok());
+        // A wire-decoded claim still cross-compares against a second registry's.
+        let c2 = SignedClaim::issue(&account, "alice", NOW + 5);
+        assert_eq!(
+            cross_compare("alice", &[decoded, c2]),
+            Some(account.public().clone())
+        );
     }
 
     #[test]

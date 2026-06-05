@@ -120,6 +120,11 @@ impl FriendStore {
     pub fn is_empty(&self) -> bool {
         self.friends.is_empty()
     }
+
+    /// Iterate the pinned friends.
+    pub fn iter(&self) -> impl Iterator<Item = &Friend> {
+        self.friends.iter()
+    }
 }
 
 /// The outcome of resolving a peer's presented [`IdentityChain`].

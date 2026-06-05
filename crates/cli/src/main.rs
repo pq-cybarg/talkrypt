@@ -4,10 +4,19 @@
 //!   * `demo`          — run a two-party PQ conversation in-process (proof).
 //!   * `host`          — create a chat, print its talkrypt:// invite, and chat.
 //!   * `join <uri>`    — join a chat from an invite URI and chat.
+//!   * `registry`      — host a username→account directory (opt-in discovery).
 //!   * `version`       — print the build + honesty banner.
 //!
-//! `host`/`join` use a real TCP transport so two terminals (or machines) can
-//! talk today; the Arti onion transport (same trait) is a drop-in swap.
+//! `host`/`join` are **interactive**: an in-session REPL (`/help`) drives chat
+//! plus account identity (`/account`, `/username`, `/pseudonym`), friending
+//! (`/friend trust` a just-seen account after an out-of-band safety-number
+//! check, `/friends`), and registry use (`/register`, `/resolve` with
+//! cross-compare). `--account <path>` links a session to a username account;
+//! omitting it stays an unlinkable pseudonym.
+//!
+//! `host`/`join`/`registry` use a real TCP transport so two terminals (or
+//! machines) can talk today; the Arti onion transport (same trait) is a drop-in
+//! swap.
 
 use std::sync::Arc;
 
@@ -15,13 +24,14 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use talkrypt_core::{
-    build_advertisement, AdvertisePolicy, ChatDescriptor, Core, Event, Marking, Persistence,
-    TopologyKind,
+    build_advertisement, resolve_across, AdvertisePolicy, ChatDescriptor, Core, Event, Marking,
+    Persistence, RegistryClient, RegistryServer, TopologyKind,
 };
 #[cfg(feature = "markings")]
 use talkrypt_core::Classification;
 use talkrypt_crypto::{
-    dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID,
+    dr_suite_id, IdentityChain, IdentityKeyPair, KemProfile, SignedClaim, SuiteRegistry,
+    DEFAULT_SUITE_ID,
 };
 use talkrypt_topology::for_kind;
 use talkrypt_transport::{LoopbackFabric, TcpTransport};
@@ -100,6 +110,15 @@ enum Cmd {
         /// by group membership; the label is advisory.
         #[arg(long = "compartment")]
         compartments: Vec<String>,
+        /// Path to an account key (32-byte seed, hex). If it exists, link this
+        /// session to that account; if it doesn't, a new account is generated
+        /// and saved there. Omit to start as an unlinkable pseudonym.
+        #[arg(long)]
+        account: Option<String>,
+        /// Self-asserted username advertised with the account (display only;
+        /// the account key is the cryptographic identity). Needs --account.
+        #[arg(long)]
+        username: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -108,6 +127,22 @@ enum Cmd {
         /// Join as a TreeKEM group member (host must be a --group host).
         #[arg(long)]
         group: bool,
+        /// Path to an account key (see `host --account`).
+        #[arg(long)]
+        account: Option<String>,
+        /// Self-asserted username advertised with the account (needs --account).
+        #[arg(long)]
+        username: Option<String>,
+    },
+    /// Host a username registry (a directory mapping username → account key).
+    /// Clients `/register` and `/resolve` against the printed registry URI.
+    Registry {
+        /// Bind address for inbound connections (host:port).
+        #[arg(long, default_value = "127.0.0.1:9100")]
+        listen: String,
+        /// Registry channel label (part of its shared descriptor/handshake root).
+        #[arg(long, default_value = "#registry")]
+        channel: String,
     },
     /// Print the build and honesty banner.
     Version,
@@ -248,6 +283,8 @@ async fn main() {
             classification,
             caveats,
             compartments,
+            account,
+            username,
         } => {
             run_host(HostArgs {
                 listen,
@@ -260,10 +297,18 @@ async fn main() {
                 classification,
                 caveats,
                 compartments,
+                account,
+                username,
             })
             .await
         }
-        Cmd::Join { uri, group } => run_join(&uri, group).await,
+        Cmd::Join {
+            uri,
+            group,
+            account,
+            username,
+        } => run_join(&uri, group, account, username).await,
+        Cmd::Registry { listen, channel } => run_registry(listen, channel).await,
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -388,6 +433,148 @@ struct HostArgs {
     classification: Option<String>,
     caveats: Vec<String>,
     compartments: Vec<String>,
+    account: Option<String>,
+    username: Option<String>,
+}
+
+// ----- account identity helpers (username accounts over device keys) -----
+
+/// Current Unix time in seconds (certificate validity stamps).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Full lowercase hex of a 48-byte fingerprint.
+fn hex48(fp: &[u8; 48]) -> String {
+    fp.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Default account-key path: `~/.talkrypt/account.key`.
+fn default_account_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    format!("{home}/.talkrypt/account.key")
+}
+
+/// Parse 64 hex chars into a 32-byte account seed.
+fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
+    let s = s.trim();
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("account key must be 64 hex characters (32-byte seed)".into());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Load an account keypair from a seed file.
+fn load_account(path: &str) -> Result<IdentityKeyPair, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    let seed = parse_seed_hex(&contents)?;
+    Ok(IdentityKeyPair::from_secret_bytes(seed))
+}
+
+/// Save an account seed to a file with owner-only permissions (0600 on unix).
+fn save_account(path: &str, kp: &IdentityKeyPair) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let seed = kp.export_secret();
+    let hexs: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(path, hexs)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Load the account at `path`, or generate + save a new one if it's absent.
+/// Returns the keypair and whether it was freshly created.
+fn open_or_create_account(
+    path: &str,
+) -> Result<(IdentityKeyPair, bool), Box<dyn std::error::Error>> {
+    if std::path::Path::new(path).exists() {
+        Ok((load_account(path)?, false))
+    } else {
+        let kp = IdentityKeyPair::generate();
+        save_account(path, &kp)?;
+        Ok((kp, true))
+    }
+}
+
+/// Build and present an account→device chain so peers resolve this session to
+/// the account. Pushes it to any already-connected peers too.
+async fn present(core: &Core, account: &IdentityKeyPair, username: Option<String>) {
+    let chain = IdentityChain::device(
+        account,
+        core.identity_public(),
+        "device:cli",
+        now_secs(),
+        0,
+    );
+    core.present_identity(chain, username);
+    core.announce_identity().await;
+}
+
+/// At startup, if an account path was given, open/create it, present the
+/// identity, and print the account's safety number. Returns the keypair (None =
+/// pseudonym).
+async fn setup_account(
+    core: &Core,
+    account_path: &Option<String>,
+    username: &Option<String>,
+) -> Result<Option<IdentityKeyPair>, Box<dyn std::error::Error>> {
+    let Some(path) = account_path else {
+        if username.is_some() {
+            return Err("--username requires --account".into());
+        }
+        println!("identity: pseudonym (unlinkable — no account presented)");
+        return Ok(None);
+    };
+    let (kp, fresh) = open_or_create_account(path)?;
+    present(core, &kp, username.clone()).await;
+    println!(
+        "identity: account {}{}",
+        kp.public().safety_number(),
+        if fresh {
+            format!("  (new account saved to {path})")
+        } else {
+            format!("  (loaded from {path})")
+        }
+    );
+    if let Some(u) = username {
+        println!("username: {u}  (self-asserted; advertise via a registry to make it discoverable)");
+    }
+    Ok(Some(kp))
+}
+
+/// Connect to a registry from its URI and return a client + the parsed
+/// descriptor (so callers can label output).
+async fn registry_connect(
+    uri: &str,
+) -> Result<(RegistryClient, ChatDescriptor), Box<dyn std::error::Error>> {
+    let desc = ChatDescriptor::from_uri(uri)?;
+    let reg = SuiteRegistry::with_defaults();
+    let suite = reg
+        .get_by_scheme_hash(&desc.scheme_hash())
+        .map_err(|_| format!("registry scheme '{}' not in this build", desc.resolved_suite_id()))?;
+    let endpoint = desc
+        .endpoints
+        .first()
+        .ok_or("registry URI carries no endpoint address")?
+        .clone();
+    let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+    let id = IdentityKeyPair::generate(); // ephemeral; the registry auths the session, not us
+    let client = RegistryClient::connect(&id, suite, transport, &desc, &endpoint).await?;
+    Ok((client, desc))
 }
 
 async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -402,6 +589,8 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         classification,
         caveats,
         compartments,
+        account,
+        username,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -482,12 +671,20 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
             hex(&blob)
         );
     }
+    // Account identity: link to an account (presented to peers inside the
+    // encrypted session) or remain an unlinkable pseudonym.
+    let account_kp = setup_account(&core, &account, &username).await?;
     println!("waiting for peers — type a message + enter to send. /help for commands.\n");
 
-    repl(core, rx).await
+    repl(core, rx, ReplState::new(account_kp, username)).await
 }
 
-async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_join(
+    uri: &str,
+    group: bool,
+    account: Option<String>,
+    username: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let desc = ChatDescriptor::from_uri(uri)?;
     // Resolve the chat's scheme by its fingerprint — this is the "receiver must
@@ -539,15 +736,84 @@ async fn run_join(uri: &str, group: bool) -> Result<(), Box<dyn std::error::Erro
         core.peer_count()
     );
 
-    repl(core, rx).await
+    // Link to an account or stay a pseudonym, then enter the interactive loop.
+    let account_kp = setup_account(&core, &account, &username).await?;
+    repl(core, rx, ReplState::new(account_kp, username)).await
 }
+
+/// Host a username registry node (the `registry` subcommand).
+async fn run_registry(listen: String, channel: String) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{BANNER}\n");
+    // The registry uses the default PQ-pure suite; its descriptor (channel +
+    // invite token) is the shared handshake root clients dial with.
+    let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
+    let desc = ChatDescriptor::new(
+        TopologyKind::Hub,
+        Persistence::Persistent,
+        DEFAULT_SUITE_ID,
+        vec![listen.clone()],
+        &channel,
+    );
+    let transport = Arc::new(TcpTransport::new(&listen));
+    let server = RegistryServer::new(IdentityKeyPair::generate(), suite, transport, &desc);
+    server.run().await?;
+
+    println!("username registry hosting on {listen} (channel {channel})");
+    println!("\nPublish this registry URI; clients use it with /register and /resolve:\n");
+    println!("  {}\n", desc.to_uri());
+    println!(
+        "A registry only stores self-signed username→account claims (public by\n\
+         nature). Register on several and clients cross-compare for unforgeability.\n\
+         Ctrl-C to stop."
+    );
+    // Park forever; the accept loop runs in the background.
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+/// Mutable interactive state: the linked account (or pseudonym) + its username.
+struct ReplState {
+    account: Option<IdentityKeyPair>,
+    username: Option<String>,
+}
+
+impl ReplState {
+    fn new(account: Option<IdentityKeyPair>, username: Option<String>) -> Self {
+        Self { account, username }
+    }
+}
+
+const HELP: &str = "\
+commands:
+  /help                          show this help
+  /whoami                        show your device + account identity
+  /verify                        show safety numbers (compare out of band)
+  /invite                        print this chat's invite URI
+  /peers                         connected peer count
+  account & friends:
+  /account new [path]            generate an account, link this session, save seed
+  /account load <path>           load an account seed and link this session
+  /account save [path]           save the current account seed
+  /username <name>               set the advertised username (re-presents)
+  /pseudonym                     drop the account (become unlinkable)
+  /friend trust <fp> [name]      pin a just-seen account by fingerprint prefix
+  /friends                       list pinned friends
+  registry (username discovery):
+  /register <registry-uri>       publish username->account to a registry
+  /resolve <name> <uri>[ <uri>…] [pin]
+                                 cross-compare a name across registries
+  /quit                          leave";
 
 /// The interactive read-eval-print loop shared by host and join.
 async fn repl(
     core: Core,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    mut state: ReplState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Event printer task.
+    // Event printer task. It holds a clone of the core so it can look up the
+    // safety number of a just-presented account (for the trust prompt).
+    let printer_core = core.clone();
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -572,13 +838,30 @@ async fn repl(
                     friend,
                 } => {
                     let name = username.unwrap_or_else(|| "<no username>".into());
-                    let tag = if friend { "friend" } else { "account" };
-                    println!(
-                        "\r* {} {name} (account {}) on device {}",
-                        tag,
-                        short_fp(&account_fingerprint),
-                        short_fp(&from)
-                    );
+                    if friend {
+                        println!(
+                            "\r* friend {name} (account {}) on device {}",
+                            short_fp(&account_fingerprint),
+                            short_fp(&from)
+                        );
+                    } else {
+                        // Not yet a friend: show the account safety number and how
+                        // to pin it after an out-of-band comparison.
+                        let sn = printer_core
+                            .seen_account(account_fingerprint)
+                            .map(|a| a.safety_number())
+                            .unwrap_or_default();
+                        println!(
+                            "\r* account {name} (fp {}) on device {} — not a friend",
+                            short_fp(&account_fingerprint),
+                            short_fp(&from)
+                        );
+                        println!("    account safety number: {sn}");
+                        println!(
+                            "    verify out of band, then: /friend trust {}",
+                            short_fp(&account_fingerprint)
+                        );
+                    }
                 }
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
@@ -597,20 +880,11 @@ async fn repl(
         if let Some(rest) = line.strip_prefix('/') {
             let mut parts = rest.splitn(2, ' ');
             let cmd = parts.next().unwrap_or("");
-            match cmd {
-                "quit" | "q" => break,
-                "help" => println!("commands: /invite  /verify  /peers  /quit"),
-                "invite" => println!("{}", core.descriptor().to_uri()),
-                "verify" => {
-                    println!(
-                        "your safety number: {}",
-                        core.identity_public().safety_number()
-                    );
-                    println!("(compare out-of-band with your peer to defeat MITM)");
-                }
-                "peers" => println!("connected peers: {}", core.peer_count()),
-                other => println!("unknown command: /{other} (try /help)"),
+            let arg = parts.next().unwrap_or("").trim();
+            if matches!(cmd, "quit" | "q") {
+                break;
             }
+            run_command(&core, &mut state, cmd, arg).await;
             continue;
         }
         if let Err(e) = core.send(line).await {
@@ -618,4 +892,236 @@ async fn repl(
         }
     }
     Ok(())
+}
+
+/// Handle one slash command (everything except /quit, handled by the caller).
+async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
+    match cmd {
+        "help" => println!("{HELP}"),
+        "invite" => println!("{}", core.descriptor().to_uri()),
+        "peers" => println!("connected peers: {}", core.peer_count()),
+        "verify" => {
+            println!("device safety number:  {}", core.identity_public().safety_number());
+            match &state.account {
+                Some(a) => println!("account safety number: {}", a.public().safety_number()),
+                None => println!("(pseudonym — no account)"),
+            }
+            println!("(compare out-of-band with your peer to defeat MITM)");
+        }
+        "whoami" => {
+            println!("device: {}", core.identity_public().safety_number());
+            match (&state.account, &state.username) {
+                (Some(a), u) => println!(
+                    "account: {}\nusername: {}",
+                    a.public().safety_number(),
+                    u.as_deref().unwrap_or("<none>")
+                ),
+                (None, _) => println!("identity: pseudonym (unlinkable)"),
+            }
+            println!("friends pinned: {}", core.friend_count());
+        }
+        "account" => cmd_account(core, state, arg).await,
+        "username" => {
+            if arg.is_empty() {
+                println!("usage: /username <name>");
+            } else {
+                state.username = Some(arg.to_string());
+                if let Some(a) = &state.account {
+                    present(core, a, state.username.clone()).await;
+                    println!("username set to {arg} (re-presented to peers)");
+                } else {
+                    println!("username set to {arg} (will apply once you /account new|load)");
+                }
+            }
+        }
+        "pseudonym" => {
+            state.account = None;
+            state.username = None;
+            core.clear_identity();
+            println!("now a pseudonym for future connections (existing sessions keep what they saw)");
+        }
+        "friend" => cmd_friend(core, arg),
+        "friends" => cmd_friend(core, "list"),
+        "register" => cmd_register(core, state, arg).await,
+        "resolve" => cmd_resolve(core, arg).await,
+        other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// `/account new|load|save`.
+async fn cmd_account(core: &Core, state: &mut ReplState, arg: &str) {
+    let mut it = arg.splitn(2, ' ');
+    let sub = it.next().unwrap_or("");
+    let rest = it.next().unwrap_or("").trim();
+    match sub {
+        "new" => {
+            let path = if rest.is_empty() { default_account_path() } else { rest.to_string() };
+            let kp = IdentityKeyPair::generate();
+            if let Err(e) = save_account(&path, &kp) {
+                println!("! could not save account to {path}: {e}");
+                return;
+            }
+            present(core, &kp, state.username.clone()).await;
+            println!("new account: {}", kp.public().safety_number());
+            println!("saved seed to {path} (protect this file — it is your account key)");
+            state.account = Some(kp);
+        }
+        "load" => {
+            if rest.is_empty() {
+                println!("usage: /account load <path>");
+                return;
+            }
+            match load_account(rest) {
+                Ok(kp) => {
+                    present(core, &kp, state.username.clone()).await;
+                    println!("loaded account: {}", kp.public().safety_number());
+                    state.account = Some(kp);
+                }
+                Err(e) => println!("! could not load account: {e}"),
+            }
+        }
+        "save" => match &state.account {
+            Some(kp) => {
+                let path = if rest.is_empty() { default_account_path() } else { rest.to_string() };
+                match save_account(&path, kp) {
+                    Ok(()) => println!("saved account seed to {path}"),
+                    Err(e) => println!("! save failed: {e}"),
+                }
+            }
+            None => println!("no account to save (try /account new)"),
+        },
+        _ => println!("usage: /account new [path] | load <path> | save [path]"),
+    }
+}
+
+/// `/friend trust <fp-prefix> [name]` and `/friend list`.
+fn cmd_friend(core: &Core, arg: &str) {
+    let mut it = arg.splitn(2, ' ');
+    let sub = it.next().unwrap_or("");
+    let rest = it.next().unwrap_or("").trim();
+    match sub {
+        "list" | "" => {
+            let friends = core.friends();
+            if friends.is_empty() {
+                println!("no friends pinned yet");
+            } else {
+                println!("pinned friends ({}):", friends.len());
+                for (fp, name) in friends {
+                    println!("  {}  {}", short_fp(&fp), name.as_deref().unwrap_or("<no username>"));
+                }
+            }
+        }
+        "trust" => {
+            let mut p = rest.splitn(2, ' ');
+            let prefix = p.next().unwrap_or("").to_lowercase();
+            let name = p.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            if prefix.is_empty() {
+                println!("usage: /friend trust <account-fp-prefix> [username]");
+                return;
+            }
+            let matches: Vec<[u8; 48]> = core
+                .seen_account_fingerprints()
+                .into_iter()
+                .filter(|fp| hex48(fp).starts_with(&prefix))
+                .collect();
+            match matches.as_slice() {
+                [] => println!("no account seen this session matches '{prefix}' (wait for them to present, then retry)"),
+                [fp] => {
+                    if core.pin_seen_account(*fp, name.clone()) {
+                        println!(
+                            "pinned friend {} {}",
+                            short_fp(fp),
+                            name.as_deref().unwrap_or("")
+                        );
+                    } else {
+                        println!("! could not pin (account no longer known)");
+                    }
+                }
+                _ => println!("'{prefix}' is ambiguous ({} matches) — use more characters", matches.len()),
+            }
+        }
+        _ => println!("usage: /friend trust <fp> [name] | /friend list"),
+    }
+}
+
+/// `/register <registry-uri>` — publish a self-signed username→account claim.
+async fn cmd_register(core: &Core, state: &ReplState, arg: &str) {
+    let _ = core; // (registry uses the account key, not the chat core)
+    let Some(account) = &state.account else {
+        println!("link an account first (/account new) before registering a name");
+        return;
+    };
+    let Some(username) = &state.username else {
+        println!("set a username first (/username <name>) before registering");
+        return;
+    };
+    if arg.is_empty() {
+        println!("usage: /register <registry-uri>");
+        return;
+    }
+    let claim = SignedClaim::issue(account, username.clone(), now_secs());
+    match registry_connect(arg).await {
+        Ok((mut client, _desc)) => match client.register(&claim).await {
+            Ok(()) => println!("registered '{username}' -> account {} at the registry", account.public().safety_number()),
+            Err(e) => println!("! registry rejected: {e}"),
+        },
+        Err(e) => println!("! could not reach registry: {e}"),
+    }
+}
+
+/// `/resolve <name> <uri>[ <uri> …] [pin]` — cross-compare a username across
+/// one or more registries; optionally pin the agreed account as a friend.
+async fn cmd_resolve(core: &Core, arg: &str) {
+    let mut tokens: Vec<&str> = arg.split_whitespace().collect();
+    if tokens.len() < 2 {
+        println!("usage: /resolve <name> <registry-uri> [more-uris…] [pin]");
+        return;
+    }
+    let name = tokens.remove(0).to_string();
+    let do_pin = tokens.last() == Some(&"pin");
+    if do_pin {
+        tokens.pop();
+    }
+    if tokens.is_empty() {
+        println!("give at least one registry URI to resolve against");
+        return;
+    }
+    let mut all_claims: Vec<SignedClaim> = Vec::new();
+    let mut answered = 0usize;
+    for uri in &tokens {
+        match registry_connect(uri).await {
+            Ok((mut client, _)) => match client.resolve(&name).await {
+                Ok(claims) => {
+                    if claims.is_empty() {
+                        println!("  {uri}: no binding for '{name}'");
+                    } else {
+                        answered += 1;
+                        all_claims.extend(claims);
+                    }
+                }
+                Err(e) => println!("  {uri}: error {e}"),
+            },
+            Err(e) => println!("  {uri}: unreachable ({e})"),
+        }
+    }
+    match resolve_across(&name, &all_claims) {
+        Some(account) => {
+            println!(
+                "'{name}' resolves to account {} ({} registr{} agreed)",
+                account.safety_number(),
+                answered,
+                if answered == 1 { "y" } else { "ies" }
+            );
+            if do_pin {
+                core.pin_friend(account, Some(name.clone()));
+                println!("pinned '{name}' as a friend");
+            } else {
+                println!("verify the safety number out of band, then add `pin` to friend them");
+            }
+        }
+        None => println!(
+            "'{name}' did NOT resolve consistently — registries disagreed or none answered \
+             (do not trust this name)"
+        ),
+    }
 }
