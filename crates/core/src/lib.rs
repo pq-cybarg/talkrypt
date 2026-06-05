@@ -22,7 +22,7 @@ pub mod relay;
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
 pub use custody::{Capabilities, CustodyTier};
 pub use marking::{Classification, Marking};
-pub use descriptor::{ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
+pub use descriptor::{ChannelPassword, ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{Core, Event, GroupRole};
 pub use friends::{Friend, FriendStore, Presentation, Resolved};
 pub use linking::{LinkClient, LinkHost, Linked};

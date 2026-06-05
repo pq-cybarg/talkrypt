@@ -24,8 +24,8 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use talkrypt_core::{
-    build_advertisement, resolve_across, AdvertisePolicy, ChatDescriptor, Core, Event, LinkClient,
-    LinkHost, Marking, Persistence, RegistryClient, RegistryServer, TopologyKind,
+    build_advertisement, resolve_across, AdvertisePolicy, ChannelPassword, ChatDescriptor, Core,
+    Event, LinkClient, LinkHost, Marking, Persistence, RegistryClient, RegistryServer, TopologyKind,
 };
 #[cfg(feature = "markings")]
 use talkrypt_core::Classification;
@@ -129,6 +129,12 @@ enum Cmd {
         /// key. Mutually exclusive with `--account`.
         #[arg(long)]
         chain: Option<String>,
+        /// Password-gate this channel: the password is mixed into the session
+        /// root via Argon2id and NEVER put in the invite, so a joiner needs both
+        /// the invite AND this password. Share it out of band; joiners pass the
+        /// same `--password`.
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -149,6 +155,10 @@ enum Cmd {
         /// Present a linked account chain from PATH (see `host --chain`).
         #[arg(long)]
         chain: Option<String>,
+        /// Channel password (must match the host's `--password`); mixed into the
+        /// session root via Argon2id, never sent on the wire.
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -331,6 +341,7 @@ async fn main() {
             username,
             device,
             chain,
+            password,
         } => {
             run_host(HostArgs {
                 listen,
@@ -347,6 +358,7 @@ async fn main() {
                 username,
                 device,
                 chain,
+                password,
             })
             .await
         }
@@ -357,7 +369,8 @@ async fn main() {
             username,
             device,
             chain,
-        } => run_join(&uri, group, account, username, device, chain).await,
+            password,
+        } => run_join(&uri, group, account, username, device, chain, password).await,
         Cmd::Registry { listen, channel } => run_registry(listen, channel).await,
         Cmd::LinkOffer {
             listen,
@@ -498,6 +511,7 @@ struct HostArgs {
     username: Option<String>,
     device: Option<String>,
     chain: Option<String>,
+    password: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -755,6 +769,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         username,
         device,
         chain,
+        password,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -800,6 +815,10 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     desc.group = group;
     desc.channel_marking = channel_marking;
+    if let Some(pw) = &password {
+        desc.password = Some(ChannelPassword::new(pw.clone()));
+        println!("channel password: set (Argon2id-gated; not carried in the invite)");
+    }
     let device_kp = device_identity(&device)?;
     let (core, rx) = if group {
         Core::new_group(device_kp, suite, transport, desc.clone(), true)
@@ -848,9 +867,13 @@ async fn run_join(
     username: Option<String>,
     device: Option<String>,
     chain: Option<String>,
+    password: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
-    let desc = ChatDescriptor::from_uri(uri)?;
+    let mut desc = ChatDescriptor::from_uri(uri)?;
+    if let Some(pw) = &password {
+        desc.password = Some(ChannelPassword::new(pw.clone()));
+    }
     // Resolve the chat's scheme by its fingerprint — this is the "receiver must
     // have a matching registered scheme to participate" check. A blank posture
     // in the invite resolves to the PQ-pure default.

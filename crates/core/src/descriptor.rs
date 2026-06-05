@@ -16,6 +16,41 @@ use crate::error::{CoreError, Result};
 pub const URI_SCHEME: &str = "talkrypt://";
 const DESCRIPTOR_VERSION: u16 = 1;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
+const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
+
+/// An out-of-band **channel password**. Never serialized into the invite URI —
+/// it is shared separately (spoken, typed) and mixed into the session root via
+/// Argon2id, so the invite token *alone* cannot derive the root: an attacker who
+/// captures the `talkrypt://` link still cannot join without the password.
+///
+/// `Debug` is redacted so the password never lands in logs or error output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChannelPassword(String);
+
+impl ChannelPassword {
+    pub fn new(password: impl Into<String>) -> Self {
+        ChannelPassword(password.into())
+    }
+}
+
+impl std::fmt::Debug for ChannelPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChannelPassword(<redacted>)")
+    }
+}
+
+/// Argon2id (m=19 MiB, t=2, p=1) of a password under a salt → 32-byte key. This
+/// is the memory-hard work factor that makes a weak channel password costly to
+/// brute-force even if the invite token leaks.
+fn argon2id_key(password: &[u8], salt: &[u8]) -> [u8; 32] {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let params = Params::new(19_456, 2, 1, Some(32)).expect("valid argon2 params");
+    let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = [0u8; 32];
+    a.hash_password_into(password, salt, &mut out)
+        .expect("argon2id derivation");
+    out
+}
 
 /// Network topology for a chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +125,11 @@ pub struct ChatDescriptor {
     /// Optional channel classification marking/policy (advisory). Present only
     /// for marked channels; consumer builds leave it `None`.
     pub channel_marking: Option<crate::marking::Marking>,
+    /// Optional out-of-band channel password. **In-memory only — never encoded
+    /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
+    /// via Argon2id, so both the invite token *and* the password are required to
+    /// join (a password-gated channel). Set it on both sides out of band.
+    pub password: Option<ChannelPassword>,
 }
 
 impl ChatDescriptor {
@@ -114,7 +154,14 @@ impl ChatDescriptor {
             channel: channel.into(),
             group: false,
             channel_marking: None,
+            password: None,
         }
+    }
+
+    /// Set (or clear) the out-of-band channel password. Chainable.
+    pub fn with_password(mut self, password: Option<ChannelPassword>) -> Self {
+        self.password = password;
+        self
     }
 
     /// The effective suite id: the stated one, or the protocol default
@@ -145,14 +192,28 @@ impl ChatDescriptor {
     pub fn derive_root(&self) -> [u8; 32] {
         // Keyed by the secret invite token; resolved suite id as the domain
         // label. KMAC256 under SHA-3, HKDF-HMAC-SHA384 under cnsa-sha2.
-        let mut out = [0u8; 32];
+        let mut base = [0u8; 32];
         talkrypt_crypto::kdf::mac_kdf(
             &self.invite_token,
             ROOT_SALT,
             self.resolved_suite_id().as_bytes(),
-            &mut out,
+            &mut base,
         );
-        out
+        match &self.password {
+            // Unprotected channel: the invite token alone derives the root.
+            None => base,
+            // Password-gated channel: fold an Argon2id(password) key in as the
+            // KDF key over the token-derived base. Without the password, the
+            // base differs, so an invite-only holder fails the handshake closed.
+            // The password itself is never transmitted — only the ability to
+            // derive this root proves knowledge of it.
+            Some(pw) => {
+                let pw_key = argon2id_key(pw.0.as_bytes(), &self.invite_token);
+                let mut out = [0u8; 32];
+                talkrypt_crypto::kdf::mac_kdf(&pw_key, PW_ROOT_SALT, &base, &mut out);
+                out
+            }
+        }
     }
 
     fn encode_bytes(&self) -> Vec<u8> {
@@ -208,6 +269,8 @@ impl ChatDescriptor {
             channel,
             group,
             channel_marking,
+            // The password is out-of-band; a parsed invite never carries it.
+            password: None,
         })
     }
 
@@ -299,6 +362,41 @@ mod tests {
     }
 
     #[test]
+    fn password_gates_the_root_and_must_match() {
+        let base = sample();
+        // Same invite token; only the password differs.
+        let no_pw = base.clone();
+        let pw = base.clone().with_password(Some(ChannelPassword::new("hunter2")));
+        // Invite-only (no password) derives a DIFFERENT root than the gated one,
+        // so leaking the URI without the password doesn't grant access.
+        assert_ne!(no_pw.derive_root(), pw.derive_root());
+        // Matching password on both sides → same root (they can talk).
+        let pw2 = base.clone().with_password(Some(ChannelPassword::new("hunter2")));
+        assert_eq!(pw.derive_root(), pw2.derive_root());
+        // Wrong password → different root → handshake fails closed.
+        let wrong = base.with_password(Some(ChannelPassword::new("nope")));
+        assert_ne!(pw.derive_root(), wrong.derive_root());
+    }
+
+    #[test]
+    fn password_is_never_serialized_into_the_uri() {
+        let d = sample().with_password(Some(ChannelPassword::new("topsecret")));
+        let uri = d.to_uri();
+        let parsed = ChatDescriptor::from_uri(&uri).unwrap();
+        // The URI carries no password — a recipient must obtain it out of band.
+        assert!(parsed.password.is_none());
+        // And so the URI-only parse derives the *unprotected* base root, which
+        // differs from the password-gated root.
+        assert_ne!(parsed.derive_root(), d.derive_root());
+    }
+
+    #[test]
+    fn password_debug_is_redacted() {
+        let p = ChannelPassword::new("supersecret");
+        assert!(!format!("{p:?}").contains("supersecret"));
+    }
+
+    #[test]
     fn bad_uri_rejected() {
         assert!(ChatDescriptor::from_uri("http://nope").is_err());
         assert!(ChatDescriptor::from_uri("talkrypt://!!!").is_err());
@@ -336,6 +434,7 @@ mod kat {
             channel: "#kat".to_string(),
             group: false,
             channel_marking: None,
+            password: None,
         };
         assert_eq!(
             d.to_uri(),

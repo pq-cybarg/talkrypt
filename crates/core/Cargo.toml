@@ -12,6 +12,8 @@ async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 rand.workspace = true
+# Argon2id for password-gated channels (mixes a channel password into the root).
+argon2 = "0.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
