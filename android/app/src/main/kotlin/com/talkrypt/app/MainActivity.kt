@@ -26,8 +26,12 @@ import android.widget.TextView
 import android.widget.Toast
 import com.talkrypt.custody.CustodyBridge
 import kotlin.concurrent.thread
+import uniffi.talkrypt_ffi.Account
+import uniffi.talkrypt_ffi.AnchorNode
 import uniffi.talkrypt_ffi.FfiEvent
 import uniffi.talkrypt_ffi.TalkryptClient
+import uniffi.talkrypt_ffi.anchorRegister
+import uniffi.talkrypt_ffi.anchorResolve
 
 /**
  * The talkrypt chat app — a post-quantum, end-to-end encrypted chat over the
@@ -146,6 +150,9 @@ class MainActivity : Activity() {
         }, lp(MATCH_PARENT, dp(50)))
         col.addView(pillButton("Share app (P2P over Wi-Fi)", panel, fg) {
             shareApp()
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("Anchors (username directory)", panel, fg) {
+            setContentView(anchorsScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -317,6 +324,131 @@ class MainActivity : Activity() {
             } else {
                 toast("nearby discovery needs Bluetooth / nearby-Wi-Fi permission")
             }
+        }
+    }
+
+    // ---------- anchors (username registry directory) ----------
+    private var anchorNode: AnchorNode? = null
+
+    /** Load this device's account, generating + persisting one on first use. */
+    private fun account(): Account {
+        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val seed = prefs.getString("account_seed", null)
+        if (seed != null) {
+            runCatching { return Account.fromSeedHex(seed) }
+        }
+        val a = Account.generate()
+        prefs.edit().putString("account_seed", a.seedHex()).apply()
+        return a
+    }
+
+    private fun anchorsScreen(): View {
+        val acct = account()
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Anchors", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("A username directory you spawn or point at by location. Names map to account keys; verify safety numbers out of band.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(12)),
+        )
+        col.addView(text("YOUR ACCOUNT", 12f, muted, bold = true))
+        col.addView(text(acct.safetyNumber().take(35) + "…", 13f, accent), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
+
+        // Spawn your own anchor.
+        col.addView(pillButton("Spawn my own anchor", accent, Color.WHITE) {
+            spawnAnchor()
+        }, lp(MATCH_PARENT, dp(50)))
+
+        // Use a known anchor by entering its location.
+        col.addView(text("— or use a known anchor —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24), bottom = dp(10)))
+        col.addView(label("ANCHOR LOCATION (talkrypt:// URI)"))
+        val anchorUri = inputField("talkrypt://…")
+        col.addView(anchorUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        col.addView(label("USERNAME").also { it.setPadding(0, dp(16), 0, dp(6)) })
+        val uname = inputField("alice")
+        col.addView(uname, lp(MATCH_PARENT, WRAP_CONTENT))
+
+        val result = text("", 13f, fg).also { it.setPadding(0, dp(14), 0, 0) }
+
+        col.addView(pillButton("Register my username here", panel, fg) {
+            val uri = anchorUri.text.toString().trim()
+            val name = uname.text.toString().trim()
+            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast("enter an anchor URI + username"); return@pillButton }
+            registerAtAnchor(uri, acct, name, result)
+        }, lp(MATCH_PARENT, dp(50), top = dp(16)))
+
+        col.addView(pillButton("Resolve this username", panel, fg) {
+            val uri = anchorUri.text.toString().trim()
+            val name = uname.text.toString().trim()
+            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast("enter an anchor URI + username"); return@pillButton }
+            resolveAtAnchor(uri, name, result)
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+
+        col.addView(result, lp(MATCH_PARENT, WRAP_CONTENT))
+        col.addView(pillButton("Back", panel, fg) {
+            setContentView(setupScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun spawnAnchor() {
+        toast("spawning anchor…")
+        thread {
+            try {
+                val lan = ApkShareServer.lanIp() ?: "127.0.0.1"
+                val node = AnchorNode.host("$lan:9100", "#anchor")
+                ui.post {
+                    anchorNode = node // keep it alive (the registry runs while held)
+                    setContentView(anchorRunningScreen(node.uri()))
+                }
+            } catch (e: Exception) {
+                ui.post { toast("anchor failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun anchorRunningScreen(uri: String): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Anchor running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("Others register/resolve usernames here. Share this location (scan or copy). It runs while the app is open.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+        addQrInto(col, uri, 0.66f)
+        col.addView(text(uri, 13f, accent, center = true).also { it.setPadding(0, dp(16), 0, dp(20)) })
+        col.addView(pillButton("Back", panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, dp(50)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun registerAtAnchor(uri: String, acct: Account, name: String, result: TextView) {
+        result.text = "registering…"
+        thread {
+            val msg = try {
+                anchorRegister(uri, acct, name)
+                "✓ registered “$name” → your account at this anchor"
+            } catch (e: Exception) {
+                "! register failed: ${e.message}"
+            }
+            ui.post { result.text = msg }
+        }
+    }
+
+    private fun resolveAtAnchor(uri: String, name: String, result: TextView) {
+        result.text = "resolving…"
+        thread {
+            val msg = try {
+                val sn = anchorResolve(uri, name)
+                if (sn != null) "“$name” → account safety number:\n$sn\n(verify out of band before trusting)"
+                else "“$name” is not registered here (or registries disagreed)"
+            } catch (e: Exception) {
+                "! resolve failed: ${e.message}"
+            }
+            ui.post { result.text = msg }
         }
     }
 
