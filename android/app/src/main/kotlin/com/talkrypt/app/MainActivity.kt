@@ -1,7 +1,9 @@
 package com.talkrypt.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -40,6 +42,12 @@ class MainActivity : Activity() {
     private var scroll: ScrollView? = null
     private var shareServer: ApkShareServer? = null
 
+    // Nearby discovery (BLE + Wi-Fi Direct) state.
+    private var nearby: List<NearbyDiscovery> = emptyList()
+    private val foundInvites = LinkedHashMap<String, NearbyDiscovery.Peer>()
+    private var nearbyList: LinearLayout? = null
+    private var pendingNearby: (() -> Unit)? = null
+
     // palette
     private val bg = Color.parseColor("#0B0E13")
     private val panel = Color.parseColor("#161B22")
@@ -48,14 +56,21 @@ class MainActivity : Activity() {
     private val muted = Color.parseColor("#8B949E")
     private val accent = Color.parseColor("#2EA043")
     private val peerBubble = Color.parseColor("#222B36")
-    private val hostPort = "127.0.0.1:9779"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
+        tintSystemBars()
         setContentView(setupScreen())
         handleDeepLink(intent)
+    }
+
+    // Match the system bars to the app background. The setters are deprecated on
+    // API 35 (no-ops under edge-to-edge, which we already handle via insets) but
+    // still tint the bars on older devices.
+    @Suppress("DEPRECATION")
+    private fun tintSystemBars() {
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
     }
 
     // A talkrypt:// link was opened (scanned QR via the OS camera, or tapped).
@@ -77,6 +92,11 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         shareServer?.stop()
+        stopNearby()
+    }
+
+    companion object {
+        private const val REQ_NEARBY = 0x4E42 // "NB"
     }
 
     // ---------- setup screen ----------
@@ -119,11 +139,14 @@ class MainActivity : Activity() {
             if (uri.startsWith("talkrypt://")) startJoin(uri) else toast("Paste a talkrypt:// invite")
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
-        // In-person: send this very app to a friend P2P over Wi-Fi/hotspot.
+        // In-person: find a nearby host, or send this very app P2P.
         col.addView(text("— in person —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
+        col.addView(pillButton("Find nearby host (BLE / Wi-Fi Direct)", accent, Color.WHITE) {
+            findNearby()
+        }, lp(MATCH_PARENT, dp(50)))
         col.addView(pillButton("Share app (P2P over Wi-Fi)", panel, fg) {
             shareApp()
-        }, lp(MATCH_PARENT, dp(50)))
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -188,6 +211,113 @@ class MainActivity : Activity() {
             addView(iv, LinearLayout.LayoutParams(side, side))
         }
         parent.addView(wrap, lp(MATCH_PARENT, WRAP_CONTENT))
+    }
+
+    // ---------- nearby discovery (BLE + Wi-Fi Direct) ----------
+    private fun findNearby() {
+        withNearbyPermissions {
+            foundInvites.clear()
+            setContentView(findNearbyScreen())
+            stopNearby()
+            nearby = listOf(NearbyDiscovery.ble(this), NearbyDiscovery.wifiDirect(this))
+            nearby.forEach { d ->
+                d.startScanning(
+                    onFound = { peer -> addNearbyPeer(peer) },
+                    onError = { msg -> toast(msg) },
+                )
+            }
+        }
+    }
+
+    private fun findNearbyScreen(): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Nearby hosts", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("Scanning over Bluetooth LE and Wi-Fi Direct. Tap a host to join.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        nearbyList = list
+        col.addView(list, lp(MATCH_PARENT, WRAP_CONTENT))
+        col.addView(text("…", 13f, muted, center = true).also { it.setPadding(0, dp(16), 0, dp(16)) })
+        col.addView(pillButton("Back", panel, fg) {
+            stopNearby(); setContentView(setupScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun addNearbyPeer(peer: NearbyDiscovery.Peer) {
+        if (foundInvites.put(peer.inviteUri, peer) != null) return // de-dupe
+        val list = nearbyList ?: return
+        list.addView(pillButton("Join ${peer.name}", accent, Color.WHITE) {
+            stopNearby(); startJoin(peer.inviteUri)
+        }, lp(MATCH_PARENT, dp(52), top = dp(8)))
+    }
+
+    private fun startNearbyAdvertising(invite: String) {
+        withNearbyPermissions {
+            stopNearby()
+            nearby = listOf(NearbyDiscovery.ble(this), NearbyDiscovery.wifiDirect(this))
+            nearby.forEach { it.startAdvertising(invite) }
+            system("broadcasting nearby (BLE + Wi-Fi Direct)")
+        }
+    }
+
+    private fun stopNearby() {
+        nearby.forEach { runCatching { it.stop() } }
+        nearby = emptyList()
+        nearbyList = null
+    }
+
+    // ---------- runtime permissions for nearby ----------
+    private fun nearbyPermissions(): Array<String> {
+        val p = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 31) {
+            p += Manifest.permission.BLUETOOTH_ADVERTISE
+            p += Manifest.permission.BLUETOOTH_SCAN
+            p += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            p += Manifest.permission.NEARBY_WIFI_DEVICES
+        }
+        // Pre-31 BLE scan and pre-33 Wi-Fi Direct need fine location.
+        if (Build.VERSION.SDK_INT < 33) {
+            p += Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        return p.distinct().toTypedArray()
+    }
+
+    private fun withNearbyPermissions(action: () -> Unit) {
+        val needed = nearbyPermissions().filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isEmpty()) {
+            action()
+        } else {
+            pendingNearby = action
+            requestPermissions(needed.toTypedArray(), REQ_NEARBY)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NEARBY) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            val act = pendingNearby
+            pendingNearby = null
+            if (granted) {
+                act?.invoke()
+            } else {
+                toast("nearby discovery needs Bluetooth / nearby-Wi-Fi permission")
+            }
+        }
     }
 
     // ---------- chat screen ----------
@@ -273,7 +403,10 @@ class MainActivity : Activity() {
         toast("creating chat…")
         thread {
             try {
-                val c = TalkryptClient.host(hostPort, channel, posture)
+                // Bind to the LAN/hotspot address (not loopback) so the invite is
+                // dialable from another device — required for QR/nearby joining.
+                val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
+                val c = TalkryptClient.host(listen, channel, posture)
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
                     setContentView(chatScreen(channel, "$posture · safety ${sn.take(11)}"))
@@ -281,6 +414,10 @@ class MainActivity : Activity() {
                     messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")
                     bind(c); poll()
+                    // Also broadcast the invite over BLE + Wi-Fi Direct so a
+                    // nearby phone can find it with no QR (best-effort; opt-in
+                    // via the granted radios).
+                    startNearbyAdvertising(invite)
                 }
             } catch (e: Exception) { ui.post { toast("host failed: ${e.message}") } }
         }
@@ -333,15 +470,19 @@ class MainActivity : Activity() {
     }
 
     // ---------- view helpers ----------
+    // The pre-30 inset getters are deprecated; suppressed at function level so
+    // the annotation isn't on a block-level expression (which parses ambiguously).
+    @Suppress("DEPRECATION")
     private fun applyInsets(v: View) {
         v.setOnApplyWindowInsetsListener { view, insets ->
-            val top: Int; val bottom: Int
+            val top: Int
+            val bottom: Int
             if (Build.VERSION.SDK_INT >= 30) {
                 val b = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
                 top = b.top; bottom = b.bottom
             } else {
-                @Suppress("DEPRECATION") top = insets.systemWindowInsetTop
-                @Suppress("DEPRECATION") bottom = insets.systemWindowInsetBottom
+                top = insets.systemWindowInsetTop
+                bottom = insets.systemWindowInsetBottom
             }
             view.setPadding(view.paddingLeft, top, view.paddingRight, bottom)
             insets

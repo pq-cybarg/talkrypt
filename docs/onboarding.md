@@ -85,17 +85,42 @@ registry's address never appears in the invite. Build: `AccessPolicy` in
 **Overlap.** `host --password … --require-registry …` requires *both* the
 out-of-band password *and* membership in your registry — two independent gates.
 
-## What's a skeleton vs. done
+## Zero-touch nearby discovery (BLE + Wi-Fi Direct)
+
+For hands-free pairing with no QR or typing, the host broadcasts its invite and a
+nearby phone finds it. **Find nearby host** on the start screen scans; the host
+auto-broadcasts when you start a chat. Two transports run together:
+
+- **Bluetooth LE** (`BleNearby.kt`) — the low-power "who's nearby" beacon. The
+  host opens a GATT server with a readable characteristic holding the invite and
+  advertises the talkrypt service UUID; the scanner connects, raises the MTU, and
+  reads the invite (offset/blob reads, so invites larger than one MTU arrive in
+  full). Permissions: BLUETOOTH_ADVERTISE/SCAN/CONNECT (API 31+) or
+  BLUETOOTH(_ADMIN) + fine location (pre-31), requested at runtime.
+- **Wi-Fi Direct** (`WifiDirectNearby.kt`) — higher bandwidth, forms its own
+  network with no router (also suits the APK transfer). `discoverPeers()` + a
+  `WIFI_P2P_PEERS_CHANGED` receiver; on connection the group owner serves the
+  invite over a socket the scanner reads. Permissions: NEARBY_WIFI_DEVICES
+  (API 33+, `neverForLocation`) or fine location (pre-33), plus CHANGE_WIFI_STATE.
+
+What crosses the air is only the `talkrypt://` invite (a one-time token); the
+chat still runs over the authenticated, AEAD-encrypted session and can be
+password- or registry-gated. Discovery is convenience, **never** a trust anchor —
+the safety-number / account checks still apply.
+
+> The host now binds its chat to the device's LAN/hotspot address (not loopback),
+> so a QR- or nearby-discovered invite is actually dialable from the other phone.
+
+## What's done vs. next
 
 Done + tested at the core/CLI layer (Rust): QR chat-start (terminal QR + deep
 link), device linking, password channels, registry-restricted channels, portable
-builds. Done in the Android app: the text-entry fix, `talkrypt://` deep-link
-auto-join, invite-QR display, and the P2P APK share server.
+builds. Done in the Android app (compiles; **not** runtime-tested on the locked
+Seeker): text-entry fix, `talkrypt://` deep-link auto-join, invite-QR display,
+P2P APK share, LAN-address hosting, and **BLE + Wi-Fi Direct nearby discovery**.
 
-Next increments (scaffolding / not yet built): an in-app camera scanner (the OS
-camera + deep link already covers scan-to-join, so this is optional polish);
-BLE / Wi-Fi Direct nearby discovery to auto-exchange invites without a QR; and a
-graphical linking/friends/segment manager in the app. These need platform
-permissions and on-device validation.
+Next increments: an in-app camera scanner (the OS camera + deep link already
+covers scan-to-join, so this is optional polish) and a graphical
+linking/friends/segment manager. These need on-device validation.
 
 NOT certified / NOT audited — see the project README.

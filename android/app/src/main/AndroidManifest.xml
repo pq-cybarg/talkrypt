@@ -4,6 +4,28 @@
     <!-- P2P app share serves the APK over the local network. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Nearby discovery (BLE). API 31+ uses the new Bluetooth runtime perms;
+         pre-31 falls back to BLUETOOTH(_ADMIN) + fine location for scanning. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <!-- Nearby discovery (Wi-Fi Direct). API 33+ uses NEARBY_WIFI_DEVICES;
+         pre-33 needs fine location. CHANGE_WIFI_STATE drives discovery. -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Fine location only on pre-33 builds, for BLE scan + Wi-Fi Direct. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
     <application
         android:label="talkrypt"
         android:allowBackup="false"
