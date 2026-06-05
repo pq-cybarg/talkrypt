@@ -501,7 +501,9 @@ class MainActivity : Activity() {
                 row.alpha = 0.5f
                 row.isClickable = false
                 col.addView(row, lp(MATCH_PARENT, dp(52), top = dp(8)))
-                pingAnchor(uri, username, acct, row, channel, posture)
+                pingAnchor(uri, username, acct, row, "Host gated by “$username@${shortUri(uri)}”") {
+                    startRestrictedHost(channel, posture, uri, username)
+                }
             }
         }
         col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
@@ -515,14 +517,19 @@ class MainActivity : Activity() {
         return "…" + body.takeLast(10)
     }
 
-    /** Ping an anchor: enabled iff reachable AND it holds our account record. */
+    /**
+     * Ping an anchor in the background: a membership is "live" iff the anchor is
+     * reachable AND holds our account record (resolve(username) == our account).
+     * Enables `row` with `liveLabel` + `onLive` on success; greys it out on
+     * failure. Shared by the restricted-host picker and the join preflight.
+     */
     private fun pingAnchor(
         uri: String,
         username: String,
         acct: Account,
         row: TextView,
-        channel: String,
-        posture: String,
+        liveLabel: String,
+        onLive: () -> Unit,
     ) {
         thread {
             val ok = try {
@@ -532,13 +539,13 @@ class MainActivity : Activity() {
             }
             ui.post {
                 if (ok) {
-                    row.text = "Host gated by “$username@${shortUri(uri)}”"
+                    row.text = liveLabel
                     row.setTextColor(Color.WHITE)
                     row.background = roundRect(accent, 14)
                     row.alpha = 1f
                     row.isEnabled = true
                     row.isClickable = true
-                    row.setOnClickListener { startRestrictedHost(channel, posture, uri, username) }
+                    row.setOnClickListener { onLive() }
                 } else {
                     row.text = "✗ ${shortUri(uri)} — unreachable or no record"
                     row.alpha = 0.5f
@@ -676,17 +683,65 @@ class MainActivity : Activity() {
         }
     }
 
+    // Entry from the Join button / deep link / nearby: surface the preflight so
+    // the joiner picks which (live) membership to present before connecting.
     private fun startJoin(uri: String) {
+        setContentView(joinPreflightScreen(uri))
+    }
+
+    /**
+     * Join preflight: the same bound-anchor grey-out guard as restricted hosting,
+     * but for the *joiner*. If a chat is registry-restricted you're admitted only
+     * if your account is a member, so present a membership that's actually live.
+     * A pseudonym fallback is always offered (won't pass a restricted gate).
+     */
+    private fun joinPreflightScreen(uri: String): View {
+        val acct = account()
+        val anchors = boundAnchors()
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Join chat", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("If this chat is registry-restricted, you're admitted only as a member. Present a live membership, or join as a pseudonym (open chats only).", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(18)),
+        )
+        if (anchors.isEmpty()) {
+            col.addView(text("You have no registry memberships yet — register at an anchor to join restricted chats.", 14f, Color.parseColor("#FFD166")), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
+        } else {
+            col.addView(text("PRESENT A MEMBERSHIP", 12f, muted, bold = true))
+            for ((anchorUri, username) in anchors) {
+                val row = pillButton("checking ${shortUri(anchorUri)} …", panel, muted) { }
+                row.isEnabled = false; row.alpha = 0.5f; row.isClickable = false
+                col.addView(row, lp(MATCH_PARENT, dp(52), top = dp(8)))
+                pingAnchor(anchorUri, username, acct, row, "Join as “$username@${shortUri(anchorUri)}”") {
+                    doJoin(uri, username, presentAccount = true)
+                }
+            }
+        }
+        col.addView(text("— or —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(10)))
+        col.addView(pillButton("Join with my account (no username)", panel, fg) {
+            doJoin(uri, null, presentAccount = true)
+        }, lp(MATCH_PARENT, dp(50)))
+        col.addView(pillButton("Join as pseudonym (unlinkable)", panel, fg) {
+            doJoin(uri, null, presentAccount = false)
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
         toast("joining…")
         thread {
             try {
                 val c = TalkryptClient.join(uri); val sn = c.safetyNumber()
-                // Present our account so a registry-restricted host can admit us
-                // (and so the peer can friend us).
-                runCatching { c.presentAccount(account(), null) }
+                // Present our account (optionally as a username) so a registry-
+                // restricted host can admit us and the peer can friend us. A
+                // pseudonym presents nothing and won't pass a restricted gate.
+                if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 ui.post {
                     setContentView(chatScreen("chat", "safety ${sn.take(11)} · peers ${c.peerCount()}"))
-                    system("joined — say hello")
+                    system(if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
                     bind(c); poll()
                 }
             } catch (e: Exception) { ui.post { toast("join failed: ${e.message}") } }
