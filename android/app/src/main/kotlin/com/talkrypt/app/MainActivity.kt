@@ -101,6 +101,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_NEARBY = 0x4E42 // "NB"
+        private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
     }
 
     // ---------- setup screen ----------
@@ -134,6 +135,9 @@ class MainActivity : Activity() {
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
             startHost(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString())
         }, lp(MATCH_PARENT, dp(54), top = dp(32)))
+        col.addView(pillButton("Registry-restricted chat", panel, fg) {
+            setContentView(restrictedHostScreen(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString()))
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
 
         col.addView(text("— or join —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
         val invite = inputField("talkrypt://…")
@@ -342,6 +346,25 @@ class MainActivity : Activity() {
         return a
     }
 
+    // Anchors you are bound at (where you registered a username) — the only
+    // registries it makes sense to gate a chat by, since you're a member.
+    private fun boundAnchors(): List<Pair<String, String>> {
+        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        return prefs.getStringSet("bound_anchors", emptySet()).orEmpty().mapNotNull {
+            val p = it.split(ANCHOR_SEP)
+            if (p.size == 2) p[0] to p[1] else null
+        }
+    }
+
+    private fun addBoundAnchor(uri: String, username: String) {
+        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val set = HashSet(prefs.getStringSet("bound_anchors", emptySet()).orEmpty())
+        // Replace any prior entry for this anchor (latest username wins).
+        set.removeAll { it.substringBefore(ANCHOR_SEP) == uri }
+        set.add(uri + ANCHOR_SEP + username)
+        prefs.edit().putStringSet("bound_anchors", set).apply()
+    }
+
     private fun anchorsScreen(): View {
         val acct = account()
         val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
@@ -430,6 +453,9 @@ class MainActivity : Activity() {
         thread {
             val msg = try {
                 anchorRegister(uri, acct, name)
+                // Remember we're bound here so registry-restricted chats can
+                // offer it — the only registries it makes sense to gate by.
+                addBoundAnchor(uri, name)
                 "✓ registered “$name” → your account at this anchor"
             } catch (e: Exception) {
                 "! register failed: ${e.message}"
@@ -449,6 +475,98 @@ class MainActivity : Activity() {
                 "! resolve failed: ${e.message}"
             }
             ui.post { result.text = msg }
+        }
+    }
+
+    // ---------- registry-restricted chat spawning ----------
+    // You can only gate a chat by a registry you're a member of (else you'd lock
+    // yourself out), so we offer ONLY anchors you're bound at, and grey out any
+    // that fail a live ping (unreachable, or your record isn't there).
+    private fun restrictedHostScreen(channel: String, posture: String): View {
+        val acct = account()
+        val anchors = boundAnchors()
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Registry-restricted chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("Only members of the chosen registry can join $channel. You can pick only registries you're bound at; unreachable ones (or ones missing your record) are greyed out.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(18)),
+        )
+        if (anchors.isEmpty()) {
+            col.addView(text("You aren't registered at any anchor yet. Open Anchors and register a username first.", 14f, Color.parseColor("#FFD166")), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
+        } else {
+            for ((uri, username) in anchors) {
+                // One disabled row per bound anchor; a background ping enables it.
+                val row = pillButton("checking ${shortUri(uri)} …", panel, muted) { /* set on success */ }
+                row.isEnabled = false
+                row.alpha = 0.5f
+                row.isClickable = false
+                col.addView(row, lp(MATCH_PARENT, dp(52), top = dp(8)))
+                pingAnchor(uri, username, acct, row, channel, posture)
+            }
+        }
+        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun shortUri(uri: String): String {
+        val body = uri.removePrefix("talkrypt://")
+        return "…" + body.takeLast(10)
+    }
+
+    /** Ping an anchor: enabled iff reachable AND it holds our account record. */
+    private fun pingAnchor(
+        uri: String,
+        username: String,
+        acct: Account,
+        row: TextView,
+        channel: String,
+        posture: String,
+    ) {
+        thread {
+            val ok = try {
+                anchorResolve(uri, username) == acct.safetyNumber()
+            } catch (e: Exception) {
+                false
+            }
+            ui.post {
+                if (ok) {
+                    row.text = "Host gated by “$username@${shortUri(uri)}”"
+                    row.setTextColor(Color.WHITE)
+                    row.background = roundRect(accent, 14)
+                    row.alpha = 1f
+                    row.isEnabled = true
+                    row.isClickable = true
+                    row.setOnClickListener { startRestrictedHost(channel, posture, uri, username) }
+                } else {
+                    row.text = "✗ ${shortUri(uri)} — unreachable or no record"
+                    row.alpha = 0.5f
+                }
+            }
+        }
+    }
+
+    private fun startRestrictedHost(channel: String, posture: String, anchorUri: String, username: String) {
+        toast("creating restricted chat…")
+        thread {
+            try {
+                val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
+                val c = TalkryptClient.host(listen, channel, posture)
+                runCatching { c.presentAccount(account(), username) }
+                val members = c.restrictToAnchor(anchorUri)
+                val invite = c.inviteUri(); val sn = c.safetyNumber()
+                ui.post {
+                    setContentView(chatScreen(channel, "restricted · $members member(s) · safety ${sn.take(11)}"))
+                    system("registry-restricted — only the $members anchor member(s) can join")
+                    messages?.let { addQrInto(it, invite, 0.62f) }
+                    addBubble(invite, mine = false, sender = "invite")
+                    bind(c); poll()
+                    startNearbyAdvertising(invite)
+                }
+            } catch (e: Exception) {
+                ui.post { toast("restricted host failed: ${e.message}") }
+            }
         }
     }
 
@@ -539,6 +657,9 @@ class MainActivity : Activity() {
                 // dialable from another device — required for QR/nearby joining.
                 val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
                 val c = TalkryptClient.host(listen, channel, posture)
+                // Present our account so peers (and registry-restricted hosts)
+                // can resolve us as that account.
+                runCatching { c.presentAccount(account(), null) }
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
                     setContentView(chatScreen(channel, "$posture · safety ${sn.take(11)}"))
@@ -560,6 +681,9 @@ class MainActivity : Activity() {
         thread {
             try {
                 val c = TalkryptClient.join(uri); val sn = c.safetyNumber()
+                // Present our account so a registry-restricted host can admit us
+                // (and so the peer can friend us).
+                runCatching { c.presentAccount(account(), null) }
                 ui.post {
                     setContentView(chatScreen("chat", "safety ${sn.take(11)} · peers ${c.peerCount()}"))
                     system("joined — say hello")

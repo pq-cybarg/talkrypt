@@ -307,6 +307,39 @@ impl TalkryptClient {
         self.core.present_identity(chain, username);
         Ok(())
     }
+
+    /// Present THIS device as the given account: builds an account→device
+    /// certificate (the account certifies this session's device key) and presents
+    /// it inside the encrypted session. Required for the peer (or a registry-
+    /// restricted host) to resolve you as that account. Also announces to any
+    /// already-connected peers.
+    pub fn present_account(&self, account: Arc<Account>, username: Option<String>) {
+        let chain = IdentityChain::device(
+            &account.kp,
+            self.core.identity_public(),
+            "device:app",
+            now_secs(),
+            0,
+        );
+        self.core.present_identity(chain, username);
+        self.rt.block_on(self.core.announce_identity());
+    }
+
+    /// Restrict this hosted chat to the members of the anchor at `anchor_uri`:
+    /// pulls the anchor's registered account fingerprints and admits only those
+    /// (others are silenced + disconnected). Returns how many accounts are
+    /// allowed. Use an anchor you are a member of, or you lock yourself out.
+    pub fn restrict_to_anchor(&self, anchor_uri: String) -> Result<u32, FfiError> {
+        self.rt.block_on(async {
+            let (mut client, _desc) = anchor_client(&anchor_uri).await?;
+            let claims = client.list().await.map_err(FfiError::from)?;
+            let allowed: std::collections::HashSet<[u8; 48]> =
+                claims.iter().map(|c| c.claim.account.fingerprint()).collect();
+            let n = allowed.len() as u32;
+            self.core.restrict_to_accounts(allowed);
+            Ok(n)
+        })
+    }
 }
 
 // ===== username accounts + registry "anchors" =====
