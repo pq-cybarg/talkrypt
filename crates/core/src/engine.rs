@@ -378,6 +378,10 @@ struct Inner {
     /// link is refused recognition even if otherwise valid. See
     /// [`Core::add_revocation`].
     revocations: Mutex<std::collections::HashSet<([u8; 48], [u8; 48])>>,
+    /// Group-chat host: peers whose presented account the access policy admits.
+    /// A KeyPackage is honored only from an admitted peer (under a restrictive
+    /// policy), so group membership is gated like pairwise access.
+    admitted_peers: Mutex<std::collections::HashSet<[u8; 48]>>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -489,6 +493,7 @@ impl Core {
             seen_accounts: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
+            admitted_peers: Mutex::new(std::collections::HashSet::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -867,6 +872,15 @@ impl Core {
         // A joining group member sends its KeyPackage toward the committer
         // (directly to the host, or via the relay in relayed mode).
         if self.inner.role == GroupRole::Member {
+            // Present our account FIRST (in-order, before the KeyPackage) so a
+            // host with a restrictive access policy admits us before deciding on
+            // the KeyPackage. Non-relayed only (relayed carries Routed envelopes).
+            if !self.inner.relayed {
+                let pres = self.inner.present_chain.lock().unwrap().clone();
+                if let Some(bytes) = pres {
+                    route(&self.inner, Frame::Identity(bytes), Route::Committer).await;
+                }
+            }
             let kp_bytes = self
                 .inner
                 .leaf_keypair
@@ -1165,6 +1179,13 @@ async fn reader_loop(
                     }
                 }
             }
+            Some(Frame::Identity(bytes))
+                if inner.role == GroupRole::Host && !inner.relayed =>
+            {
+                // Group host: record whether the joiner's account is admitted, so
+                // handle_keypackage can gate membership the same as pairwise.
+                handle_group_member_identity(&inner, from, bytes);
+            }
             Some(Frame::AccessDenied(reason)) if inner.role == GroupRole::None => {
                 // The host refused us. Surface it so the UI can say why instead
                 // of showing an unexplained disconnect.
@@ -1288,10 +1309,73 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
     }
 }
 
+/// Group host: a joining member presented its account. Resolve + bind it to the
+/// member's device (`from`), check revocation, and — if the access policy admits
+/// it — record `from` as admitted so [`handle_keypackage`] honors its join.
+/// Emits an [`Event::Identity`] either way (for display).
+fn handle_group_member_identity(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    let Ok(presentation) = Presentation::decode(&bytes) else {
+        return;
+    };
+    let now = now_secs();
+    let resolved = {
+        let store = inner.contacts.lock().unwrap();
+        contacts::resolve_chain(&store, &presentation.chain, from, now)
+    };
+    let Some(res) = resolved else { return };
+    // Reject a chain with a revoked link.
+    let revoked = {
+        let revs = inner.revocations.lock().unwrap();
+        presentation
+            .chain
+            .links
+            .iter()
+            .any(|l| revs.contains(&(res.account_fingerprint, l.cert.subject.fingerprint())))
+    };
+    if revoked {
+        let _ = inner
+            .events_tx
+            .send(Event::Error("group joiner presented a revoked device".into()));
+        return;
+    }
+    inner
+        .seen_accounts
+        .lock()
+        .unwrap()
+        .insert(res.account_fingerprint, res.account.clone());
+    if inner
+        .access
+        .lock()
+        .unwrap()
+        .admits(&res.account_fingerprint, res.contact, res.friend)
+    {
+        inner.admitted_peers.lock().unwrap().insert(from);
+    }
+    let _ = inner.events_tx.send(Event::Identity {
+        from,
+        account_fingerprint: res.account_fingerprint,
+        username: presentation.username,
+        contact: res.contact,
+        friend: res.friend,
+    });
+}
+
 /// Host: admit a new member, send them a Welcome, and broadcast the Commit to
 /// existing members. (Sequential joins only; concurrent joins need a delivery
 /// service to order commits — see docs/plans/0002-mls-pq.md.)
 async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
+    // Access gate: under a restrictive policy, only admit a member whose account
+    // we already admitted (recorded when it presented its identity, which the
+    // joiner sends in-order before its KeyPackage). Open policy admits anyone.
+    let admit = inner.access.lock().unwrap().is_open()
+        || inner.admitted_peers.lock().unwrap().contains(&from);
+    if !admit {
+        let _ = inner.events_tx.send(Event::Error(format!(
+            "refused group join from non-member {}",
+            short_hex6(&from)
+        )));
+        return;
+    }
     // Hold the group lock across decode + add + leaf assignment so concurrent
     // joins get distinct, ordered epochs. The KeyPackage is decoded with the
     // group's KEM profile (posture + wire padding). The commit is tagged with
@@ -1973,6 +2057,65 @@ mod tests {
                 "non-member account must be silenced"
             );
         }
+    }
+
+    /// Group membership is gated by the access policy: under `restrict_to_accounts`,
+    /// a member presenting an allowed account joins and exchanges group messages;
+    /// a member with a non-allowed account is refused membership (no group msg).
+    #[tokio::test]
+    async fn group_access_control_gates_membership() {
+        use std::collections::HashSet;
+        use talkrypt_crypto::IdentityChain;
+
+        async fn member_receives_group_msg(allowed: bool) -> bool {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::Hub,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec!["gh".into()],
+                "#grp-acl",
+            );
+            let member_account = IdentityKeyPair::generate();
+            let (host, _h) = group_core(&fabric, "gh", &desc, true);
+            host.restrict_to_accounts(HashSet::from([member_account.public().fingerprint()]));
+            if !allowed {
+                // Host restricts to a DIFFERENT account than the member presents.
+                host.restrict_to_accounts(HashSet::from([
+                    IdentityKeyPair::generate().public().fingerprint()
+                ]));
+            }
+            host.host().await.unwrap();
+
+            let (member, mut m_rx) = group_core(&fabric, "gm", &desc, false);
+            member.present_identity(
+                IdentityChain::device(&member_account, member.identity_public(), "d", 0, 0),
+                Some("m".into()),
+            );
+            member.connect("gh").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+
+            host.send("group hello").await.unwrap();
+            // An admitted member gets the group message; a refused one never
+            // joined the group, so it can't decrypt any group traffic.
+            timeout(Duration::from_millis(800), async {
+                loop {
+                    if let Event::Message { text, .. } = next_event(&mut m_rx).await {
+                        if text == "group hello" {
+                            break true;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false)
+        }
+
+        assert!(member_receives_group_msg(true).await, "allowed member must join");
+        assert!(
+            !member_receives_group_msg(false).await,
+            "non-member account must be refused group membership"
+        );
     }
 
     /// A revoked device is refused recognition even with an otherwise-valid
