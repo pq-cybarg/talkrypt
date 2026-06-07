@@ -88,11 +88,15 @@ enum Frame {
     GroupMsg(Vec<u8>),
     /// Full leaf→fingerprint roster snapshot, for message attribution.
     Roster(Vec<(u32, [u8; 48])>),
-    /// An encoded [`crate::friends::Presentation`] — the peer's account→device
+    /// An encoded [`crate::contacts::Presentation`] — the peer's account→device
     /// certificate chain (+ optional username). Sent as the FIRST frame inside
     /// the encrypted session (never in the plaintext handshake) so the sensitive
     /// account↔device linkage is AEAD-protected and forward-secret.
     Identity(Vec<u8>),
+    /// The host refused this peer on a restricted channel (carries a short
+    /// reason). Sent just before disconnecting so the joiner gets explicit
+    /// feedback instead of a silent drop.
+    AccessDenied(String),
 }
 
 impl Frame {
@@ -138,6 +142,10 @@ impl Frame {
                 w.put_u8(6);
                 w.put_bytes(b);
             }
+            Frame::AccessDenied(reason) => {
+                w.put_u8(7);
+                w.put_bytes(reason.as_bytes());
+            }
         }
         w.into_vec()
     }
@@ -176,6 +184,7 @@ impl Frame {
                 Frame::Roster(entries)
             }
             6 => Frame::Identity(r.get_vec().ok()?),
+            7 => Frame::AccessDenied(String::from_utf8(r.get_vec().ok()?).ok()?),
             _ => return None,
         };
         Some(frame)
@@ -1067,12 +1076,27 @@ async fn reader_loop(
                     IdentityOutcome::Allowed => approved = true,
                     IdentityOutcome::Ignored => {}
                     IdentityOutcome::Rejected => {
-                        // Not permitted on this restricted channel: drop the peer.
+                        // Not permitted on this restricted channel. Tell the peer
+                        // explicitly (we're send-ready: we just got their frame),
+                        // then drop them — no silent disconnect.
+                        if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                            let denied = Frame::AccessDenied(
+                                "not permitted on this channel".to_string(),
+                            );
+                            let _ = send_payload(&s, &w, &denied.encode()).await;
+                        }
                         inner.peers.lock().unwrap().retain(|p| p.fingerprint != fingerprint);
                         let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
                         break;
                     }
                 }
+            }
+            Some(Frame::AccessDenied(reason)) if inner.role == GroupRole::None => {
+                // The host refused us. Surface it so the UI can say why instead
+                // of showing an unexplained disconnect.
+                let _ = inner
+                    .events_tx
+                    .send(Event::Error(format!("not admitted: {reason}")));
             }
             _ => { /* frame not valid for this role; ignore */ }
         }
@@ -1845,6 +1869,46 @@ mod tests {
                 "non-member account must be silenced"
             );
         }
+    }
+
+    /// A rejected joiner gets explicit feedback (an `Error` "not admitted: …"),
+    /// not just a silent disconnect.
+    #[tokio::test]
+    async fn rejected_joiner_gets_feedback() {
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#fb",
+        );
+        let allowed = IdentityKeyPair::generate();
+        let (host, _h) = core_on(&fabric, "h", &desc);
+        host.restrict_to_accounts(std::collections::HashSet::from([allowed.public().fingerprint()]));
+        let (peer, mut peer_rx) = core_on(&fabric, "p", &desc);
+        let intruder = IdentityKeyPair::generate(); // not allowed
+        peer.present_identity(
+            IdentityChain::device(&intruder, peer.identity_public(), "d", 0, 0),
+            Some("x".into()),
+        );
+        host.host().await.unwrap();
+        peer.connect("h").await.unwrap();
+
+        // The joiner receives an explicit "not admitted" error.
+        let got = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Event::Error(msg) = next_event(&mut peer_rx).await {
+                    if msg.contains("not admitted") {
+                        break true;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(got, "rejected joiner must be told it was not admitted");
     }
 
     /// `restrict_to_contacts`: a recognized contact is admitted; a stranger
