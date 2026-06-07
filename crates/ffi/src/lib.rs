@@ -233,6 +233,9 @@ pub struct TalkryptClient {
     rt: Runtime,
     core: Core,
     events: Mutex<UnboundedReceiver<Event>>,
+    /// The shareable invite URI. For Tor hosts this carries the published
+    /// `.onion`; otherwise it's the descriptor's URI.
+    invite: String,
 }
 
 #[uniffi::export]
@@ -259,11 +262,62 @@ impl TalkryptClient {
         let transport = Arc::new(TcpTransport::new(&listen));
         let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc);
         rt.block_on(core.host()).map_err(FfiError::from)?;
+        let invite = core.descriptor().to_uri();
         Ok(Arc::new(Self {
             rt,
             core,
             events: Mutex::new(rx),
+            invite,
         }))
+    }
+
+    /// Host over real Tor (Arti): publishes an onion service; `invite_uri`
+    /// carries the `.onion`. Requires the FFI built with `--features tor`,
+    /// otherwise returns an error.
+    #[uniffi::constructor]
+    pub fn host_tor(channel: String, posture: String) -> Result<Arc<Self>, FfiError> {
+        #[cfg(not(feature = "tor"))]
+        {
+            let _ = (channel, posture);
+            Err(FfiError::Failed(
+                "this build has Tor disabled; rebuild the FFI with --features tor".into(),
+            ))
+        }
+        #[cfg(feature = "tor")]
+        {
+            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            let rt = Runtime::new().map_err(FfiError::from)?;
+            let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
+            let suite_id = dr_suite_id(profile);
+            let suite = SuiteRegistry::with_defaults()
+                .get(&suite_id)
+                .map_err(FfiError::from)?;
+            let arti = Arc::new(
+                rt.block_on(ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt"))
+                    .map_err(FfiError::from)?,
+            );
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                &suite_id,
+                vec![],
+                channel,
+            );
+            let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti.clone(), desc);
+            rt.block_on(core.host()).map_err(FfiError::from)?;
+            // Put the published .onion into the invite so peers can dial it.
+            let mut d = core.descriptor().clone();
+            if let Some(onion) = arti.onion_address() {
+                d.endpoints = vec![onion];
+            }
+            let invite = d.to_uri();
+            Ok(Arc::new(Self {
+                rt,
+                core,
+                events: Mutex::new(rx),
+                invite,
+            }))
+        }
     }
 
     /// Join an existing chat from a `talkrypt://` invite URI.
@@ -284,11 +338,53 @@ impl TalkryptClient {
                 .await
         })
         .map_err(FfiError::from)?;
+        let invite = core.descriptor().to_uri();
         Ok(Arc::new(Self {
             rt,
             core,
             events: Mutex::new(rx),
+            invite,
         }))
+    }
+
+    /// Join over real Tor (Arti) — for a `.onion` invite. Requires the FFI built
+    /// with `--features tor`, otherwise returns an error.
+    #[uniffi::constructor]
+    pub fn join_tor(uri: String) -> Result<Arc<Self>, FfiError> {
+        #[cfg(not(feature = "tor"))]
+        {
+            let _ = uri;
+            Err(FfiError::Failed(
+                "this build has Tor disabled; rebuild the FFI with --features tor".into(),
+            ))
+        }
+        #[cfg(feature = "tor")]
+        {
+            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            let rt = Runtime::new().map_err(FfiError::from)?;
+            let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+            let suite = SuiteRegistry::with_defaults()
+                .get_by_scheme_hash(&desc.scheme_hash())
+                .map_err(FfiError::from)?;
+            let arti = Arc::new(
+                rt.block_on(ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt"))
+                    .map_err(FfiError::from)?,
+            );
+            let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti, desc.clone());
+            rt.block_on(async {
+                for_kind(desc.topology)
+                    .establish(&core, &desc.endpoints)
+                    .await
+            })
+            .map_err(FfiError::from)?;
+            let invite = core.descriptor().to_uri();
+            Ok(Arc::new(Self {
+                rt,
+                core,
+                events: Mutex::new(rx),
+                invite,
+            }))
+        }
     }
 
     /// Send a message to the channel.
@@ -298,9 +394,10 @@ impl TalkryptClient {
             .map_err(FfiError::from)
     }
 
-    /// The shareable invite URI for this chat.
+    /// The shareable invite URI for this chat (carries the `.onion` for a Tor
+    /// host).
     pub fn invite_uri(&self) -> String {
-        self.core.descriptor().to_uri()
+        self.invite.clone()
     }
 
     /// Our safety number, for out-of-band verification.

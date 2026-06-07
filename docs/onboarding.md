@@ -119,6 +119,13 @@ builds. Done in the Android app (compiles; **not** runtime-tested on the locked
 Seeker): text-entry fix, `talkrypt://` deep-link auto-join, invite-QR display,
 P2P APK share, LAN-address hosting, and **BLE + Wi-Fi Direct nearby discovery**.
 
+**Over Tor:** the CLI runs over real onion services with `--tor` (build with
+`--features tor`), and the Android app has a "Route over Tor" toggle that uses
+the FFI's `host_tor`/`join_tor` (host publishes a `.onion`, put in the invite;
+peers dial it). The shipped `.so` includes Tor only when built with
+`TALKRYPT_TOR=1 bash android/build-apk.sh` (Arti is a heavy cross-compile);
+without it the toggle errors clearly at runtime.
+
 Next increments: an in-app camera scanner (the OS camera + deep link already
 covers scan-to-join, so this is optional polish) and a graphical
 linking/friends/segment manager. These need on-device validation.

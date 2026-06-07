@@ -17,7 +17,15 @@ NDK="${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/26.3.11579264}"
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 
 # 1. FFI .so for arm64 (real device link via the NDK).
-ANDROID_NDK_HOME="$NDK" cargo ndk -t arm64-v8a build -p talkrypt-ffi --release
+# Set TALKRYPT_TOR=1 to compile the Arti (Tor) transport into the .so, so the
+# app's "Route over Tor" toggle works. This pulls the large Arti dependency tree
+# and a heavier cross-compile; off by default for a lean, fast build.
+TOR_FEATURE=""
+if [ "${TALKRYPT_TOR:-0}" = "1" ]; then
+  echo "building FFI with Tor (Arti) — heavier cross-compile…"
+  TOR_FEATURE="--features tor"
+fi
+ANDROID_NDK_HOME="$NDK" cargo ndk -t arm64-v8a build -p talkrypt-ffi --release $TOR_FEATURE
 mkdir -p android/app/src/main/jniLibs/arm64-v8a
 cp target/aarch64-linux-android/release/libtalkrypt_ffi.so \
    android/app/src/main/jniLibs/arm64-v8a/

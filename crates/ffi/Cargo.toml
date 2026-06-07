@@ -18,6 +18,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "net"
 thiserror.workspace = true
 uniffi = { version = "0.31", features = ["cli"] }
 
+[features]
+default = []
+# Run over real Tor (Arti). Pulls the large Arti tree into the .so.
+tor = ["talkrypt-transport/tor"]
+
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"

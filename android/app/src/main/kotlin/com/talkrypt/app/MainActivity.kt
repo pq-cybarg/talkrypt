@@ -17,6 +17,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
 import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -45,6 +46,7 @@ class MainActivity : Activity() {
     private var messages: LinearLayout? = null
     private var scroll: ScrollView? = null
     private var shareServer: ApkShareServer? = null
+    private var useTor = false // route the next host/join over Tor (.onion)
 
     // Nearby discovery (BLE + Wi-Fi Direct) state.
     private var nearby: List<NearbyDiscovery> = emptyList()
@@ -141,6 +143,14 @@ class MainActivity : Activity() {
             )
         }
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
+
+        val torBox = CheckBox(this).apply {
+            text = "Route over Tor (.onion; slow to start)"
+            setTextColor(muted)
+            isChecked = useTor
+            setOnCheckedChangeListener { _, checked -> useTor = checked }
+        }
+        col.addView(torBox, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16)))
 
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
             startHost(
@@ -676,8 +686,13 @@ class MainActivity : Activity() {
             try {
                 // Bind to the LAN/hotspot address (not loopback) so the invite is
                 // dialable from another device — required for QR/nearby joining.
-                val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
-                val c = TalkryptClient.host(listen, channel, posture)
+                // Over Tor, host an onion service instead (the .onion goes in the invite).
+                val c = if (useTor) {
+                    TalkryptClient.hostTor(channel, posture)
+                } else {
+                    val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
+                    TalkryptClient.host(listen, channel, posture)
+                }
                 // Present our account so peers (and registry-restricted hosts)
                 // can resolve us as that account.
                 runCatching { c.presentAccount(account(), null) }
@@ -748,10 +763,11 @@ class MainActivity : Activity() {
     }
 
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
-        toast("joining…")
+        toast(if (useTor) "joining over Tor…" else "joining…")
         thread {
             try {
-                val c = TalkryptClient.join(uri); val sn = c.safetyNumber()
+                val c = if (useTor) TalkryptClient.joinTor(uri) else TalkryptClient.join(uri)
+                val sn = c.safetyNumber()
                 // Present our account (optionally as a username) so a registry-
                 // restricted host can admit us and the peer can friend us. A
                 // pseudonym presents nothing and won't pass a restricted gate.
