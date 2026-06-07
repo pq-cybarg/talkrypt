@@ -672,6 +672,30 @@ impl Core {
             .collect()
     }
 
+    /// Export contacts for persistence: (account public-key bytes, name, friend).
+    /// Reload them with [`Core::add_contact_bytes`] on a fresh session.
+    pub fn export_contacts(&self) -> Vec<(Vec<u8>, Option<String>, bool)> {
+        self.inner
+            .contacts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| (c.account.sig_vk.clone(), c.name.clone(), c.friend))
+            .collect()
+    }
+
+    /// Add a contact from raw account public-key bytes (the persistence-friendly
+    /// counterpart to [`Core::add_contact`]).
+    pub fn add_contact_bytes(&self, account_pubkey: Vec<u8>, name: Option<String>, friend: bool) {
+        self.add_contact(
+            IdentityPublic {
+                sig_vk: account_pubkey,
+            },
+            name,
+            friend,
+        );
+    }
+
     /// Number of connected peers.
     pub fn peer_count(&self) -> usize {
         self.inner.peers.lock().unwrap().len()

@@ -40,6 +40,17 @@ fn hex_bytes(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Parse an even-length hex string into bytes.
+fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
 /// Parse 96 hex chars into a 48-byte fingerprint.
 fn parse_fp_hex(s: &str) -> Option<[u8; 48]> {
     let s = s.trim();
@@ -160,6 +171,14 @@ pub enum FfiEvent {
 
 fn hex_fp(fp: &[u8; 48]) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A persisted contact (account public key + remembered name + friend label).
+#[derive(uniffi::Record)]
+pub struct ContactRecord {
+    pub account_pubkey_hex: String,
+    pub name: String,
+    pub friend: bool,
 }
 
 fn map_event(e: Event) -> FfiEvent {
@@ -310,6 +329,26 @@ impl TalkryptClient {
             sig_vk: account_pubkey,
         };
         self.core.add_contact(account, name, friend);
+    }
+
+    /// Add a contact from a hex-encoded account public key (persistence-friendly).
+    pub fn add_contact_hex(&self, account_pubkey_hex: String, name: Option<String>, friend: bool) {
+        if let Some(pk) = parse_hex_bytes(&account_pubkey_hex) {
+            self.core.add_contact(IdentityPublic { sig_vk: pk }, name, friend);
+        }
+    }
+
+    /// Export contacts for the host to persist (reload with `add_contact_hex`).
+    pub fn export_contacts(&self) -> Vec<ContactRecord> {
+        self.core
+            .export_contacts()
+            .into_iter()
+            .map(|(pk, name, friend)| ContactRecord {
+                account_pubkey_hex: hex_bytes(&pk),
+                name: name.unwrap_or_default(),
+                friend,
+            })
+            .collect()
     }
 
     /// Grant one account access to this hosted channel by its fingerprint hex

@@ -580,6 +580,66 @@ fn load_chain(path: &str) -> Result<IdentityChain, Box<dyn std::error::Error>> {
     Ok(IdentityChain::decode(&std::fs::read(path)?)?)
 }
 
+// ----- contact persistence (so recognized accounts survive restarts) -----
+
+/// Where the contact list is stored (TSV: `pubkey_hex \t 0|1 \t name`).
+fn contacts_path() -> String {
+    expand_tilde("~/.talkrypt/contacts.tsv")
+}
+
+/// Parse an even-length hex string into bytes.
+fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// Re-add persisted contacts into a fresh `Core` (called on host/join startup).
+fn load_contacts(core: &Core) {
+    let Ok(text) = std::fs::read_to_string(contacts_path()) else {
+        return;
+    };
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        if let Some(pk) = parse_hex_bytes(parts[0]) {
+            let friend = parts[1] == "1";
+            let name = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+            core.add_contact_bytes(pk, name, friend);
+        }
+    }
+}
+
+/// Persist the current contact list (called after any contact change).
+fn save_contacts(core: &Core) {
+    let path = contacts_path();
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    for (pk, name, friend) in core.export_contacts() {
+        let pkhex: String = pk.iter().map(|b| format!("{b:02x}")).collect();
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            pkhex,
+            if friend { 1 } else { 0 },
+            name.unwrap_or_default()
+        ));
+    }
+    let _ = std::fs::write(&path, out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// Current Unix time in seconds (certificate validity stamps).
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -886,6 +946,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
+    load_contacts(&core); // restore recognized accounts from previous sessions
     println!("\nwaiting for peers — type a message + enter to send. /help for commands.\n");
 
     repl(core, rx, ReplState::new(account_kp, username)).await
@@ -951,6 +1012,7 @@ async fn run_join(
 
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
+    load_contacts(&core); // restore recognized accounts from previous sessions
     repl(core, rx, ReplState::new(account_kp, username)).await
 }
 
@@ -1391,6 +1453,7 @@ fn cmd_contact(core: &Core, arg: &str) {
             if let Some(fp) = resolve_seen(core, prefix) {
                 // Add as a contact (recognition); not a friend, not access.
                 if core.add_seen_contact(fp, name.clone(), false) {
+                    save_contacts(core);
                     println!("added contact {} {}", short_fp(&fp), name.as_deref().unwrap_or(""));
                 } else {
                     println!("! could not add (account no longer known)");
@@ -1408,6 +1471,7 @@ fn cmd_contact(core: &Core, arg: &str) {
                     } else {
                         core.set_friend(&acct, make_friend);
                     }
+                    save_contacts(core);
                     println!(
                         "{} {}",
                         if make_friend { "labeled friend" } else { "unlabeled friend" },
@@ -1508,6 +1572,7 @@ async fn cmd_resolve(core: &Core, arg: &str) {
             );
             if do_pin {
                 core.add_contact(account, Some(name.clone()), false);
+                save_contacts(core);
                 println!("added '{name}' as a contact (use /friend to label, /allow to grant access)");
             } else {
                 println!("verify the safety number out of band, then add `add` to save '{name}' as a contact");
