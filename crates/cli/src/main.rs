@@ -31,8 +31,8 @@ use talkrypt_core::{
 #[cfg(feature = "markings")]
 use talkrypt_core::Classification;
 use talkrypt_crypto::{
-    dr_suite_id, IdentityChain, IdentityKeyPair, KemProfile, SignedClaim, SuiteRegistry,
-    DEFAULT_SUITE_ID,
+    dr_suite_id, IdentityChain, IdentityKeyPair, KemProfile, Revocation, SignedClaim,
+    SuiteRegistry, DEFAULT_SUITE_ID,
 };
 use talkrypt_topology::for_kind;
 use talkrypt_transport::{LoopbackFabric, TcpTransport};
@@ -1221,6 +1221,10 @@ async fn run_link_accept(
         println!("account username: {u}");
     }
     println!("saved account→device chain to {chain_path}");
+    println!(
+        "this device fingerprint (give to the account holder to revoke later if lost):\n  {}",
+        hex48(&device_kp.public().fingerprint())
+    );
     let uname_flag = linked
         .username
         .as_deref()
@@ -1263,6 +1267,7 @@ commands:
   /contact add <fp> [name]       recognize a just-seen account (by fp prefix)
   /contacts                      list contacts
   /friend <fp>                   label a contact a friend  (/unfriend to clear)
+  /revoke <device-fp>            (account holder) revoke + broadcast a lost device
   access (a SEPARATE grant — no contact/friend/mutual needed):
   /access open|contacts|friends  set who may join this channel
   /allow <fp>                    admit one specific account
@@ -1433,6 +1438,7 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
             _ => println!("usage: /access open | contacts | friends   (also: /allow <fp>, host --require-registry)"),
         },
         "register" => cmd_register(core, state, arg).await,
+        "revoke" => cmd_revoke(core, state, arg).await,
         "resolve" => cmd_resolve(core, arg).await,
         other => println!("unknown command: /{other} (try /help)"),
     }
@@ -1583,6 +1589,43 @@ fn cmd_access(core: &Core, arg: &str, allow: bool) {
             println!("revoked access for {}", short_fp(&fp));
         }
     }
+}
+
+/// `/revoke <device-fp>` — the account holder revokes one of its device keys
+/// (by 96-hex fingerprint, as printed by `link-accept`) and broadcasts the
+/// account-signed revocation to connected peers so they lock the device out.
+async fn cmd_revoke(core: &Core, state: &ReplState, arg: &str) {
+    let Some(account) = &state.account else {
+        println!("link an account first (/account new|load) — only the account can revoke its devices");
+        return;
+    };
+    let Some(fp) = parse_fp96(arg.trim()) else {
+        println!("usage: /revoke <96-hex device fingerprint>  (shown by `link-accept`)");
+        return;
+    };
+    let rev = Revocation::issue(account, fp, now_secs());
+    if core.broadcast_revocation(rev).await {
+        println!(
+            "revoked device {} and broadcast to {} peer(s) — they'll refuse it",
+            short_fp(&fp),
+            core.peer_count()
+        );
+    } else {
+        println!("! could not issue the revocation");
+    }
+}
+
+/// Parse a 96-char hex string into a 48-byte fingerprint.
+fn parse_fp96(s: &str) -> Option<[u8; 48]> {
+    let s = s.trim();
+    if s.len() != 96 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// `/register <registry-uri>` — publish a self-signed username→account claim.

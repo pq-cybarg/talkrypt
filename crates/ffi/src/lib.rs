@@ -21,8 +21,8 @@ use talkrypt_core::{
     TopologyKind,
 };
 use talkrypt_crypto::{
-    dr_suite_id, IdentityChain, IdentityKeyPair, IdentityPublic, KemProfile, SignedClaim,
-    SuiteRegistry, DEFAULT_SUITE_ID,
+    dr_suite_id, IdentityChain, IdentityKeyPair, IdentityPublic, KemProfile, Revocation,
+    SignedClaim, SuiteRegistry, DEFAULT_SUITE_ID,
 };
 use talkrypt_topology::for_kind;
 use talkrypt_transport::TcpTransport;
@@ -482,6 +482,20 @@ impl TalkryptClient {
         let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
         self.core.present_identity(chain, username);
         Ok(())
+    }
+
+    /// Revoke a device by its 96-hex fingerprint: the account signs a revocation
+    /// and broadcasts it to connected peers, who then refuse that device even if
+    /// its key leaks. Requires the issuing `account`. Returns false on bad input.
+    pub fn revoke_device(
+        &self,
+        account: Arc<Account>,
+        device_fingerprint_hex: String,
+    ) -> Result<bool, FfiError> {
+        let fp = parse_fp_hex(&device_fingerprint_hex)
+            .ok_or_else(|| FfiError::Failed("device fingerprint must be 96 hex chars".into()))?;
+        let rev = Revocation::issue(&account.kp, fp, now_secs());
+        Ok(self.rt.block_on(self.core.broadcast_revocation(rev)))
     }
 
     /// Present THIS device as the given account: builds an account→device
