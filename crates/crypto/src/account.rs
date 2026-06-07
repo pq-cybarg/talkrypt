@@ -321,6 +321,79 @@ pub fn cross_compare(username: &str, claims: &[SignedClaim]) -> Option<IdentityP
     Some(account.clone())
 }
 
+// ----- revocation: an account revokes one of its device/segment keys -----
+
+/// An account's signed statement that it **revokes** a device/segment key (by
+/// fingerprint). Only the account that certified the key can revoke it — the
+/// signature is by the account, so a revocation is as unforgeable as the cert.
+/// A revoked key is rejected even if its private key later leaks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revocation {
+    /// The account issuing the revocation (must be the chain root that certified
+    /// the subject).
+    pub account: IdentityPublic,
+    /// Fingerprint of the revoked device/segment key.
+    pub subject_fp: [u8; 48],
+    /// Unix seconds the revocation was issued.
+    pub issued: u64,
+    /// Account signature over `subject_fp ‖ issued`.
+    pub sig: Vec<u8>,
+}
+
+impl Revocation {
+    fn signed_bytes(subject_fp: &[u8; 48], issued: u64) -> Vec<u8> {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_bytes(subject_fp);
+        put_u64(&mut w, issued);
+        w.into_vec()
+    }
+
+    /// The account revokes `subject_fp` as of `issued`.
+    pub fn issue(account: &IdentityKeyPair, subject_fp: [u8; 48], issued: u64) -> Revocation {
+        let sig = account.sign(&Self::signed_bytes(&subject_fp, issued));
+        Revocation {
+            account: account.public().clone(),
+            subject_fp,
+            issued,
+            sig,
+        }
+    }
+
+    /// Verify the account's signature over the revocation.
+    pub fn verify(&self) -> Result<()> {
+        self.account
+            .verify(&Self::signed_bytes(&self.subject_fp, self.issued), &self.sig)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = talkrypt_wire::Writer::new();
+        put_pub(&mut w, &self.account);
+        w.put_bytes(&self.subject_fp);
+        put_u64(&mut w, self.issued);
+        w.put_bytes(&self.sig);
+        w.into_vec()
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Revocation> {
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let account = get_pub(&mut r)?;
+        let sfp = r.get_bytes()?;
+        if sfp.len() != 48 {
+            return Err(CryptoError::Malformed("revocation subject fp length"));
+        }
+        let mut subject_fp = [0u8; 48];
+        subject_fp.copy_from_slice(sfp);
+        let issued = get_u64(&mut r)?;
+        let sig = r.get_vec()?;
+        r.finish()?;
+        Ok(Revocation {
+            account,
+            subject_fp,
+            issued,
+            sig,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +520,39 @@ mod tests {
             cross_compare("alice", &[decoded, c2]),
             Some(account.public().clone())
         );
+    }
+
+    #[test]
+    fn revocation_signs_and_verifies_only_under_the_issuing_account() {
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let dev_fp = device.public().fingerprint();
+        let rev = Revocation::issue(&account, dev_fp, NOW);
+        assert!(rev.verify().is_ok());
+        assert_eq!(rev.subject_fp, dev_fp);
+
+        // Wire round-trips.
+        let decoded = Revocation::decode(&rev.encode()).unwrap();
+        assert_eq!(decoded, rev);
+        assert!(decoded.verify().is_ok());
+
+        // Tampering the subject or issued breaks the signature.
+        let mut tampered = rev.clone();
+        tampered.subject_fp[0] ^= 1;
+        assert!(tampered.verify().is_err());
+        let mut tampered2 = rev.clone();
+        tampered2.issued += 1;
+        assert!(tampered2.verify().is_err());
+
+        // A different account can't forge a revocation that verifies under it.
+        let impostor = IdentityKeyPair::generate();
+        let forged = Revocation {
+            account: impostor.public().clone(),
+            subject_fp: dev_fp,
+            issued: NOW,
+            sig: rev.sig.clone(), // account's sig, wrong verifier
+        };
+        assert!(forged.verify().is_err());
     }
 
     #[test]

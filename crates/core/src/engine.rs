@@ -22,7 +22,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use talkrypt_crypto::suite::SessionHandle;
 use talkrypt_crypto::{
     Commit, CryptoSuite, IdentityChain, IdentityKeyPair, IdentityPublic, KeyPackage, LeafKeyPair,
-    TreeKemGroup, Welcome,
+    Revocation, TreeKemGroup, Welcome,
 };
 use talkrypt_transport::{Endpoint, FrameReader, FrameWriter, Stream, Transport};
 use talkrypt_wire::{Reader, Writer};
@@ -97,6 +97,9 @@ enum Frame {
     /// reason). Sent just before disconnecting so the joiner gets explicit
     /// feedback instead of a silent drop.
     AccessDenied(String),
+    /// An encoded [`Revocation`] propagated in-band: the receiver verifies the
+    /// account signature and adds it, locking out the revoked device.
+    Revocation(Vec<u8>),
 }
 
 impl Frame {
@@ -146,6 +149,10 @@ impl Frame {
                 w.put_u8(7);
                 w.put_bytes(reason.as_bytes());
             }
+            Frame::Revocation(b) => {
+                w.put_u8(8);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -185,6 +192,7 @@ impl Frame {
             }
             6 => Frame::Identity(r.get_vec().ok()?),
             7 => Frame::AccessDenied(String::from_utf8(r.get_vec().ok()?).ok()?),
+            8 => Frame::Revocation(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -366,6 +374,10 @@ struct Inner {
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
+    /// Revoked (account_fp, subject_fp) pairs. A presented chain with a revoked
+    /// link is refused recognition even if otherwise valid. See
+    /// [`Core::add_revocation`].
+    revocations: Mutex<std::collections::HashSet<([u8; 48], [u8; 48])>>,
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -476,6 +488,7 @@ impl Core {
             contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
+            revocations: Mutex::new(std::collections::HashSet::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -552,6 +565,43 @@ impl Core {
     /// Whether `account` is a contact you've labeled a friend.
     pub fn is_friend(&self, account: &IdentityPublic) -> bool {
         self.inner.contacts.lock().unwrap().is_friend(account)
+    }
+
+    /// Record a **revocation** of a device/segment key (signed by its account).
+    /// A presented chain containing a revoked link is then refused recognition,
+    /// even if otherwise valid — so a lost/compromised device is locked out even
+    /// if its key leaks. Returns `false` if the revocation's signature is bad.
+    pub fn add_revocation(&self, revocation: Revocation) -> bool {
+        if revocation.verify().is_err() {
+            return false;
+        }
+        self.inner
+            .revocations
+            .lock()
+            .unwrap()
+            .insert((revocation.account.fingerprint(), revocation.subject_fp));
+        true
+    }
+
+    /// Number of revocations held.
+    pub fn revocation_count(&self) -> usize {
+        self.inner.revocations.lock().unwrap().len()
+    }
+
+    /// Add a revocation locally AND propagate it to connected peers (in-band).
+    /// Returns `false` if the signature is bad. Use this when you (the account)
+    /// revoke one of your devices so contacts lock it out too.
+    pub async fn broadcast_revocation(&self, revocation: Revocation) -> bool {
+        if !self.add_revocation(revocation.clone()) {
+            return false;
+        }
+        if self.inner.role == GroupRole::None && !self.inner.relayed {
+            for (s, w, _) in collect_peers(&self.inner) {
+                let _ =
+                    send_payload(&s, &w, &Frame::Revocation(revocation.encode()).encode()).await;
+            }
+        }
+        true
     }
 
     /// Number of recognized contacts.
@@ -1122,6 +1172,19 @@ async fn reader_loop(
                     .events_tx
                     .send(Event::Error(format!("not admitted: {reason}")));
             }
+            Some(Frame::Revocation(b)) => {
+                // A peer propagated a revocation; verify + store it (the account
+                // signature makes it unforgeable, so this is safe to accept).
+                if let Ok(rev) = Revocation::decode(&b) {
+                    if rev.verify().is_ok() {
+                        inner
+                            .revocations
+                            .lock()
+                            .unwrap()
+                            .insert((rev.account.fingerprint(), rev.subject_fp));
+                    }
+                }
+            }
             _ => { /* frame not valid for this role; ignore */ }
         }
     }
@@ -1165,6 +1228,23 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
     };
     match resolved {
         Some(res) => {
+            // Reject a chain that includes a REVOKED link (the account revoked
+            // that device/segment). Checked against revocations issued by this
+            // chain's own account, so a leaked-but-revoked device is locked out.
+            let revoked = {
+                let revs = inner.revocations.lock().unwrap();
+                presentation
+                    .chain
+                    .links
+                    .iter()
+                    .any(|l| revs.contains(&(res.account_fingerprint, l.cert.subject.fingerprint())))
+            };
+            if revoked {
+                let _ = inner
+                    .events_tx
+                    .send(Event::Error("peer presented a revoked device".into()));
+                return IdentityOutcome::Ignored;
+            }
             // Enforce the access policy: on a restricted channel, a peer whose
             // account isn't permitted is rejected (caller disconnects it). The
             // decision can depend on contact/friend status (Contacts/Friends
@@ -1893,6 +1973,49 @@ mod tests {
                 "non-member account must be silenced"
             );
         }
+    }
+
+    /// A revoked device is refused recognition even with an otherwise-valid
+    /// chain: the host surfaces a "revoked device" error and does not recognize
+    /// the account.
+    #[tokio::test]
+    async fn revoked_device_is_refused() {
+        use talkrypt_crypto::{IdentityChain, Revocation};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#rev",
+        );
+        let account = IdentityKeyPair::generate();
+        let (host, mut host_rx) = core_on(&fabric, "h", &desc);
+        let (peer, _p) = core_on(&fabric, "p", &desc);
+        // The host recognizes the account, but has revoked the peer's device.
+        host.add_contact(account.public().clone(), Some("alice".into()), true);
+        let dev_fp = peer.identity_public().fingerprint();
+        assert!(host.add_revocation(Revocation::issue(&account, dev_fp, 1)));
+        peer.present_identity(
+            IdentityChain::device(&account, peer.identity_public(), "d", 0, 0),
+            Some("alice".into()),
+        );
+        host.host().await.unwrap();
+        peer.connect("h").await.unwrap();
+
+        // Host gets a "revoked" error and never an Identity event for this peer.
+        let saw_revoked = timeout(Duration::from_secs(2), async {
+            loop {
+                match next_event(&mut host_rx).await {
+                    Event::Error(m) if m.contains("revoked") => break true,
+                    Event::Identity { friend: true, .. } => break false,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(saw_revoked, "a revoked device must be refused, not recognized");
     }
 
     /// A rejected joiner gets explicit feedback (an `Error` "not admitted: …"),

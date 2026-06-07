@@ -29,7 +29,8 @@ pub mod suite;
 pub mod treekem;
 
 pub use account::{
-    belongs_to_account, cross_compare, IdentityChain, SignedCert, SignedClaim, UsernameClaim,
+    belongs_to_account, cross_compare, IdentityChain, Revocation, SignedCert, SignedClaim,
+    UsernameClaim,
 };
 pub use beacon::BeaconBody;
 pub use error::{CryptoError, Result};
