@@ -22,6 +22,8 @@ qrcode = { version = "0.14", default-features = false }
 default = []
 # Build the inner-layer crypto against the FIPS-validated backend.
 fips = ["talkrypt-crypto/fips"]
+# Run over real Tor (Arti): onion hosting + dialing. Pulls the large Arti tree.
+tor = ["talkrypt-transport/tor"]
 # Enable classification handling-markings (off in consumer builds; on in builds
 # intended for that audience). Receiving/displaying a marking always works; this
 # gates *originating* a channel classification.

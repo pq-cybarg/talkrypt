@@ -14,9 +14,10 @@
 //! cross-compare). `--account <path>` links a session to a username account;
 //! omitting it stays an unlinkable pseudonym.
 //!
-//! `host`/`join`/`registry` use a real TCP transport so two terminals (or
-//! machines) can talk today; the Arti onion transport (same trait) is a drop-in
-//! swap.
+//! `host`/`join`/`registry` use a real TCP transport by default so two terminals
+//! (or machines) can talk; pass `--tor` (on a `--features tor` build) to run over
+//! real Tor instead — the host publishes an onion service and puts the `.onion`
+//! in the invite, and joiners dial it.
 
 use std::sync::Arc;
 
@@ -140,6 +141,10 @@ enum Cmd {
         /// never appears in the invite). The allowlist is pulled at startup.
         #[arg(long)]
         require_registry: Option<String>,
+        /// Host over real Tor (Arti): publishes an onion service and puts the
+        /// .onion in the invite. Requires a `--features tor` build.
+        #[arg(long)]
+        tor: bool,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -164,6 +169,10 @@ enum Cmd {
         /// session root via Argon2id, never sent on the wire.
         #[arg(long)]
         password: Option<String>,
+        /// Dial over real Tor (Arti) — required when the invite is a .onion.
+        /// Requires a `--features tor` build.
+        #[arg(long)]
+        tor: bool,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -202,6 +211,9 @@ enum Cmd {
         /// Registry channel label (part of its shared descriptor/handshake root).
         #[arg(long, default_value = "#registry")]
         channel: String,
+        /// Host the registry as a Tor onion service (Arti). `--features tor`.
+        #[arg(long)]
+        tor: bool,
     },
     /// Print the build and honesty banner.
     Version,
@@ -348,6 +360,7 @@ async fn main() {
             chain,
             password,
             require_registry,
+            tor,
         } => {
             run_host(HostArgs {
                 listen,
@@ -366,6 +379,7 @@ async fn main() {
                 chain,
                 password,
                 require_registry,
+                tor,
             })
             .await
         }
@@ -377,8 +391,9 @@ async fn main() {
             device,
             chain,
             password,
-        } => run_join(&uri, group, account, username, device, chain, password).await,
-        Cmd::Registry { listen, channel } => run_registry(listen, channel).await,
+            tor,
+        } => run_join(&uri, group, account, username, device, chain, password, tor).await,
+        Cmd::Registry { listen, channel, tor } => run_registry(listen, channel, tor).await,
         Cmd::LinkOffer {
             listen,
             account,
@@ -520,6 +535,7 @@ struct HostArgs {
     chain: Option<String>,
     password: Option<String>,
     require_registry: Option<String>,
+    tor: bool,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -562,6 +578,53 @@ fn device_identity(path: &Option<String>) -> Result<IdentityKeyPair, Box<dyn std
         }
         None => Ok(IdentityKeyPair::generate()),
     }
+}
+
+// ----- transport selection: plain TCP or real Tor (Arti) -----
+
+/// The chosen network transport. Tor is feature-gated so a non-Tor build is
+/// small; `--tor` on a non-Tor build is a clear error.
+enum Net {
+    Tcp(Arc<dyn talkrypt_transport::Transport>),
+    #[cfg(feature = "tor")]
+    Tor(Arc<talkrypt_transport::ArtiTransport>),
+}
+
+impl Net {
+    fn transport(&self) -> Arc<dyn talkrypt_transport::Transport> {
+        match self {
+            Net::Tcp(t) => t.clone(),
+            #[cfg(feature = "tor")]
+            Net::Tor(t) => t.clone(),
+        }
+    }
+    /// The dialable onion address (Tor only), available after `host()`.
+    fn onion(&self) -> Option<String> {
+        match self {
+            Net::Tcp(_) => None,
+            #[cfg(feature = "tor")]
+            Net::Tor(t) => t.onion_address(),
+        }
+    }
+}
+
+/// Build the transport: a bootstrapped Arti client for `--tor`, else TCP bound
+/// to `tcp_listen`.
+async fn make_net(tor: bool, tcp_listen: &str) -> Result<Net, Box<dyn std::error::Error>> {
+    if tor {
+        #[cfg(feature = "tor")]
+        {
+            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            println!("bootstrapping Tor (Arti) — this can take a minute…");
+            let t = ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt").await?;
+            return Ok(Net::Tor(Arc::new(t)));
+        }
+        #[cfg(not(feature = "tor"))]
+        {
+            return Err("this build has Tor disabled; rebuild with `--features tor`".into());
+        }
+    }
+    Ok(Net::Tcp(Arc::new(TcpTransport::new(tcp_listen))))
 }
 
 /// Save an encoded identity chain to a file.
@@ -839,6 +902,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         chain,
         password,
         require_registry,
+        tor,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -871,10 +935,12 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(m) = &channel_marking {
         println!("classification: {}  (advisory; carried authenticated in every message)", m.banner());
     }
-    let transport = Arc::new(TcpTransport::new(&listen));
+    let net = make_net(tor, &listen).await?;
 
     // Advertise the configured bind address in the descriptor, including
     // whether this is a group chat (so joiners auto-detect from the invite).
+    // For Tor the real endpoint is the .onion, known only after host(); patched
+    // into the printed invite below.
     let mut desc = ChatDescriptor::new(
         kind,
         Persistence::Ephemeral,
@@ -890,11 +956,17 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     let device_kp = device_identity(&device)?;
     let (core, rx) = if group {
-        Core::new_group(device_kp, suite, transport, desc.clone(), true)
+        Core::new_group(device_kp, suite, net.transport(), desc.clone(), true)
     } else {
-        Core::new(device_kp, suite, transport, desc.clone())
+        Core::new(device_kp, suite, net.transport(), desc.clone())
     };
     core.host().await?;
+    // For Tor, replace the invite's endpoint with the published .onion so peers
+    // can dial it (the session root is unaffected — it derives from the token).
+    if let Some(onion) = net.onion() {
+        desc.endpoints = vec![onion.clone()];
+        println!("onion: {onion}");
+    }
 
     // Registry-restricted channel: pull the allowlist of account fingerprints
     // from a registry only the host knows; only those accounts will be heard.
@@ -960,6 +1032,7 @@ async fn run_join(
     device: Option<String>,
     chain: Option<String>,
     password: Option<String>,
+    tor: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let mut desc = ChatDescriptor::from_uri(uri)?;
@@ -978,7 +1051,8 @@ async fn run_join(
         )
     })?;
     println!("scheme: {}", desc.resolved_suite_id());
-    let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+    let net = make_net(tor, "127.0.0.1:0").await?;
+    let transport = net.transport();
     // The invite descriptor declares group mode; --group can also force it.
     let want_group = group || desc.group;
     let device_kp = device_identity(&device)?;
@@ -1017,21 +1091,30 @@ async fn run_join(
 }
 
 /// Host a username registry node (the `registry` subcommand).
-async fn run_registry(listen: String, channel: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_registry(
+    listen: String,
+    channel: String,
+    tor: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     // The registry uses the default PQ-pure suite; its descriptor (channel +
     // invite token) is the shared handshake root clients dial with.
     let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
-    let desc = ChatDescriptor::new(
+    let mut desc = ChatDescriptor::new(
         TopologyKind::Hub,
         Persistence::Persistent,
         DEFAULT_SUITE_ID,
         vec![listen.clone()],
         &channel,
     );
-    let transport = Arc::new(TcpTransport::new(&listen));
-    let server = RegistryServer::new(IdentityKeyPair::generate(), suite, transport, &desc);
+    let net = make_net(tor, &listen).await?;
+    let server = RegistryServer::new(IdentityKeyPair::generate(), suite, net.transport(), &desc);
     server.run().await?;
+    // For Tor, advertise the published .onion in the registry URI.
+    if let Some(onion) = net.onion() {
+        desc.endpoints = vec![onion.clone()];
+        println!("onion: {onion}");
+    }
 
     println!("username registry hosting on {listen} (channel {channel})");
     println!("\nPublish this registry URI; clients use it with /register and /resolve:\n");
