@@ -18,11 +18,16 @@ tor-rtcompat = { version = "0.42", default-features = false, features = ["tokio"
 futures = { version = "0.3", optional = true }
 tempfile = { version = "3", optional = true }
 safelog = { version = "0.8", optional = true }
+# Force SQLite to compile from source (Arti's tor-dirmgr → rusqlite →
+# libsqlite3-sys). Without `bundled` the build links the system `-lsqlite3`,
+# absent in the Android NDK sysroot, so the cross-compile fails to link. The
+# version matches Arti's libsqlite3-sys so Cargo unifies the `bundled` feature.
+libsqlite3-sys = { version = "0.37", features = ["bundled"], optional = true }
 
 [features]
 default = []
 # Pulls in the (large) Arti dependency tree and enables ArtiTransport.
-tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog"]
+tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog", "dep:libsqlite3-sys"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
