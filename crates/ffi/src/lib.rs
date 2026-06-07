@@ -40,6 +40,19 @@ fn hex_bytes(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Parse 96 hex chars into a 48-byte fingerprint.
+fn parse_fp_hex(s: &str) -> Option<[u8; 48]> {
+    let s = s.trim();
+    if s.len() != 96 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Parse 64 hex chars into a 32-byte seed.
 fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
     let s = s.trim();
@@ -126,13 +139,15 @@ pub enum FfiEvent {
         fingerprint: String,
     },
     /// A peer resolved its device to an account identity (it presented a
-    /// certificate chain inside the encrypted session). `friend` is true iff the
-    /// account is one the host pinned via `pin_friend` — unforgeable by anyone
-    /// lacking that account's ML-DSA private key.
+    /// certificate chain inside the encrypted session). `contact` is true iff the
+    /// account is a recognized contact (added via `add_contact`); `friend` iff
+    /// you labeled it a friend. Neither implies access — both are unforgeable by
+    /// anyone lacking that account's ML-DSA private key.
     Identity {
         from: String,
         account_fingerprint: String,
         username: String,
+        contact: bool,
         friend: bool,
     },
     Disconnected {
@@ -167,11 +182,13 @@ fn map_event(e: Event) -> FfiEvent {
             from,
             account_fingerprint,
             username,
+            contact,
             friend,
         } => FfiEvent::Identity {
             from: hex_fp(&from),
             account_fingerprint: hex_fp(&account_fingerprint),
             username: username.unwrap_or_default(),
+            contact,
             friend,
         },
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
@@ -283,15 +300,25 @@ impl TalkryptClient {
         rx.try_recv().ok().map(map_event)
     }
 
-    /// Pin a friend by their **account public key** (raw ML-DSA-87 verifying-key
-    /// bytes, as exchanged out of band via an invite/QR). A peer whose presented
-    /// chain roots at this account then arrives as an `Identity` event with
-    /// `friend = true`; nobody without the account's private key can forge that.
-    pub fn pin_friend(&self, account_pubkey: Vec<u8>, username: Option<String>) {
+    /// Add a **contact** by their account public key (raw ML-DSA-87 verifying-key
+    /// bytes, as exchanged out of band via an invite/QR). `friend` is your own
+    /// elevated label. A peer whose presented chain roots at this account then
+    /// arrives as an `Identity` event with `contact = true`; nobody without the
+    /// account's private key can forge that. Recognition only — NOT access.
+    pub fn add_contact(&self, account_pubkey: Vec<u8>, name: Option<String>, friend: bool) {
         let account = IdentityPublic {
             sig_vk: account_pubkey,
         };
-        self.core.pin_friend(account, username);
+        self.core.add_contact(account, name, friend);
+    }
+
+    /// Grant one account access to this hosted channel by its fingerprint hex
+    /// (48-byte SHA3-384, 96 hex chars). Unilateral — the account need not be a
+    /// contact, a friend, or a mutual. No-op if the hex is malformed.
+    pub fn allow_account(&self, account_fingerprint_hex: String) {
+        if let Some(fp) = parse_fp_hex(&account_fingerprint_hex) {
+            self.core.allow_account(fp);
+        }
     }
 
     /// Present an account identity to peers: `chain_bytes` is an encoded

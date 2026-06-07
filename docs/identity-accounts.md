@@ -55,29 +55,49 @@ Two binding models — pick per deployment (this is an open decision):
 
 Either way the account key — not the name — is the cryptographic identity.
 
-## 2. Friending (impersonation-proof)
+## 2. Recognition vs. access (contacts, friends, grants)
 
-To friend someone you obtain and **pin** their **account public key** (via an
+Three separate, deliberately-unbundled ideas (`crates/core/src/contacts.rs` +
+the engine's `AccessPolicy`):
+
+- **Contact** — an account you *recognize*: you've pinned its key (via invite
+  QR/URI or a verified directory lookup). Adding a contact is **unilateral** —
+  you can have someone as a contact without them having you, and it grants them
+  nothing.
+- **Friend** — just an *elevated label* on a contact (a closeness marker in your
+  own view). Still unilateral; not mutual.
+- **Access** — letting an account into a channel/group. A **separate, unilateral
+  grant** (`Core::allow_account` / `restrict_to_accounts`): **no one needs to be
+  a contact, a friend, or a mutual to be allowed in**, and being a friend never
+  auto-grants access. Decoupling these is the rule — recognition ≠ permission.
+
+On the wire, a peer's resolved `Event::Identity` carries `contact` and `friend`
+booleans (recognition), entirely independent of whether the host's access policy
+admits them.
+
+## 2a. Friending / recognition (impersonation-proof)
+
+To recognize someone you obtain and **pin** their **account public key** (via an
 invite QR/URI, or a directory lookup you then verify by safety number). You
-store `(username, account_pubkey, account_safety_number)`.
+store `(name, account_pubkey, account_safety_number, friend?)`.
 
 When you later talk to one of their devices, that device presents its **device
-certificate**. You accept the device as "your friend A" iff:
+certificate**. You recognize the device as "account A" iff:
 
 ```
 verify_ML-DSA( account_pubkey_of_A, device_cert )  == valid
    AND  device_cert not revoked  AND  not expired
 ```
 
-**Why an impersonator can't pretend to be a friend:** forging a device cert that
-validates under A's account key requires A's ML-DSA-87 *private* key. ML-DSA-87
-is post-quantum existentially-unforgeable, so no attacker (even with a quantum
-computer) can mint a device that your client will accept as A. A friend is a
-**pinned account key**; only devices A actually certified pass. This is the hard
-requirement, met cryptographically.
+**Why an impersonator can't pretend to be a known contact:** forging a device
+cert that validates under A's account key requires A's ML-DSA-87 *private* key.
+ML-DSA-87 is post-quantum existentially-unforgeable, so no attacker (even with a
+quantum computer) can mint a device that your client will accept as A. A contact
+is a **pinned account key**; only devices A actually certified pass. This is the
+hard requirement, met cryptographically.
 
 Defense-in-depth (as today): the **account safety number** is compared out of
-band on first friend; if A's account key ever changes, the client warns
+band on first contact; if A's account key ever changes, the client warns
 ("safety number changed") and requires re-verification — preventing silent
 key substitution.
 

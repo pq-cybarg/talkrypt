@@ -315,7 +315,7 @@ impl LinkClient {
 mod tests {
     use super::*;
     use crate::descriptor::{Persistence, TopologyKind};
-    use crate::friends::{resolve_chain, FriendStore};
+    use crate::contacts::{resolve_chain, ContactStore};
     use talkrypt_crypto::{SuiteRegistry, DEFAULT_SUITE_ID};
     use talkrypt_transport::LoopbackFabric;
 
@@ -377,8 +377,8 @@ mod tests {
 
         // A friend who pinned Alice's account now resolves the NEW device as a
         // friend — exactly the multi-device goal.
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), Some("alice".into()));
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), Some("alice".into()), true);
         let res = resolve_chain(&store, &linked.chain, new_device.public().fingerprint(), NOW)
             .expect("chain binds + resolves");
         assert!(res.friend, "the linked device belongs to the pinned account");

@@ -170,9 +170,9 @@ async fn run(
                     }
                     Some(CoreEvent::Connected { fingerprint }) =>
                         app.push(format!("* peer connected: {}", short_fp(&fingerprint))),
-                    Some(CoreEvent::Identity { from, account_fingerprint, username, friend }) => {
+                    Some(CoreEvent::Identity { from, account_fingerprint, username, contact, friend }) => {
                         let name = username.unwrap_or_else(|| "<no username>".into());
-                        let tag = if friend { "friend" } else { "account" };
+                        let tag = if friend { "friend" } else if contact { "contact" } else { "account" };
                         app.push(format!(
                             "* {tag} {name} (account {}) on device {}",
                             short_fp(&account_fingerprint),

@@ -1,12 +1,25 @@
-//! Friends + account resolution for live sessions.
+//! Contacts + account resolution for live sessions.
 //!
-//! A **friend** is a *pinned account key* (ML-DSA-87). When a peer presents an
-//! [`IdentityChain`] for the device key it just authenticated in the handshake,
-//! we (1) bind the chain's leaf to that authenticated device and (2) check the
-//! chain's account root against the [`FriendStore`]. Forging a chain that roots
-//! at a pinned account needs that account's ML-DSA private key, which is
-//! post-quantum-unforgeable — so an impersonator can never resolve as a friend.
-//! See `docs/identity-accounts.md` and `talkrypt_crypto::account`.
+//! Two ideas kept deliberately separate (see also the engine's access policy):
+//!
+//! - **Contact** — an account you *recognize*: you've pinned its key so a peer
+//!   presenting it resolves to a known identity. Adding a contact is entirely
+//!   **unilateral** — you can have someone as a contact without them having you,
+//!   and it grants them nothing.
+//! - **Friend** — just an *elevated label* on a contact (a closeness marker in
+//!   your own view). Still unilateral; not mutual; not an access grant.
+//!
+//! Neither implies **access**. Letting an account into a channel/group is a
+//! separate, unilateral grant (the engine's `AccessPolicy`) — nobody needs to be
+//! a contact, a friend, or a mutual to be allowed in, and being a friend doesn't
+//! auto-grant access.
+//!
+//! When a peer presents an [`IdentityChain`] for the device key it authenticated
+//! in the handshake, we (1) bind the chain's leaf to that authenticated device
+//! and (2) check the chain's account root against the [`ContactStore`]. Forging
+//! a chain that roots at a recognized account needs that account's ML-DSA private
+//! key, which is post-quantum-unforgeable — so an impostor can never resolve as a
+//! known contact. See `docs/identity-accounts.md` and `talkrypt_crypto::account`.
 //!
 //! Everything here is pure post-quantum (ML-DSA-87 chains, SHA3-384
 //! fingerprints); elliptic curve is never load-bearing.
@@ -68,62 +81,86 @@ impl Presentation {
     }
 }
 
-/// A pinned friend: an account public key plus a remembered username.
+/// A recognized account: its public key, a remembered name, and whether you've
+/// elevated it to **friend**. Recognition is unilateral; the `friend` flag is
+/// just your own label and is never sent to or required of the other party.
 #[derive(Clone, Debug)]
-pub struct Friend {
+pub struct Contact {
     pub account: IdentityPublic,
     pub account_fingerprint: [u8; FINGERPRINT_LEN],
-    pub username: Option<String>,
+    pub name: Option<String>,
+    /// Your elevated label. Does **not** grant access (see `AccessPolicy`).
+    pub friend: bool,
 }
 
-/// The set of accounts the user has friended (pinned). Pinning is the trust
+/// The set of accounts you recognize. Adding a contact is the recognition
 /// decision; everything downstream is pure verification against these keys.
 #[derive(Clone, Debug, Default)]
-pub struct FriendStore {
-    friends: Vec<Friend>,
+pub struct ContactStore {
+    contacts: Vec<Contact>,
 }
 
-impl FriendStore {
+impl ContactStore {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Pin (or update the username of) a friend by account key. Pinning the same
-    /// account twice replaces the stored username rather than duplicating.
-    pub fn pin(&mut self, account: IdentityPublic, username: Option<String>) {
+    /// Add (or update) a contact by account key. Re-adding the same account
+    /// updates its name/friend label rather than duplicating.
+    pub fn add(&mut self, account: IdentityPublic, name: Option<String>, friend: bool) {
         let fp = account.fingerprint();
-        if let Some(existing) = self.friends.iter_mut().find(|f| f.account == account) {
-            existing.username = username;
+        if let Some(existing) = self.contacts.iter_mut().find(|c| c.account == account) {
+            existing.name = name;
+            existing.friend = friend;
             return;
         }
-        self.friends.push(Friend {
+        self.contacts.push(Contact {
             account,
             account_fingerprint: fp,
-            username,
+            name,
+            friend,
         });
     }
 
-    /// Is this account a pinned friend?
-    pub fn is_pinned(&self, account: &IdentityPublic) -> bool {
-        self.friends.iter().any(|f| &f.account == account)
+    /// Set (or clear) the friend label on an existing contact. Returns whether a
+    /// matching contact was found.
+    pub fn set_friend(&mut self, account: &IdentityPublic, friend: bool) -> bool {
+        if let Some(c) = self.contacts.iter_mut().find(|c| &c.account == account) {
+            c.friend = friend;
+            true
+        } else {
+            false
+        }
     }
 
-    /// The pinned friend for an account, if any.
-    pub fn get(&self, account: &IdentityPublic) -> Option<&Friend> {
-        self.friends.iter().find(|f| &f.account == account)
+    /// Is this account a recognized contact?
+    pub fn is_contact(&self, account: &IdentityPublic) -> bool {
+        self.contacts.iter().any(|c| &c.account == account)
+    }
+
+    /// Is this account a contact you've labeled a friend?
+    pub fn is_friend(&self, account: &IdentityPublic) -> bool {
+        self.contacts
+            .iter()
+            .any(|c| &c.account == account && c.friend)
+    }
+
+    /// The contact for an account, if any.
+    pub fn get(&self, account: &IdentityPublic) -> Option<&Contact> {
+        self.contacts.iter().find(|c| &c.account == account)
     }
 
     pub fn len(&self) -> usize {
-        self.friends.len()
+        self.contacts.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.friends.is_empty()
+        self.contacts.is_empty()
     }
 
-    /// Iterate the pinned friends.
-    pub fn iter(&self) -> impl Iterator<Item = &Friend> {
-        self.friends.iter()
+    /// Iterate the contacts.
+    pub fn iter(&self) -> impl Iterator<Item = &Contact> {
+        self.contacts.iter()
     }
 }
 
@@ -135,7 +172,9 @@ pub struct Resolved {
     pub account_fingerprint: [u8; FINGERPRINT_LEN],
     /// The leaf (device) fingerprint, equal to the authenticated peer.
     pub leaf_fingerprint: [u8; FINGERPRINT_LEN],
-    /// Whether `account` is a pinned friend.
+    /// Whether `account` is a recognized contact.
+    pub contact: bool,
+    /// Whether that contact is labeled a friend (implies `contact`).
     pub friend: bool,
 }
 
@@ -148,11 +187,11 @@ pub struct Resolved {
 /// 2. the chain is internally valid at `now` — rooted at its account, every
 ///    link signed by its issuer, properly chained, and unexpired.
 ///
-/// `friend` is then `true` iff that account is pinned in `store`. Because (2)
-/// requires the account's signature over the device cert, a `friend == true`
-/// result is unforgeable without the friend's account private key.
+/// `contact`/`friend` are then set from `store`. Because (2) requires the
+/// account's signature over the device cert, a `contact == true` result is
+/// unforgeable without that account's ML-DSA private key.
 pub fn resolve_chain(
-    store: &FriendStore,
+    store: &ContactStore,
     chain: &IdentityChain,
     peer_fp: [u8; FINGERPRINT_LEN],
     now: u64,
@@ -160,7 +199,7 @@ pub fn resolve_chain(
     let leaf = chain.leaf()?;
     let leaf_fingerprint = leaf.fingerprint();
     // (1) Bind: the chain must describe the device we authenticated. Without
-    // this, anyone could replay a friend's real chain over their own session.
+    // this, anyone could replay a contact's real chain over their own session.
     if leaf_fingerprint != peer_fp {
         return None;
     }
@@ -169,11 +208,13 @@ pub fn resolve_chain(
     // (2) The chain must be internally valid and end at this leaf.
     chain.verify(&account, leaf, now).ok()?;
     let account_fingerprint = account.fingerprint();
-    let friend = store.is_pinned(&account);
+    let contact = store.is_contact(&account);
+    let friend = store.is_friend(&account);
     Some(Resolved {
         account,
         account_fingerprint,
         leaf_fingerprint,
+        contact,
         friend,
     })
 }
@@ -195,23 +236,38 @@ mod tests {
     }
 
     #[test]
-    fn pinned_friend_resolves_as_friend() {
+    fn contact_resolves_as_contact_not_necessarily_friend() {
         let (account, device, chain) = linked();
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), Some("alice".into()));
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), Some("alice".into()), false);
 
         let res = resolve_chain(&store, &chain, device.public().fingerprint(), NOW).unwrap();
-        assert!(res.friend);
+        assert!(res.contact, "recognized account is a contact");
+        assert!(!res.friend, "but not elevated to friend");
         assert_eq!(res.account_fingerprint, account.public().fingerprint());
         assert_eq!(res.leaf_fingerprint, device.public().fingerprint());
     }
 
     #[test]
-    fn unpinned_account_resolves_but_is_not_friend() {
-        let (_account, device, chain) = linked();
-        let store = FriendStore::new(); // nobody pinned
+    fn friend_label_is_unilateral_and_separate() {
+        let (account, device, chain) = linked();
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), Some("alice".into()), true);
         let res = resolve_chain(&store, &chain, device.public().fingerprint(), NOW).unwrap();
-        assert!(!res.friend, "valid chain, but account isn't a friend");
+        assert!(res.contact && res.friend);
+        // Clearing the friend label keeps them a contact.
+        store.set_friend(account.public(), false);
+        let res2 = resolve_chain(&store, &chain, device.public().fingerprint(), NOW).unwrap();
+        assert!(res2.contact && !res2.friend);
+    }
+
+    #[test]
+    fn unknown_account_resolves_but_is_not_a_contact() {
+        let (_account, device, chain) = linked();
+        let store = ContactStore::new(); // nobody recognized
+        let res = resolve_chain(&store, &chain, device.public().fingerprint(), NOW).unwrap();
+        assert!(!res.contact, "valid chain, but account isn't recognized");
+        assert!(!res.friend);
     }
 
     #[test]
@@ -219,29 +275,29 @@ mod tests {
         // Alice's real chain, replayed by Mallory over Mallory's session: the
         // leaf fingerprint won't match Mallory's authenticated device fp.
         let (account, _device, chain) = linked();
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), Some("alice".into()));
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), Some("alice".into()), true);
 
         let mallory = IdentityKeyPair::generate();
         assert!(resolve_chain(&store, &chain, mallory.public().fingerprint(), NOW).is_none());
     }
 
     #[test]
-    fn impostor_chain_does_not_resolve_as_pinned_friend() {
+    fn impostor_chain_does_not_resolve_as_known_contact() {
         // Mallory mints a chain for HIS own device under HIS own account, but
         // claims to be Alice. He controls his device, so the binding passes —
-        // but his account isn't pinned as Alice, so friend == false. He can
-        // never produce friend == true for Alice without Alice's account key.
+        // but his account isn't recognized as Alice, so contact == false. He can
+        // never produce contact == true for Alice without Alice's account key.
         let alice = IdentityKeyPair::generate();
-        let mut store = FriendStore::new();
-        store.pin(alice.public().clone(), Some("alice".into()));
+        let mut store = ContactStore::new();
+        store.add(alice.public().clone(), Some("alice".into()), true);
 
         let mallory_acct = IdentityKeyPair::generate();
         let mallory_dev = IdentityKeyPair::generate();
         let fake =
             IdentityChain::device(&mallory_acct, mallory_dev.public(), "device", NOW - 1, NOW + 1);
         let res = resolve_chain(&store, &fake, mallory_dev.public().fingerprint(), NOW).unwrap();
-        assert!(!res.friend, "impostor must not resolve as the pinned friend");
+        assert!(!res.contact, "impostor must not resolve as the known contact");
         assert_ne!(res.account_fingerprint, alice.public().fingerprint());
     }
 
@@ -250,8 +306,8 @@ mod tests {
         let account = IdentityKeyPair::generate();
         let device = IdentityKeyPair::generate();
         let chain = IdentityChain::device(&account, device.public(), "device", 0, NOW - 1);
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), None);
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), None, false);
         assert!(resolve_chain(&store, &chain, device.public().fingerprint(), NOW).is_none());
     }
 
@@ -269,13 +325,15 @@ mod tests {
     }
 
     #[test]
-    fn pin_updates_username_without_duplicating() {
+    fn add_updates_without_duplicating() {
         let account = IdentityKeyPair::generate();
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), Some("old".into()));
-        store.pin(account.public().clone(), Some("new".into()));
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), Some("old".into()), false);
+        store.add(account.public().clone(), Some("new".into()), true);
         assert_eq!(store.len(), 1);
-        assert_eq!(store.get(account.public()).unwrap().username.as_deref(), Some("new"));
+        let c = store.get(account.public()).unwrap();
+        assert_eq!(c.name.as_deref(), Some("new"));
+        assert!(c.friend);
     }
 
     #[test]
@@ -286,10 +344,10 @@ mod tests {
         let segment = IdentityKeyPair::generate();
         let chain = IdentityChain::device(&account, device.public(), "device:laptop", NOW - 5, 0)
             .extend(&device, segment.public(), "segment:work", NOW - 5, 0);
-        let mut store = FriendStore::new();
-        store.pin(account.public().clone(), None);
+        let mut store = ContactStore::new();
+        store.add(account.public().clone(), None, false);
         let res = resolve_chain(&store, &chain, segment.public().fingerprint(), NOW).unwrap();
-        assert!(res.friend);
+        assert!(res.contact);
         assert_eq!(res.leaf_fingerprint, segment.public().fingerprint());
     }
 }

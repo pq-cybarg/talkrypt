@@ -29,7 +29,7 @@ use talkrypt_wire::{Reader, Writer};
 
 use crate::descriptor::ChatDescriptor;
 use crate::error::Result;
-use crate::friends::{self, FriendStore, Presentation};
+use crate::contacts::{self, ContactStore, Presentation};
 use crate::handshake::{self, HandshakeResult};
 use crate::marking::{self, Marking};
 
@@ -52,13 +52,15 @@ pub enum Event {
     /// presented a certificate chain inside the encrypted session). `from` is
     /// the peer's authenticated device fingerprint; `account_fingerprint` is the
     /// account the chain roots at; `username` is the peer's self-asserted label
-    /// (display only); `friend` is `true` iff that account is a pinned friend
-    /// (unforgeable without the friend's account private key). A peer that
-    /// stays a pseudonym never triggers this event.
+    /// (display only); `contact` is `true` iff that account is a recognized
+    /// contact, and `friend` iff you've labeled that contact a friend (both
+    /// unforgeable without the account's private key). Neither implies access.
+    /// A peer that stays a pseudonym never triggers this event.
     Identity {
         from: [u8; 48],
         account_fingerprint: [u8; 48],
         username: Option<String>,
+        contact: bool,
         friend: bool,
     },
     /// A peer connection closed.
@@ -329,9 +331,10 @@ struct Inner {
     /// sends to each peer as the first encrypted frame. `None` ⇒ pseudonym
     /// (present nothing — unlinkable). Set via [`Core::present_identity`].
     present_chain: Mutex<Option<Vec<u8>>>,
-    /// Pinned friend accounts. An incoming chain that roots at one of these
-    /// resolves as `friend: true`. Populated via [`Core::pin_friend`].
-    friends: Mutex<FriendStore>,
+    /// Recognized accounts (contacts, optionally labeled friends). An incoming
+    /// chain rooting at one resolves as `contact: true`. Populated via
+    /// [`Core::add_contact`]. Recognition only — NOT access (see `access`).
+    contacts: Mutex<ContactStore>,
     /// Account keys seen on presented (verified, peer-bound) chains, keyed by
     /// account fingerprint. Lets the UI pin a just-seen account by fingerprint
     /// after an out-of-band safety-number check — TOFU friending without pasting
@@ -447,7 +450,7 @@ impl Core {
             relayed,
             default_marking,
             present_chain: Mutex::new(None),
-            friends: Mutex::new(FriendStore::new()),
+            contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
         });
@@ -501,30 +504,74 @@ impl Core {
         }
     }
 
-    /// Pin a friend by **account public key** (the trust decision). A peer whose
-    /// presented chain roots at this account will resolve as `friend: true` in
-    /// the [`Event::Identity`] event — and only the real account can produce
-    /// such a chain (ML-DSA-87 unforgeability), so impersonation is impossible.
-    pub fn pin_friend(&self, account: IdentityPublic, username: Option<String>) {
-        self.inner.friends.lock().unwrap().pin(account, username);
+    // ----- contacts + friends (recognition; unilateral; NOT access) -----
+
+    /// Add (or update) a **contact** by account public key — you recognize this
+    /// account, so a peer presenting it resolves as `contact: true` in
+    /// [`Event::Identity`]. `friend` is your own elevated label. Unilateral: the
+    /// other party need not recognize you, and this grants them nothing. Only the
+    /// real account can produce a chain rooting at it (ML-DSA-87 unforgeability),
+    /// so recognition can't be spoofed.
+    pub fn add_contact(&self, account: IdentityPublic, name: Option<String>, friend: bool) {
+        self.inner.contacts.lock().unwrap().add(account, name, friend);
     }
 
-    /// Whether `account` is currently a pinned friend.
+    /// Set (or clear) the friend label on an existing contact.
+    pub fn set_friend(&self, account: &IdentityPublic, friend: bool) -> bool {
+        self.inner.contacts.lock().unwrap().set_friend(account, friend)
+    }
+
+    /// Whether `account` is a recognized contact.
+    pub fn is_contact(&self, account: &IdentityPublic) -> bool {
+        self.inner.contacts.lock().unwrap().is_contact(account)
+    }
+
+    /// Whether `account` is a contact you've labeled a friend.
     pub fn is_friend(&self, account: &IdentityPublic) -> bool {
-        self.inner.friends.lock().unwrap().is_pinned(account)
+        self.inner.contacts.lock().unwrap().is_friend(account)
     }
 
-    /// Number of pinned friend accounts.
-    pub fn friend_count(&self) -> usize {
-        self.inner.friends.lock().unwrap().len()
+    /// Number of recognized contacts.
+    pub fn contact_count(&self) -> usize {
+        self.inner.contacts.lock().unwrap().len()
     }
+
+    // ----- access (a SEPARATE, unilateral grant — no contact/friend/mutual
+    // relationship required to allow an account in) -----
 
     /// Restrict this (pairwise) channel to the given **account fingerprints**:
     /// only peers presenting one of these accounts are heard; pseudonyms and
-    /// other accounts are silenced and disconnected. Build the set from a
-    /// registry you alone know to make a *registry-restricted* channel.
+    /// other accounts are silenced and disconnected. This is an access grant,
+    /// independent of contacts/friends — you can allow accounts you've never
+    /// recognized. Build the set from a registry you alone know for a
+    /// *registry-restricted* channel.
     pub fn restrict_to_accounts(&self, accounts: std::collections::HashSet<[u8; 48]>) {
         *self.inner.access.lock().unwrap() = AccessPolicy::Accounts(accounts);
+    }
+
+    /// Grant one account access by fingerprint (unilateral). Switches an `Open`
+    /// channel into allowlist mode containing just this account; on an
+    /// already-restricted channel, adds to the allowlist.
+    pub fn allow_account(&self, account_fingerprint: [u8; 48]) {
+        let mut access = self.inner.access.lock().unwrap();
+        match &mut *access {
+            AccessPolicy::Open => {
+                let mut set = std::collections::HashSet::new();
+                set.insert(account_fingerprint);
+                *access = AccessPolicy::Accounts(set);
+            }
+            AccessPolicy::Accounts(set) => {
+                set.insert(account_fingerprint);
+            }
+        }
+    }
+
+    /// Revoke one account's access (no-op on an `Open` channel).
+    pub fn deny_account(&self, account_fingerprint: [u8; 48]) {
+        let mut access = self.inner.access.lock().unwrap();
+        if let AccessPolicy::Accounts(set) = &mut *access {
+            set.remove(&account_fingerprint);
+        }
     }
 
     /// Set an explicit access policy (e.g. back to `Open`).
@@ -539,7 +586,7 @@ impl Core {
 
     /// The account public key seen (on a verified, peer-bound chain) for
     /// `account_fingerprint`, if any. Use its `safety_number()` for an
-    /// out-of-band comparison before pinning.
+    /// out-of-band comparison before adding it.
     pub fn seen_account(&self, account_fingerprint: [u8; 48]) -> Option<IdentityPublic> {
         self.inner
             .seen_accounts
@@ -549,14 +596,18 @@ impl Core {
             .cloned()
     }
 
-    /// Pin a just-seen account as a friend by its fingerprint (TOFU after an
+    /// Add a just-seen account as a contact by its fingerprint (TOFU after an
     /// out-of-band safety-number check). Returns `true` if the account was known
     /// from a prior [`Event::Identity`]; `false` if no such account was seen.
-    pub fn pin_seen_account(&self, account_fingerprint: [u8; 48], username: Option<String>) -> bool {
-        let account = self.seen_account(account_fingerprint);
-        match account {
+    pub fn add_seen_contact(
+        &self,
+        account_fingerprint: [u8; 48],
+        name: Option<String>,
+        friend: bool,
+    ) -> bool {
+        match self.seen_account(account_fingerprint) {
             Some(acct) => {
-                self.inner.friends.lock().unwrap().pin(acct, username);
+                self.inner.contacts.lock().unwrap().add(acct, name, friend);
                 true
             }
             None => false,
@@ -564,7 +615,7 @@ impl Core {
     }
 
     /// Fingerprints of all accounts seen on verified presentations this session
-    /// (candidates for `pin_seen_account`).
+    /// (candidates for `add_seen_contact`).
     pub fn seen_account_fingerprints(&self) -> Vec<[u8; 48]> {
         self.inner
             .seen_accounts
@@ -575,14 +626,14 @@ impl Core {
             .collect()
     }
 
-    /// All pinned friends (account fingerprint + remembered username).
-    pub fn friends(&self) -> Vec<([u8; 48], Option<String>)> {
+    /// All contacts (account fingerprint, remembered name, friend label).
+    pub fn contacts(&self) -> Vec<([u8; 48], Option<String>, bool)> {
         self.inner
-            .friends
+            .contacts
             .lock()
             .unwrap()
             .iter()
-            .map(|f| (f.account_fingerprint, f.username.clone()))
+            .map(|c| (c.account_fingerprint, c.name.clone(), c.friend))
             .collect()
     }
 
@@ -1035,8 +1086,8 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
     };
     let now = now_secs();
     let resolved = {
-        let store = inner.friends.lock().unwrap();
-        friends::resolve_chain(&store, &presentation.chain, peer_fp, now)
+        let store = inner.contacts.lock().unwrap();
+        contacts::resolve_chain(&store, &presentation.chain, peer_fp, now)
     };
     match resolved {
         Some(res) => {
@@ -1060,6 +1111,7 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
                 from: peer_fp,
                 account_fingerprint: res.account_fingerprint,
                 username: presentation.username,
+                contact: res.contact,
                 friend: res.friend,
             });
             IdentityOutcome::Allowed
@@ -1567,7 +1619,7 @@ mod tests {
             0,
         );
         alice.present_identity(chain, Some("alice".into()));
-        bob.pin_friend(alice_account.public().clone(), Some("alice".into()));
+        bob.add_contact(alice_account.public().clone(), Some("alice".into()), true);
 
         bob.host().await.unwrap();
         alice.connect("bob").await.unwrap();
@@ -1589,7 +1641,7 @@ mod tests {
         let (bob2, mut bob2_rx) = core_on(&ifab, "bob2", &idesc);
         let (mallory, _m_rx) = core_on(&ifab, "mallory", &idesc);
         // Bob2 still only trusts Alice's real account.
-        bob2.pin_friend(alice_account.public().clone(), Some("alice".into()));
+        bob2.add_contact(alice_account.public().clone(), Some("alice".into()), true);
         // Mallory mints a chain under HIS OWN account but claims "alice".
         let mallory_account = IdentityKeyPair::generate();
         let fake_chain = IdentityChain::device(
@@ -1659,8 +1711,8 @@ mod tests {
             Some("alice".into()),
         );
         // Each pins the other's account.
-        bob.pin_friend(alice_account.public().clone(), Some("alice".into()));
-        alice.pin_friend(bob_account.public().clone(), Some("bob".into()));
+        bob.add_contact(alice_account.public().clone(), Some("alice".into()), true);
+        alice.add_contact(bob_account.public().clone(), Some("bob".into()), true);
 
         bob.host().await.unwrap();
         alice.connect("bob").await.unwrap();

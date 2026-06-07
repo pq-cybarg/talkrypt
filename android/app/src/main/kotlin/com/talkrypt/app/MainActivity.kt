@@ -769,7 +769,13 @@ class MainActivity : Activity() {
                         is FfiEvent.Connected -> system("● ${e.fingerprint.take(8)} connected")
                         is FfiEvent.Identity -> {
                             val who = e.username.ifEmpty { e.accountFingerprint.take(8) }
-                            system(if (e.friend) "✓ friend $who" else "• account $who (not a friend)")
+                            system(
+                                when {
+                                    e.friend -> "✓ friend $who"
+                                    e.contact -> "• contact $who"
+                                    else -> "• account $who (not a contact)"
+                                },
+                            )
                         }
                         is FfiEvent.Disconnected -> system("○ ${e.fingerprint.take(8)} left")
                         is FfiEvent.Error -> system("! ${e.message}")

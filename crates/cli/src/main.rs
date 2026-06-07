@@ -1108,18 +1108,23 @@ commands:
   /verify                        show safety numbers (compare out of band)
   /invite                        print this chat's invite URI
   /peers                         connected peer count
-  account & friends:
+  account:
   /account new [path]            generate an account, link this session, save seed
   /account load <path>           load an account seed and link this session
   /account save [path]           save the current account seed
   /username <name>               set the advertised username (re-presents)
   /pseudonym                     drop the account (become unlinkable)
-  /friend trust <fp> [name]      pin a just-seen account by fingerprint prefix
-  /friends                       list pinned friends
+  contacts (recognition — unilateral, NOT access):
+  /contact add <fp> [name]       recognize a just-seen account (by fp prefix)
+  /contacts                      list contacts
+  /friend <fp>                   label a contact a friend  (/unfriend to clear)
+  access (a SEPARATE grant — no contact/friend/mutual needed):
+  /allow <fp>                    admit an account into this channel
+  /deny <fp>                     revoke an account's access
   registry (username discovery):
   /register <registry-uri>       publish username->account to a registry
-  /resolve <name> <uri>[ <uri>…] [pin]
-                                 cross-compare a name across registries
+  /resolve <name> <uri>[ <uri>…] [add]
+                                 cross-compare a name; `add` saves it as a contact
   /quit                          leave";
 
 /// The interactive read-eval-print loop shared by host and join.
@@ -1152,30 +1157,33 @@ async fn repl(
                     from,
                     account_fingerprint,
                     username,
+                    contact,
                     friend,
                 } => {
                     let name = username.unwrap_or_else(|| "<no username>".into());
-                    if friend {
+                    if contact {
+                        let label = if friend { "friend" } else { "contact" };
                         println!(
-                            "\r* friend {name} (account {}) on device {}",
+                            "\r* {label} {name} (account {}) on device {}",
                             short_fp(&account_fingerprint),
                             short_fp(&from)
                         );
                     } else {
-                        // Not yet a friend: show the account safety number and how
-                        // to pin it after an out-of-band comparison.
+                        // Unknown account: show the safety number and how to add
+                        // it as a contact after an out-of-band comparison.
                         let sn = printer_core
                             .seen_account(account_fingerprint)
                             .map(|a| a.safety_number())
                             .unwrap_or_default();
                         println!(
-                            "\r* account {name} (fp {}) on device {} — not a friend",
+                            "\r* account {name} (fp {}) on device {} — not a contact",
                             short_fp(&account_fingerprint),
                             short_fp(&from)
                         );
                         println!("    account safety number: {sn}");
                         println!(
-                            "    verify out of band, then: /friend trust {}",
+                            "    verify out of band, then: /contact add {} [name]   (or /friend {} to label a friend)",
+                            short_fp(&account_fingerprint),
                             short_fp(&account_fingerprint)
                         );
                     }
@@ -1235,7 +1243,7 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
                 ),
                 (None, _) => println!("identity: pseudonym (unlinkable)"),
             }
-            println!("friends pinned: {}", core.friend_count());
+            println!("contacts: {}", core.contact_count());
         }
         "account" => cmd_account(core, state, arg).await,
         "username" => {
@@ -1257,8 +1265,12 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
             core.clear_identity();
             println!("now a pseudonym for future connections (existing sessions keep what they saw)");
         }
-        "friend" => cmd_friend(core, arg),
-        "friends" => cmd_friend(core, "list"),
+        "contact" => cmd_contact(core, arg),
+        "contacts" => cmd_contact(core, "list"),
+        "friend" => cmd_contact(core, &format!("friend {arg}")),
+        "unfriend" => cmd_contact(core, &format!("unfriend {arg}")),
+        "allow" => cmd_access(core, arg, true),
+        "deny" => cmd_access(core, arg, false),
         "register" => cmd_register(core, state, arg).await,
         "resolve" => cmd_resolve(core, arg).await,
         other => println!("unknown command: /{other} (try /help)"),
@@ -1311,53 +1323,102 @@ async fn cmd_account(core: &Core, state: &mut ReplState, arg: &str) {
     }
 }
 
-/// `/friend trust <fp-prefix> [name]` and `/friend list`.
-fn cmd_friend(core: &Core, arg: &str) {
+/// Resolve a seen account by fp-prefix: returns the unique match, else prints a
+/// diagnostic and returns `None`.
+fn resolve_seen(core: &Core, prefix: &str) -> Option<[u8; 48]> {
+    let prefix = prefix.to_lowercase();
+    if prefix.is_empty() {
+        println!("give an account fingerprint prefix");
+        return None;
+    }
+    let matches: Vec<[u8; 48]> = core
+        .seen_account_fingerprints()
+        .into_iter()
+        .filter(|fp| hex48(fp).starts_with(&prefix))
+        .collect();
+    match matches.as_slice() {
+        [] => {
+            println!("no account seen this session matches '{prefix}' (wait for them to present, then retry)");
+            None
+        }
+        [fp] => Some(*fp),
+        _ => {
+            println!("'{prefix}' is ambiguous ({} matches) — use more characters", matches.len());
+            None
+        }
+    }
+}
+
+/// `/contact add <fp> [name]` | `/contact list` | `/contact friend|unfriend <fp>`.
+/// A contact is recognition only (unilateral) — never an access grant.
+fn cmd_contact(core: &Core, arg: &str) {
     let mut it = arg.splitn(2, ' ');
     let sub = it.next().unwrap_or("");
     let rest = it.next().unwrap_or("").trim();
     match sub {
         "list" | "" => {
-            let friends = core.friends();
-            if friends.is_empty() {
-                println!("no friends pinned yet");
+            let contacts = core.contacts();
+            if contacts.is_empty() {
+                println!("no contacts yet");
             } else {
-                println!("pinned friends ({}):", friends.len());
-                for (fp, name) in friends {
-                    println!("  {}  {}", short_fp(&fp), name.as_deref().unwrap_or("<no username>"));
+                println!("contacts ({}):", contacts.len());
+                for (fp, name, friend) in contacts {
+                    let tag = if friend { " [friend]" } else { "" };
+                    println!("  {}  {}{tag}", short_fp(&fp), name.as_deref().unwrap_or("<no name>"));
                 }
             }
         }
-        "trust" => {
+        "add" | "trust" => {
             let mut p = rest.splitn(2, ' ');
-            let prefix = p.next().unwrap_or("").to_lowercase();
+            let prefix = p.next().unwrap_or("");
             let name = p.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            if prefix.is_empty() {
-                println!("usage: /friend trust <account-fp-prefix> [username]");
-                return;
-            }
-            let matches: Vec<[u8; 48]> = core
-                .seen_account_fingerprints()
-                .into_iter()
-                .filter(|fp| hex48(fp).starts_with(&prefix))
-                .collect();
-            match matches.as_slice() {
-                [] => println!("no account seen this session matches '{prefix}' (wait for them to present, then retry)"),
-                [fp] => {
-                    if core.pin_seen_account(*fp, name.clone()) {
-                        println!(
-                            "pinned friend {} {}",
-                            short_fp(fp),
-                            name.as_deref().unwrap_or("")
-                        );
-                    } else {
-                        println!("! could not pin (account no longer known)");
-                    }
+            if let Some(fp) = resolve_seen(core, prefix) {
+                // Add as a contact (recognition); not a friend, not access.
+                if core.add_seen_contact(fp, name.clone(), false) {
+                    println!("added contact {} {}", short_fp(&fp), name.as_deref().unwrap_or(""));
+                } else {
+                    println!("! could not add (account no longer known)");
                 }
-                _ => println!("'{prefix}' is ambiguous ({} matches) — use more characters", matches.len()),
             }
         }
-        _ => println!("usage: /friend trust <fp> [name] | /friend list"),
+        "friend" | "unfriend" => {
+            let prefix = rest.split(' ').next().unwrap_or("");
+            let make_friend = sub == "friend";
+            if let Some(fp) = resolve_seen(core, prefix) {
+                if let Some(acct) = core.seen_account(fp) {
+                    // Ensure they're a contact, then set the friend label.
+                    if !core.is_contact(&acct) {
+                        core.add_seen_contact(fp, None, make_friend);
+                    } else {
+                        core.set_friend(&acct, make_friend);
+                    }
+                    println!(
+                        "{} {}",
+                        if make_friend { "labeled friend" } else { "unlabeled friend" },
+                        short_fp(&fp)
+                    );
+                } else {
+                    println!("! account no longer known");
+                }
+            }
+        }
+        _ => println!("usage: /contact add <fp> [name] | list | friend <fp> | unfriend <fp>"),
+    }
+}
+
+/// `/allow <fp>` / `/deny <fp>` — grant or revoke channel access for an account
+/// by fingerprint prefix. A UNILATERAL access grant — the account need not be a
+/// contact, a friend, or a mutual. Switches an open channel into allowlist mode.
+fn cmd_access(core: &Core, arg: &str, allow: bool) {
+    let prefix = arg.split(' ').next().unwrap_or("");
+    if let Some(fp) = resolve_seen(core, prefix) {
+        if allow {
+            core.allow_account(fp);
+            println!("granted access to {} (this channel is now restricted to allowed accounts)", short_fp(&fp));
+        } else {
+            core.deny_account(fp);
+            println!("revoked access for {}", short_fp(&fp));
+        }
     }
 }
 
@@ -1395,7 +1456,7 @@ async fn cmd_resolve(core: &Core, arg: &str) {
         return;
     }
     let name = tokens.remove(0).to_string();
-    let do_pin = tokens.last() == Some(&"pin");
+    let do_pin = matches!(tokens.last(), Some(&"add") | Some(&"pin"));
     if do_pin {
         tokens.pop();
     }
@@ -1430,10 +1491,10 @@ async fn cmd_resolve(core: &Core, arg: &str) {
                 if answered == 1 { "y" } else { "ies" }
             );
             if do_pin {
-                core.pin_friend(account, Some(name.clone()));
-                println!("pinned '{name}' as a friend");
+                core.add_contact(account, Some(name.clone()), false);
+                println!("added '{name}' as a contact (use /friend to label, /allow to grant access)");
             } else {
-                println!("verify the safety number out of band, then add `pin` to friend them");
+                println!("verify the safety number out of band, then add `add` to save '{name}' as a contact");
             }
         }
         None => println!(
