@@ -321,6 +321,19 @@ impl TalkryptClient {
         }
     }
 
+    /// Set this hosted channel's access mode. `"open"` admits anyone with the
+    /// invite; `"contacts"` admits recognized contacts; `"friends"` admits
+    /// contacts you've labeled friends; anything else leaves it unchanged.
+    /// (Registry-restriction is the separate `restrict_to_anchor`.)
+    pub fn set_access_mode(&self, mode: String) {
+        match mode.as_str() {
+            "open" => self.core.open_access(),
+            "contacts" => self.core.restrict_to_contacts(),
+            "friends" => self.core.restrict_to_friends(),
+            _ => {}
+        }
+    }
+
     /// Present an account identity to peers: `chain_bytes` is an encoded
     /// `IdentityChain` (account→…→this device) and `username` an optional
     /// self-asserted label. Sent as the first frame *inside* the encrypted

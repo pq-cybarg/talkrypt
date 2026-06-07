@@ -132,8 +132,22 @@ class MainActivity : Activity() {
         }
         col.addView(posture, lp(MATCH_PARENT, WRAP_CONTENT))
 
+        col.addView(label("ACCESS").also { it.setPadding(0, dp(20), 0, dp(8)) })
+        val access = Spinner(this).also {
+            it.background = roundRect(field, 14)
+            it.adapter = ArrayAdapter(
+                this, android.R.layout.simple_spinner_dropdown_item,
+                listOf("open", "contacts", "friends"),
+            )
+        }
+        col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
+
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
-            startHost(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString())
+            startHost(
+                channel.text.toString().ifBlank { "#general" },
+                posture.selectedItem.toString(),
+                access.selectedItem.toString(),
+            )
         }, lp(MATCH_PARENT, dp(54), top = dp(32)))
         col.addView(pillButton("Registry-restricted chat", panel, fg) {
             setContentView(restrictedHostScreen(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString()))
@@ -656,7 +670,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
-    private fun startHost(channel: String, posture: String) {
+    private fun startHost(channel: String, posture: String, access: String = "open") {
         toast("creating chat…")
         thread {
             try {
@@ -667,9 +681,12 @@ class MainActivity : Activity() {
                 // Present our account so peers (and registry-restricted hosts)
                 // can resolve us as that account.
                 runCatching { c.presentAccount(account(), null) }
+                // Apply the chosen access mode (open / contacts / friends).
+                runCatching { c.setAccessMode(access) }
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
-                    setContentView(chatScreen(channel, "$posture · safety ${sn.take(11)}"))
+                    val tag = if (access == "open") posture else "$posture · $access only"
+                    setContentView(chatScreen(channel, "$tag · safety ${sn.take(11)}"))
                     system("hosting — let a friend scan this to join:")
                     messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")

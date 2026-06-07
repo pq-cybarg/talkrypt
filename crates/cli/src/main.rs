@@ -1119,7 +1119,8 @@ commands:
   /contacts                      list contacts
   /friend <fp>                   label a contact a friend  (/unfriend to clear)
   access (a SEPARATE grant — no contact/friend/mutual needed):
-  /allow <fp>                    admit an account into this channel
+  /access open|contacts|friends  set who may join this channel
+  /allow <fp>                    admit one specific account
   /deny <fp>                     revoke an account's access
   registry (username discovery):
   /register <registry-uri>       publish username->account to a registry
@@ -1271,6 +1272,21 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
         "unfriend" => cmd_contact(core, &format!("unfriend {arg}")),
         "allow" => cmd_access(core, arg, true),
         "deny" => cmd_access(core, arg, false),
+        "access" => match arg.trim() {
+            "open" => {
+                core.open_access();
+                println!("access: open (anyone with the invite)");
+            }
+            "contacts" => {
+                core.restrict_to_contacts();
+                println!("access: contacts only (recognized contacts admitted)");
+            }
+            "friends" => {
+                core.restrict_to_friends();
+                println!("access: friends only (contacts labeled friend admitted)");
+            }
+            _ => println!("usage: /access open | contacts | friends   (also: /allow <fp>, host --require-registry)"),
+        },
         "register" => cmd_register(core, state, arg).await,
         "resolve" => cmd_resolve(core, arg).await,
         other => println!("unknown command: /{other} (try /help)"),

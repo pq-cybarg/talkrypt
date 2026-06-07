@@ -195,20 +195,34 @@ pub enum AccessPolicy {
     /// Anyone with the invite (and password, if any) may participate.
     #[default]
     Open,
-    /// Only these account fingerprints may participate. A peer that presents a
-    /// non-listed account — or never presents one (a pseudonym) — is silenced
-    /// and disconnected.
+    /// Only these account fingerprints may participate (an explicit allowlist —
+    /// e.g. populated from a registry for a *registry-restricted channel*). A
+    /// peer presenting a non-listed account — or no account (a pseudonym) — is
+    /// silenced and disconnected.
     Accounts(std::collections::HashSet<[u8; 48]>),
+    /// Only **recognized contacts** may participate. This is still a deliberate,
+    /// unilateral access grant — you're choosing "let my contacts in" — it just
+    /// derives the allowlist from whom you recognize rather than a fixed set.
+    Contacts,
+    /// Only contacts you've **labeled friends** may participate.
+    Friends,
 }
 
 impl AccessPolicy {
+    /// An open policy admits everyone immediately (no identity needed); the
+    /// restrictive modes require the peer to present a qualifying account.
     fn is_open(&self) -> bool {
         matches!(self, AccessPolicy::Open)
     }
-    fn allows(&self, account_fingerprint: &[u8; 48]) -> bool {
+
+    /// Decide admission from a peer's resolved identity: its account
+    /// fingerprint plus whether it's a recognized `contact` / labeled `friend`.
+    fn admits(&self, account_fingerprint: &[u8; 48], contact: bool, friend: bool) -> bool {
         match self {
             AccessPolicy::Open => true,
             AccessPolicy::Accounts(set) => set.contains(account_fingerprint),
+            AccessPolicy::Contacts => contact,
+            AccessPolicy::Friends => friend,
         }
     }
 }
@@ -549,19 +563,31 @@ impl Core {
         *self.inner.access.lock().unwrap() = AccessPolicy::Accounts(accounts);
     }
 
-    /// Grant one account access by fingerprint (unilateral). Switches an `Open`
-    /// channel into allowlist mode containing just this account; on an
-    /// already-restricted channel, adds to the allowlist.
+    /// Restrict this channel to **recognized contacts** (a unilateral grant that
+    /// derives the allowlist from whom you recognize). A peer is admitted iff its
+    /// presented account is a contact.
+    pub fn restrict_to_contacts(&self) {
+        *self.inner.access.lock().unwrap() = AccessPolicy::Contacts;
+    }
+
+    /// Restrict this channel to contacts you've **labeled friends**.
+    pub fn restrict_to_friends(&self) {
+        *self.inner.access.lock().unwrap() = AccessPolicy::Friends;
+    }
+
+    /// Grant one account access by fingerprint (unilateral). On an explicit
+    /// allowlist, adds to it; from any mode-based policy (`Open`/`Contacts`/
+    /// `Friends`) it starts an explicit allowlist containing just this account.
     pub fn allow_account(&self, account_fingerprint: [u8; 48]) {
         let mut access = self.inner.access.lock().unwrap();
         match &mut *access {
-            AccessPolicy::Open => {
+            AccessPolicy::Accounts(set) => {
+                set.insert(account_fingerprint);
+            }
+            _ => {
                 let mut set = std::collections::HashSet::new();
                 set.insert(account_fingerprint);
                 *access = AccessPolicy::Accounts(set);
-            }
-            AccessPolicy::Accounts(set) => {
-                set.insert(account_fingerprint);
             }
         }
     }
@@ -1092,8 +1118,15 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
     match resolved {
         Some(res) => {
             // Enforce the access policy: on a restricted channel, a peer whose
-            // account isn't permitted is rejected (caller disconnects it).
-            if !inner.access.lock().unwrap().allows(&res.account_fingerprint) {
+            // account isn't permitted is rejected (caller disconnects it). The
+            // decision can depend on contact/friend status (Contacts/Friends
+            // modes), so it's made from the resolved identity, not just the fp.
+            if !inner
+                .access
+                .lock()
+                .unwrap()
+                .admits(&res.account_fingerprint, res.contact, res.friend)
+            {
                 let _ = inner.events_tx.send(Event::Error(format!(
                     "rejected non-member account {}",
                     short_hex6(&res.account_fingerprint)
@@ -1812,6 +1845,60 @@ mod tests {
                 "non-member account must be silenced"
             );
         }
+    }
+
+    /// `restrict_to_contacts`: a recognized contact is admitted; a stranger
+    /// (valid account, but not a contact) is silenced.
+    #[tokio::test]
+    async fn access_policy_contacts_mode() {
+        use talkrypt_crypto::IdentityChain;
+
+        async fn got_message(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+            dur: Duration,
+        ) -> bool {
+            timeout(dur, async {
+                loop {
+                    match rx.recv().await {
+                        Some(Event::Message { .. }) => break true,
+                        Some(_) => continue,
+                        None => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false)
+        }
+
+        async fn run(make_contact: bool) -> bool {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec!["h".into()],
+                "#contacts",
+            );
+            let (host, mut host_rx) = core_on(&fabric, "h", &desc);
+            host.restrict_to_contacts();
+            let peer_account = IdentityKeyPair::generate();
+            if make_contact {
+                host.add_contact(peer_account.public().clone(), Some("pal".into()), false);
+            }
+            let (peer, _p) = core_on(&fabric, "p", &desc);
+            peer.present_identity(
+                IdentityChain::device(&peer_account, peer.identity_public(), "d", 0, 0),
+                Some("pal".into()),
+            );
+            host.host().await.unwrap();
+            peer.connect("h").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            peer.send("hi").await.unwrap();
+            got_message(&mut host_rx, Duration::from_millis(700)).await
+        }
+
+        assert!(run(true).await, "a recognized contact must be admitted");
+        assert!(!run(false).await, "a non-contact must be silenced");
     }
 
     #[tokio::test]
