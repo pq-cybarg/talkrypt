@@ -435,6 +435,35 @@ impl TalkryptClient {
         }
     }
 
+    /// Add a just-seen account (from an `Identity` event) as a contact by its
+    /// fingerprint hex — the Core resolves the full key it saw. Returns false if
+    /// no such account was seen this session. Verify the safety number out of
+    /// band first (see `seen_account_safety_number`).
+    pub fn add_seen_contact(
+        &self,
+        account_fingerprint_hex: String,
+        name: Option<String>,
+        friend: bool,
+    ) -> bool {
+        match parse_fp_hex(&account_fingerprint_hex) {
+            Some(fp) => self.core.add_seen_contact(fp, name, friend),
+            None => false,
+        }
+    }
+
+    /// The safety number of a just-seen account (by fingerprint hex), for an
+    /// out-of-band check before adding it. Empty if not seen.
+    pub fn seen_account_safety_number(&self, account_fingerprint_hex: String) -> String {
+        match parse_fp_hex(&account_fingerprint_hex) {
+            Some(fp) => self
+                .core
+                .seen_account(fp)
+                .map(|a| a.safety_number())
+                .unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
     /// Export contacts for the host to persist (reload with `add_contact_hex`).
     pub fn export_contacts(&self) -> Vec<ContactRecord> {
         self.core

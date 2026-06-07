@@ -182,7 +182,38 @@ class MainActivity : Activity() {
         col.addView(pillButton("Anchors (username directory)", panel, fg) {
             setContentView(anchorsScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("Contacts", panel, fg) {
+            setContentView(contactsScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    // ---------- contacts screen ----------
+    private fun contactsScreen(): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Contacts", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("Accounts you recognize. Recognition only — being a contact (or friend) doesn't grant channel access; that's set per chat.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+        val contacts = storedContacts()
+        if (contacts.isEmpty()) {
+            col.addView(
+                text("No contacts yet. In a chat, when an account presents itself, tap “Add as a contact”.", 14f, muted),
+                lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)),
+            )
+        } else {
+            for ((pk, name, friend) in contacts) {
+                val label = (name.ifEmpty { pk.take(12) }) + (if (friend) "  [friend]" else "")
+                col.addView(text(label, 15f, if (friend) accent else fg).apply {
+                    background = roundRect(panel, 12); setPadding(dp(14), dp(12), dp(14), dp(12))
+                }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+            }
+        }
+        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -368,6 +399,34 @@ class MainActivity : Activity() {
         val a = Account.generate()
         prefs.edit().putString("account_seed", a.seedHex()).apply()
         return a
+    }
+
+    // ----- contacts (recognized accounts), persisted across sessions -----
+    private val contactSep = "\u001F"
+
+    /** Persisted contacts: (account pubkey hex, name, friend). */
+    private fun storedContacts(): List<Triple<String, String, Boolean>> {
+        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        return prefs.getStringSet("contacts", emptySet()).orEmpty().mapNotNull {
+            val p = it.split(contactSep)
+            if (p.size == 3) Triple(p[0], p[1], p[2] == "1") else null
+        }
+    }
+
+    /** Save the client's current contacts to SharedPreferences. */
+    private fun saveContacts(client: TalkryptClient) {
+        val set = client.exportContacts()
+            .map { "${it.accountPubkeyHex}$contactSep${it.name}$contactSep${if (it.friend) "1" else "0"}" }
+            .toSet()
+        getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+            .edit().putStringSet("contacts", set).apply()
+    }
+
+    /** Re-add persisted contacts into a fresh client (call after creating it). */
+    private fun loadContacts(client: TalkryptClient) {
+        storedContacts().forEach { (pk, name, friend) ->
+            client.addContactHex(pk, name.ifEmpty { null }, friend)
+        }
     }
 
     // Anchors you are bound at (where you registered a username) — the only
@@ -585,6 +644,7 @@ class MainActivity : Activity() {
                 val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
                 val c = TalkryptClient.host(listen, channel, posture)
                 runCatching { c.presentAccount(account(), username) }
+                runCatching { loadContacts(c) } // recognize saved contacts
                 val members = c.restrictToAnchor(anchorUri)
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
@@ -674,6 +734,14 @@ class MainActivity : Activity() {
         scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
     }
 
+    /** A tappable action row inside the message list (e.g. "Add as contact"). */
+    private fun addAction(label: String, onClick: () -> Unit) {
+        val list = messages ?: return
+        val btn = pillButton(label, panel, accent, onClick)
+        list.addView(btn, lp(MATCH_PARENT, dp(44), top = dp(6), bottom = dp(2)))
+        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
     private fun bubbleBg(mine: Boolean) = GradientDrawable().apply {
         setColor(if (mine) accent else peerBubble)
         cornerRadius = dp(18).toFloat()
@@ -696,6 +764,7 @@ class MainActivity : Activity() {
                 // Present our account so peers (and registry-restricted hosts)
                 // can resolve us as that account.
                 runCatching { c.presentAccount(account(), null) }
+                runCatching { loadContacts(c) } // recognize saved contacts
                 // Apply the chosen access mode (open / contacts / friends).
                 runCatching { c.setAccessMode(access) }
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
@@ -772,6 +841,7 @@ class MainActivity : Activity() {
                 // restricted host can admit us and the peer can friend us. A
                 // pseudonym presents nothing and won't pass a restricted gate.
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
+                runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
                     setContentView(chatScreen("chat", "safety ${sn.take(11)} · peers ${c.peerCount()}"))
                     system(if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
@@ -809,6 +879,21 @@ class MainActivity : Activity() {
                                     else -> "• account $who (not a contact)"
                                 },
                             )
+                            // Offer to recognize an unknown account (verify the
+                            // safety number out of band first).
+                            if (!e.contact) {
+                                val fp = e.accountFingerprint
+                                val name = e.username
+                                addAction("Add “$who” as a contact") {
+                                    val cl = client
+                                    if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) {
+                                        saveContacts(cl)
+                                        system("added contact $who")
+                                    } else {
+                                        toast("could not add (account not seen)")
+                                    }
+                                }
+                            }
                         }
                         is FfiEvent.Disconnected -> system("○ ${e.fingerprint.take(8)} left")
                         is FfiEvent.Error -> system("! ${e.message}")
