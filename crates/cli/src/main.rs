@@ -608,6 +608,31 @@ impl Net {
     }
 }
 
+/// Find a bindable TCP address starting at `listen` (`host:port`), trying the
+/// next ports if the default is taken — so two hosts on one machine don't
+/// collide. Returns the chosen address (the descriptor advertises this port).
+/// Falls back to the original if nothing is free in the scanned range.
+fn pick_listen(listen: &str) -> String {
+    let Some((host, port_str)) = listen.rsplit_once(':') else {
+        return listen.to_string();
+    };
+    let Ok(base) = port_str.parse::<u16>() else {
+        return listen.to_string();
+    };
+    for offset in 0..100u16 {
+        let port = base.saturating_add(offset);
+        let addr = format!("{host}:{port}");
+        // Bind then drop to release the port; TcpTransport rebinds it next.
+        if std::net::TcpListener::bind(&addr).is_ok() {
+            if offset > 0 {
+                println!("port {base} busy; using {port}");
+            }
+            return addr;
+        }
+    }
+    listen.to_string()
+}
+
 /// Build the transport: a bootstrapped Arti client for `--tor`, else TCP bound
 /// to `tcp_listen`.
 async fn make_net(tor: bool, tcp_listen: &str) -> Result<Net, Box<dyn std::error::Error>> {
@@ -935,6 +960,8 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(m) = &channel_marking {
         println!("classification: {}  (advisory; carried authenticated in every message)", m.banner());
     }
+    // Auto-pick a free port if the default is busy (TCP only; Tor uses an onion).
+    let listen = if tor { listen } else { pick_listen(&listen) };
     let net = make_net(tor, &listen).await?;
 
     // Advertise the configured bind address in the descriptor, including
@@ -1100,6 +1127,8 @@ async fn run_registry(
     // The registry uses the default PQ-pure suite; its descriptor (channel +
     // invite token) is the shared handshake root clients dial with.
     let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
+    // Auto-pick a free port if the default is busy (TCP only).
+    let listen = if tor { listen } else { pick_listen(&listen) };
     let mut desc = ChatDescriptor::new(
         TopologyKind::Hub,
         Persistence::Persistent,
@@ -1117,8 +1146,9 @@ async fn run_registry(
     }
 
     println!("username registry hosting on {listen} (channel {channel})");
-    println!("\nPublish this registry URI; clients use it with /register and /resolve:\n");
+    println!("\nPublish this registry URI; scan the QR with the app or copy the URI:\n");
     println!("  {}\n", desc.to_uri());
+    print_qr(&desc.to_uri());
     println!(
         "A registry only stores self-signed username→account claims (public by\n\
          nature). Register on several and clients cross-compare for unforgeability.\n\
