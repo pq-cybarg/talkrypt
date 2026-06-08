@@ -145,6 +145,12 @@ enum Cmd {
         /// .onion in the invite. Requires a `--features tor` build.
         #[arg(long)]
         tor: bool,
+        /// Advertise this address in the invite instead of the bound --listen
+        /// address. Use when the address peers must dial differs from the one
+        /// you bind (bind 0.0.0.0, advertise your LAN/public IP; on an Android
+        /// emulator advertise the host alias 10.0.2.2). Ignored with --tor.
+        #[arg(long)]
+        endpoint: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -361,6 +367,7 @@ async fn main() {
             password,
             require_registry,
             tor,
+            endpoint,
         } => {
             run_host(HostArgs {
                 listen,
@@ -380,6 +387,7 @@ async fn main() {
                 password,
                 require_registry,
                 tor,
+                endpoint,
             })
             .await
         }
@@ -536,6 +544,7 @@ struct HostArgs {
     password: Option<String>,
     require_registry: Option<String>,
     tor: bool,
+    endpoint: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -928,6 +937,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         password,
         require_registry,
         tor,
+        endpoint,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -993,6 +1003,13 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(onion) = net.onion() {
         desc.endpoints = vec![onion.clone()];
         println!("onion: {onion}");
+    } else if let Some(ep) = &endpoint {
+        // Advertise a reachable address that differs from the bound one (we
+        // still bind `listen`; only the invite's dial address changes). This
+        // is what lets a host bind 0.0.0.0 but hand out its LAN/public IP, or
+        // hand an Android emulator the host alias 10.0.2.2.
+        desc.endpoints = vec![ep.clone()];
+        println!("advertising endpoint: {ep} (bound on {listen})");
     }
 
     // Registry-restricted channel: pull the allowlist of account fingerprints
