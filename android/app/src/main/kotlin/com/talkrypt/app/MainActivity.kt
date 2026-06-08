@@ -32,11 +32,14 @@ import uniffi.talkrypt_ffi.AnchorNode
 import uniffi.talkrypt_ffi.DeviceKey
 import uniffi.talkrypt_ffi.FfiEvent
 import uniffi.talkrypt_ffi.LinkOffer
+import uniffi.talkrypt_ffi.SegmentKey
 import uniffi.talkrypt_ffi.TalkryptClient
+import uniffi.talkrypt_ffi.accountSegmentChain
 import uniffi.talkrypt_ffi.anchorRegister
 import uniffi.talkrypt_ffi.anchorResolve
 import uniffi.talkrypt_ffi.inviteChannel
 import uniffi.talkrypt_ffi.linkAccept
+import uniffi.talkrypt_ffi.linkedSegmentChain
 
 /**
  * The talkrypt chat app — a post-quantum, end-to-end encrypted chat over the
@@ -202,6 +205,9 @@ class MainActivity : Activity() {
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
         col.addView(pillButton("Linked devices", panel, fg) {
             setContentView(linkedDevicesScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("Segments (contextual identities)", panel, fg) {
+            setContentView(segmentsScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -470,6 +476,120 @@ class MainActivity : Activity() {
                 ui.post {
                     setContentView(chatScreen("chat", "linked · safety ${sn.take(11)} · peers ${c.peerCount()}"))
                     system("joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
+                    bind(c); poll()
+                }
+            } catch (e: Exception) {
+                ui.post { toast("join failed: ${e.message}") }
+            }
+        }
+    }
+
+    // ---------- segment sub-identities (mutually-unlinkable contexts) ----------
+    /** Persisted segments: (name, seed-hex). Each is an unlinkable contextual
+     *  identity under this device's account (account→device→segment). */
+    private fun storedSegments(): List<Pair<String, String>> {
+        val p = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        return p.getStringSet("segments", emptySet()).orEmpty().mapNotNull {
+            val s = it.split(contactSep)
+            if (s.size == 2) s[0] to s[1] else null
+        }.sortedBy { it.first }
+    }
+
+    private fun addSegment(name: String): SegmentKey {
+        val seg = SegmentKey.generate()
+        val p = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val set = HashSet(p.getStringSet("segments", emptySet()).orEmpty())
+        set.removeAll { it.substringBefore(contactSep) == name } // replace same-name
+        set.add(name + contactSep + seg.seedHex())
+        p.edit().putStringSet("segments", set).apply()
+        return seg
+    }
+
+    private fun removeSegment(name: String) {
+        val p = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val set = HashSet(p.getStringSet("segments", emptySet()).orEmpty())
+        set.removeAll { it.substringBefore(contactSep) == name }
+        p.edit().putStringSet("segments", set).apply()
+    }
+
+    private fun segmentsScreen(): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Segments", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text(
+                "Contextual sub-identities under your account. Each segment authenticates with its own key, so different segments are unlinkable to each other — yet a contact who recognizes your account recognizes every segment. Use one per context (work, activism, …).",
+                13f, muted,
+            ),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(12)),
+        )
+
+        val linked = storedLink()
+        col.addView(
+            text(
+                if (linked != null) "rooted at your linked account ${linked.third.take(20)}…"
+                else "rooted at this device's account",
+                12f, muted,
+            ),
+            lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)),
+        )
+
+        col.addView(label("JOIN A CHAT (talkrypt:// invite)"))
+        val joinUri = inputField("talkrypt://…")
+        col.addView(joinUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6), bottom = dp(8)))
+
+        val segs = storedSegments()
+        if (segs.isEmpty()) {
+            col.addView(text("No segments yet — create one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
+        } else {
+            segs.forEach { (name, seed) ->
+                val seg = runCatching { SegmentKey.fromSeedHex(seed) }.getOrNull() ?: return@forEach
+                col.addView(text("● $name", 15f, fg, bold = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+                col.addView(text("safety ${seg.safetyNumber().take(23)}…", 12f, muted))
+                col.addView(pillButton("Join as “$name”", accent, Color.WHITE) {
+                    val u = joinUri.text.toString().trim()
+                    if (u.startsWith("talkrypt://")) joinAsSegment(u, seg, name) else toast("paste a talkrypt:// invite above")
+                }, lp(MATCH_PARENT, dp(46), top = dp(6)))
+                col.addView(pillButton("Delete “$name”", panel, fg) {
+                    removeSegment(name); setContentView(segmentsScreen())
+                }, lp(MATCH_PARENT, dp(42), top = dp(6)))
+            }
+        }
+
+        col.addView(text("— new segment —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(8)))
+        col.addView(label("SEGMENT NAME (context label)"))
+        val name = inputField("work")
+        col.addView(name, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+        col.addView(pillButton("Create segment", accent, Color.WHITE) {
+            val n = name.text.toString().trim()
+            if (n.isEmpty()) { toast("name the segment"); return@pillButton }
+            addSegment(n); toast("created segment “$n”"); setContentView(segmentsScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+
+        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun joinAsSegment(uri: String, segment: SegmentKey, name: String) {
+        toast("joining as “$name”…")
+        thread {
+            try {
+                // Build account→device→segment: from the stored link chain if this
+                // device is linked (no account key needed), else from the account
+                // this device holds. deviceKey() is the intermediate device layer.
+                val linked = storedLink()
+                val chain = if (linked != null) {
+                    linkedSegmentChain(deviceKey(), linked.first, segment, name)
+                } else {
+                    accountSegmentChain(account(), deviceKey(), segment, name)
+                }
+                val c = TalkryptClient.joinSegment(uri, segment, chain, name)
+                val sn = c.safetyNumber()
+                runCatching { loadContacts(c) } // recognize saved contacts
+                ui.post {
+                    setContentView(chatScreen("chat", "segment “$name” · safety ${sn.take(11)} · peers ${c.peerCount()}"))
+                    system("joined as segment “$name”")
                     bind(c); poll()
                 }
             } catch (e: Exception) {

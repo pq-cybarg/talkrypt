@@ -536,6 +536,97 @@ impl TalkryptClient {
         }))
     }
 
+    /// Join a chat as a **segment** sub-identity: the session authenticates as
+    /// `segment` (a per-context unlinkable leaf key) and presents the full
+    /// `account → device → segment` chain `chain_hex` (build it with
+    /// [`account_segment_chain`] or [`linked_segment_chain`]). Peers who pinned
+    /// the account still resolve you as that account, but two segments are
+    /// unlinkable to each other (distinct leaf keys).
+    #[uniffi::constructor]
+    pub fn join_segment(
+        uri: String,
+        segment: Arc<SegmentKey>,
+        chain_hex: String,
+        username: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let rt = Runtime::new().map_err(FfiError::from)?;
+        let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+        let suite = SuiteRegistry::with_defaults()
+            .get_by_scheme_hash(&desc.scheme_hash())
+            .map_err(FfiError::from)?;
+        let chain_bytes = parse_hex_bytes(&chain_hex)
+            .ok_or_else(|| FfiError::Failed("segment chain hex is malformed".into()))?;
+        let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
+        let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+        let (core, rx) = Core::new(
+            IdentityKeyPair::from_secret_bytes(segment.kp.export_secret()),
+            suite,
+            transport,
+            desc.clone(),
+        );
+        // Present before establishing so the eager presentation carries the chain.
+        core.present_identity(chain, username);
+        rt.block_on(async {
+            for_kind(desc.topology)
+                .establish(&core, &desc.endpoints)
+                .await
+        })
+        .map_err(FfiError::from)?;
+        let invite = core.descriptor().to_uri();
+        Ok(Arc::new(Self {
+            rt,
+            core,
+            events: Mutex::new(rx),
+            invite,
+        }))
+    }
+
+    /// Host a chat as a **segment** sub-identity (see [`Self::join_segment`]): the
+    /// session authenticates as `segment` and announces the `account → device →
+    /// segment` chain `chain_hex` to joiners.
+    #[uniffi::constructor]
+    pub fn host_segment(
+        listen: String,
+        channel: String,
+        posture: String,
+        segment: Arc<SegmentKey>,
+        chain_hex: String,
+        username: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let rt = Runtime::new().map_err(FfiError::from)?;
+        let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
+        let suite_id = dr_suite_id(profile);
+        let suite = SuiteRegistry::with_defaults()
+            .get(&suite_id)
+            .map_err(FfiError::from)?;
+        let chain_bytes = parse_hex_bytes(&chain_hex)
+            .ok_or_else(|| FfiError::Failed("segment chain hex is malformed".into()))?;
+        let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            &suite_id,
+            vec![listen.clone()],
+            channel,
+        );
+        let transport = Arc::new(TcpTransport::new(&listen));
+        let (core, rx) = Core::new(
+            IdentityKeyPair::from_secret_bytes(segment.kp.export_secret()),
+            suite,
+            transport,
+            desc,
+        );
+        rt.block_on(core.host()).map_err(FfiError::from)?;
+        core.present_identity(chain, username);
+        let invite = core.descriptor().to_uri();
+        Ok(Arc::new(Self {
+            rt,
+            core,
+            events: Mutex::new(rx),
+            invite,
+        }))
+    }
+
     /// Send a message to the channel.
     pub fn send(&self, text: String) -> Result<(), FfiError> {
         self.rt
@@ -913,6 +1004,100 @@ pub fn link_accept(
     })
 }
 
+// ===== segment sub-identities (mutually-unlinkable contextual identities) =====
+
+/// A **segment** key (ML-DSA-87): a contextual sub-identity certified by a device
+/// key (a signature subtree `account → device → segment`). Different segments
+/// authenticate different sessions with *different* leaf keys, so they are
+/// mutually unlinkable at the session/transport layer, yet each still resolves to
+/// the same account for a contact who pinned it (the chain roots at the account).
+/// Generate one per context (e.g. "work", "activism"), persist `seed_hex()`.
+#[derive(uniffi::Object)]
+pub struct SegmentKey {
+    kp: IdentityKeyPair,
+}
+
+#[uniffi::export]
+impl SegmentKey {
+    /// Generate a fresh segment key.
+    #[uniffi::constructor]
+    pub fn generate() -> Arc<Self> {
+        Arc::new(Self {
+            kp: IdentityKeyPair::generate(),
+        })
+    }
+
+    /// Reload a segment key from its 64-hex-char seed.
+    #[uniffi::constructor]
+    pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
+        let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
+        Ok(Arc::new(Self {
+            kp: IdentityKeyPair::from_secret_bytes(seed),
+        }))
+    }
+
+    /// The 32-byte segment seed as hex — the secret; store it protected.
+    pub fn seed_hex(&self) -> String {
+        hex_bytes(&self.kp.export_secret())
+    }
+
+    /// This segment's fingerprint (96 hex chars) — the key that authenticates a
+    /// session presented as this segment. Distinct per segment (unlinkability).
+    pub fn fingerprint_hex(&self) -> String {
+        hex_bytes(&self.kp.public().fingerprint())
+    }
+
+    /// This segment's safety number. Two segments of the same account have
+    /// different safety numbers — that is the point (they are unlinkable).
+    pub fn safety_number(&self) -> String {
+        self.kp.public().safety_number()
+    }
+}
+
+/// Build an `account → device → segment` chain when you **hold the account key**
+/// (the primary-device path): the account certifies `device`, then `device`
+/// certifies `segment`. Returns the encoded chain as hex; present it with
+/// [`TalkryptClient::join_segment`] / [`TalkryptClient::host_segment`], whose
+/// session authenticates as `segment`. `label` is recorded in the segment cert
+/// (e.g. "segment:work").
+#[uniffi::export]
+pub fn account_segment_chain(
+    account: Arc<Account>,
+    device: Arc<DeviceKey>,
+    segment: Arc<SegmentKey>,
+    label: String,
+) -> String {
+    let now = now_secs();
+    let chain = IdentityChain::device(&account.kp, device.kp.public(), "device:app", now, 0)
+        .extend(&device.kp, segment.kp.public(), format!("segment:{label}"), now, 0);
+    hex_bytes(&chain.encode())
+}
+
+/// Build an `account → device → segment` chain when this is a **linked device**
+/// (you hold `device` and its `account → device` certificate `device_chain_hex`
+/// from [`link_accept`], but NOT the account key): `device` certifies `segment`
+/// and the link is appended. The account key is never needed — a linked device
+/// mints its own segments. Returns the encoded chain as hex.
+#[uniffi::export]
+pub fn linked_segment_chain(
+    device: Arc<DeviceKey>,
+    device_chain_hex: String,
+    segment: Arc<SegmentKey>,
+    label: String,
+) -> Result<String, FfiError> {
+    let bytes = parse_hex_bytes(&device_chain_hex)
+        .ok_or_else(|| FfiError::Failed("device chain hex is malformed".into()))?;
+    let device_chain = IdentityChain::decode(&bytes).map_err(FfiError::from)?;
+    let chain = device_chain.extend(
+        &device.kp,
+        segment.kp.public(),
+        format!("segment:{label}"),
+        now_secs(),
+        0,
+    );
+    Ok(hex_bytes(&chain.encode()))
+}
+
 /// A username **registry "anchor"** hosted on this device: a directory mapping
 /// usernames to account keys. Spawn one and share its `uri()` so others can
 /// register/resolve against it (e.g. via [`anchor_register`]/[`anchor_resolve`]).
@@ -1021,6 +1206,74 @@ pub fn anchor_resolve(uri: String, username: String) -> Result<Option<String>, F
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Two segments of one account both resolve to that account (a contact who
+    /// pinned it recognizes both), yet they authenticate with distinct leaf keys
+    /// — mutually unlinkable contextual identities. Exercises the exact surface
+    /// the app's Segments screen calls.
+    #[test]
+    fn segments_belong_to_account_but_are_unlinkable() {
+        let account = Account::generate();
+        let device = DeviceKey::generate();
+        let work = SegmentKey::generate();
+        let play = SegmentKey::generate();
+
+        // Distinct leaf keys → unlinkable at the session/transport layer.
+        assert_ne!(work.fingerprint_hex(), play.fingerprint_hex());
+        assert_ne!(work.safety_number(), play.safety_number());
+
+        let work_chain = account_segment_chain(
+            account.clone(),
+            device.clone(),
+            work.clone(),
+            "work".into(),
+        );
+        assert!(!work_chain.is_empty());
+
+        // A host pins the account; the "work" segment joins and resolves AS the
+        // account (contact = true), proving the segment belongs to the account.
+        let host =
+            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into())
+                .expect("host");
+        host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
+        let joiner =
+            TalkryptClient::join_segment(host.invite_uri(), work, work_chain, None).expect("join seg");
+
+        let mut resolved_as_account = false;
+        for _ in 0..50 {
+            while let Some(ev) = host.poll_event() {
+                if let FfiEvent::Identity { contact, .. } = ev {
+                    if contact {
+                        resolved_as_account = true;
+                    }
+                }
+            }
+            if resolved_as_account {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            resolved_as_account,
+            "a segment must resolve as the account that roots its chain"
+        );
+        assert_eq!(joiner.peer_count(), 1);
+
+        // The linked-device path (no account key): obtain a real account→device
+        // chain via linking, then mint a segment under the device key alone.
+        let offer = LinkOffer::host(account.clone(), "127.0.0.1:19958".into(), None).expect("offer");
+        let res = link_accept(device.clone(), offer.uri(), "phone".into()).expect("link");
+        let seg_chain =
+            linked_segment_chain(device, res.chain_hex, play, "play".into()).expect("seg chain");
+        // It decodes, has 2 links (account→device→segment), and roots at the
+        // same account — a linked device minted a segment with no account key.
+        let decoded = IdentityChain::decode(&parse_hex_bytes(&seg_chain).unwrap()).unwrap();
+        assert_eq!(decoded.links.len(), 2);
+        assert_eq!(
+            decoded.links.first().unwrap().issuer.fingerprint(),
+            account.kp.public().fingerprint()
+        );
+    }
 
     /// Spawn an anchor, register a username, and resolve it back — the exact
     /// surface the app's Anchors screen calls.
