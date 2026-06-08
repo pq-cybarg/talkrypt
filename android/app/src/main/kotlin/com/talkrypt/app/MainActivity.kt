@@ -29,10 +29,14 @@ import com.talkrypt.custody.CustodyBridge
 import kotlin.concurrent.thread
 import uniffi.talkrypt_ffi.Account
 import uniffi.talkrypt_ffi.AnchorNode
+import uniffi.talkrypt_ffi.DeviceKey
 import uniffi.talkrypt_ffi.FfiEvent
+import uniffi.talkrypt_ffi.LinkOffer
 import uniffi.talkrypt_ffi.TalkryptClient
 import uniffi.talkrypt_ffi.anchorRegister
 import uniffi.talkrypt_ffi.anchorResolve
+import uniffi.talkrypt_ffi.inviteChannel
+import uniffi.talkrypt_ffi.linkAccept
 
 /**
  * The talkrypt chat app — a post-quantum, end-to-end encrypted chat over the
@@ -93,8 +97,16 @@ class MainActivity : Activity() {
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "talkrypt") {
-            toast("opening invite…")
-            startJoin(data.toString())
+            val uri = data.toString()
+            // A device-linking offer (channel "#link") routes to the linking
+            // confirm screen — not the chat join flow.
+            val isLink = runCatching { inviteChannel(uri) == "#link" }.getOrDefault(false)
+            if (isLink) {
+                setContentView(acceptLinkConfirmScreen(uri))
+            } else {
+                toast("opening invite…")
+                startJoin(uri)
+            }
         }
     }
 
@@ -188,6 +200,9 @@ class MainActivity : Activity() {
         col.addView(pillButton("Contacts", panel, fg) {
             setContentView(contactsScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("Linked devices", panel, fg) {
+            setContentView(linkedDevicesScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -280,6 +295,187 @@ class MainActivity : Activity() {
             addView(iv, LinearLayout.LayoutParams(side, side))
         }
         parent.addView(wrap, lp(MATCH_PARENT, WRAP_CONTENT))
+    }
+
+    // ---------- device linking (primary certifies a secondary device) ----------
+    // Held while a link offer is running so its accept loop stays alive.
+    private var linkOffer: LinkOffer? = null
+
+    /** This device's persistent linked-device key (generated + persisted once).
+     *  Distinct from `account()`: a linked secondary device holds this key but
+     *  NOT the account secret — it presents a certificate the primary issued. */
+    private fun deviceKey(): DeviceKey {
+        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val seed = prefs.getString("device_seed", null)
+        if (seed != null) {
+            runCatching { return DeviceKey.fromSeedHex(seed) }
+        }
+        val d = DeviceKey.generate()
+        prefs.edit().putString("device_seed", d.seedHex()).apply()
+        return d
+    }
+
+    /** The account this device is linked to, if any: (chainHex, username, accountSafetyNumber). */
+    private fun storedLink(): Triple<String, String, String>? {
+        val p = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+        val chain = p.getString("link_chain", null) ?: return null
+        return Triple(chain, p.getString("link_username", "") ?: "", p.getString("link_account_sn", "") ?: "")
+    }
+
+    private fun saveLink(chainHex: String, username: String, accountSn: String) {
+        getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE).edit()
+            .putString("link_chain", chainHex)
+            .putString("link_username", username)
+            .putString("link_account_sn", accountSn)
+            .apply()
+    }
+
+    private fun clearLink() {
+        getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE).edit()
+            .remove("link_chain").remove("link_username").remove("link_account_sn").apply()
+    }
+
+    private fun linkedDevicesScreen(): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Linked devices", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text(
+                "Link this device to your account on another device, so contacts recognize all your devices as one account. The account key never leaves the device that holds it — only a signed certificate crosses the wire.",
+                13f, muted,
+            ),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+
+        val link = storedLink()
+        if (link != null) {
+            col.addView(text("THIS DEVICE IS LINKED", 12f, muted, bold = true))
+            col.addView(text("account ${link.third.take(35)}…", 13f, accent))
+            if (link.second.isNotEmpty()) col.addView(text("username ${link.second}", 13f, fg))
+            col.addView(
+                text("device ${deviceKey().fingerprintHex().take(24)}…", 12f, muted),
+                lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(14)),
+            )
+            col.addView(label("JOIN A CHAT AS THIS ACCOUNT (talkrypt:// invite)"))
+            val joinUri = inputField("talkrypt://…")
+            col.addView(joinUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+            col.addView(pillButton("Join as this account", accent, Color.WHITE) {
+                val u = joinUri.text.toString().trim()
+                if (u.startsWith("talkrypt://")) joinAsLinked(u) else toast("paste a talkrypt:// invite")
+            }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+            col.addView(pillButton("Unlink this device", panel, fg) {
+                clearLink(); toast("unlinked"); setContentView(linkedDevicesScreen())
+            }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+            col.addView(text("— or re-link —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(22), bottom = dp(6)))
+        }
+
+        // Primary role: certify ANOTHER device under this device's account.
+        col.addView(text("LINK ANOTHER DEVICE TO MY ACCOUNT", 12f, muted, bold = true).also { it.setPadding(0, dp(4), 0, dp(4)) })
+        col.addView(text("This device holds the account. Show a one-time QR the new device scans.", 12f, muted))
+        col.addView(pillButton("Start a link offer", accent, Color.WHITE) {
+            startLinkOffer()
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+
+        // Secondary role: link THIS device using an offer from the primary.
+        col.addView(text("LINK THIS DEVICE TO AN ACCOUNT", 12f, muted, bold = true).also { it.setPadding(0, dp(22), 0, dp(4)) })
+        col.addView(label("LINK OFFER (talkrypt:// from the primary)"))
+        val offerUri = inputField("talkrypt://…")
+        col.addView(offerUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+        col.addView(pillButton("Accept link on this device", panel, fg) {
+            val u = offerUri.text.toString().trim()
+            if (u.startsWith("talkrypt://")) setContentView(acceptLinkConfirmScreen(u)) else toast("paste the link offer URI")
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+
+        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun startLinkOffer() {
+        toast("starting link offer…")
+        thread {
+            try {
+                val lan = ApkShareServer.lanIp() ?: "127.0.0.1"
+                val offer = LinkOffer.host(account(), "$lan:9110", null)
+                ui.post {
+                    linkOffer = offer // hold it alive (the accept loop runs while held)
+                    setContentView(linkOfferRunningScreen(offer.uri(), offer.accountSafetyNumber()))
+                }
+            } catch (e: Exception) {
+                ui.post { toast("link offer failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun linkOfferRunningScreen(uri: String, accountSn: String): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Link offer running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("On the NEW device, scan this (or paste the URI into Linked devices → Accept link). The account key stays on this device.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+        addQrInto(col, uri, 0.66f)
+        col.addView(text(uri, 12f, accent, center = true).also { it.setPadding(0, dp(14), 0, dp(16)) })
+        col.addView(text("VERIFY OUT OF BAND — account safety number:", 12f, muted, bold = true))
+        col.addView(text(accountSn, 13f, fg), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
+        col.addView(pillButton("Done", panel, fg) {
+            linkOffer = null; setContentView(linkedDevicesScreen())
+        }, lp(MATCH_PARENT, dp(50)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun acceptLinkConfirmScreen(uri: String): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("Link this device?", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(
+            text("This certifies THIS device under the account offering the link. Afterward, verify the account safety number shown matches the other device, out of band.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
+        )
+        col.addView(text(uri, 12f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
+        col.addView(pillButton("Accept link on this device", accent, Color.WHITE) {
+            acceptLink(uri)
+        }, lp(MATCH_PARENT, dp(54)))
+        col.addView(pillButton("Cancel", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    private fun acceptLink(uri: String) {
+        toast("linking this device…")
+        thread {
+            try {
+                val res = linkAccept(deviceKey(), uri, "android")
+                saveLink(res.chainHex, res.username, res.accountSafetyNumber)
+                ui.post {
+                    setContentView(linkedDevicesScreen())
+                    toast("linked to account ${res.accountSafetyNumber.take(11)}…")
+                }
+            } catch (e: Exception) {
+                ui.post { toast("link failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun joinAsLinked(uri: String) {
+        val link = storedLink() ?: run { toast("this device isn't linked"); return }
+        toast("joining as linked account…")
+        thread {
+            try {
+                val c = TalkryptClient.joinLinked(uri, deviceKey(), link.first, link.second.ifEmpty { null })
+                val sn = c.safetyNumber()
+                runCatching { loadContacts(c) } // recognize saved contacts
+                ui.post {
+                    setContentView(chatScreen("chat", "linked · safety ${sn.take(11)} · peers ${c.peerCount()}"))
+                    system("joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
+                    bind(c); poll()
+                }
+            } catch (e: Exception) {
+                ui.post { toast("join failed: ${e.message}") }
+            }
+        }
     }
 
     // ---------- nearby discovery (BLE + Wi-Fi Direct) ----------

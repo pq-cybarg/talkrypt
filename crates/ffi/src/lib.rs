@@ -17,8 +17,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use talkrypt_core::{
-    resolve_across, ChatDescriptor, Core, Event, Persistence, RegistryClient, RegistryServer,
-    TopologyKind,
+    resolve_across, ChatDescriptor, Core, Event, LinkClient, LinkHost, Persistence, RegistryClient,
+    RegistryServer, TopologyKind,
 };
 use talkrypt_crypto::{
     dr_suite_id, IdentityChain, IdentityKeyPair, IdentityPublic, KemProfile, Revocation,
@@ -206,6 +206,23 @@ pub struct ContactRecord {
     pub account_pubkey_hex: String,
     pub name: String,
     pub friend: bool,
+}
+
+/// The result of a successful device link (the new-device side). Persist
+/// `chain_hex` (with this device's seed) and pass both to `join_linked` /
+/// `host_linked` to chat as this account on this device.
+#[derive(uniffi::Record)]
+pub struct LinkResult {
+    /// The account→device certificate chain, hex-encoded.
+    pub chain_hex: String,
+    /// The account's safety number — verify it against the primary out of band
+    /// before trusting this link.
+    pub account_safety_number: String,
+    /// The account's self-asserted username (empty if none).
+    pub username: String,
+    /// This device's fingerprint (give it to the account holder so they can
+    /// revoke this device later if it is lost).
+    pub device_fingerprint_hex: String,
 }
 
 fn map_event(e: Event) -> FfiEvent {
@@ -423,6 +440,100 @@ impl TalkryptClient {
                 invite,
             }))
         }
+    }
+
+    /// Join a chat as a **linked device**: use the persistent `device` key and
+    /// present the stored account certificate `chain_hex` (from [`link_accept`]),
+    /// so peers who pinned the account resolve you as that account. `username` is
+    /// the self-asserted label. The account key is never on this device — only
+    /// the certificate chain is.
+    #[uniffi::constructor]
+    pub fn join_linked(
+        uri: String,
+        device: Arc<DeviceKey>,
+        chain_hex: String,
+        username: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let rt = Runtime::new().map_err(FfiError::from)?;
+        let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+        let suite = SuiteRegistry::with_defaults()
+            .get_by_scheme_hash(&desc.scheme_hash())
+            .map_err(FfiError::from)?;
+        let chain_bytes = parse_hex_bytes(&chain_hex)
+            .ok_or_else(|| FfiError::Failed("link chain hex is malformed".into()))?;
+        let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
+        let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+        let (core, rx) = Core::new(
+            IdentityKeyPair::from_secret_bytes(device.kp.export_secret()),
+            suite,
+            transport,
+            desc.clone(),
+        );
+        // Set the presentation BEFORE establishing, so the initiator's eager
+        // presentation (sent as it connects) already carries our chain — the
+        // host resolves us as the account on first contact, with no separate
+        // post-connect announce (which would deliver the identity a second time).
+        core.present_identity(chain, username);
+        rt.block_on(async {
+            for_kind(desc.topology)
+                .establish(&core, &desc.endpoints)
+                .await
+        })
+        .map_err(FfiError::from)?;
+        let invite = core.descriptor().to_uri();
+        Ok(Arc::new(Self {
+            rt,
+            core,
+            events: Mutex::new(rx),
+            invite,
+        }))
+    }
+
+    /// Host a chat as a **linked device**: like [`Self::host`], but use the
+    /// persistent `device` key and announce the stored account certificate
+    /// `chain_hex` to joiners (so they resolve this host as the account).
+    #[uniffi::constructor]
+    pub fn host_linked(
+        listen: String,
+        channel: String,
+        posture: String,
+        device: Arc<DeviceKey>,
+        chain_hex: String,
+        username: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let rt = Runtime::new().map_err(FfiError::from)?;
+        let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
+        let suite_id = dr_suite_id(profile);
+        let suite = SuiteRegistry::with_defaults()
+            .get(&suite_id)
+            .map_err(FfiError::from)?;
+        let chain_bytes = parse_hex_bytes(&chain_hex)
+            .ok_or_else(|| FfiError::Failed("link chain hex is malformed".into()))?;
+        let chain = IdentityChain::decode(&chain_bytes).map_err(FfiError::from)?;
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            &suite_id,
+            vec![listen.clone()],
+            channel,
+        );
+        let transport = Arc::new(TcpTransport::new(&listen));
+        let (core, rx) = Core::new(
+            IdentityKeyPair::from_secret_bytes(device.kp.export_secret()),
+            suite,
+            transport,
+            desc,
+        );
+        rt.block_on(core.host()).map_err(FfiError::from)?;
+        // Set the identity to present; joiners receive it as they connect.
+        core.present_identity(chain, username);
+        let invite = core.descriptor().to_uri();
+        Ok(Arc::new(Self {
+            rt,
+            core,
+            events: Mutex::new(rx),
+            invite,
+        }))
     }
 
     /// Send a message to the channel.
@@ -644,6 +755,164 @@ impl Account {
     }
 }
 
+// ===== device linking (primary certifies a secondary device) =====
+
+/// A persistent **device identity** (ML-DSA-87) for a *linked* secondary device
+/// — the device that does NOT hold the account key. Generate it once, persist
+/// `seed_hex()`, and reuse it so a link certificate ([`link_accept`]) stays valid
+/// across sessions (the certificate certifies *this* device key). Distinct from
+/// [`Account`], which holds the account secret.
+#[derive(uniffi::Object)]
+pub struct DeviceKey {
+    kp: IdentityKeyPair,
+}
+
+#[uniffi::export]
+impl DeviceKey {
+    /// Generate a fresh device key.
+    #[uniffi::constructor]
+    pub fn generate() -> Arc<Self> {
+        Arc::new(Self {
+            kp: IdentityKeyPair::generate(),
+        })
+    }
+
+    /// Reload a device key from its 64-hex-char seed.
+    #[uniffi::constructor]
+    pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
+        let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
+        Ok(Arc::new(Self {
+            kp: IdentityKeyPair::from_secret_bytes(seed),
+        }))
+    }
+
+    /// The 32-byte device seed as hex — the secret; store it protected.
+    pub fn seed_hex(&self) -> String {
+        hex_bytes(&self.kp.export_secret())
+    }
+
+    /// This device's fingerprint (96 hex chars). Give it to the account holder so
+    /// they can revoke this device later if it is lost.
+    pub fn fingerprint_hex(&self) -> String {
+        hex_bytes(&self.kp.public().fingerprint())
+    }
+
+    /// This device's safety number, for out-of-band verification.
+    pub fn safety_number(&self) -> String {
+        self.kp.public().safety_number()
+    }
+}
+
+/// The **primary** side of device linking: hold the account key and certify new
+/// devices that connect with the one-time linking URI. Spawn it, show `uri()`
+/// (as a QR in person), and keep this object alive while pairing. The account
+/// key never leaves this device — only a signed device certificate is sent.
+#[derive(uniffi::Object)]
+pub struct LinkOffer {
+    // The runtime keeps the linking accept loop alive.
+    _rt: Runtime,
+    uri: String,
+    account_safety_number: String,
+}
+
+#[uniffi::export]
+impl LinkOffer {
+    /// Host a linking offer bound to `listen` (host:port — use the device's
+    /// reachable LAN address). `username` is advertised with the account to the
+    /// new device. Returns a node whose `uri()` the NEW device passes to
+    /// [`link_accept`].
+    #[uniffi::constructor]
+    pub fn host(
+        account: Arc<Account>,
+        listen: String,
+        username: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let rt = Runtime::new().map_err(FfiError::from)?;
+        let suite = SuiteRegistry::with_defaults()
+            .get(DEFAULT_SUITE_ID)
+            .map_err(FfiError::from)?;
+        // A one-time linking descriptor: its random invite token is the in-person
+        // secret carried by the QR. The account key never crosses the wire.
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![listen.clone()],
+            "#link",
+        );
+        let transport = Arc::new(TcpTransport::new(&listen));
+        let host = LinkHost::new(
+            IdentityKeyPair::from_secret_bytes(account.kp.export_secret()),
+            IdentityKeyPair::generate(),
+            suite,
+            transport,
+            &desc,
+            username,
+            now_secs(),
+        );
+        rt.block_on(host.run()).map_err(FfiError::from)?;
+        Ok(Arc::new(Self {
+            _rt: rt,
+            uri: desc.to_uri(),
+            account_safety_number: account.safety_number(),
+        }))
+    }
+
+    /// The shareable linking URI (show as a QR to the new device).
+    pub fn uri(&self) -> String {
+        self.uri.clone()
+    }
+
+    /// The offering account's safety number — the new device should verify the
+    /// value it gets back from `link_accept` matches this, out of band.
+    pub fn account_safety_number(&self) -> String {
+        self.account_safety_number.clone()
+    }
+}
+
+/// **New-device** side of linking: connect to a [`LinkOffer`] `uri`, get this
+/// `device` certified under the offering account, and return the certificate to
+/// persist. `label` is a human note recorded in the certificate (e.g. "phone").
+/// Verify `account_safety_number` against the primary out of band before
+/// trusting. Blocking (runs its own runtime).
+#[uniffi::export]
+pub fn link_accept(
+    device: Arc<DeviceKey>,
+    uri: String,
+    label: String,
+) -> Result<LinkResult, FfiError> {
+    let rt = Runtime::new().map_err(FfiError::from)?;
+    rt.block_on(async move {
+        let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+        let suite = SuiteRegistry::with_defaults()
+            .get_by_scheme_hash(&desc.scheme_hash())
+            .map_err(FfiError::from)?;
+        let endpoint = desc
+            .endpoints
+            .first()
+            .cloned()
+            .ok_or_else(|| FfiError::Failed("link URI has no endpoint".into()))?;
+        let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+        let linked = LinkClient::request(
+            &device.kp,
+            suite,
+            transport,
+            &desc,
+            &endpoint,
+            label,
+            now_secs(),
+        )
+        .await
+        .map_err(FfiError::from)?;
+        Ok(LinkResult {
+            chain_hex: hex_bytes(&linked.chain.encode()),
+            account_safety_number: linked.account.safety_number(),
+            username: linked.username.unwrap_or_default(),
+            device_fingerprint_hex: hex_bytes(&device.kp.public().fingerprint()),
+        })
+    })
+}
+
 /// A username **registry "anchor"** hosted on this device: a directory mapping
 /// usernames to account keys. Spawn one and share its `uri()` so others can
 /// register/resolve against it (e.g. via [`anchor_register`]/[`anchor_resolve`]).
@@ -713,6 +982,16 @@ async fn anchor_client(uri: &str) -> Result<(RegistryClient, ChatDescriptor), Ff
     Ok((client, desc))
 }
 
+/// The channel a `talkrypt://` invite/link URI encodes (e.g. `#link` for a
+/// device-linking offer, so the app can route it to `link_accept` instead of
+/// joining it as a chat). Empty string if the URI can't be parsed.
+#[uniffi::export]
+pub fn invite_channel(uri: String) -> String {
+    ChatDescriptor::from_uri(&uri)
+        .map(|d| d.channel)
+        .unwrap_or_default()
+}
+
 /// Register `account` under `username` at the anchor at `uri` (you must hold the
 /// account key). The binding is self-signed by the account, so the anchor can't
 /// forge it. Blocking (runs its own runtime).
@@ -763,6 +1042,93 @@ mod tests {
         // Seed round-trips so the app can persist + reload the account.
         let reloaded = Account::from_seed_hex(account.seed_hex()).expect("reload");
         assert_eq!(reloaded.safety_number(), account.safety_number());
+    }
+
+    /// Full device-linking flow over the FFI: a primary certifies a new device,
+    /// then that linked device joins a chat and is resolved as the pinned
+    /// account — the exact surface the app's linking screen calls.
+    #[test]
+    fn link_then_chat_as_linked_device() {
+        // Primary holds the account and offers linking.
+        let account = Account::generate();
+        let offer = LinkOffer::host(account.clone(), "127.0.0.1:19955".into(), Some("alice".into()))
+            .expect("offer");
+        assert_eq!(offer.account_safety_number(), account.safety_number());
+
+        // A new device gets certified under the account.
+        let device = DeviceKey::generate();
+        let res = link_accept(device.clone(), offer.uri(), "phone".into()).expect("link");
+        assert_eq!(res.account_safety_number, account.safety_number());
+        assert_eq!(res.username, "alice");
+        assert!(!res.chain_hex.is_empty());
+        assert_eq!(res.device_fingerprint_hex, device.fingerprint_hex());
+
+        // A separate host pins the account as a contact; the linked device joins
+        // presenting its certificate → the host resolves it as that contact. The
+        // host also presents ITS OWN account *before* the joiner connects, so the
+        // host→joiner identity travels the reactive responder path (the exact
+        // on-device scenario that surfaced "identity chain did not bind").
+        let host =
+            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into())
+                .expect("host");
+        let host_account = Account::generate();
+        host.present_account(host_account.clone(), Some("bob".into()));
+        host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
+        let joiner = TalkryptClient::join_linked(
+            host.invite_uri(),
+            device,
+            res.chain_hex,
+            Some("alice".into()),
+        )
+        .expect("join linked");
+
+        let mut saw_contact = false;
+        for _ in 0..50 {
+            while let Some(ev) = host.poll_event() {
+                if let FfiEvent::Identity {
+                    contact, username, ..
+                } = ev
+                {
+                    if contact && username == "alice" {
+                        saw_contact = true;
+                    }
+                }
+            }
+            if saw_contact {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            saw_contact,
+            "linked device must resolve as the pinned account/contact"
+        );
+        assert_eq!(joiner.peer_count(), 1);
+
+        // Reverse direction: the linked joiner must resolve the host's presented
+        // account (NOT raise "identity chain did not bind to peer").
+        let mut saw_host_identity = false;
+        for _ in 0..50 {
+            while let Some(ev) = joiner.poll_event() {
+                match ev {
+                    FfiEvent::Identity { username, .. } if username == "bob" => {
+                        saw_host_identity = true;
+                    }
+                    FfiEvent::Error { message } => {
+                        panic!("linked joiner rejected the host identity: {message}");
+                    }
+                    _ => {}
+                }
+            }
+            if saw_host_identity {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            saw_host_identity,
+            "linked joiner must resolve the host's presented account"
+        );
     }
 
     /// Exercise the full FFI facade: host, join, send, receive — the exact

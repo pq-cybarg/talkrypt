@@ -305,7 +305,15 @@ mod tests {
     fn expired_chain_is_rejected() {
         let account = IdentityKeyPair::generate();
         let device = IdentityKeyPair::generate();
-        let chain = IdentityChain::device(&account, device.public(), "device", 0, NOW - 1);
+        // Expire beyond the clock-skew grace so it is unambiguously expired
+        // (a cert expired within tolerance is intentionally still accepted).
+        let chain = IdentityChain::device(
+            &account,
+            device.public(),
+            "device",
+            0,
+            NOW - talkrypt_crypto::CLOCK_SKEW_TOLERANCE - 1,
+        );
         let mut store = ContactStore::new();
         store.add(account.public().clone(), None, false);
         assert!(resolve_chain(&store, &chain, device.public().fingerprint(), NOW).is_none());

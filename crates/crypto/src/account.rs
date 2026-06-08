@@ -83,9 +83,24 @@ impl Cert {
         })
     }
     fn valid_at(&self, now: u64) -> bool {
-        now >= self.valid_from && (self.expiry == 0 || now <= self.expiry)
+        // Tolerate clock skew between the issuer and the verifier (devices have
+        // independent, unsynchronized clocks). Without this, a certificate issued
+        // "just now" by one device is rejected by a peer whose clock is a little
+        // behind — its `now` falls before the cert's `valid_from`. We allow the
+        // verifier's clock to be off by up to CLOCK_SKEW_TOLERANCE in either
+        // direction (standard PKI practice: a backdated not-before allowance plus
+        // a symmetric grace past expiry). Observed live: a fresh device cert from
+        // a host was refused by an Android client whose clock lagged ~45s.
+        now.saturating_add(CLOCK_SKEW_TOLERANCE) >= self.valid_from
+            && (self.expiry == 0 || now <= self.expiry.saturating_add(CLOCK_SKEW_TOLERANCE))
     }
 }
+
+/// Allowance for unsynchronized device clocks when checking certificate validity
+/// windows (seconds). Five minutes mirrors common PKI not-before skew tolerance:
+/// large enough for realistic phone/desktop drift, small enough to bound how
+/// early a not-yet-valid cert (or how late an expired one) is accepted.
+pub const CLOCK_SKEW_TOLERANCE: u64 = 300;
 
 /// A [`Cert`] signed by its **issuer** (the parent key in the tree).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,10 +471,34 @@ mod tests {
     fn expired_cert_is_rejected() {
         let account = IdentityKeyPair::generate();
         let device = IdentityKeyPair::generate();
-        let chain = IdentityChain::device(&account, device.public(), "device", 0, NOW - 1);
+        // Expire well beyond the clock-skew grace so this is unambiguously expired.
+        let chain =
+            IdentityChain::device(&account, device.public(), "device", 0, NOW - CLOCK_SKEW_TOLERANCE - 1);
         assert!(chain.verify(account.public(), device.public(), NOW).is_err());
         // valid before expiry
-        assert!(chain.verify(account.public(), device.public(), NOW - 100).is_ok());
+        assert!(chain.verify(account.public(), device.public(), NOW - 1000).is_ok());
+    }
+
+    #[test]
+    fn fresh_cert_tolerates_verifier_clock_behind() {
+        // A cert issued "now" by one device must still verify on a peer whose
+        // clock lags slightly — the live Android-vs-host skew that surfaced this.
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let issued_at = NOW; // issuer's clock
+        let chain = IdentityChain::device(&account, device.public(), "device", issued_at, 0);
+        // Verifier's clock is 45s behind the issuer: within tolerance → accepted.
+        assert!(chain
+            .verify(account.public(), device.public(), issued_at - 45)
+            .is_ok());
+        // Within the full grace window: still accepted.
+        assert!(chain
+            .verify(account.public(), device.public(), issued_at - CLOCK_SKEW_TOLERANCE)
+            .is_ok());
+        // Beyond the grace window: a genuinely not-yet-valid cert is refused.
+        assert!(chain
+            .verify(account.public(), device.public(), issued_at - CLOCK_SKEW_TOLERANCE - 1)
+            .is_err());
     }
 
     #[test]

@@ -192,6 +192,12 @@ enum Cmd {
         /// Username to convey to the new device (optional).
         #[arg(long)]
         username: Option<String>,
+        /// Advertise this address in the linking URI instead of the bound
+        /// --listen (e.g. bind 0.0.0.0, advertise your LAN IP; on an Android
+        /// emulator advertise the host alias 10.0.2.2). Same idea as `host
+        /// --endpoint`.
+        #[arg(long)]
+        endpoint: Option<String>,
     },
     /// Accept a link offer on a NEW device: connect to the offer's URI, get a
     /// certificate for this device's key, and save the chain for `host --chain`.
@@ -406,7 +412,8 @@ async fn main() {
             listen,
             account,
             username,
-        } => run_link_offer(listen, account, username).await,
+            endpoint,
+        } => run_link_offer(listen, account, username, endpoint).await,
         Cmd::LinkAccept {
             uri,
             device,
@@ -1183,6 +1190,7 @@ async fn run_link_offer(
     listen: String,
     account: String,
     username: Option<String>,
+    endpoint: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID)?;
@@ -1190,15 +1198,21 @@ async fn run_link_offer(
     let account_kp = load_account(&account_path)
         .map_err(|e| format!("could not load account {account_path}: {e}"))?;
     let account_sn = account_kp.public().safety_number();
+    // The address advertised in the linking URI: the bound listen, unless the
+    // caller advertises a different reachable one (bind 0.0.0.0, advertise LAN).
+    let advertised = endpoint.clone().unwrap_or_else(|| listen.clone());
     // A one-time linking descriptor: its random invite token is the in-person
     // secret carried by the QR. The account key never crosses the wire.
     let desc = ChatDescriptor::new(
         TopologyKind::P2P,
         Persistence::Ephemeral,
         DEFAULT_SUITE_ID,
-        vec![listen.clone()],
+        vec![advertised.clone()],
         "#link",
     );
+    if let Some(ep) = &endpoint {
+        println!("advertising endpoint: {ep} (bound on {listen})");
+    }
     let transport = Arc::new(TcpTransport::new(&listen));
     let host = LinkHost::new(
         account_kp,

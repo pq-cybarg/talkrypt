@@ -30,7 +30,7 @@ pub mod treekem;
 
 pub use account::{
     belongs_to_account, cross_compare, IdentityChain, Revocation, SignedCert, SignedClaim,
-    UsernameClaim,
+    UsernameClaim, CLOCK_SKEW_TOLERANCE,
 };
 pub use beacon::BeaconBody;
 pub use error::{CryptoError, Result};
