@@ -23,11 +23,15 @@ safelog = { version = "0.8", optional = true }
 # absent in the Android NDK sysroot, so the cross-compile fails to link. The
 # version matches Arti's libsqlite3-sys so Cargo unifies the `bundled` feature.
 libsqlite3-sys = { version = "0.37", features = ["bundled"], optional = true }
+# Direct rustls handle so we can install a default CryptoProvider (ring) before
+# Arti uses TLS — rustls 0.23 panics otherwise when both ring + aws-lc-rs are in
+# the graph (feature unification). Version matches Arti's rustls.
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 
 [features]
 default = []
 # Pulls in the (large) Arti dependency tree and enables ArtiTransport.
-tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog", "dep:libsqlite3-sys"]
+tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog", "dep:libsqlite3-sys", "dep:rustls"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -48,6 +48,9 @@ class MainActivity : Activity() {
     private var shareServer: ApkShareServer? = null
     private var useTor = false // route the next host/join over Tor (.onion)
 
+    /** Writable state dir for Arti (onion keys + dir cache) under app storage. */
+    private fun torStateDir(): String = java.io.File(filesDir, "tor").absolutePath
+
     // Nearby discovery (BLE + Wi-Fi Direct) state.
     private var nearby: List<NearbyDiscovery> = emptyList()
     private val foundInvites = LinkedHashMap<String, NearbyDiscovery.Peer>()
@@ -756,7 +759,7 @@ class MainActivity : Activity() {
                 // dialable from another device — required for QR/nearby joining.
                 // Over Tor, host an onion service instead (the .onion goes in the invite).
                 val c = if (useTor) {
-                    TalkryptClient.hostTor(channel, posture)
+                    TalkryptClient.hostTor(channel, posture, torStateDir())
                 } else {
                     val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
                     TalkryptClient.host(listen, channel, posture)
@@ -835,7 +838,7 @@ class MainActivity : Activity() {
         toast(if (useTor) "joining over Tor…" else "joining…")
         thread {
             try {
-                val c = if (useTor) TalkryptClient.joinTor(uri) else TalkryptClient.join(uri)
+                val c = if (useTor) TalkryptClient.joinTor(uri, torStateDir()) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 // Present our account (optionally as a username) so a registry-
                 // restricted host can admit us and the peer can friend us. A

@@ -27,6 +27,33 @@ use talkrypt_crypto::{
 use talkrypt_topology::for_kind;
 use talkrypt_transport::TcpTransport;
 
+/// Build an Arti onion-state persistence rooted at a caller-supplied writable
+/// directory (created if missing) — required on Android, where the temp dir is
+/// not usable and the onion service keys + dir cache need a real path under the
+/// app's storage.
+#[cfg(feature = "tor")]
+fn tor_persistence(state_dir: &str) -> talkrypt_transport::OnionPersistence {
+    let path = std::path::PathBuf::from(state_dir);
+    let _ = std::fs::create_dir_all(&path);
+    talkrypt_transport::OnionPersistence::Persistent { state_dir: path }
+}
+
+/// Route panics (incl. on Arti's worker threads, which Android can't surface) to
+/// `<state_dir>/panic.txt`, so a Tor-bootstrap failure is diagnosable on device.
+/// Installed once before the first Tor bootstrap.
+#[cfg(feature = "tor")]
+fn install_tor_panic_logger(state_dir: &str) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    let dir = state_dir.to_string();
+    ONCE.call_once(move || {
+        let _ = std::fs::create_dir_all(&dir);
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::write(format!("{dir}/panic.txt"), format!("{info}"));
+        }));
+    });
+}
+
 /// Current Unix time in seconds (registry claim timestamps).
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -275,25 +302,34 @@ impl TalkryptClient {
     /// carries the `.onion`. Requires the FFI built with `--features tor`,
     /// otherwise returns an error.
     #[uniffi::constructor]
-    pub fn host_tor(channel: String, posture: String) -> Result<Arc<Self>, FfiError> {
+    pub fn host_tor(
+        channel: String,
+        posture: String,
+        state_dir: String,
+    ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (channel, posture);
+            let _ = (channel, posture, state_dir);
             Err(FfiError::Failed(
                 "this build has Tor disabled; rebuild the FFI with --features tor".into(),
             ))
         }
         #[cfg(feature = "tor")]
         {
-            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            use talkrypt_transport::ArtiTransport;
+            install_tor_panic_logger(&state_dir);
             let rt = Runtime::new().map_err(FfiError::from)?;
             let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
             let suite_id = dr_suite_id(profile);
             let suite = SuiteRegistry::with_defaults()
                 .get(&suite_id)
                 .map_err(FfiError::from)?;
+            // Arti needs a writable state dir for onion keys + the dir cache. On
+            // Android the temp dir isn't usable, so the host passes a persistent
+            // path (the app's filesDir).
+            let persistence = tor_persistence(&state_dir);
             let arti = Arc::new(
-                rt.block_on(ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt"))
+                rt.block_on(ArtiTransport::bootstrap(persistence, "talkrypt"))
                     .map_err(FfiError::from)?,
             );
             let desc = ChatDescriptor::new(
@@ -348,26 +384,28 @@ impl TalkryptClient {
     }
 
     /// Join over real Tor (Arti) — for a `.onion` invite. Requires the FFI built
-    /// with `--features tor`, otherwise returns an error.
+    /// with `--features tor`, otherwise returns an error. `state_dir` is a
+    /// writable path for Arti's state (the app's filesDir).
     #[uniffi::constructor]
-    pub fn join_tor(uri: String) -> Result<Arc<Self>, FfiError> {
+    pub fn join_tor(uri: String, state_dir: String) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "tor"))]
         {
-            let _ = uri;
+            let _ = (uri, state_dir);
             Err(FfiError::Failed(
                 "this build has Tor disabled; rebuild the FFI with --features tor".into(),
             ))
         }
         #[cfg(feature = "tor")]
         {
-            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            use talkrypt_transport::ArtiTransport;
+            install_tor_panic_logger(&state_dir);
             let rt = Runtime::new().map_err(FfiError::from)?;
             let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
             let suite = SuiteRegistry::with_defaults()
                 .get_by_scheme_hash(&desc.scheme_hash())
                 .map_err(FfiError::from)?;
             let arti = Arc::new(
-                rt.block_on(ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt"))
+                rt.block_on(ArtiTransport::bootstrap(tor_persistence(&state_dir), "talkrypt"))
                     .map_err(FfiError::from)?,
             );
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti, desc.clone());

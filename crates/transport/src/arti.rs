@@ -94,6 +94,11 @@ impl ArtiTransport {
         nickname: &str,
         anti_censorship: Option<&AntiCensorship>,
     ) -> Result<Self> {
+        // rustls 0.23 panics if it can't auto-pick a CryptoProvider when more
+        // than one (ring + aws-lc-rs) is compiled in — which happens via feature
+        // unification in larger builds (e.g. Android). Install one explicitly,
+        // process-wide, before any TLS is used. Idempotent; ignore "already set".
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let (config, tempdir) = build_config(&persistence, anti_censorship)?;
         let client = TorClient::create_bootstrapped(config)
             .await
