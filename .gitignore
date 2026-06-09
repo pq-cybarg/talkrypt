@@ -42,3 +42,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Desktop packaging output (scripts/package.sh)
+dist/
