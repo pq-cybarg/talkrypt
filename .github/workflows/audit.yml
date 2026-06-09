@@ -1,0 +1,38 @@
+# Dependency-advisory + supply-chain CI (SECURITY-AUDIT R-1 / F-2).
+#
+# Runs cargo-audit + cargo-deny on every push/PR AND on a weekly schedule — the
+# schedule matters: it re-scans the *unchanged* dependency tree so a newly
+# disclosed advisory is caught even when no commit triggered it. Runs the same
+# scripts/audit-deps.sh used locally, so CI and developer results match.
+name: audit
+
+on:
+  push:
+    paths: ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".github/workflows/audit.yml", "scripts/audit-deps.sh"]
+  pull_request:
+    paths: ["**/Cargo.toml", "Cargo.lock", "deny.toml"]
+  schedule:
+    - cron: "0 7 * * 1"   # every Monday 07:00 UTC — catch freshly-disclosed advisories
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Cache cargo-audit / cargo-deny
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: audit-tools-${{ runner.os }}-cargo-audit-cargo-deny
+      - name: Install audit tools
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          command -v cargo-deny  >/dev/null || cargo install cargo-deny  --locked
+      - name: Dependency advisory + supply-chain scan
+        run: bash scripts/audit-deps.sh

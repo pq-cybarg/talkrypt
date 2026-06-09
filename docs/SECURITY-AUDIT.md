@@ -91,7 +91,7 @@ who has read the disclaimers.
 | ID | Severity | Finding | Status |
 | --- | --- | --- | --- |
 | F-1 | High (meta) | No independent audit / cryptographic review / penetration test. Every property above is unverified externally. | Open — disclosed in README & `SECURITY.md` |
-| F-2 | Medium | Dependency vulnerability scanning (`cargo audit` / `cargo deny`) is not run in CI. | Open — see Recommendation R-1 |
+| F-2 | Medium | Dependency vulnerability scanning (`cargo audit` / `cargo deny`) was not run in CI. | **Resolved** — `scripts/audit-deps.sh` + `deny.toml` + `.github/workflows/audit.yml` (push/PR + weekly) |
 | F-3 | Low | Transient *symmetric* session secrets were not all zeroized-on-drop. | **Resolved** — Double Ratchet + PQ-Noise sessions now zeroize on drop; per-message keys held in `Zeroizing` |
 | F-4 | Low | Keygen uses `rand::OsRng` (`getrandom`) with no SP 800-90B health tests or approved DRBG wrapper. | Open — relevant to FIPS (COMPLIANCE §5.2) |
 | F-5 | Low | Cert validity tolerates ±5 min clock skew (`CLOCK_SKEW_TOLERANCE`), so a cert expired by <5 min, or not-yet-valid by <5 min, is accepted. | Accepted — bounded, necessary for unsynchronized device clocks; revisit if short-TTL certs are introduced |
@@ -102,6 +102,7 @@ who has read the disclaimers.
 | F-10 | Info | GUI bundles (Android APK, desktop) are not built/tested in CI; the Rust core + FFI they depend on are. | Open |
 | F-11 | Medium | The suite-registry floor was enforced only against a suite's *self-declared* `SecurityLevel` tag — a suite naming AES-128 / ML-KEM-768 / ML-DSA-65 could pass by tagging itself `PostQuantum`. | **Resolved** — `register` now also enforces the declared parameters (`meets_cnsa_floor`); the AEAD type (`&[u8;32]`) structurally bars an AES-128-length key |
 | F-12 | Info | The RFC 9420 conformance harness (`crates/crypto/src/mls/`) names the standard AES-128-GCM ciphersuite and derives 16-byte key-schedule bytes to match official MLS vectors. It instantiates no cipher, is not a registrable suite, and is not on any message path. | By design — `docs/CONFORMANCE.md`; walled off by F-11 + the AEAD type |
+| F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
 
 ### Detail on the notable findings
 
@@ -124,6 +125,32 @@ guard: `ratchet::tests::dropping_active_session_runs_zeroize_drop` exercises the
 drop path with all secret fields populated. (Full memory-wipe verification — that
 the bytes are actually zero post-drop — is not observable in safe Rust; a Miri
 run remains the proper check, R-3.)
+
+**F-2 / R-1 (dependency scanning) — Resolved.** `scripts/audit-deps.sh` runs
+`cargo audit` (RustSec DB) + `cargo deny check` (advisories, licenses, banned
+crates, source policy via `deny.toml`); `.github/workflows/audit.yml` runs it on
+push/PR **and weekly** (the schedule re-scans the unchanged tree so newly
+disclosed advisories surface). Baseline at adoption: one vulnerability (F-13,
+fixed by patch), three unmaintained transitive crates (`bincode`, `paste`,
+`proc-macro-error2` — surfaced as non-failing warnings; not vulnerabilities), all
+licenses permissive, all sources crates.io. The gate is green.
+
+**F-13 (rsa / Marvin) — Resolved by source patch.** `rsa` 0.9.10 is flagged by
+RUSTSEC-2023-0071 (private-key recovery via a timing side-channel) with no fixed
+upstream release. It enters the tree **only** transitively through Arti
+(`arti-client → … → ssh-key-fork-arti → rsa`) under the `tor` feature, for SSH
+key *parsing* (not encryption/signing), and is **absent from default builds**;
+talkrypt performs no RSA operations of its own. Rather than accept it, `rsa` is
+**vendored and source-patched** (`third-party/rsa/`, wired via
+`[patch.crates-io]` so the fix applies to every build/install): the single
+private-key chokepoint (`algorithms/rsa.rs::rsa_decrypt`, which backs decrypt
+*and* sign) now **blinds with the OS CSPRNG whenever no caller RNG is supplied**,
+so a private-key operation is never performed unblinded — the recognized Marvin
+countermeasure. The vendored crate's own 89 tests pass with the patch active,
+confirming RSA correctness is preserved. Advisory tooling matches by version and
+cannot see the source patch, so RUSTSEC-2023-0071 is listed in `deny.toml` /
+`audit-deps.sh` with a justification pointing to `third-party/rsa/TALKRYPT-PATCH.md`
+— documenting a *fixed* dependency, not an accepted risk.
 
 **F-11 (floor enforcement) — Resolved.** The registry's floor originally rejected
 a suite only if its self-reported `SecurityLevel` was below `PostQuantum`. Because
@@ -193,7 +220,7 @@ timing/side-channel tests (F-9); CVE scanning not automated (F-2).
 
 | ID | Priority | Recommendation |
 | --- | --- | --- |
-| R-1 | High | Add `cargo audit` + `cargo deny` to CI (and run before each release); track the advisory DB. (F-2) |
+| R-1 | Done | `cargo audit` + `cargo deny` wired into CI (`.github/workflows/audit.yml`, push/PR + weekly) via `scripts/audit-deps.sh` + `deny.toml`. Keep the ignore list reviewed. (F-2, F-13) |
 | R-2 | High | Commission an independent cryptographic review of the ratchet, handshake, and identity-chain logic — the properties in §3 are the audit's core. (F-1) |
 | R-3 | Low | F-3 zeroization is implemented; add a Miri run in CI to *verify* the wipe (safe Rust can't observe post-drop bytes). |
 | R-4 | Medium | Timing side-channel review of the AEAD and signature paths; document constant-time status. (F-9) |

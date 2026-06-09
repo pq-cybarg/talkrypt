@@ -76,14 +76,10 @@ echo "PQ parameter set (the crate APIs in use):"
 grep -rqE 'MlKem1024' crates/crypto/src/ && note "ML-KEM API" "MlKem1024 only" || bad "MlKem1024 not referenced"
 grep -rqE 'MlDsa87'   crates/crypto/src/ && note "ML-DSA API" "MlDsa87 only"   || bad "MlDsa87 not referenced"
 
-# ---- Optional: dependency vulnerability scan, if the tools are installed ----
+# ---- Dependency advisory + supply-chain scan lives in its own gate ----
 echo
-echo "Dependency advisory scan:"
-if command -v cargo-audit >/dev/null 2>&1; then
-  cargo audit 2>&1 | tail -3
-else
-  echo "  cargo-audit not installed (recommended: 'cargo install cargo-audit' — SECURITY-AUDIT R-1)"
-fi
+echo "Dependency advisories / supply-chain: see scripts/audit-deps.sh"
+echo "  (cargo audit + cargo deny; CI: .github/workflows/audit.yml — SECURITY-AUDIT R-1)"
 
 echo
 if [ "$fail" -eq 0 ]; then

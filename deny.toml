@@ -1,0 +1,62 @@
+# cargo-deny configuration — supply-chain policy for the talkrypt workspace.
+# Run via `scripts/audit-deps.sh` or `cargo deny check`. Gates CI (SECURITY-AUDIT
+# R-1 / F-2): a new advisory, a disallowed license, or a non-crates.io source
+# fails the build. Tune the few `allow`/`ignore` lists below with a comment
+# justifying each entry — never ignore an advisory silently.
+
+[advisories]
+# Use the default RustSec advisory DB. Any unfixed vulnerability fails.
+version = 2
+yanked = "deny"
+# Per-advisory exceptions, each justified. NB: advisory tooling matches by crate
+# name + version, so it cannot see source patches — an entry here may document a
+# *fixed* (locally patched) dependency, not an accepted-as-is risk.
+ignore = [
+  # rsa 0.9.10 — RUSTSEC-2023-0071 (Marvin timing attack). FIXED LOCALLY: rsa is
+  # vendored + source-patched to blind every private-key operation
+  # (third-party/rsa/TALKRYPT-PATCH.md), applied via [patch.crates-io]. rsa is
+  # also tor-feature-only and absent from default builds. The advisory still
+  # matches by version; this entry records the fix, not an unmitigated risk.
+  "RUSTSEC-2023-0071",
+]
+
+[licenses]
+# talkrypt is Apache-2.0; only permissive, audit-friendly licenses are allowed.
+version = 2
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+]
+confidence-threshold = 0.9
+# Per-crate license clarifications go here if a crate's license is unclear.
+exceptions = []
+
+[bans]
+# Warn (don't fail) on duplicate versions — a large async/crypto tree pulls a
+# few; track them but don't block. Flip to "deny" once the tree is deduplicated.
+multiple-versions = "warn"
+wildcards = "deny"          # no external `version = "*"` deps — break reproducibility
+# But the workspace's own crates depend on each other by path (no version req),
+# which cargo reports as a wildcard. Exempt path-based wildcards — they are
+# internal, not an unpinned external dependency.
+allow-wildcard-paths = true
+# Crates that must never appear (add with a justification).
+deny = []
+
+[sources]
+# Supply-chain: only crates.io. An unexpected git or alternate registry source
+# (a common malicious-dependency vector) fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

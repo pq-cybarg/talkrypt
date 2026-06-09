@@ -10,6 +10,11 @@ exclude = ["fuzz"]
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.95"
+# These crates are private to this application and are NOT published to crates.io
+# (opsec-clean, and the workspace uses internal path dependencies). Setting this
+# prevents an accidental `cargo publish` and lets cargo-deny exempt the internal
+# path-dependency wildcards (see deny.toml `allow-wildcard-paths`).
+publish = false
 
 [workspace.dependencies]
 # crypto primitives (CNSA 2.0 algorithm set, RustCrypto pure-Rust)
@@ -46,3 +51,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Source-patched `rsa` (RUSTSEC-2023-0071 / Marvin): a locally vendored, hardened
+# copy that makes every RSA private-key operation blinded. `rsa` is pulled in only
+# transitively under the `tor` feature (Arti's SSH-key parsing); default builds
+# contain no `rsa`. Applied to every build/install of this workspace. The full
+# rationale and the exact change are in `third-party/rsa/TALKRYPT-PATCH.md`.
+[patch.crates-io]
+rsa = { path = "third-party/rsa" }
