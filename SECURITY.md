@@ -72,8 +72,11 @@ decoder, uniform AEAD failure).
   interoperate with standard MLS. A classical/standardized-PQ ciphersuite, MLS
   TLS-presentation framing, and the official interop test vectors remain future
   work.
-- **Transient symmetric secrets** in live session state are not all
-  zeroized-on-drop yet; long-term secrets are.
+- **Symmetric session secrets are zeroized on drop.** The Double Ratchet and
+  PQ-Noise sessions wipe their root, both chain keys, and any cached skipped
+  message-key seeds on drop; per-message keys are held in `Zeroizing` (wiped even
+  on an early-return error path). Long-term secrets (ML-DSA seed, sealed keys)
+  were already zeroized. See `docs/SECURITY-AUDIT.md` finding F-3.
 - **GUI bundles** (Android APK, desktop) are integration-documented, not built
   in CI; the Rust core + FFI they depend on are built and tested.
 

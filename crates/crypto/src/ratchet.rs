@@ -19,6 +19,8 @@
 
 use std::collections::BTreeMap;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
 use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
@@ -93,6 +95,26 @@ pub struct Session {
     skipped: BTreeMap<(Vec<u8>, u32), [u8; KEY_LEN]>,
 }
 
+/// Wipe the live symmetric secrets (root, both chain keys, and every cached
+/// skipped message-key seed) when a session is dropped — including the transient
+/// clones made for trial-decryption, whose drop wipes their copies too. The
+/// asymmetric ratchet secret zeroizes itself (the X25519 half via dalek's
+/// `ZeroizeOnDrop`). Closes SECURITY-AUDIT finding F-3 for the ratchet session.
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.root.zeroize();
+        if let Some(ck) = self.send_ck.as_mut() {
+            ck.zeroize();
+        }
+        if let Some(ck) = self.recv_ck.as_mut() {
+            ck.zeroize();
+        }
+        for seed in self.skipped.values_mut() {
+            seed.zeroize();
+        }
+    }
+}
+
 impl Session {
     /// Initiator session. `root0` is the initial shared secret (derived from
     /// the invite-token PSK by the caller); `peer_prekey` is the responder's
@@ -144,9 +166,11 @@ impl Session {
         if self.need_send_ratchet || self.send_ck.is_none() {
             self.ratchet_send()?;
         }
-        let ck = self.send_ck.expect("send chain set after ratchet_send");
+        let ck = Zeroizing::new(self.send_ck.expect("send chain set after ratchet_send"));
         let (next_ck, mk_seed) = kdf_ck(&ck);
+        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
+        let key = Zeroizing::new(key); // wiped even if aead_seal returns early
 
         let header = Header {
             ratchet_pub: self.self_ratchet_pub.clone().expect("self ratchet pub set"),
@@ -202,9 +226,11 @@ impl Session {
         self.skip_recv(header.n)?;
 
         // 4. Derive the message key for the current position and open.
-        let ck = self.recv_ck.ok_or(CryptoError::DecryptionFailed)?;
+        let ck = Zeroizing::new(self.recv_ck.ok_or(CryptoError::DecryptionFailed)?);
         let (next_ck, mk_seed) = kdf_ck(&ck);
+        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
+        let key = Zeroizing::new(key);
         let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
         self.recv_ck = Some(next_ck);
         self.recv_n += 1;
@@ -278,7 +304,9 @@ impl Session {
     fn try_skipped(&mut self, header: &Header, ct: &[u8], aad: &[u8]) -> Result<Option<Vec<u8>>> {
         let id = (header.ratchet_pub.encode(), header.n);
         if let Some(mk_seed) = self.skipped.get(&id).copied() {
+            let mk_seed = Zeroizing::new(mk_seed);
             let (key, nonce) = kdf_mk(&mk_seed);
+            let key = Zeroizing::new(key);
             let pt = aead_open(&key, &nonce, ct, aad)?;
             self.skipped.remove(&id);
             Ok(Some(pt))
@@ -335,6 +363,25 @@ mod tests {
         assert_eq!(bob.decrypt(&m3).unwrap(), b"how are you");
         let m4 = bob.encrypt(b"good").unwrap();
         assert_eq!(alice.decrypt(&m4).unwrap(), b"good");
+    }
+
+    #[test]
+    fn dropping_active_session_runs_zeroize_drop() {
+        // Populate every secret field — root, both chain keys, and a non-empty
+        // skipped-key map — then drop. Exercises the F-3 zeroize-on-drop path for
+        // all field combinations (a regression here, e.g. a field type that no
+        // longer zeroizes, would surface as a compile error or a Drop panic).
+        let (mut alice, mut bob) = pair();
+        let m0 = alice.encrypt(b"0").unwrap();
+        let _m1 = alice.encrypt(b"1").unwrap(); // never delivered → stays skipped
+        let m2 = alice.encrypt(b"2").unwrap();
+        bob.decrypt(&m2).unwrap(); // skips 0 and 1 into bob.skipped
+        bob.decrypt(&m0).unwrap(); // drains one; n=1 remains cached
+        let r = bob.encrypt(b"reply").unwrap();
+        alice.decrypt(&r).unwrap(); // both sides now hold send + recv chain keys
+        assert!(!bob.skipped.is_empty(), "a skipped key must remain at drop");
+        drop(alice);
+        drop(bob); // Drop::drop zeroizes the secrets; must not panic
     }
 
     #[test]

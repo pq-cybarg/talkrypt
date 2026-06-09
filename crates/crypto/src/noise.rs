@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
 use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
@@ -39,6 +41,24 @@ pub struct NoiseSession {
     send_n: u32,
     recv_n: u32,
     skipped: BTreeMap<u32, [u8; KEY_LEN]>,
+}
+
+/// Wipe the session root and both direction chains (plus any cached skipped
+/// message-key seeds) when the session drops. The X25519 prekey secret zeroizes
+/// itself via dalek. Closes SECURITY-AUDIT finding F-3 for the PQ-Noise session.
+impl Drop for NoiseSession {
+    fn drop(&mut self) {
+        self.root0.zeroize();
+        if let Some(c) = self.send_chain.as_mut() {
+            c.zeroize();
+        }
+        if let Some(c) = self.recv_chain.as_mut() {
+            c.zeroize();
+        }
+        for seed in self.skipped.values_mut() {
+            seed.zeroize();
+        }
+    }
 }
 
 impl NoiseSession {
@@ -127,9 +147,11 @@ impl NoiseSession {
                 ));
             }
         }
-        let ck = self.send_chain.expect("send chain established");
+        let ck = Zeroizing::new(self.send_chain.expect("send chain established"));
         let (next, mk_seed) = kdf_ck(&ck);
+        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
+        let key = Zeroizing::new(key);
 
         // The initiator carries the (fixed) establishment header on every
         // message, so the responder can establish from whichever message
@@ -184,13 +206,15 @@ impl NoiseSession {
 
         // Skipped key for this n?
         if let Some(mk_seed) = self.skipped.get(&n).copied() {
+            let mk_seed = Zeroizing::new(mk_seed);
             let (key, nonce) = kdf_mk(&mk_seed);
+            let key = Zeroizing::new(key);
             let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
             self.skipped.remove(&n);
             return Ok(pt);
         }
 
-        let mut ck = self.recv_chain.ok_or(CryptoError::DecryptionFailed)?;
+        let mut ck = Zeroizing::new(self.recv_chain.ok_or(CryptoError::DecryptionFailed)?);
         if n < self.recv_n {
             // already consumed in-order and not skipped → replay/garbage
             return Err(CryptoError::DecryptionFailed);
@@ -201,11 +225,13 @@ impl NoiseSession {
         while self.recv_n < n {
             let (next, mk_seed) = kdf_ck(&ck);
             self.skipped.insert(self.recv_n, mk_seed);
-            ck = next;
+            ck = Zeroizing::new(next);
             self.recv_n += 1;
         }
         let (next, mk_seed) = kdf_ck(&ck);
+        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
+        let key = Zeroizing::new(key);
         let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
         self.recv_chain = Some(next);
         self.recv_n += 1;

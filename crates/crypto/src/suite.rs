@@ -120,6 +120,48 @@ pub enum SecurityLevel {
     PostQuantum,
 }
 
+/// Whether a suite **identifier** declares algorithm parameters that meet the
+/// CNSA 2.0 floor: ML-KEM-1024 key establishment, AES-256-GCM AEAD, a ≥384-bit
+/// hash, and — if the suite carries a signature — ML-DSA-87.
+///
+/// This enforces the floor against a suite's *declared parameters*, not its
+/// self-reported [`SecurityLevel`]. A suite must therefore not be able to pass
+/// the floor merely by tagging itself `PostQuantum` while naming AES-128 /
+/// ML-KEM-768 / ML-DSA-65 in its id — the [`SuiteRegistry`] rejects such a suite
+/// at the default floor regardless of the tag it advertises.
+///
+/// Suite ids are dot-separated — `tk.dr.<kem>.<aead>.<hash>[.<sig>]` and
+/// `tk.noise.<kem>.<aead>.<hash>` — and hash tokens use a hyphen (`sha3-384`),
+/// so splitting on `.` cleanly yields the algorithm components. A suite whose id
+/// does not declare floor-meeting components cannot prove it meets the floor and
+/// is rejected (register it only after an explicit [`SuiteRegistry::set_floor`]).
+pub fn meets_cnsa_floor(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('.').collect();
+    // ML-KEM-1024 key establishment (PQ-pure, padded, or +X25519 hybrid).
+    let kem = parts.iter().any(|p| p.starts_with("mlkem1024"));
+    // AES-256-GCM (CNSA 2.0 names AES-256; AES-128 is below floor).
+    let aead = parts.iter().any(|p| *p == "aes256gcm");
+    // A ≥384-bit hash (SHA-384/512 or SHA3-384/512).
+    let hash = parts
+        .iter()
+        .any(|p| matches!(*p, "sha384" | "sha512" | "sha3-384" | "sha3-512"));
+    // Any signature token present must be ML-DSA-87 (suites without one — e.g.
+    // PQ-Noise — vacuously pass this check).
+    let sig_ok = parts
+        .iter()
+        .filter(|p| p.starts_with("mldsa"))
+        .all(|p| *p == "mldsa87");
+    // Belt-and-suspenders: no explicit sub-floor token anywhere.
+    let subfloor = parts.iter().any(|p| {
+        matches!(
+            *p,
+            "aes128gcm" | "aes128" | "mldsa65" | "mldsa44" | "sha256" | "sha3-256"
+        ) || p.starts_with("mlkem768")
+            || p.starts_with("mlkem512")
+    });
+    kem && aead && hash && sig_ok && !subfloor
+}
+
 /// Self-describing metadata a suite advertises (carried in chat descriptors).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuiteDescriptor {
@@ -365,10 +407,21 @@ impl SuiteRegistry {
         self.floor = floor;
     }
 
-    /// Register a suite. Rejected if it advertises below the current floor.
+    /// Register a suite. Rejected if it falls below the current floor — checked
+    /// two ways so the floor cannot be passed by a mislabeled suite:
+    ///   1. the suite's self-declared [`SecurityLevel`] must meet the floor, and
+    ///   2. at the post-quantum floor, its *declared algorithm parameters* (its
+    ///      id) must meet the CNSA 2.0 floor ([`meets_cnsa_floor`]) — so a suite
+    ///      naming AES-128 / ML-KEM-768 / ML-DSA-65 is rejected even if it tags
+    ///      itself `PostQuantum`.
+    /// Lowering the floor with [`Self::set_floor`] is the single, explicit,
+    /// visible way to admit a sub-floor suite.
     pub fn register(&mut self, suite: Arc<dyn CryptoSuite>) -> Result<()> {
         let d = suite.descriptor();
         if d.level < self.floor {
+            return Err(CryptoError::BelowFloor(d.id));
+        }
+        if self.floor >= SecurityLevel::PostQuantum && !meets_cnsa_floor(&d.id) {
             return Err(CryptoError::BelowFloor(d.id));
         }
         self.suites.insert(d.id, suite);
@@ -529,6 +582,75 @@ mod tests {
         ));
         reg.set_floor(SecurityLevel::Weak);
         assert!(reg.register(Arc::new(WeakSuite)).is_ok());
+    }
+
+    #[test]
+    fn floor_check_accepts_real_suites_rejects_subfloor_parameters() {
+        // Every real talkrypt suite id meets the CNSA 2.0 parameter floor.
+        for id in [
+            "tk.dr.mlkem1024+pad.aes256gcm.sha3-384.mldsa87",
+            "tk.dr.mlkem1024+pad.aes256gcm.sha384.mldsa87",
+            "tk.dr.mlkem1024+x25519.aes256gcm.sha3-384.mldsa87",
+            "tk.dr.mlkem1024.aes256gcm.sha3-384.mldsa87",
+            "tk.noise.mlkem1024+pad.aes256gcm.sha3-384",
+        ] {
+            assert!(meets_cnsa_floor(id), "{id} should meet the floor");
+        }
+        // Each sub-floor component is independently caught.
+        for id in [
+            "tk.x.mlkem768.aes256gcm.sha384.mldsa87",  // KEM below floor
+            "tk.x.mlkem1024.aes128gcm.sha384.mldsa87", // AEAD below floor (AES-128)
+            "tk.x.mlkem1024.aes256gcm.sha256.mldsa87", // hash below floor
+            "tk.x.mlkem1024.aes256gcm.sha384.mldsa65", // signature below floor
+            "tk.x.classical.chacha20poly1305.sha256",  // not PQ at all
+        ] {
+            assert!(!meets_cnsa_floor(id), "{id} must NOT meet the floor");
+        }
+        // And every suite the default registry actually holds meets it.
+        let reg = SuiteRegistry::with_defaults();
+        for id in reg.ids() {
+            assert!(meets_cnsa_floor(&id), "registered {id} must meet the floor");
+        }
+    }
+
+    #[test]
+    fn mislabeled_subfloor_suite_rejected_even_when_tagged_post_quantum() {
+        // The floor must not be passable by self-declaration: a suite that names
+        // AES-128 / ML-KEM-768 / ML-DSA-65 but tags itself `PostQuantum` is still
+        // rejected at the default floor — enforcement is against the declared
+        // PARAMETERS (the id), not the advertised SecurityLevel.
+        struct LiarSuite;
+        impl CryptoSuite for LiarSuite {
+            fn descriptor(&self) -> SuiteDescriptor {
+                SuiteDescriptor {
+                    id: "tk.x.mlkem768.aes128gcm.sha256.mldsa65".into(),
+                    version: 1,
+                    level: SecurityLevel::PostQuantum, // the lie
+                    params: vec![],
+                }
+            }
+            fn generate_prekey(&self) -> (Vec<u8>, PrekeySecretHandle) {
+                (vec![], PrekeySecretHandle(Box::new(())))
+            }
+            fn begin_session(&self, _r: [u8; KEY_LEN], _p: &[u8]) -> Result<Box<dyn SessionHandle>> {
+                Err(CryptoError::Malformed("unused"))
+            }
+            fn accept_session(
+                &self,
+                _r: [u8; KEY_LEN],
+                _s: PrekeySecretHandle,
+            ) -> Result<Box<dyn SessionHandle>> {
+                Err(CryptoError::Malformed("unused"))
+            }
+        }
+        let mut reg = SuiteRegistry::with_defaults();
+        assert!(
+            matches!(reg.register(Arc::new(LiarSuite)), Err(CryptoError::BelowFloor(_))),
+            "a PQ-tagged but sub-floor-parameter suite must be rejected at the default floor"
+        );
+        // Only an explicit, visible floor-lowering admits a sub-floor suite.
+        reg.set_floor(SecurityLevel::Weak);
+        assert!(reg.register(Arc::new(LiarSuite)).is_ok());
     }
 
     #[test]
