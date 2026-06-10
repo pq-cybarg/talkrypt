@@ -340,6 +340,31 @@ mod tests {
         assert_eq!(bob.decrypt(&ct).unwrap(), b"hello bob");
     }
 
+    /// Miri-verified: `Session::drop` actually zeroes its `root` (the session's
+    /// most sensitive symmetric field). Built with synthetic secrets and no
+    /// ratchet keys so it runs under Miri without PQ keygen. SECURITY-AUDIT F-3.
+    #[test]
+    fn drop_zeroizes_session_root() {
+        let session = Session {
+            profile: KemProfile::pq_pure(),
+            root: [0xAA; KEY_LEN],
+            self_ratchet: None,
+            self_ratchet_pub: None,
+            self_send_ct: Vec::new(),
+            send_ck: Some([0xAA; KEY_LEN]),
+            send_n: 0,
+            prev_send_n: 0,
+            peer_ratchet: None,
+            recv_ck: Some([0xAA; KEY_LEN]),
+            recv_n: 0,
+            need_send_ratchet: false,
+            skipped: BTreeMap::new(),
+        };
+        unsafe {
+            crate::assert_drop_zeroes(session, core::mem::offset_of!(Session, root), KEY_LEN);
+        }
+    }
+
     #[test]
     fn jumbo_message_roundtrips() {
         // Large ("jumbo") payloads must encrypt/decrypt intact — a 4 MiB

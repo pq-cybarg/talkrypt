@@ -185,6 +185,36 @@ fn aad_for(n: u32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    // Miri-verified zeroize-on-drop for the sender-key types (SECURITY-AUDIT F-3).
+    #[test]
+    fn drop_zeroizes_sender_key_chain() {
+        // Use offset_of! — field order isn't guaranteed without #[repr(C)].
+        unsafe {
+            crate::assert_drop_zeroes(
+                SenderKey { chain: [0xAA; KEY_LEN], n: 7 },
+                core::mem::offset_of!(SenderKey, chain),
+                KEY_LEN,
+            );
+        }
+    }
+
+    #[test]
+    fn drop_zeroizes_sender_key_receiver_chain() {
+        // (The skipped-map values are also zeroed by Drop, but those live on the
+        // map's heap which Drop frees, so they can't be read back soundly.)
+        unsafe {
+            crate::assert_drop_zeroes(
+                SenderKeyReceiver {
+                    chain: [0xAA; KEY_LEN],
+                    n: 0,
+                    skipped: BTreeMap::new(),
+                },
+                core::mem::offset_of!(SenderKeyReceiver, chain),
+                KEY_LEN,
+            );
+        }
+    }
+
     fn fp(b: u8) -> MemberId {
         [b; 48]
     }

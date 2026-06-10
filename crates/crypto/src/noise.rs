@@ -260,6 +260,29 @@ impl Clone for NoiseSession {
 mod tests {
     use super::*;
 
+    /// Miri-verified: `NoiseSession::drop` zeroes its session `root0`. No PQ keys
+    /// needed (prekeys set to None). SECURITY-AUDIT F-3.
+    #[test]
+    fn drop_zeroizes_noise_root() {
+        let session = NoiseSession {
+            initiator: true,
+            profile: KemProfile::pq_pure(),
+            root0: [0xAA; KEY_LEN],
+            peer_prekey: None,
+            self_prekey: None,
+            eph_public: None,
+            eph_ct: Vec::new(),
+            send_chain: Some([0xAA; KEY_LEN]),
+            recv_chain: Some([0xAA; KEY_LEN]),
+            send_n: 0,
+            recv_n: 0,
+            skipped: BTreeMap::new(),
+        };
+        unsafe {
+            crate::assert_drop_zeroes(session, core::mem::offset_of!(NoiseSession, root0), KEY_LEN);
+        }
+    }
+
     fn pair() -> (NoiseSession, NoiseSession) {
         pair_with(KemProfile::pq_pure())
     }

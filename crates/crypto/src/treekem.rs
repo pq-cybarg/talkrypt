@@ -830,6 +830,32 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
 mod tests {
     use super::*;
 
+    /// Miri-verified: `TreeKemGroup::drop` zeroes its `epoch_secret`. Built with
+    /// empty maps so it runs under Miri without PQ keygen. SECURITY-AUDIT F-3.
+    #[test]
+    fn drop_zeroizes_treekem_epoch_secret() {
+        let group = TreeKemGroup {
+            profile: KemProfile::pq_pure(),
+            capacity: 2,
+            public: HashMap::new(),
+            occupied: vec![false, false],
+            me: 0,
+            secrets: HashMap::new(),
+            epoch: 0,
+            epoch_secret: [0xAA; 32],
+            send_chain: [0xAA; 32],
+            send_n: 0,
+            recvs: HashMap::new(),
+        };
+        unsafe {
+            crate::assert_drop_zeroes(
+                group,
+                core::mem::offset_of!(TreeKemGroup, epoch_secret),
+                32,
+            );
+        }
+    }
+
     /// Add a fresh member to an existing group; returns the joiner's group. The
     /// joiner's leaf key is generated with the committer's profile so the
     /// published key matches the group.
