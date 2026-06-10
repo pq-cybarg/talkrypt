@@ -94,7 +94,7 @@ what talkrypt does today, and the concrete delta to a validatable module.
 | 6 | Physical security | N/A (software module). | N/A. |
 | 7 | Non-invasive security | Decryption is **uniform-failure**; decrypt runs on cloned state (no partial-state leak). Not formally constant-time across all primitives. | Side-channel (timing) review of each primitive; constant-time guarantees. |
 | 8 | Sensitive security parameter (SSP) management | ML-DSA seed in `Zeroizing`; **session symmetric secrets zeroized on drop** (ratchet + Noise; per-message keys in `Zeroizing` — SECURITY-AUDIT F-3, resolved); persistent keys sealed with Argon2id + AES-256-GCM; `OsRng` (`getrandom`) for keygen. | An approved DRBG with health tests; a documented SSP lifecycle table. |
-| 9 | Self-tests | KAT-locked KDF and wire vectors run as unit tests; property tests; one Kani proof. | **Power-on self-tests (POST)**: KATs for AES-GCM, ML-KEM, ML-DSA, the hash/KDF, run at module init with a hard fail; conditional self-tests (pairwise consistency on keygen). |
+| 9 | Self-tests | **Power-on self-tests implemented** (`talkrypt_crypto::self_test` / `ensure_self_tested`, SECURITY-AUDIT R-5): AES-256-GCM + hash KATs, ML-KEM/ML-DSA pairwise-consistency, KDF determinism — run once at start-up (CLI `main`, suite-registry init, FFI keygen) and **abort on failure**. Plus KAT-locked KDF/wire vectors, property tests, a Kani proof. | Per-operation conditional self-tests on every keygen (vs once at start-up); a CAVP-traceable KAT set; documented POST in the Security Policy. |
 | 10 | Life-cycle assurance | Versioned, tested (211 tests), fuzzed wire codec, Kani-proven decoder, frozen+KAT-locked wire format. | Configuration-management, delivery, and operator-guidance documents per 140-3; CAVP test evidence. |
 | 11 | Mitigation of other attacks | Replay rejection (bounded skip), AEAD AAD-bound headers, wire padding for frame-indistinguishability, invite-token PSK + safety-number MITM mitigation. | Formal documentation of mitigations and their limits. |
 
@@ -141,10 +141,11 @@ Exact versions from `Cargo.lock` (reproduce with `scripts/crypto-inventory.sh`):
 
 In priority order, to move from *algorithm-aligned* to *validatable*:
 
-1. **Power-on self-tests (POST).** Add KAT self-tests for AES-256-GCM, ML-KEM-1024,
-   ML-DSA-87, the hash, and the KDF, executed at module initialization with a hard
-   failure (the module refuses to operate if any KAT fails). Add conditional
-   pairwise-consistency tests on keypair generation.
+1. **Power-on self-tests (POST).** *Done* (`talkrypt_crypto::self_test` /
+   `ensure_self_tested`): AES-256-GCM + hash KATs, ML-KEM-1024/ML-DSA-87
+   pairwise-consistency, KDF determinism, run once at start-up and aborting on
+   failure. Remaining for validation: per-keygen conditional self-tests and a
+   CAVP-traceable KAT set.
 2. **Approved DRBG with health tests.** Replace bare `OsRng` use at the boundary
    with an SP 800-90A DRBG seeded from a health-tested entropy source
    (SP 800-90B), or document the OS DRBG as the approved entropy source per the

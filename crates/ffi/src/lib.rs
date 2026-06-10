@@ -816,6 +816,7 @@ impl Account {
     /// Generate a fresh account.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -824,6 +825,7 @@ impl Account {
     /// Reload an account from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),
@@ -863,6 +865,7 @@ impl DeviceKey {
     /// Generate a fresh device key.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -871,6 +874,7 @@ impl DeviceKey {
     /// Reload a device key from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),
@@ -1022,6 +1026,7 @@ impl SegmentKey {
     /// Generate a fresh segment key.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -1030,6 +1035,7 @@ impl SegmentKey {
     /// Reload a segment key from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
+        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),

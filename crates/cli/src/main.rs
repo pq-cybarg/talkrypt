@@ -341,6 +341,9 @@ fn classification_from(s: &str) -> Option<Classification> {
 
 #[tokio::main]
 async fn main() {
+    // Power-on self-test (FIPS POST / SECURITY-AUDIT R-5): verify every crypto
+    // primitive at start-up and abort if any is broken, before doing anything.
+    talkrypt_crypto::ensure_self_tested();
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Version => {

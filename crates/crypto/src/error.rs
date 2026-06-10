@@ -39,6 +39,11 @@ pub enum CryptoError {
     /// A suite's advertised primitives fall below the configured floor.
     #[error("suite '{0}' rejected: below security floor")]
     BelowFloor(String),
+
+    /// A power-on self-test (known-answer / pairwise-consistency) failed — a
+    /// primitive is broken or corrupted; the module must not be used.
+    #[error("crypto self-test failed: {0}")]
+    SelfTest(&'static str),
 }
 
 pub type Result<T> = core::result::Result<T, CryptoError>;

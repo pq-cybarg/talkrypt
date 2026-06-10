@@ -243,7 +243,7 @@ ignore list reviewed.
 | R-2 | High | Commission an independent cryptographic review of the ratchet, handshake, and identity-chain logic — the properties in §3 are the audit's core. (F-1) |
 | R-3 | Done | F-3 zeroization is Miri-verified (`assert_drop_zeroes` + `cargo +nightly miri test`); wire the Miri run into CI to keep it verified. |
 | R-4 | Medium | Timing side-channel review of the AEAD and signature paths; document constant-time status. (F-9) |
-| R-5 | Medium | Power-on KAT self-tests for AES-GCM, ML-KEM, ML-DSA, hash, KDF (also a FIPS prerequisite). (COMPLIANCE §5.1) |
+| R-5 | Done | Power-on self-tests (`talkrypt_crypto::self_test`/`ensure_self_tested`): AES-GCM+hash KATs, ML-KEM/ML-DSA pairwise-consistency, KDF determinism; run at start-up, abort on failure. Next: per-keygen conditional tests + CAVP-traceable KATs. |
 | R-6 | Low | External fuzzing campaign on the wire codec and descriptor parser beyond the bundled harness. |
 | R-7 | Low | Sign and notarize desktop packages once a release identity exists; sign the `.deb`. (F-8) |
 

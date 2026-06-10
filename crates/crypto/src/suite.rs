@@ -387,6 +387,11 @@ impl SuiteRegistry {
     /// must remain available in every build. PQ-Noise is offered in the
     /// non-compact profiles.
     pub fn with_defaults() -> Self {
+        // Power-on self-test (FIPS POST / SECURITY-AUDIT R-5): the first time the
+        // suite registry is built, verify every primitive and abort if any is
+        // broken. Safe here — `self_test` uses the primitives directly, never the
+        // registry, so this cannot re-enter. Once-guarded, so it runs once.
+        crate::selftest::ensure_self_tested();
         let mut r = Self::new();
         for profile in offered_profiles() {
             r.register(Arc::new(DoubleRatchetSuite::with_profile(profile)))
