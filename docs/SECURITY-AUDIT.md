@@ -113,18 +113,31 @@ chain-verification shortcut — could silently void any property in §3. The
 relied on for high-stakes confidentiality. This is stated prominently and is not
 boilerplate.
 
-**F-3 (zeroization) — Resolved.** The ML-DSA seed and sealed keys were already
-zeroized; the gap was per-session symmetric material. Fixed: `ratchet::Session`
-and `noise::NoiseSession` now implement `Drop` to zeroize their root, both
-direction chain keys, and every cached skipped message-key seed (including the
-transient clones made for trial-decryption, whose drop wipes their copies). The
-per-message key and message-key seed in the encrypt/decrypt hot paths are held in
-`zeroize::Zeroizing`, so they are wiped on scope exit *and* on an early-return
-error path. The X25519 ratchet secret already self-zeroizes via dalek. Regression
-guard: `ratchet::tests::dropping_active_session_runs_zeroize_drop` exercises the
-drop path with all secret fields populated. (Full memory-wipe verification — that
-the bytes are actually zero post-drop — is not observable in safe Rust; a Miri
-run remains the proper check, R-3.)
+**F-3 (zeroization) — Resolved (comprehensively).** Done at the source so no
+transient can be missed:
+
+- **KDF outputs** — `kdf_rk`, `kdf_ck`, `kdf_mk` now return their secret outputs
+  (root, chain keys, message-key seed, AEAD key) in `zeroize::Zeroizing`, so
+  *every* caller's locals — across `ratchet`, `noise`, `group` (sender keys), and
+  `treekem` — wipe on scope exit, including on early-return error paths.
+- **Raw shared secrets** — `RatchetSecret::step_to`/`step_from`/`combine_ikm`
+  return the `ikm` in `Zeroizing` and wipe the intermediate KEM secret (`kem_ss`)
+  and the X25519 DH secret. These are the freshest, most sensitive transients and
+  were previously left in plain `Vec`/array locals.
+- **Session state on drop** — `ratchet::Session`, `noise::NoiseSession`,
+  `group::SenderKey`/`SenderKeyReceiver`, and `treekem::{TreeKemGroup, RecvChain,
+  LeafKeyPair}` implement `Drop` to zero their root/epoch/chain keys, cached
+  skipped message-key seeds, and the TreeKEM node-secret map (the ratchet Session
+  also wipes the transient clones made for trial-decryption). The ML-DSA seed and
+  sealed keys were already zeroized; the X25519 ratchet secret self-zeroizes via
+  dalek.
+
+Regression guard: `ratchet::tests::dropping_active_session_runs_zeroize_drop`
+exercises the drop path with all secret fields populated; the existing 101 crypto
+tests confirm correctness is preserved. (That the bytes are *observably* zero
+post-drop is not testable in safe Rust — reading dropped memory is UB; a Miri run
+is the proper verification, R-3. `zeroize` itself guarantees the volatile write
+is not optimized away.)
 
 **F-2 / R-1 (dependency scanning) — Resolved.** `scripts/audit-deps.sh` runs
 `cargo audit` (RustSec DB) + `cargo deny check` (advisories, licenses, banned

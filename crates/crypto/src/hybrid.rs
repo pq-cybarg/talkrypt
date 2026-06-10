@@ -28,6 +28,7 @@ use ml_kem::{Encoded, EncodedSizeUser, KemCore, MlKem1024, B32};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
+use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, Result};
 
@@ -287,32 +288,34 @@ impl RatchetSecret {
     ///
     /// `self` must be the freshly generated sending key; under `Hybrid` its
     /// X25519 secret is DH'd against the peer's X25519 public.
-    pub fn step_to(&self, peer: &RatchetPublic) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub fn step_to(&self, peer: &RatchetPublic) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
         let (ct, kem_ss) = peer.encapsulate()?;
+        let kem_ss = Zeroizing::new(kem_ss); // raw KEM secret — wipe on drop
         let ikm = self.combine_ikm(peer, &kem_ss)?;
         Ok((ct, ikm))
     }
 
     /// Receiver asymmetric step from a peer header: decapsulate `ct` and combine
-    /// into the posture's input keying material. Returns the `ikm`.
-    pub fn step_from(&self, peer_pub: &RatchetPublic, ct: &[u8]) -> Result<Vec<u8>> {
-        let kem_ss = self.decapsulate(ct)?;
+    /// into the posture's input keying material. Returns the `ikm` (zeroized on
+    /// drop, like the raw KEM/DH secrets it is derived from).
+    pub fn step_from(&self, peer_pub: &RatchetPublic, ct: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let kem_ss = Zeroizing::new(self.decapsulate(ct)?);
         self.combine_ikm(peer_pub, &kem_ss)
     }
 
-    fn combine_ikm(&self, peer: &RatchetPublic, kem_ss: &[u8; SS_LEN]) -> Result<Vec<u8>> {
+    fn combine_ikm(&self, peer: &RatchetPublic, kem_ss: &[u8; SS_LEN]) -> Result<Zeroizing<Vec<u8>>> {
         match self.profile.posture {
             KemPosture::Hybrid => {
                 let peer_x = peer
                     .x_pub
                     .ok_or(CryptoError::Malformed("hybrid step against PQ-pure peer"))?;
-                let dh = self.dh(&peer_x)?;
-                let mut ikm = Vec::with_capacity(64);
-                ikm.extend_from_slice(&dh);
+                let dh = Zeroizing::new(self.dh(&peer_x)?); // raw X25519 secret
+                let mut ikm = Zeroizing::new(Vec::with_capacity(64));
+                ikm.extend_from_slice(&*dh);
                 ikm.extend_from_slice(kem_ss);
                 Ok(ikm)
             }
-            KemPosture::PqPure => Ok(kem_ss.to_vec()),
+            KemPosture::PqPure => Ok(Zeroizing::new(kem_ss.to_vec())),
         }
     }
 }

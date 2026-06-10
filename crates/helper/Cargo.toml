@@ -7,7 +7,6 @@ license.workspace = true
 
 [[bin]]
 name = "talkrypt-helper"
-publish.workspace = true
 path = "src/bin/talkrypt-helper.rs"
 
 [dependencies]

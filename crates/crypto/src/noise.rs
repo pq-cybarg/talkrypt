@@ -96,9 +96,12 @@ impl NoiseSession {
         }
     }
 
-    fn chains_from_root(&self, session_root: [u8; KEY_LEN]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
-        let i2r = kdf_rk(&session_root, I2R).1;
-        let r2i = kdf_rk(&session_root, R2I).1;
+    fn chains_from_root(
+        &self,
+        session_root: &[u8; KEY_LEN],
+    ) -> (Zeroizing<[u8; KEY_LEN]>, Zeroizing<[u8; KEY_LEN]>) {
+        let i2r = kdf_rk(session_root, I2R).1;
+        let r2i = kdf_rk(session_root, R2I).1;
         if self.initiator {
             (i2r, r2i) // (send, recv)
         } else {
@@ -113,11 +116,11 @@ impl NoiseSession {
             .clone()
             .ok_or(CryptoError::Malformed("noise: no peer prekey"))?;
         let (eph_secret, eph_public) = RatchetSecret::generate(self.profile);
-        let (ct, ikm) = eph_secret.step_to(&peer)?;
+        let (ct, ikm) = eph_secret.step_to(&peer)?; // ikm: Zeroizing
         let session_root = kdf_rk(&self.root0, &ikm).0;
-        let (send, recv) = self.chains_from_root(session_root);
-        self.send_chain = Some(send);
-        self.recv_chain = Some(recv);
+        let (send, recv) = self.chains_from_root(&session_root);
+        self.send_chain = Some(*send);
+        self.recv_chain = Some(*recv);
         self.eph_public = Some(eph_public);
         self.eph_ct = ct;
         Ok(())
@@ -129,11 +132,11 @@ impl NoiseSession {
             .self_prekey
             .as_ref()
             .ok_or(CryptoError::Malformed("noise: no prekey secret"))?;
-        let ikm = prekey.step_from(eph_public, ct)?;
+        let ikm = prekey.step_from(eph_public, ct)?; // Zeroizing
         let session_root = kdf_rk(&self.root0, &ikm).0;
-        let (send, recv) = self.chains_from_root(session_root);
-        self.send_chain = Some(send);
-        self.recv_chain = Some(recv);
+        let (send, recv) = self.chains_from_root(&session_root);
+        self.send_chain = Some(*send);
+        self.recv_chain = Some(*recv);
         Ok(())
     }
 
@@ -148,10 +151,8 @@ impl NoiseSession {
             }
         }
         let ck = Zeroizing::new(self.send_chain.expect("send chain established"));
-        let (next, mk_seed) = kdf_ck(&ck);
-        let mk_seed = Zeroizing::new(mk_seed);
-        let (key, nonce) = kdf_mk(&mk_seed);
-        let key = Zeroizing::new(key);
+        let (next, mk_seed) = kdf_ck(&ck); // both Zeroizing
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
 
         // The initiator carries the (fixed) establishment header on every
         // message, so the responder can establish from whichever message
@@ -170,7 +171,7 @@ impl NoiseSession {
         let aad = hw.into_vec();
 
         let ciphertext = aead_seal(&key, &nonce, plaintext, &aad)?;
-        self.send_chain = Some(next);
+        self.send_chain = Some(*next);
         self.send_n += 1;
 
         let mut w = talkrypt_wire::Writer::new();
@@ -207,8 +208,7 @@ impl NoiseSession {
         // Skipped key for this n?
         if let Some(mk_seed) = self.skipped.get(&n).copied() {
             let mk_seed = Zeroizing::new(mk_seed);
-            let (key, nonce) = kdf_mk(&mk_seed);
-            let key = Zeroizing::new(key);
+            let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
             let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
             self.skipped.remove(&n);
             return Ok(pt);
@@ -223,17 +223,15 @@ impl NoiseSession {
             return Err(CryptoError::TooManySkipped(MAX_SKIP));
         }
         while self.recv_n < n {
-            let (next, mk_seed) = kdf_ck(&ck);
-            self.skipped.insert(self.recv_n, mk_seed);
-            ck = Zeroizing::new(next);
+            let (next, mk_seed) = kdf_ck(&ck); // both Zeroizing
+            self.skipped.insert(self.recv_n, *mk_seed);
+            ck = next;
             self.recv_n += 1;
         }
         let (next, mk_seed) = kdf_ck(&ck);
-        let mk_seed = Zeroizing::new(mk_seed);
-        let (key, nonce) = kdf_mk(&mk_seed);
-        let key = Zeroizing::new(key);
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
-        self.recv_chain = Some(next);
+        self.recv_chain = Some(*next);
         self.recv_n += 1;
         Ok(pt)
     }

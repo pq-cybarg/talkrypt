@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
@@ -379,6 +380,34 @@ pub struct TreeKemGroup {
     recvs: HashMap<u32, RecvChain>,
 }
 
+// Zero the group's secret material on drop: the ratchet-tree node secrets, the
+// epoch secret, and the sending chain key. The per-member receive chains zero
+// via `RecvChain`'s own Drop. SECURITY-AUDIT F-3.
+impl Drop for TreeKemGroup {
+    fn drop(&mut self) {
+        for secret in self.secrets.values_mut() {
+            secret.zeroize();
+        }
+        self.epoch_secret.zeroize();
+        self.send_chain.zeroize();
+    }
+}
+
+impl Drop for RecvChain {
+    fn drop(&mut self) {
+        self.chain.zeroize();
+        for seed in self.skipped.values_mut() {
+            seed.zeroize();
+        }
+    }
+}
+
+impl Drop for LeafKeyPair {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
+}
+
 impl TreeKemGroup {
     /// Create a new group as its founder (leaf 0), capacity 2, using the
     /// default (PQ-pure) KEM profile.
@@ -679,12 +708,12 @@ impl TreeKemGroup {
     }
 
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let (next, mk_seed) = kdf_ck(&self.send_chain);
-        let (key, nonce) = kdf_mk(&mk_seed);
+        let (next, mk_seed) = kdf_ck(&self.send_chain); // both Zeroizing
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let n = self.send_n;
         let aad = msg_aad(self.epoch, self.me, n);
         let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
-        self.send_chain = next;
+        self.send_chain = *next;
         self.send_n += 1;
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(self.epoch);
@@ -713,7 +742,8 @@ impl TreeKemGroup {
         });
 
         if let Some(seed) = recv.skipped.remove(&n) {
-            let (key, nonce) = kdf_mk(&seed);
+            let seed = Zeroizing::new(seed);
+            let (key, nonce) = kdf_mk(&seed); // key: Zeroizing
             return aead_open(&key, &nonce, &ct, &aad);
         }
         if n < recv.n {
@@ -723,15 +753,15 @@ impl TreeKemGroup {
             return Err(CryptoError::TooManySkipped(MAX_SKIP));
         }
         while recv.n < n {
-            let (nx, seed) = kdf_ck(&recv.chain);
-            recv.skipped.insert(recv.n, seed);
-            recv.chain = nx;
+            let (nx, seed) = kdf_ck(&recv.chain); // both Zeroizing
+            recv.skipped.insert(recv.n, *seed);
+            recv.chain = *nx;
             recv.n += 1;
         }
         let (nx, mk_seed) = kdf_ck(&recv.chain);
-        let (key, nonce) = kdf_mk(&mk_seed);
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let pt = aead_open(&key, &nonce, &ct, &aad)?;
-        recv.chain = nx;
+        recv.chain = *nx;
         recv.n += 1;
         Ok(pt)
     }

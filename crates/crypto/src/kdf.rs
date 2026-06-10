@@ -15,7 +15,7 @@
 //! abstracts both. (The RFC 9420 MLS modules deliberately keep HKDF-SHA256, as
 //! that is mandated for conformance with the official MLS test vectors.)
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// 32-byte symmetric key material (AES-256 key, chain key, root key).
 pub const KEY_LEN: usize = 32;
@@ -48,32 +48,35 @@ pub fn mac_kdf(key: &[u8], msg: &[u8], label: &[u8], out: &mut [u8]) {
 }
 
 /// Root-key ratchet step. `root` keys the KDF; `ikm` is the fresh hybrid
-/// shared secret from a DH+KEM step. Returns `(new_root, chain_key)`.
-pub fn kdf_rk(root: &[u8; KEY_LEN], ikm: &[u8]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
+/// shared secret from a DH+KEM step. Returns `(new_root, chain_key)`, each in
+/// [`Zeroizing`] so the caller's copies are wiped on drop (no need to remember).
+pub fn kdf_rk(root: &[u8; KEY_LEN], ikm: &[u8]) -> (Zeroizing<[u8; KEY_LEN]>, Zeroizing<[u8; KEY_LEN]>) {
     let mut out = [0u8; KEY_LEN * 2];
     mac_kdf(root, ikm, INFO_RK, &mut out);
-    let mut new_root = [0u8; KEY_LEN];
-    let mut chain = [0u8; KEY_LEN];
+    let mut new_root = Zeroizing::new([0u8; KEY_LEN]);
+    let mut chain = Zeroizing::new([0u8; KEY_LEN]);
     new_root.copy_from_slice(&out[..KEY_LEN]);
     chain.copy_from_slice(&out[KEY_LEN..]);
     out.zeroize();
     (new_root, chain)
 }
 
-/// Symmetric chain-key step. Returns `(next_chain_key, message_key_seed)`.
-pub fn kdf_ck(chain: &[u8; KEY_LEN]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
-    let mut next = [0u8; KEY_LEN];
-    let mut mk_seed = [0u8; KEY_LEN];
-    mac_kdf(chain, &[], &[INFO_CK, b"/next"].concat(), &mut next);
-    mac_kdf(chain, &[], &[INFO_CK, b"/mk"].concat(), &mut mk_seed);
+/// Symmetric chain-key step. Returns `(next_chain_key, message_key_seed)`, each
+/// in [`Zeroizing`].
+pub fn kdf_ck(chain: &[u8; KEY_LEN]) -> (Zeroizing<[u8; KEY_LEN]>, Zeroizing<[u8; KEY_LEN]>) {
+    let mut next = Zeroizing::new([0u8; KEY_LEN]);
+    let mut mk_seed = Zeroizing::new([0u8; KEY_LEN]);
+    mac_kdf(chain, &[], &[INFO_CK, b"/next"].concat(), &mut *next);
+    mac_kdf(chain, &[], &[INFO_CK, b"/mk"].concat(), &mut *mk_seed);
     (next, mk_seed)
 }
 
-/// Expand a message-key seed into an AEAD `(key, nonce)` pair.
-pub fn kdf_mk(mk_seed: &[u8; KEY_LEN]) -> ([u8; KEY_LEN], [u8; NONCE_LEN]) {
+/// Expand a message-key seed into an AEAD `(key, nonce)` pair. The `key` is
+/// secret (returned in [`Zeroizing`]); the `nonce` is not.
+pub fn kdf_mk(mk_seed: &[u8; KEY_LEN]) -> (Zeroizing<[u8; KEY_LEN]>, [u8; NONCE_LEN]) {
     let mut okm = [0u8; KEY_LEN + NONCE_LEN];
     mac_kdf(mk_seed, &[], INFO_MK, &mut okm);
-    let mut key = [0u8; KEY_LEN];
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
     let mut nonce = [0u8; NONCE_LEN];
     key.copy_from_slice(&okm[..KEY_LEN]);
     nonce.copy_from_slice(&okm[KEY_LEN..]);
@@ -91,25 +94,25 @@ mod tests {
         let ikm = b"shared-secret";
         let (r1, c1) = kdf_rk(&root, ikm);
         let (r2, c2) = kdf_rk(&root, ikm);
-        assert_eq!(r1, r2);
-        assert_eq!(c1, c2);
+        assert_eq!(*r1, *r2);
+        assert_eq!(*c1, *c2);
         // new root and chain key must differ (domain separation within output)
-        assert_ne!(r1, c1);
+        assert_ne!(*r1, *c1);
         // different ikm -> different outputs
         let (r3, _) = kdf_rk(&root, b"other");
-        assert_ne!(r1, r3);
+        assert_ne!(*r1, *r3);
     }
 
     #[test]
     fn ck_advances_and_separates_message_key() {
         let ck = [3u8; KEY_LEN];
         let (next, mk_seed) = kdf_ck(&ck);
-        assert_ne!(next, ck); // chain advanced
-        assert_ne!(next, mk_seed); // chain output != message-key seed
-                                   // deterministic
+        assert_ne!(*next, ck); // chain advanced
+        assert_ne!(*next, *mk_seed); // chain output != message-key seed
+                                     // deterministic
         let (next2, mk2) = kdf_ck(&ck);
-        assert_eq!(next, next2);
-        assert_eq!(mk_seed, mk2);
+        assert_eq!(*next, *next2);
+        assert_eq!(*mk_seed, *mk2);
     }
 
     #[test]
@@ -117,10 +120,10 @@ mod tests {
         let seed = [9u8; KEY_LEN];
         let (k, n) = kdf_mk(&seed);
         let (k2, n2) = kdf_mk(&seed);
-        assert_eq!(k, k2);
+        assert_eq!(*k, *k2);
         assert_eq!(n, n2);
         // key and nonce are not trivially equal/zero
-        assert_ne!(k, [0u8; KEY_LEN]);
+        assert_ne!(*k, [0u8; KEY_LEN]);
         assert_ne!(n, [0u8; NONCE_LEN]);
     }
 

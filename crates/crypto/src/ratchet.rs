@@ -167,10 +167,10 @@ impl Session {
             self.ratchet_send()?;
         }
         let ck = Zeroizing::new(self.send_ck.expect("send chain set after ratchet_send"));
+        // kdf_ck / kdf_mk now return the chain key, message-key seed, and AEAD key
+        // in Zeroizing, so these locals (and the early-return error path) wipe.
         let (next_ck, mk_seed) = kdf_ck(&ck);
-        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
-        let key = Zeroizing::new(key); // wiped even if aead_seal returns early
 
         let header = Header {
             ratchet_pub: self.self_ratchet_pub.clone().expect("self ratchet pub set"),
@@ -181,7 +181,7 @@ impl Session {
         let aad = header.encode();
         let ciphertext = aead_seal(&key, &nonce, plaintext, &aad)?;
 
-        self.send_ck = Some(next_ck);
+        self.send_ck = Some(*next_ck);
         self.send_n += 1;
 
         let mut w = talkrypt_wire::Writer::new();
@@ -225,14 +225,13 @@ impl Session {
         // 3. Skip within the current recv chain up to this message number.
         self.skip_recv(header.n)?;
 
-        // 4. Derive the message key for the current position and open.
+        // 4. Derive the message key for the current position and open. The chain
+        //    key, seed, and AEAD key come back in Zeroizing (kdf), so they wipe.
         let ck = Zeroizing::new(self.recv_ck.ok_or(CryptoError::DecryptionFailed)?);
         let (next_ck, mk_seed) = kdf_ck(&ck);
-        let mk_seed = Zeroizing::new(mk_seed);
         let (key, nonce) = kdf_mk(&mk_seed);
-        let key = Zeroizing::new(key);
         let pt = aead_open(&key, &nonce, &ciphertext, &aad)?;
-        self.recv_ck = Some(next_ck);
+        self.recv_ck = Some(*next_ck);
         self.recv_n += 1;
         Ok(pt)
     }
@@ -245,13 +244,13 @@ impl Session {
             .clone()
             .ok_or(CryptoError::Malformed("no peer ratchet key"))?;
         let (new_secret, new_public) = RatchetSecret::generate(self.profile);
-        let (ct, ikm) = new_secret.step_to(&peer)?;
+        let (ct, ikm) = new_secret.step_to(&peer)?; // ikm: Zeroizing (raw shared secret)
         let (root, ck) = kdf_rk(&self.root, &ikm);
 
-        self.root = root;
+        self.root = *root;
         self.prev_send_n = self.send_n;
         self.send_n = 0;
-        self.send_ck = Some(ck);
+        self.send_ck = Some(*ck);
         self.self_ratchet = Some(new_secret);
         self.self_ratchet_pub = Some(new_public);
         self.self_send_ct = ct;
@@ -265,12 +264,12 @@ impl Session {
             .self_ratchet
             .as_ref()
             .ok_or(CryptoError::Malformed("no self ratchet key"))?;
-        let ikm = self_r.step_from(&header.ratchet_pub, &header.ct)?;
+        let ikm = self_r.step_from(&header.ratchet_pub, &header.ct)?; // Zeroizing
         let (root, ck) = kdf_rk(&self.root, &ikm);
 
-        self.root = root;
+        self.root = *root;
         self.peer_ratchet = Some(header.ratchet_pub.clone());
-        self.recv_ck = Some(ck);
+        self.recv_ck = Some(*ck);
         self.recv_n = 0;
         self.need_send_ratchet = true;
         Ok(())
@@ -291,11 +290,11 @@ impl Session {
             .map(|p| p.encode())
             .unwrap_or_default();
         while self.recv_n < until {
-            let ck = self.recv_ck.expect("recv chain present");
+            let ck = Zeroizing::new(self.recv_ck.expect("recv chain present"));
             let (next_ck, mk_seed) = kdf_ck(&ck);
             self.skipped
-                .insert((chain_id.clone(), self.recv_n), mk_seed);
-            self.recv_ck = Some(next_ck);
+                .insert((chain_id.clone(), self.recv_n), *mk_seed);
+            self.recv_ck = Some(*next_ck);
             self.recv_n += 1;
         }
         Ok(())
@@ -305,8 +304,7 @@ impl Session {
         let id = (header.ratchet_pub.encode(), header.n);
         if let Some(mk_seed) = self.skipped.get(&id).copied() {
             let mk_seed = Zeroizing::new(mk_seed);
-            let (key, nonce) = kdf_mk(&mk_seed);
-            let key = Zeroizing::new(key);
+            let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
             let pt = aead_open(&key, &nonce, ct, aad)?;
             self.skipped.remove(&id);
             Ok(Some(pt))

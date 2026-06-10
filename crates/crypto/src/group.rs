@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
@@ -41,13 +42,21 @@ impl SenderKey {
     }
 
     fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(u32, Vec<u8>)> {
-        let (next, mk_seed) = kdf_ck(&self.chain);
-        let (key, nonce) = kdf_mk(&mk_seed);
+        let (next, mk_seed) = kdf_ck(&self.chain); // both Zeroizing
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let ct = aead_seal(&key, &nonce, plaintext, aad)?;
         let n = self.n;
-        self.chain = next;
+        self.chain = *next;
         self.n += 1;
         Ok((n, ct))
+    }
+}
+
+/// Wipe a sender key's chain key on drop (sender-key forward secrecy is per
+/// message; this clears the residual state too). SECURITY-AUDIT F-3.
+impl Drop for SenderKey {
+    fn drop(&mut self) {
+        self.chain.zeroize();
     }
 }
 
@@ -70,7 +79,8 @@ impl SenderKeyReceiver {
 
     fn open(&mut self, n: u32, ct: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         if let Some(mk_seed) = self.skipped.get(&n).copied() {
-            let (key, nonce) = kdf_mk(&mk_seed);
+            let mk_seed = Zeroizing::new(mk_seed);
+            let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
             let pt = aead_open(&key, &nonce, ct, aad)?;
             self.skipped.remove(&n);
             return Ok(pt);
@@ -81,20 +91,31 @@ impl SenderKeyReceiver {
         if (n - self.n) as usize > MAX_SKIP {
             return Err(CryptoError::TooManySkipped(MAX_SKIP));
         }
-        let mut chain = self.chain;
+        let mut chain = Zeroizing::new(self.chain);
         let mut idx = self.n;
         while idx < n {
-            let (next, mk_seed) = kdf_ck(&chain);
-            self.skipped.insert(idx, mk_seed);
+            let (next, mk_seed) = kdf_ck(&chain); // both Zeroizing
+            self.skipped.insert(idx, *mk_seed);
             chain = next;
             idx += 1;
         }
         let (next, mk_seed) = kdf_ck(&chain);
-        let (key, nonce) = kdf_mk(&mk_seed);
+        let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let pt = aead_open(&key, &nonce, ct, aad)?;
-        self.chain = next;
+        self.chain = *next;
         self.n = n + 1;
         Ok(pt)
+    }
+}
+
+/// Wipe the receiver's chain key and any cached skipped message-key seeds on
+/// drop. SECURITY-AUDIT F-3.
+impl Drop for SenderKeyReceiver {
+    fn drop(&mut self) {
+        self.chain.zeroize();
+        for seed in self.skipped.values_mut() {
+            seed.zeroize();
+        }
     }
 }
 

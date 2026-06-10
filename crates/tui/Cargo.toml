@@ -7,7 +7,6 @@ license.workspace = true
 
 [[bin]]
 name = "talkrypt-tui"
-publish.workspace = true
 path = "src/main.rs"
 
 [dependencies]
