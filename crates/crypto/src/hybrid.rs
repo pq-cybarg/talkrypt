@@ -174,14 +174,30 @@ impl RatchetSecret {
             pad,
             kem_ek: kem_ek.as_bytes().as_slice().to_vec(),
         };
-        (
-            RatchetSecret {
-                profile,
-                x,
-                kem_dk,
-            },
-            public,
-        )
+        let secret = RatchetSecret {
+            profile,
+            x,
+            kem_dk,
+        };
+        secret.kem_pairwise_consistency_check(&public);
+        (secret, public)
+    }
+
+    /// FIPS conditional self-test (pairwise consistency) on ML-KEM-1024 key
+    /// generation (SECURITY-AUDIT R-5): encapsulate to the freshly generated
+    /// public key and decapsulate with the matching secret — the shared secrets
+    /// must agree, or the key pair is faulty. **Abort** rather than return a
+    /// broken key. One ML-KEM encapsulate + decapsulate (the X25519 hybrid half
+    /// is non-load-bearing; the approved KEM is what the PCT covers).
+    fn kem_pairwise_consistency_check(&self, public: &RatchetPublic) {
+        let agree = public
+            .encapsulate()
+            .and_then(|(ct, ss_enc)| self.decapsulate(&ct).map(|ss_dec| ss_enc == ss_dec))
+            .unwrap_or(false);
+        if !agree {
+            eprintln!("FATAL: ML-KEM-1024 key-generation pairwise-consistency test failed");
+            std::process::abort();
+        }
     }
 
     /// Deterministically derive a ratchet key for `profile` from a 32-byte seed.
@@ -197,7 +213,7 @@ impl RatchetSecret {
         profile: KemProfile,
         seed: &[u8; 32],
     ) -> (RatchetSecret, RatchetPublic) {
-        match profile.posture {
+        let (secret, public) = match profile.posture {
             KemPosture::Hybrid => {
                 let mut okm = [0u8; 96];
                 crate::kdf::mac_kdf(seed, &[], b"talkrypt-treekem-node", &mut okm);
@@ -254,7 +270,9 @@ impl RatchetSecret {
                     public,
                 )
             }
-        }
+        };
+        secret.kem_pairwise_consistency_check(&public); // FIPS PCT (R-5)
+        (secret, public)
     }
 
     /// The profile this key was generated for.

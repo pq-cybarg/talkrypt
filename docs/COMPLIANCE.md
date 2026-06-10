@@ -94,7 +94,7 @@ what talkrypt does today, and the concrete delta to a validatable module.
 | 6 | Physical security | N/A (software module). | N/A. |
 | 7 | Non-invasive security | Decryption is **uniform-failure**; decrypt runs on cloned state (no partial-state leak). Not formally constant-time across all primitives. | Side-channel (timing) review of each primitive; constant-time guarantees. |
 | 8 | Sensitive security parameter (SSP) management | ML-DSA seed in `Zeroizing`; **session symmetric secrets zeroized on drop** (ratchet + Noise; per-message keys in `Zeroizing` — SECURITY-AUDIT F-3, resolved); persistent keys sealed with Argon2id + AES-256-GCM; `OsRng` (`getrandom`) for keygen. | An approved DRBG with health tests; a documented SSP lifecycle table. |
-| 9 | Self-tests | **Power-on self-tests implemented** (`talkrypt_crypto::self_test` / `ensure_self_tested`, SECURITY-AUDIT R-5): AES-256-GCM + hash KATs, ML-KEM/ML-DSA pairwise-consistency, KDF determinism — run once at start-up (CLI `main`, suite-registry init, FFI keygen) and **abort on failure**. Plus KAT-locked KDF/wire vectors, property tests, a Kani proof. | Per-operation conditional self-tests on every keygen (vs once at start-up); a CAVP-traceable KAT set; documented POST in the Security Policy. |
+| 9 | Self-tests | **POST + conditional self-tests** (`talkrypt_crypto::self_test`/`ensure_self_tested`, SECURITY-AUDIT R-5). **Known-answer tests against official vectors**: AES-256-GCM + SHA3-384/SHA-384 (NIST); ML-DSA-87 keyGen (FIPS-204 reference); **ML-KEM-1024 keyGen/encaps/decaps (NIST FIPS-203 ACVP)** — keyGen in the POST, full set in `tests/nist_mlkem_acvp.rs`; plus a KDF KAT. Run at start-up (CLI `main`, suite-registry init, FFI keygen), **abort on failure**. **Per-keygen PCT**: every ML-DSA/ML-KEM keygen self-checks. CI validates every pinned vector. | A formal Security Policy documenting the POST; full-module CAVP/CMVP lab testing. |
 | 10 | Life-cycle assurance | Versioned, tested (211 tests), fuzzed wire codec, Kani-proven decoder, frozen+KAT-locked wire format. | Configuration-management, delivery, and operator-guidance documents per 140-3; CAVP test evidence. |
 | 11 | Mitigation of other attacks | Replay rejection (bounded skip), AEAD AAD-bound headers, wire padding for frame-indistinguishability, invite-token PSK + safety-number MITM mitigation. | Formal documentation of mitigations and their limits. |
 
@@ -141,11 +141,18 @@ Exact versions from `Cargo.lock` (reproduce with `scripts/crypto-inventory.sh`):
 
 In priority order, to move from *algorithm-aligned* to *validatable*:
 
-1. **Power-on self-tests (POST).** *Done* (`talkrypt_crypto::self_test` /
-   `ensure_self_tested`): AES-256-GCM + hash KATs, ML-KEM-1024/ML-DSA-87
-   pairwise-consistency, KDF determinism, run once at start-up and aborting on
-   failure. Remaining for validation: per-keygen conditional self-tests and a
-   CAVP-traceable KAT set.
+1. **Power-on self-tests (POST) + conditional self-tests.** *Done*
+   (`talkrypt_crypto::self_test` / `ensure_self_tested`): start-up known-answer
+   tests against **official vectors** — AES-256-GCM and the hash (NIST), ML-DSA-87
+   keyGen (FIPS-204 reference example, exact), and **ML-KEM-1024 keyGen/encaps/
+   decaps against the NIST FIPS-203 ACVP vectors** (usnistgov/ACVP-Server; keyGen
+   in the POST, full encaps/decaps in `tests/nist_mlkem_acvp.rs`) — plus a
+   pairwise-consistency test on every ML-DSA/ML-KEM key generation, all aborting
+   on failure. Only the KDF (talkrypt's own KMAC256/HKDF construction) is an
+   implementation KAT. (Note recorded en route: the commonly-cited C2SP/CCTV
+   ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final
+   implementation.) Remaining for full module validation: CAVP/CMVP lab testing
+   of the complete boundary.
 2. **Approved DRBG with health tests.** Replace bare `OsRng` use at the boundary
    with an SP 800-90A DRBG seeded from a health-tested entropy source
    (SP 800-90B), or document the OS DRBG as the approved entropy source per the

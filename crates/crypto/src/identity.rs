@@ -44,7 +44,24 @@ impl IdentityKeyPair {
     pub fn generate() -> Self {
         let mut seed = Zeroizing::new([0u8; 32]);
         rand::rngs::OsRng.fill_bytes(seed.as_mut_slice());
-        Self::from_secret_bytes(*seed)
+        let kp = Self::from_secret_bytes(*seed);
+        kp.pairwise_consistency_check();
+        kp
+    }
+
+    /// FIPS conditional self-test (pairwise consistency test) on key generation
+    /// (SECURITY-AUDIT R-5): the freshly generated key must sign a probe and
+    /// verify it. A failure means the keypair is faulty — a fault or corruption
+    /// during generation — so we **abort** rather than ever hand back a key that
+    /// can't sign-and-verify. Cheap (one ML-DSA-87 sign + verify); keygen is rare
+    /// (account/device/segment creation), not per-message.
+    fn pairwise_consistency_check(&self) {
+        const PROBE: &[u8] = b"talkrypt ml-dsa-87 keygen PCT";
+        let sig = self.sign(PROBE);
+        if self.public.verify(PROBE, &sig).is_err() {
+            eprintln!("FATAL: ML-DSA-87 key-generation pairwise-consistency test failed");
+            std::process::abort();
+        }
     }
 
     /// Reconstruct from a stored ML-DSA seed.
