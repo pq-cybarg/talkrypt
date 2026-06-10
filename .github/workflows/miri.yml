@@ -1,0 +1,33 @@
+# Miri verification of secret zeroization (SECURITY-AUDIT F-3 / R-3).
+#
+# Runs the zero-on-drop observation tests and the Zeroizing-returning KDF paths
+# under Miri, which confirms BOTH that secret bytes are actually wiped on drop
+# AND that the drop paths contain no undefined behaviour. Only the fast tests run
+# here; the full ML-KEM-under-Miri ratchet round-trip (~6 min) stays a manual,
+# on-demand check (`MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test
+# -p talkrypt-crypto dropping_active_session_runs_zeroize_drop`).
+name: miri
+
+on:
+  push:
+    paths: ["crates/crypto/**", ".github/workflows/miri.yml"]
+  pull_request:
+    paths: ["crates/crypto/**"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  zeroize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly + Miri
+        run: |
+          rustup toolchain install nightly --component miri --profile minimal
+          rustup default nightly
+      - name: Miri — zero-on-drop observation tests
+        run: cargo miri test -p talkrypt-crypto drop_zeroizes
+      - name: Miri — Zeroizing-returning KDF paths
+        run: cargo miri test -p talkrypt-crypto 'kdf::'

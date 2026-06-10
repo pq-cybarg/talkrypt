@@ -132,12 +132,17 @@ transient can be missed:
   sealed keys were already zeroized; the X25519 ratchet secret self-zeroizes via
   dalek.
 
-Regression guard: `ratchet::tests::dropping_active_session_runs_zeroize_drop`
-exercises the drop path with all secret fields populated; the existing 101 crypto
-tests confirm correctness is preserved. (That the bytes are *observably* zero
-post-drop is not testable in safe Rust — reading dropped memory is UB; a Miri run
-is the proper verification, R-3. `zeroize` itself guarantees the volatile write
-is not optimized away.)
+**Miri-verified (R-3 done).** The wipe is observed soundly with
+`crate::assert_drop_zeroes`: heap-allocate the value, run its `Drop` via
+`drop_in_place` (which does *not* free the allocation), then read the secret
+field from the still-live allocation (no use-after-free) and assert it is zero.
+Under `cargo +nightly miri test` this confirms both the wipe and freedom from
+undefined behavior for every secret-bearing type — `ratchet::Session`,
+`noise::NoiseSession`, `group::SenderKey`/`SenderKeyReceiver`,
+`treekem::TreeKemGroup` — plus the `Zeroizing`-returning `kdf::*` paths and a full
+ratchet encrypt/decrypt + populated-session drop run end-to-end (real ML-KEM
+under Miri). `zeroize` itself guarantees the volatile write is not optimized away.
+The existing 101 crypto tests confirm correctness is preserved.
 
 **F-2 / R-1 (dependency scanning) — Resolved.** `scripts/audit-deps.sh` runs
 `cargo audit` (RustSec DB) + `cargo deny check` (advisories, licenses, banned
@@ -221,11 +226,12 @@ introduced. Bounded, documented, and unit-tested (`fresh_cert_tolerates_verifier
 - **KDF/wire KAT:** `kdf_known_answer_lock`, `padded_pure_matches_hybrid_wire_length`, `padded_pure_filler_is_x25519_shaped`.
 - **Group:** `remove_denies_removed_member`, `stale_epoch_message_rejected`, `broadcast_is_opaque_without_the_chat_root`.
 
-- **Zeroization:** `dropping_active_session_runs_zeroize_drop` (exercises the
-  F-3 drop path with root + both chain keys + a non-empty skipped-key map).
+- **Zeroization:** `dropping_active_session_runs_zeroize_drop`, plus the
+  Miri-verified `drop_zeroizes_*` observation tests for `Session`, `NoiseSession`,
+  `SenderKey`/`SenderKeyReceiver`, and `TreeKemGroup` (`assert_drop_zeroes`).
 
-Gaps: the zeroize *wipe* is not memory-verified in safe Rust (Miri, R-3); no
-timing/side-channel tests (F-9); CVE scanning not automated (F-2).
+Gaps: no timing/side-channel tests (F-9); CVE scanning is wired (F-2) — keep the
+ignore list reviewed.
 
 ---
 
@@ -235,7 +241,7 @@ timing/side-channel tests (F-9); CVE scanning not automated (F-2).
 | --- | --- | --- |
 | R-1 | Done | `cargo audit` + `cargo deny` wired into CI (`.github/workflows/audit.yml`, push/PR + weekly) via `scripts/audit-deps.sh` + `deny.toml`. Keep the ignore list reviewed. (F-2, F-13) |
 | R-2 | High | Commission an independent cryptographic review of the ratchet, handshake, and identity-chain logic — the properties in §3 are the audit's core. (F-1) |
-| R-3 | Low | F-3 zeroization is implemented; add a Miri run in CI to *verify* the wipe (safe Rust can't observe post-drop bytes). |
+| R-3 | Done | F-3 zeroization is Miri-verified (`assert_drop_zeroes` + `cargo +nightly miri test`); wire the Miri run into CI to keep it verified. |
 | R-4 | Medium | Timing side-channel review of the AEAD and signature paths; document constant-time status. (F-9) |
 | R-5 | Medium | Power-on KAT self-tests for AES-GCM, ML-KEM, ML-DSA, hash, KDF (also a FIPS prerequisite). (COMPLIANCE §5.1) |
 | R-6 | Low | External fuzzing campaign on the wire codec and descriptor parser beyond the bundled harness. |
