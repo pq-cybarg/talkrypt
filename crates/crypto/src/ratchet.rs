@@ -70,6 +70,20 @@ impl Header {
     }
 }
 
+/// Fuzz hook (SECURITY-AUDIT R-6): drive the crate-private ratchet [`Header`]
+/// wire decoder over arbitrary attacker-controlled bytes for a given KEM
+/// profile. Decoding must never panic or over-read — only ever `Ok`/`Err`. On a
+/// successful decode the header must re-encode and re-decode (structural
+/// round-trip), proving the parser and serializer agree. Gated behind the
+/// `fuzzing` feature so it never ships in a normal build.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_header_roundtrip(profile: crate::hybrid::KemProfile, bytes: &[u8]) {
+    if let Ok(h) = Header::decode(profile, bytes) {
+        let re = h.encode();
+        Header::decode(profile, &re).expect("re-decode of re-encoded ratchet header");
+    }
+}
+
 /// A Double Ratchet session with one peer.
 #[derive(Clone)]
 pub struct Session {

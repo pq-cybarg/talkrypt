@@ -1,0 +1,55 @@
+# Coverage-guided fuzzing smoke test (SECURITY-AUDIT R-6).
+#
+# Builds every fuzz target under ASan + libFuzzer and runs each for a short,
+# bounded time on every push/PR that touches a decoder or the harness. This is a
+# regression gate, not a campaign: it re-exercises the checked-in corpus (so any
+# previously-found crash, e.g. F-14, can never silently return) and gives fresh
+# inputs a brief chance to surface new ones. A real fuzzing campaign runs for
+# hours/days out of band. Any crash writes an artifact and fails the job.
+name: fuzz
+
+on:
+  push:
+    paths:
+      - "crates/crypto/**"
+      - "crates/core/**"
+      - "crates/wire/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    paths:
+      - "crates/crypto/**"
+      - "crates/core/**"
+      - "crates/wire/**"
+      - "fuzz/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          cargo install cargo-fuzz --locked
+      - name: Build all fuzz targets
+        run: cargo fuzz build
+      - name: Smoke-run each target (45 s)
+        run: |
+          set -e
+          for t in $(cargo fuzz list); do
+            echo "::group::fuzz $t"
+            cargo fuzz run "$t" -- -max_total_time=45 -print_final_stats=1
+            echo "::endgroup::"
+          done
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/

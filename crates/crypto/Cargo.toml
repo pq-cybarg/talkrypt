@@ -34,6 +34,10 @@ fips = ["dep:aws-lc-rs"]
 # Use SHA-2 (SHA-384) for the KDF/fingerprint instead of the default SHA3-384,
 # for strict CNSA 2.0 hash alignment.
 cnsa-sha2 = []
+# Expose thin wrappers around crate-private wire decoders (`Header`,
+# `BeaconBody`) so the out-of-tree `fuzz/` crate can exercise them. Off by
+# default; carries no behavior and nothing else depends on it. (SECURITY-AUDIT R-6.)
+fuzzing = []
 
 [dev-dependencies]
 proptest.workspace = true

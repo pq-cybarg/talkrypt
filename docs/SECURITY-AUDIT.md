@@ -20,8 +20,9 @@ engine (`crates/core`), transport (`crates/transport`), wire codec
 (`crates/wire`), group layer (`treekem`), FFI (`crates/ffi`), and the CLI.
 **Method:** source review against the threat model, mapping of each claimed
 security property to its mechanism and its test(s), and an honest findings sweep
-(including properties that are *not* yet met). 211 automated tests, a fuzzed wire
-codec, and one Kani proof back the review but are *not themselves* an audit.
+(including properties that are *not* yet met). 225 automated tests, nine
+coverage-guided fuzz targets over every attacker-reachable decoder, and one Kani
+proof back the review but are *not themselves* an audit.
 
 **Out of scope:** the Arti/Tor dependency tree, the OS, the Rust standard library
 and the cryptographic-primitive crates' internals (their correctness is assumed;
@@ -140,6 +141,7 @@ who has read the disclaimers.
 | F-11 | Medium | The suite-registry floor was enforced only against a suite's *self-declared* `SecurityLevel` tag — a suite naming AES-128 / ML-KEM-768 / ML-DSA-65 could pass by tagging itself `PostQuantum`. | **Resolved** — `register` now also enforces the declared parameters (`meets_cnsa_floor`); the AEAD type (`&[u8;32]`) structurally bars an AES-128-length key |
 | F-12 | Info | The RFC 9420 conformance harness (`crates/crypto/src/mls/`) names the standard AES-128-GCM ciphersuite and derives 16-byte key-schedule bytes to match official MLS vectors. It instantiates no cipher, is not a registrable suite, and is not on any message path. | By design — `docs/CONFORMANCE.md`; walled off by F-11 + the AEAD type |
 | F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
+| F-14 | Medium | Remote-DoS panic in the ratchet-header decoder: a hybrid / padded-PQ-pure `RatchetPublic` whose length-prefixed X25519/pad field was shorter than 32 bytes triggered an out-of-range slice index (`hybrid.rs::to_32`), panicking the receiver on a single malformed inbound message. Found by the new `ratchet_header` fuzz target (R-6), in ~3.5k executions. | **Resolved** — decode path now uses a fallible `try_to_32` returning `Malformed`; regression test `short_x25519_or_pad_field_is_rejected_not_panic` + corpus seed `corpus/ratchet_header/regression-short-x25519-field` |
 
 ### Detail on the notable findings
 
@@ -236,13 +238,22 @@ introduced. Bounded, documented, and unit-tested (`fresh_cert_tolerates_verifier
 ## 5. Attack surface
 
 - **Wire codec** (`crates/wire`): the primary untrusted-input surface. Bounded
-  length-prefixed decoding, **fuzzed** (`fuzz/fuzz_targets/`) and **Kani-proven**
-  for decoder bounds. Highest-value place for an external fuzzing campaign.
+  length-prefixed decoding, **fuzzed** (`fuzz_targets/wire_reader`) and
+  **Kani-proven** for decoder bounds.
 - **Invite/descriptor parsing** (`descriptor.rs`): parses attacker-influenceable
-  `talkrypt://` URIs; covered by parser fuzzing.
-- **Identity resolution** (`contacts.rs`, `engine.rs::handle_identity`): verifies
-  attacker-supplied cert chains; the binding check (leaf == authenticated peer)
-  is the anti-replay linchpin.
+  `talkrypt://` URIs; **fuzzed** (`descriptor_parser`).
+- **Identity resolution** (`contacts.rs`, `account.rs`, `engine.rs::handle_identity`):
+  decodes and verifies attacker-supplied presentations, cert chains, username
+  claims, and revocations *before* signature checks; the binding check
+  (leaf == authenticated peer) is the anti-replay linchpin. All four decoders
+  are **fuzzed** (`presentation`, `identity_chain`, `signed_claim`, `revocation`).
+- **Per-message ratchet header** (`hybrid.rs`, `ratchet.rs`): the public key +
+  KEM ciphertext parsed on every inbound message, across all three KEM profiles;
+  **fuzzed** (`ratchet_header`) — this surfaced and fixed F-14.
+- **Scheme beacons & suite matching** (`beacon.rs`, `suite.rs`): the
+  always-encrypted scheme advertisement and the fingerprint-based registry
+  lookup of an attacker-chosen suite id/params; **fuzzed** (`beacon_body`,
+  `suite_scheme`).
 - **FFI boundary** (`crates/ffi`): the host UI supplies opaque hex/URIs; malformed
   input returns typed errors, never panics across the boundary (uniffi).
 - **Transport** (`crates/transport`): sees only ciphertext; a hostile relay
@@ -281,7 +292,7 @@ ignore list reviewed.
 | R-3 | Done | F-3 zeroization is Miri-verified (`assert_drop_zeroes` + `cargo +nightly miri test`); wire the Miri run into CI to keep it verified. |
 | R-4 | Done | Timing review complete (§3a): AEAD/signature/KEM constant-time via their crates; uniform AEAD failure; no secret-dependent comparison in our code; identity-chain key comparison made constant-time (`subtle`). Next: a `dudect`/statistical timing test in CI for empirical confirmation. |
 | R-5 | Done | POST (`self_test`/`ensure_self_tested`) + per-keygen PCT, abort on failure. **CAVP-traceable KATs against official vectors:** AES-256-GCM + SHA3-384/SHA-384 (NIST), ML-DSA-87 keyGen (FIPS-204 reference example, exact), and **ML-KEM-1024 keyGen/encaps/decaps against NIST FIPS-203 ACVP** (usnistgov/ACVP-Server — `selftest::kem_kat` + `tests/nist_mlkem_acvp.rs`, exact). Only the KDF (talkrypt's own KMAC256/HKDF) remains an implementation KAT. (Recorded en route: the C2SP/CCTV ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final implementation — use NIST ACVP.) |
-| R-6 | Low | External fuzzing campaign on the wire codec and descriptor parser beyond the bundled harness. |
+| R-6 | Done | Fuzz harness expanded from 2 to 9 targets covering every attacker-reachable decoder: `wire_reader`, `descriptor_parser`, `identity_chain`, `signed_claim`, `revocation`, `presentation`, `ratchet_header`, `beacon_body`, `suite_scheme` (`fuzz/fuzz_targets/`; the two crate-private codecs reached via the crypto crate's `fuzzing`-gated `fuzz_header_roundtrip`/`fuzz_beacon_roundtrip` hooks). Each ran ≥12 s clean except `ratchet_header`, which found a remote-DoS panic (F-14) in ~3.5k runs — now fixed, with a regression test + corpus seed, and re-fuzzed 30 s (3.9M runs) clean. Decoders are checked for no-panic and structural round-trip. A CI smoke job (`.github/workflows/fuzz.yml`) builds all targets and runs each 45 s on every decoder/harness change, re-exercising the regression corpus. Next: a longer (hours/days) external campaign. |
 | R-7 | Low | Sign and notarize desktop packages once a release identity exists; sign the `.deb`. (F-8) |
 
 ---

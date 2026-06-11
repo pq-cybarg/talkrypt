@@ -370,8 +370,8 @@ impl RatchetPublic {
     pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<RatchetPublic> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let (x_pub, pad) = match profile.posture {
-            KemPosture::Hybrid => (Some(to_32(r.get_bytes()?)), None),
-            KemPosture::PqPure if profile.pad_pure => (None, Some(to_32(r.get_bytes()?))),
+            KemPosture::Hybrid => (Some(try_to_32(r.get_bytes()?)?), None),
+            KemPosture::PqPure if profile.pad_pure => (None, Some(try_to_32(r.get_bytes()?)?)),
             KemPosture::PqPure => (None, None),
         };
         let kem_ek = r.get_vec()?;
@@ -384,10 +384,24 @@ impl RatchetPublic {
     }
 }
 
+/// Copy a slice that is **invariably** 32 bytes (an X25519 shared secret) into
+/// an array. Callers must guarantee the length; this panics otherwise. Never
+/// call on attacker-controlled bytes — use [`try_to_32`] for those.
 fn to_32(b: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&b[..32]);
     out
+}
+
+/// Fallible 32-byte conversion for **attacker-controlled** wire fields (the
+/// X25519 public / PQ-pure pad in a ratchet header). A non-32-byte field is a
+/// malformed message, not a crash: the X25519 public and the pad are each
+/// exactly 32 bytes by construction, so any other length is rejected.
+/// (SECURITY-AUDIT R-6: found by `ratchet_header` fuzzing — a short field used
+/// to panic the receiver via an out-of-range slice index.)
+fn try_to_32(b: &[u8]) -> Result<[u8; 32]> {
+    b.try_into()
+        .map_err(|_| CryptoError::Malformed("ratchet public x25519/pad length"))
 }
 
 /// Shape 32 random bytes so they are indistinguishable from a serialized
@@ -497,6 +511,25 @@ mod tests {
             let bytes = pk.encode();
             let p2 = RatchetPublic::decode(p, &bytes).unwrap();
             assert_eq!(pk, p2);
+        }
+    }
+
+    #[test]
+    fn short_x25519_or_pad_field_is_rejected_not_panic() {
+        // Regression (SECURITY-AUDIT R-6, found by `ratchet_header` fuzzing): a
+        // hybrid / padded-PQ-pure ratchet public whose first length-prefixed
+        // field is shorter than 32 bytes must decode to `Err(Malformed)`, never
+        // panic via an out-of-range slice index in the 32-byte conversion.
+        for p in [KemProfile::hybrid(), KemProfile::pq_pure()] {
+            // A 2-byte field (len prefix = 2) followed by an empty KEM key.
+            let mut w = talkrypt_wire::Writer::new();
+            w.put_bytes(&[0xAB, 0xCD]); // too-short x25519/pad
+            w.put_bytes(&[]); // empty kem_ek
+            let bytes = w.into_vec();
+            match RatchetPublic::decode(p, &bytes) {
+                Err(CryptoError::Malformed(_)) => {}
+                other => panic!("expected Malformed for short field, got {other:?}"),
+            }
         }
     }
 

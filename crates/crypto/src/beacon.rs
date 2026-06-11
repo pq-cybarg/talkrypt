@@ -104,6 +104,21 @@ impl BeaconBody {
     }
 }
 
+/// Fuzz hook (SECURITY-AUDIT R-6): drive the crate-private [`BeaconBody`] wire
+/// decoder over arbitrary bytes (this is the always-encrypted scheme-beacon
+/// parsing path). Decoding must never panic; a successful decode must round-trip
+/// (`decode(encode(b)) == b`). Gated behind the `fuzzing` feature.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_beacon_roundtrip(bytes: &[u8]) {
+    if let Ok(b) = BeaconBody::decode(bytes) {
+        assert_eq!(
+            BeaconBody::decode(&b.encode()).expect("re-decode of re-encoded beacon"),
+            b,
+            "beacon body round-trip mismatch"
+        );
+    }
+}
+
 /// Derive the symmetric beacon key from a chat root.
 pub fn beacon_key(root: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     let mut k = [0u8; KEY_LEN];

@@ -11,6 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 talkrypt-wire = { path = "../crates/wire" }
 talkrypt-core = { path = "../crates/core" }
+# `fuzzing` exposes thin wrappers around the crate-private ratchet/beacon decoders.
+talkrypt-crypto = { path = "../crates/crypto", features = ["fuzzing"] }
 
 [[bin]]
 name = "wire_reader"
@@ -21,6 +23,48 @@ doc = false
 [[bin]]
 name = "descriptor_parser"
 path = "fuzz_targets/descriptor_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "identity_chain"
+path = "fuzz_targets/identity_chain.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "signed_claim"
+path = "fuzz_targets/signed_claim.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "revocation"
+path = "fuzz_targets/revocation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "presentation"
+path = "fuzz_targets/presentation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ratchet_header"
+path = "fuzz_targets/ratchet_header.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "beacon_body"
+path = "fuzz_targets/beacon_body.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "suite_scheme"
+path = "fuzz_targets/suite_scheme.rs"
 test = false
 doc = false
 

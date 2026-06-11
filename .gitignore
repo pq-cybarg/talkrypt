@@ -5,9 +5,12 @@ Cargo.lock.bak
 
 # --- cargo-fuzz ---
 /fuzz/target
-/fuzz/corpus
 /fuzz/artifacts
 /fuzz/Cargo.lock
+# Ignore the bulk auto-generated corpus, but keep checked-in regression seeds
+# (inputs that once crashed a target — see fuzz/README.md).
+/fuzz/corpus/*/*
+!/fuzz/corpus/*/regression-*
 
 # --- key material / secrets: NEVER track ---
 *.key
