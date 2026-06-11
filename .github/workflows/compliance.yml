@@ -1,0 +1,40 @@
+# FIPS compliance gate: prove Node's Web Crypto (crypto.subtle / SubtleCrypto)
+# runs over an active, ENFORCING OpenSSL FIPS module — using only free, openly
+# available components (the OpenSSL FIPS provider built from source; no
+# Chainguard/RHEL subscription, no host-kernel FIPS).
+#
+# The job builds ci/fips.Dockerfile (stock Node 20 + the OpenSSL 3.0.19 FIPS
+# provider of the validated 3.0 family) and runs ci/fips-compliance-check.sh:
+#   1. the FIPS module loads + activates (its load-time KAT self-tests pass),
+#   2. it enforces (approved algorithms succeed, non-approved MD5 is rejected),
+#   3. SubtleCrypto exercises the approved set.
+name: compliance
+
+# Run JavaScript-based actions on Node.js 24 (newest stable/secure runtime).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "ci/fips.Dockerfile"
+      - "ci/fips-compliance-check.sh"
+      - "ci/fips-subtle-check.mjs"
+      - ".github/workflows/compliance.yml"
+  pull_request:
+    paths:
+      - "ci/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fips-subtle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the FIPS-provider Node image
+        run: docker build -f ci/fips.Dockerfile -t talkrypt-fips-node ci/
+      - name: FIPS module self-test + enforcement + SubtleCrypto
+        run: docker run --rm -v "$PWD/ci:/work:ro" talkrypt-fips-node bash /work/fips-compliance-check.sh
