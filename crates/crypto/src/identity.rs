@@ -39,6 +39,28 @@ pub struct IdentityPublic {
     pub sig_vk: Vec<u8>,
 }
 
+impl subtle::ConstantTimeEq for IdentityPublic {
+    /// Constant-time key equality for the **authentication-decision** path
+    /// (identity-chain verification). The key bytes are public, so this is
+    /// defense-in-depth — an auth-gate comparison is constant-time by principle,
+    /// leaking no position-of-first-difference even though the values aren't
+    /// secret. The key length is public (a fixed parameter), so a length
+    /// mismatch short-circuits to "not equal". (SECURITY-AUDIT R-4.)
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        if self.sig_vk.len() != other.sig_vk.len() {
+            return subtle::Choice::from(0u8);
+        }
+        self.sig_vk.ct_eq(&other.sig_vk)
+    }
+}
+
+impl IdentityPublic {
+    /// Constant-time equality (see [`subtle::ConstantTimeEq`]).
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        bool::from(subtle::ConstantTimeEq::ct_eq(self, other))
+    }
+}
+
 impl IdentityKeyPair {
     /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {

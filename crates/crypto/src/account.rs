@@ -191,7 +191,9 @@ impl IdentityChain {
         if self.links.is_empty() {
             return Err(CryptoError::Malformed("empty identity chain"));
         }
-        if &self.links[0].issuer != account {
+        // Constant-time key comparisons on the authentication-decision path
+        // (defense-in-depth; the keys are public — see IdentityPublic::ct_eq).
+        if !self.links[0].issuer.ct_eq(account) {
             return Err(CryptoError::BadSignature); // not rooted at the pinned account
         }
         for (i, link) in self.links.iter().enumerate() {
@@ -199,11 +201,11 @@ impl IdentityChain {
             if !link.cert.valid_at(now) {
                 return Err(CryptoError::BadSignature); // expired / not yet valid
             }
-            if i > 0 && link.issuer != self.links[i - 1].cert.subject {
+            if i > 0 && !link.issuer.ct_eq(&self.links[i - 1].cert.subject) {
                 return Err(CryptoError::BadSignature); // broken chaining
             }
         }
-        if self.leaf() != Some(leaf) {
+        if !self.leaf().is_some_and(|l| l.ct_eq(leaf)) {
             return Err(CryptoError::BadSignature); // chain doesn't end at this key
         }
         Ok(())

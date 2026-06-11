@@ -83,6 +83,43 @@ core for crypto decisions (it only polls events and supplies opaque inputs).
 
 ---
 
+### 3a. Constant-time analysis (R-4)
+
+A timing-side-channel review of every comparison and branch that touches secret
+or authentication-decision data. Scope: talkrypt's own code plus the
+constant-time guarantees we inherit from the primitive crates.
+
+| Surface | Operation | Constant-time? | Source |
+| --- | --- | --- | --- |
+| AEAD open | GCM tag verification + uniform failure (no plaintext on bad tag, single error path) | Yes | `aes-gcm` / `aws-lc-rs` verify the tag in constant time and return one opaque error; talkrypt never branches on *why* an open failed |
+| ML-KEM decaps | Implicit rejection — a bad ciphertext yields a pseudo-random shared secret rather than an early error, with no secret-dependent branch | Yes | `ml-kem` (FIPS-203 §6.3 implicit rejection) |
+| ML-DSA verify | Signature verification over public inputs; no secret-dependent timing in the signer's secret path that talkrypt exposes | Yes | `ml-dsa` |
+| Identity-chain key equality | Issuer/subject/leaf verifying-key comparison on the **authentication-decision** path | Yes — `subtle::ConstantTimeEq` | `identity.rs::IdentityPublic::ct_eq`, used in `account.rs::IdentityChain::verify` |
+| Ratchet decrypt | Runs against a **clone** of session state, committed only on success | N/A (no secret-dependent branch; failure is uniform) | `ratchet.rs`; `tampered_fails_without_corrupting` |
+| At-rest unseal | Argon2id KDF then AES-256-GCM open; failure is the single AEAD error path | Yes (inherits AEAD uniform failure) | `keystore.rs`, `descriptor.rs` |
+
+**talkrypt's own code:** audited for secret-dependent branches and
+comparisons. There are none — no `==` on key/MAC/tag material, no early-return
+keyed on secret content, no table or array index derived from a secret. The one
+authentication-gate comparison (identity-chain key equality) was converted to
+`subtle::ConstantTimeEq` as defense-in-depth: the verifying-key bytes are
+public, so the prior `==` was not an exploitable leak, but an auth gate is
+constant-time *by principle* — it must not leak position-of-first-difference
+regardless of whether the operands are secret. The key length is a fixed public
+parameter, so a length mismatch short-circuits to "not equal".
+
+**Inherited guarantees:** the three PQ/AEAD primitives (`ml-kem`, `ml-dsa`,
+`aes-gcm`/`aws-lc-rs`) provide their own constant-time and uniform-failure
+behavior for the secret paths; talkrypt does not re-implement any primitive and
+does not unwrap their internal state, so it cannot reintroduce a leak those
+crates avoid.
+
+**Residual:** constant-time behavior of the *underlying crates* is asserted by
+those crates, not independently verified here; this is folded into F-1 (no
+external review). No talkrypt-introduced timing leak was found.
+
+---
+
 ## 4. Findings register
 
 Severity reflects impact *on the project's own claims*, assuming an honest user
@@ -98,7 +135,7 @@ who has read the disclaimers.
 | F-6 | Info | Default hash/KDF is SHA3-384/KMAC256 (FIPS 202), not the CNSA-named SHA-384; `--features cnsa-sha2` switches to SHA-384. | By design — `docs/COMPLIANCE.md` §2 |
 | F-7 | Info | Group layer is a custom PQ construction, not RFC 9420 (MLS) conformant — no MLS interop. | By design — `docs/CONFORMANCE.md` |
 | F-8 | Low | Desktop packages are ad-hoc-signed (macOS) or unsigned (`.deb`); integrity rests on `SHA256SUMS`, not a trusted signing authority or notarization. | Open — `docs/PACKAGING.md` |
-| F-9 | Info | No formal constant-time guarantees across all primitives (timing side-channel review not performed). | Open — Recommendation R-4 |
+| F-9 | Info | Timing side-channel posture not documented. | **Reviewed** (R-4): AEAD/signature/KEM are constant-time via their crates; our code has no secret-dependent comparison; the auth-decision key comparison is now constant-time. See §3a. |
 | F-10 | Info | GUI bundles (Android APK, desktop) are not built/tested in CI; the Rust core + FFI they depend on are. | Open |
 | F-11 | Medium | The suite-registry floor was enforced only against a suite's *self-declared* `SecurityLevel` tag — a suite naming AES-128 / ML-KEM-768 / ML-DSA-65 could pass by tagging itself `PostQuantum`. | **Resolved** — `register` now also enforces the declared parameters (`meets_cnsa_floor`); the AEAD type (`&[u8;32]`) structurally bars an AES-128-length key |
 | F-12 | Info | The RFC 9420 conformance harness (`crates/crypto/src/mls/`) names the standard AES-128-GCM ciphersuite and derives 16-byte key-schedule bytes to match official MLS vectors. It instantiates no cipher, is not a registrable suite, and is not on any message path. | By design — `docs/CONFORMANCE.md`; walled off by F-11 + the AEAD type |
@@ -242,7 +279,7 @@ ignore list reviewed.
 | R-1 | Done | `cargo audit` + `cargo deny` wired into CI (`.github/workflows/audit.yml`, push/PR + weekly) via `scripts/audit-deps.sh` + `deny.toml`. Keep the ignore list reviewed. (F-2, F-13) |
 | R-2 | High | Commission an independent cryptographic review of the ratchet, handshake, and identity-chain logic — the properties in §3 are the audit's core. (F-1) |
 | R-3 | Done | F-3 zeroization is Miri-verified (`assert_drop_zeroes` + `cargo +nightly miri test`); wire the Miri run into CI to keep it verified. |
-| R-4 | Medium | Timing side-channel review of the AEAD and signature paths; document constant-time status. (F-9) |
+| R-4 | Done | Timing review complete (§3a): AEAD/signature/KEM constant-time via their crates; uniform AEAD failure; no secret-dependent comparison in our code; identity-chain key comparison made constant-time (`subtle`). Next: a `dudect`/statistical timing test in CI for empirical confirmation. |
 | R-5 | Done | POST (`self_test`/`ensure_self_tested`) + per-keygen PCT, abort on failure. **CAVP-traceable KATs against official vectors:** AES-256-GCM + SHA3-384/SHA-384 (NIST), ML-DSA-87 keyGen (FIPS-204 reference example, exact), and **ML-KEM-1024 keyGen/encaps/decaps against NIST FIPS-203 ACVP** (usnistgov/ACVP-Server — `selftest::kem_kat` + `tests/nist_mlkem_acvp.rs`, exact). Only the KDF (talkrypt's own KMAC256/HKDF) remains an implementation KAT. (Recorded en route: the C2SP/CCTV ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final implementation — use NIST ACVP.) |
 | R-6 | Low | External fuzzing campaign on the wire codec and descriptor parser beyond the bundled harness. |
 | R-7 | Low | Sign and notarize desktop packages once a release identity exists; sign the `.deb`. (F-8) |
