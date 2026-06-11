@@ -18,6 +18,10 @@ pub enum CoreError {
     UnknownSuite(String),
     #[error("registry rejected the request: {0}")]
     Registry(String),
+    #[error("at-rest sealing: {0}")]
+    Seal(&'static str),
+    #[error("hardware key-wrap failed: {0}")]
+    Wrap(String),
     #[error("crypto error: {0}")]
     Crypto(#[from] talkrypt_crypto::CryptoError),
     #[error("transport error: {0}")]

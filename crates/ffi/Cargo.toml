@@ -17,6 +17,7 @@ talkrypt-transport.workspace = true
 talkrypt-topology.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "net"] }
 thiserror.workspace = true
+zeroize.workspace = true
 uniffi = { version = "0.31", features = ["cli"] }
 
 [features]

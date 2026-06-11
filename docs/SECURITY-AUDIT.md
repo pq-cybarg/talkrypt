@@ -172,15 +172,29 @@ therefore blocked on **PQC-capable silicon shipping in commodity secure
 elements**, not on talkrypt integration work — it is a hardware-roadmap
 dependency, and we do not claim it as available mitigation.
 
-What hardware *can* do today is protect the key **at rest, not in use**: a
-classical key held in the secure element (biometric/PIN-gated, non-exportable)
-can wrap the encryption key that seals the stored ML-DSA seed, so the seed cannot
-be decrypted off-device or without user presence. This is exactly the
-`CustodyTier::HardwareBacked` the FFI already surfaces
-(`SoftwareSealed` / `OsKeystore` / `HardwareBacked`) — hardware-backed *sealing*
-of the seed, distinct from hardware-backed *signing*. It hardens the at-rest and
-theft cases; it does **not** help the live-RAM attacker, because the seed is
-still unwrapped into (locked) RAM to sign. Tracked as **R-8**.
+What hardware *can* do today is protect the key **at rest, not in use**, and
+this is now **implemented** (R-8): a classical key held in the secure element
+(biometric/PIN-gated, non-exportable) wraps the random **KEK** that seals the
+stored ML-DSA seed, so the seed cannot be decrypted off-device or without user
+presence. The format and the wrap/unwrap seam are defined **once** in
+`talkrypt-core` (`seal.rs`: the `TKS1` sealed envelope + the `KeyWrapper`
+trait), so every platform shares one format:
+
+- **Mobile** — the FFI exposes a `#[uniffi::export(callback_interface)]`
+  `HardwareKeyWrapper` the host implements over Android Keystore/StrongBox or
+  iOS Secure Enclave; `Account::seal` / `Account::from_sealed` seal/reload the
+  account seed without ever exposing it to the host.
+- **Desktop** — the helper's `HardwareBacked` tier routes through the *same*
+  core codec, wrapping the KEK with a TPM 2.0 (Linux, `tpm` feature; validated
+  against swtpm in `docs/linux-tpm-test.sh`).
+
+The KEK model is unified: a passphrase mixes in via Argon2id, so with both
+factors it is two-factor (device **and** passphrase), with only one it degrades
+to that factor alone. This is the `CustodyTier::HardwareBacked` tier
+(`SoftwareSealed` / `OsKeystore` / `HardwareBacked`) — hardware-backed *sealing*,
+distinct from hardware-backed *signing*. It hardens the at-rest and theft cases;
+it does **not** help the live-RAM attacker, because the seed is still unwrapped
+into (locked) RAM to sign.
 
 ---
 
@@ -358,7 +372,7 @@ ignore list reviewed.
 | R-5 | Done | POST (`self_test`/`ensure_self_tested`) + per-keygen PCT, abort on failure. **CAVP-traceable KATs against official vectors:** AES-256-GCM + SHA3-384/SHA-384 (NIST), ML-DSA-87 keyGen (FIPS-204 reference example, exact), and **ML-KEM-1024 keyGen/encaps/decaps against NIST FIPS-203 ACVP** (usnistgov/ACVP-Server — `selftest::kem_kat` + `tests/nist_mlkem_acvp.rs`, exact). Only the KDF (talkrypt's own KMAC256/HKDF) remains an implementation KAT. (Recorded en route: the C2SP/CCTV ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final implementation — use NIST ACVP.) |
 | R-6 | Done | Fuzz harness expanded from 2 to 9 targets covering every attacker-reachable decoder: `wire_reader`, `descriptor_parser`, `identity_chain`, `signed_claim`, `revocation`, `presentation`, `ratchet_header`, `beacon_body`, `suite_scheme` (`fuzz/fuzz_targets/`; the two crate-private codecs reached via the crypto crate's `fuzzing`-gated `fuzz_header_roundtrip`/`fuzz_beacon_roundtrip` hooks). Each ran ≥12 s clean except `ratchet_header`, which found a remote-DoS panic (F-14) in ~3.5k runs — now fixed, with a regression test + corpus seed, and re-fuzzed 30 s (3.9M runs) clean. Decoders are checked for no-panic and structural round-trip. A CI smoke job (`.github/workflows/fuzz.yml`) builds all targets and runs each 45 s on every decoder/harness change, re-exercising the regression corpus. Next: a longer (hours/days) external campaign. |
 | R-7 | Low | Sign and notarize desktop packages once a release identity exists; sign the `.deb`. (F-8) |
-| R-8 | In progress | RAM-capture hardening (§3b, F-15). **Done:** identity seed in `mlock`'d/`MADV_DONTDUMP`/zeroize-on-drop `LockedBox` (Miri-verified drop), `harden_process` (no core dumps + non-dumpable) wired into CLI + FFI startup. **Next (host integration, available now):** wrap the at-rest seed-sealing KEK with a secure-element classical key (biometric/PIN-gated) when the host reports `CustodyTier::HardwareBacked` — hardware-backed *sealing*. **Blocked (hardware roadmap):** hardware-backed *signing* of the PQ key is impossible until PQC-capable secure elements ship — StrongBox / the Seeker's SE / Secure Enclave / TPMs are classical-only and cannot hold ML-DSA-87. Not a talkrypt task; a silicon dependency. |
+| R-8 | In progress | RAM-capture hardening (§3b, F-15). **Done:** (a) identity seed in `mlock`'d/`MADV_DONTDUMP`/zeroize-on-drop `LockedBox` (Miri-verified drop), `harden_process` (no core dumps + non-dumpable) wired into CLI + FFI startup; (b) **hardware-backed at-rest sealing** — one multiplatform sealed-envelope codec + `KeyWrapper` seam in `talkrypt-core` (`seal.rs`), wraps the seed-sealing KEK with a secure-element classical key. Mobile hosts implement it via the FFI callback `HardwareKeyWrapper` (Android StrongBox / iOS Secure Enclave; `Account::seal`/`from_sealed`); the desktop helper routes its `HardwareBacked` tier through the **same** codec (TPM 2.0 on Linux). Unified format, hybrid (passphrase+device) or pure-hardware. **Blocked (hardware roadmap):** hardware-backed *signing* of the PQ key is impossible until PQC-capable secure elements ship — StrongBox / the Seeker's SE / Secure Enclave / TPMs are classical-only and cannot hold ML-DSA-87. Not a talkrypt task; a silicon dependency. |
 
 ---
 

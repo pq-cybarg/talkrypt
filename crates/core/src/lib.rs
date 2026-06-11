@@ -18,9 +18,11 @@ pub mod linking;
 pub mod marking;
 pub mod registry;
 pub mod relay;
+pub mod seal;
 
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
 pub use custody::{Capabilities, CustodyTier};
+pub use seal::{seal, tier_of, unseal, KeyWrapper, SealOptions, WrapError};
 pub use marking::{Classification, Marking};
 pub use descriptor::{ChannelPassword, ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
 pub use engine::{AccessPolicy, Core, Event, GroupRole};

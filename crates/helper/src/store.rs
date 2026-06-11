@@ -1,26 +1,87 @@
 //! On-disk custody of **already-sealed** key blobs.
 //!
-//! The store persists opaque ciphertext only — sealing/unsealing happens in the
-//! [`crate::server`] dispatch via `talkrypt_server::keystore` (Argon2id +
-//! AES-256-GCM). The store never sees a passphrase or plaintext. Files live in
-//! an owner-only directory; each file is written owner-read/write.
+//! The store persists opaque ciphertext only. For `SoftwareSealed`,
+//! sealing/unsealing happens in the [`crate::server`] dispatch via
+//! `talkrypt_server::keystore` (Argon2id + AES-256-GCM). For `HardwareBacked`,
+//! the store seals through the **shared multiplatform envelope**
+//! ([`talkrypt_core::seal`]) with a secure-element [`talkrypt_core::KeyWrapper`]
+//! (a TPM on Linux), so a desktop hardware-backed blob has the exact same format
+//! as a mobile one sealed via the FFI callback. The store never sees a
+//! passphrase or plaintext. Files live in an owner-only directory.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::custody::CustodyTier;
 use crate::error::{HelperError, Result};
 
+/// The platform's secure-element key wrapper for the `HardwareBacked` tier,
+/// shared by mobile and desktop via [`talkrypt_core::KeyWrapper`].
+type HwWrapper = Arc<dyn talkrypt_core::KeyWrapper + Send + Sync>;
+
 /// Tiered custody of key material. Each key has a one-byte `<name>.tier` marker
 /// recording its [`CustodyTier`]; the bytes live in a sealed file
-/// (`<name>.sealed`, `SoftwareSealed`) or the OS keychain (`OsKeystore`).
+/// (`<name>.sealed`, `SoftwareSealed` / `HardwareBacked`) or the OS keychain
+/// (`OsKeystore`).
 #[derive(Clone)]
 pub struct KeyStore {
     dir: PathBuf,
+    /// Hardware key-wrapper for the `HardwareBacked` tier, or `None` if this
+    /// build/platform has no secure-element backend (then that tier errors).
+    hw: Option<HwWrapper>,
 }
 
 impl KeyStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            hw: platform_hw_wrapper(),
+        }
+    }
+
+    /// Construct with an explicit hardware wrapper (used by tests to exercise the
+    /// `HardwareBacked` path with a mock secure element on any platform).
+    #[cfg(test)]
+    fn with_hw(dir: impl Into<PathBuf>, hw: HwWrapper) -> Self {
+        Self {
+            dir: dir.into(),
+            hw: Some(hw),
+        }
+    }
+
+    /// Seal a secret at the `HardwareBacked` tier through the shared core
+    /// envelope, wrapping the KEK with this platform's secure element. Runs the
+    /// (CPU-bound + possibly blocking) seal off the async runtime.
+    async fn hw_seal(&self, secret: &[u8]) -> Result<Vec<u8>> {
+        let hw = self.hw.clone().ok_or(HelperError::Unsupported(
+            "hardware-backed custody not built — rebuild on Linux with --features tpm",
+        ))?;
+        let secret = secret.to_vec();
+        tokio::task::spawn_blocking(move || {
+            talkrypt_core::seal(
+                &secret,
+                talkrypt_core::SealOptions {
+                    passphrase: None,
+                    wrapper: Some(hw.as_ref()),
+                },
+            )
+            .map_err(HelperError::from)
+        })
+        .await
+        .map_err(|_| HelperError::Unsupported("hardware seal task failed"))?
+    }
+
+    /// Open a `HardwareBacked` blob produced by [`Self::hw_seal`].
+    async fn hw_unseal(&self, blob: &[u8]) -> Result<Vec<u8>> {
+        let hw = self.hw.clone().ok_or(HelperError::Unsupported(
+            "hardware-backed custody not built — rebuild on Linux with --features tpm",
+        ))?;
+        let blob = blob.to_vec();
+        tokio::task::spawn_blocking(move || {
+            talkrypt_core::unseal(&blob, None, Some(hw.as_ref())).map_err(HelperError::from)
+        })
+        .await
+        .map_err(|_| HelperError::Unsupported("hardware unseal task failed"))?
     }
 
     /// Create the store directory (owner-only on Unix) if needed.
@@ -48,7 +109,9 @@ impl KeyStore {
     ///
     /// For `SoftwareSealed`, `blob` is the already-sealed ciphertext (written to
     /// a file). For `OsKeystore`, `blob` is the secret itself, handed to the OS
-    /// keychain (which encrypts at rest). `HardwareBacked` is not yet a backend.
+    /// keychain (which encrypts at rest). For `HardwareBacked`, `blob` is the
+    /// secret; it is sealed through the shared core envelope with the platform
+    /// secure element wrapping the KEK, and the resulting blob written to a file.
     pub async fn put(&self, name: &str, tier: CustodyTier, blob: &[u8]) -> Result<()> {
         match tier {
             CustodyTier::SoftwareSealed => {
@@ -58,8 +121,8 @@ impl KeyStore {
             }
             CustodyTier::OsKeystore => keychain_set(name, blob).await?,
             CustodyTier::HardwareBacked => {
-                // TPM-seal the secret; the TPM-bound blob goes to a file.
-                let sealed = tpm_seal(blob).await?;
+                // Seal via the shared envelope (KEK wrapped by the secure element).
+                let sealed = self.hw_seal(blob).await?;
                 let path = self.sealed_path(name)?;
                 tokio::fs::write(&path, &sealed).await?;
                 set_owner_only_file(&path)?;
@@ -92,7 +155,7 @@ impl KeyStore {
                     }
                     Err(e) => return Err(e.into()),
                 };
-                tpm_unseal(&sealed).await?
+                self.hw_unseal(&sealed).await?
             }
         };
         Ok((tier, bytes))
@@ -184,28 +247,58 @@ async fn keychain_delete(_name: &str) -> Result<()> {
     Ok(())
 }
 
-// ----- HardwareBacked routing (TPM 2.0 on Linux, `tpm` feature) -----
+// ----- HardwareBacked routing: the secure-element KEK wrapper -----
+//
+// The `HardwareBacked` tier seals through the shared core envelope
+// (`talkrypt_core::seal`) and wraps only the random 32-byte KEK with the
+// platform secure element — the same seam the mobile FFI exposes as a host
+// callback. On Linux with the `tpm` feature the wrapper is a TPM 2.0 (reusing
+// the validated `crate::tpm` seal/unseal on the KEK); other builds have no
+// hardware backend, so the tier errors with a clear "rebuild with --features
+// tpm" message.
 
+/// This platform's hardware KEK wrapper, or `None` if none is built in.
 #[cfg(all(target_os = "linux", feature = "tpm"))]
-async fn tpm_seal(secret: &[u8]) -> Result<Vec<u8>> {
-    crate::tpm::seal(secret).await
-}
-#[cfg(all(target_os = "linux", feature = "tpm"))]
-async fn tpm_unseal(blob: &[u8]) -> Result<Vec<u8>> {
-    crate::tpm::unseal(blob).await
-}
-
-#[cfg(not(all(target_os = "linux", feature = "tpm")))]
-async fn tpm_seal(_secret: &[u8]) -> Result<Vec<u8>> {
-    Err(HelperError::Unsupported(
-        "hardware-backed (TPM) custody not built — rebuild on Linux with --features tpm",
-    ))
+fn platform_hw_wrapper() -> Option<HwWrapper> {
+    Some(Arc::new(TpmWrapper))
 }
 #[cfg(not(all(target_os = "linux", feature = "tpm")))]
-async fn tpm_unseal(_blob: &[u8]) -> Result<Vec<u8>> {
-    Err(HelperError::Unsupported(
-        "hardware-backed (TPM) custody not built — rebuild on Linux with --features tpm",
-    ))
+fn platform_hw_wrapper() -> Option<HwWrapper> {
+    None
+}
+
+/// A TPM-2.0-backed [`talkrypt_core::KeyWrapper`]: wraps the KEK by sealing it to
+/// the TPM (bound to this machine), unwraps by TPM-unsealing. The underlying
+/// `crate::tpm` calls are async; this wrapper is invoked from `spawn_blocking`,
+/// so it drives them on a private current-thread runtime.
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+struct TpmWrapper;
+
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+impl talkrypt_core::KeyWrapper for TpmWrapper {
+    fn wrap(&self, kek: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+        let kek = kek.to_vec();
+        tpm_block_on(async move { crate::tpm::seal(&kek).await })
+    }
+    fn unwrap(&self, wrapped: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+        let wrapped = wrapped.to_vec();
+        tpm_block_on(async move { crate::tpm::unseal(&wrapped).await })
+    }
+}
+
+/// Drive a TPM future to completion on a private current-thread runtime. Safe to
+/// call from a `spawn_blocking` thread (which is not a runtime worker, so it may
+/// create and block on its own runtime).
+#[cfg(all(target_os = "linux", feature = "tpm"))]
+fn tpm_block_on(
+    fut: impl std::future::Future<Output = Result<Vec<u8>>>,
+) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| talkrypt_core::WrapError(e.to_string()))?;
+    rt.block_on(fut)
+        .map_err(|e| talkrypt_core::WrapError(e.to_string()))
 }
 
 /// A name must be a single safe path component — no separators, no `.`/`..`,
@@ -280,6 +373,66 @@ mod tests {
         // delete is idempotent
         store.delete("k").await.unwrap();
 
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A mock secure element so the unified `HardwareBacked` path is testable on
+    /// any platform (the real backend is a TPM, Linux-only). "Wraps" by XOR with
+    /// a fixed pad and a marker, so a different instance can't unwrap.
+    struct MockSe(u8);
+    impl talkrypt_core::KeyWrapper for MockSe {
+        fn wrap(&self, kek: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+            let mut v = vec![0xC3];
+            v.extend(kek.iter().map(|b| b ^ self.0));
+            Ok(v)
+        }
+        fn unwrap(&self, w: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+            if w.first() != Some(&0xC3) {
+                return Err(talkrypt_core::WrapError("not my blob".into()));
+            }
+            Ok(w[1..].iter().map(|b| b ^ self.0).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn hardware_backed_uses_shared_core_envelope() {
+        let dir = tmp();
+        let store = KeyStore::with_hw(&dir, Arc::new(MockSe(0x5A)));
+        store.ensure_dir().await.unwrap();
+
+        let secret = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f";
+        store
+            .put("id", CustodyTier::HardwareBacked, secret)
+            .await
+            .unwrap();
+
+        // The on-disk blob is the shared core envelope, tagged HardwareBacked.
+        let on_disk = tokio::fs::read(store.sealed_path("id").unwrap()).await.unwrap();
+        assert_eq!(
+            talkrypt_core::tier_of(&on_disk).unwrap(),
+            talkrypt_core::CustodyTier::HardwareBacked
+        );
+        assert!(on_disk.windows(secret.len()).all(|w| w != secret));
+
+        // get round-trips the secret through the same wrapper.
+        let (tier, got) = store.get("id").await.unwrap();
+        assert_eq!(tier, CustodyTier::HardwareBacked);
+        assert_eq!(got, secret);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn hardware_backed_without_wrapper_is_unsupported() {
+        // A store with no hardware backend (the macOS/non-tpm default) must
+        // refuse the HardwareBacked tier with a clear error, not panic.
+        let dir = tmp();
+        let store = KeyStore { dir: dir.clone(), hw: None };
+        store.ensure_dir().await.unwrap();
+        assert!(matches!(
+            store.put("id", CustodyTier::HardwareBacked, b"secret").await,
+            Err(HelperError::Unsupported(_))
+        ));
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

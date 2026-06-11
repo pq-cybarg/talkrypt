@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
+use zeroize::Zeroize;
 
 use talkrypt_core::{
     resolve_across, ChatDescriptor, Core, Event, LinkClient, LinkHost, Persistence, RegistryClient,
@@ -133,7 +134,7 @@ impl FfiError {
 /// [`talkrypt_core::CustodyTier`]). The host detects this — e.g. the Android
 /// app probes StrongBox/TEE availability — and reports it; talkrypt's crypto
 /// never depends on the tier, only its at-rest protection does.
-#[derive(uniffi::Enum)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CustodyTier {
     SoftwareSealed,
     OsKeystore,
@@ -813,6 +814,144 @@ impl TalkryptClient {
 
 // ===== username accounts + registry "anchors" =====
 
+// ===== hardware-backed at-rest sealing (SECURITY-AUDIT R-8) =====
+
+/// A host-implemented secure-element key wrapper, the mobile half of the
+/// multiplatform sealing seam (`talkrypt_core::KeyWrapper`). The **host**
+/// implements this against its platform API — Android Keystore / StrongBox
+/// (a non-exportable, user-presence-gated `Cipher`) or iOS Secure Enclave — and
+/// passes it in when sealing/unsealing. The Rust core never sees the secure
+/// element's key: it hands over a random KEK to `wrap` and gets back an opaque
+/// blob only this device can `unwrap`.
+///
+/// Note: this protects the seed **at rest**, not in use — today's secure
+/// elements are classical-only and cannot hold/sign the PQ identity key, so the
+/// seed is still unwrapped into memory to sign (see `custody_report` and
+/// `docs/SECURITY-AUDIT.md` §3b).
+#[uniffi::export(callback_interface)]
+pub trait HardwareKeyWrapper: Send + Sync {
+    /// Wrap (encrypt) `kek` with the device's secure element; return an opaque
+    /// blob unwrappable only on this device. Return an error if the user
+    /// declines a presence check or the key is unavailable.
+    fn wrap(&self, kek: Vec<u8>) -> Result<Vec<u8>, FfiError>;
+    /// Unwrap a blob previously produced by [`HardwareKeyWrapper::wrap`].
+    fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError>;
+}
+
+/// Bridges a host [`HardwareKeyWrapper`] to the core [`talkrypt_core::KeyWrapper`]
+/// trait the seal codec consumes.
+struct WrapperBridge(Box<dyn HardwareKeyWrapper>);
+
+impl talkrypt_core::KeyWrapper for WrapperBridge {
+    fn wrap(&self, kek: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+        self.0
+            .wrap(kek.to_vec())
+            .map_err(|e| talkrypt_core::WrapError(e.to_string()))
+    }
+    fn unwrap(&self, wrapped: &[u8]) -> std::result::Result<Vec<u8>, talkrypt_core::WrapError> {
+        self.0
+            .unwrap(wrapped.to_vec())
+            .map_err(|e| talkrypt_core::WrapError(e.to_string()))
+    }
+}
+
+impl From<talkrypt_core::CustodyTier> for CustodyTier {
+    fn from(t: talkrypt_core::CustodyTier) -> Self {
+        match t {
+            talkrypt_core::CustodyTier::SoftwareSealed => CustodyTier::SoftwareSealed,
+            talkrypt_core::CustodyTier::OsKeystore => CustodyTier::OsKeystore,
+            talkrypt_core::CustodyTier::HardwareBacked => CustodyTier::HardwareBacked,
+        }
+    }
+}
+
+/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase`,
+/// a hardware `wrapper`, or both (two-factor). With a wrapper the blob is
+/// `HardwareBacked` and cannot be opened off this device; with only a passphrase
+/// it is `SoftwareSealed`. At least one factor is required.
+#[uniffi::export]
+pub fn seal_secret(
+    secret: Vec<u8>,
+    passphrase: Option<String>,
+    wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+) -> Result<Vec<u8>, FfiError> {
+    ffi_secure_init();
+    let mut secret = secret;
+    let out = seal_bytes(&secret, passphrase.as_deref(), wrapper);
+    secret.zeroize();
+    out
+}
+
+/// Open an envelope produced by [`seal_secret`] (or `Account::seal`). Supply the
+/// same factors it was sealed with; a missing factor, wrong passphrase, wrong
+/// device, or any tampering fails.
+#[uniffi::export]
+pub fn unseal_secret(
+    blob: Vec<u8>,
+    passphrase: Option<String>,
+    wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+) -> Result<Vec<u8>, FfiError> {
+    ffi_secure_init();
+    unseal_bytes(&blob, passphrase.as_deref(), wrapper)
+}
+
+/// Report the [`CustodyTier`] a sealed blob was produced at, without opening it
+/// (so a UI can show "hardware-backed" vs "software-sealed").
+#[uniffi::export]
+pub fn sealed_tier(blob: Vec<u8>) -> Result<CustodyTier, FfiError> {
+    Ok(talkrypt_core::tier_of(&blob).map_err(FfiError::from)?.into())
+}
+
+/// Seal `secret` with the given factors (shared by the free fn and key methods).
+fn seal_bytes(
+    secret: &[u8],
+    passphrase: Option<&str>,
+    wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+) -> Result<Vec<u8>, FfiError> {
+    let bridge = wrapper.map(WrapperBridge);
+    let opts = talkrypt_core::SealOptions {
+        passphrase: passphrase.map(|p| p.as_bytes()),
+        wrapper: bridge
+            .as_ref()
+            .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+    };
+    talkrypt_core::seal(secret, opts).map_err(FfiError::from)
+}
+
+/// Unseal with the given factors.
+fn unseal_bytes(
+    blob: &[u8],
+    passphrase: Option<&str>,
+    wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+) -> Result<Vec<u8>, FfiError> {
+    let bridge = wrapper.map(WrapperBridge);
+    talkrypt_core::unseal(
+        blob,
+        passphrase.map(|p| p.as_bytes()),
+        bridge
+            .as_ref()
+            .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+    )
+    .map_err(FfiError::from)
+}
+
+/// Unseal a blob to exactly a 32-byte seed, zeroizing the transient buffer.
+fn unseal_seed(
+    blob: &[u8],
+    passphrase: Option<&str>,
+    wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+) -> Result<[u8; 32], FfiError> {
+    let mut bytes = unseal_bytes(blob, passphrase, wrapper)?;
+    if bytes.len() != 32 {
+        bytes.zeroize();
+        return Err(FfiError::Failed("sealed seed has wrong length".into()));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(seed)
+}
+
 /// A username account identity (ML-DSA-87). Holds the long-term account key that
 /// signs registry claims and certifies devices. Persist `seed_hex()` securely
 /// (it is the account secret) and reload with [`Account::from_seed_hex`].
@@ -842,9 +981,42 @@ impl Account {
         }))
     }
 
+    /// Reload an account from a sealed blob (see [`Account::seal`]). Supply the
+    /// same factors used to seal: a `passphrase`, a hardware `wrapper`, or both.
+    /// The seed is unsealed straight into the account's page-locked store and
+    /// never leaves Rust as plaintext.
+    #[uniffi::constructor]
+    pub fn from_sealed(
+        blob: Vec<u8>,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<Arc<Self>, FfiError> {
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
+        let mut seed = unseal_seed(&blob, passphrase.as_deref(), wrapper)?;
+        let kp = IdentityKeyPair::from_secret_bytes(seed);
+        seed.zeroize();
+        Ok(Arc::new(Self { kp }))
+    }
+
     /// The 32-byte account seed as hex — the secret; store it protected.
     pub fn seed_hex(&self) -> String {
         hex_bytes(&self.kp.export_secret())
+    }
+
+    /// Seal this account's seed at rest into a portable envelope, **without**
+    /// exposing the seed to the host. Prefer this over persisting `seed_hex()`:
+    /// pass a hardware `wrapper` (Android StrongBox / Secure Enclave) for a
+    /// `HardwareBacked` blob bound to this device, and/or a `passphrase` for
+    /// two-factor custody. Reload with [`Account::from_sealed`].
+    pub fn seal(
+        &self,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut seed = self.kp.export_secret();
+        let out = seal_bytes(&seed, passphrase.as_deref(), wrapper);
+        seed.zeroize();
+        out
     }
 
     /// The account public key (ML-DSA-87 verifying key) as hex.
@@ -891,9 +1063,36 @@ impl DeviceKey {
         }))
     }
 
+    /// Reload a device key from a sealed blob (see [`DeviceKey::seal`]).
+    #[uniffi::constructor]
+    pub fn from_sealed(
+        blob: Vec<u8>,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<Arc<Self>, FfiError> {
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
+        let mut seed = unseal_seed(&blob, passphrase.as_deref(), wrapper)?;
+        let kp = IdentityKeyPair::from_secret_bytes(seed);
+        seed.zeroize();
+        Ok(Arc::new(Self { kp }))
+    }
+
     /// The 32-byte device seed as hex — the secret; store it protected.
     pub fn seed_hex(&self) -> String {
         hex_bytes(&self.kp.export_secret())
+    }
+
+    /// Seal this device seed at rest into a portable envelope without exposing it
+    /// to the host (see [`Account::seal`]). Reload with [`DeviceKey::from_sealed`].
+    pub fn seal(
+        &self,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut seed = self.kp.export_secret();
+        let out = seal_bytes(&seed, passphrase.as_deref(), wrapper);
+        seed.zeroize();
+        out
     }
 
     /// This device's fingerprint (96 hex chars). Give it to the account holder so
@@ -1428,5 +1627,86 @@ mod tests {
         }
         assert_eq!(got.as_deref(), Some("hello via ffi"));
         assert_eq!(joiner.peer_count(), 1);
+    }
+
+    /// A Rust stand-in for a host's secure element, exercising the
+    /// `HardwareKeyWrapper` callback seam the way Android/iOS will. "Wraps" by
+    /// XOR-ing with a per-instance pad so a different instance (a different
+    /// "device") cannot unwrap.
+    struct FakeSecureElement {
+        pad: u8,
+    }
+    impl HardwareKeyWrapper for FakeSecureElement {
+        fn wrap(&self, kek: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+            Ok(kek.iter().map(|b| b ^ self.pad).collect())
+        }
+        fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+            Ok(wrapped.iter().map(|b| b ^ self.pad).collect())
+        }
+    }
+
+    #[test]
+    fn account_hardware_seal_roundtrip_via_callback() {
+        let account = Account::generate();
+        let seed = account.seed_hex();
+
+        // Seal hardware-backed (device wrapper, no passphrase).
+        let blob = account
+            .seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A })))
+            .expect("seal");
+        assert_eq!(
+            sealed_tier(blob.clone()).unwrap(),
+            CustodyTier::HardwareBacked
+        );
+
+        // Reload on the same "device" → same seed, same identity.
+        let reloaded = Account::from_sealed(
+            blob.clone(),
+            None,
+            Some(Box::new(FakeSecureElement { pad: 0x5A })),
+        )
+        .expect("from_sealed");
+        assert_eq!(reloaded.seed_hex(), seed);
+        assert_eq!(reloaded.public_hex(), account.public_hex());
+
+        // A different "device" cannot open it.
+        assert!(
+            Account::from_sealed(blob, None, Some(Box::new(FakeSecureElement { pad: 0x11 }))).is_err()
+        );
+    }
+
+    #[test]
+    fn account_two_factor_seal_needs_passphrase_and_device() {
+        let account = Account::generate();
+        let seed = account.seed_hex();
+        let blob = account
+            .seal(
+                Some("pass".into()),
+                Some(Box::new(FakeSecureElement { pad: 0x42 })),
+            )
+            .expect("seal");
+        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::HardwareBacked);
+
+        // Both factors → ok.
+        let ok = Account::from_sealed(
+            blob.clone(),
+            Some("pass".into()),
+            Some(Box::new(FakeSecureElement { pad: 0x42 })),
+        )
+        .expect("both factors");
+        assert_eq!(ok.seed_hex(), seed);
+
+        // Missing passphrase, wrong passphrase, or missing device → all fail.
+        assert!(Account::from_sealed(blob.clone(), None, Some(Box::new(FakeSecureElement { pad: 0x42 }))).is_err());
+        assert!(Account::from_sealed(blob.clone(), Some("WRONG".into()), Some(Box::new(FakeSecureElement { pad: 0x42 }))).is_err());
+        assert!(Account::from_sealed(blob, Some("pass".into()), None).is_err());
+    }
+
+    #[test]
+    fn software_only_seal_secret_free_fns() {
+        let secret = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f".to_vec();
+        let blob = seal_secret(secret.clone(), Some("pw".into()), None).expect("seal");
+        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::SoftwareSealed);
+        assert_eq!(unseal_secret(blob, Some("pw".into()), None).unwrap(), secret);
     }
 }
