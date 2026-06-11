@@ -8,6 +8,11 @@
 # -p talkrypt-crypto dropping_active_session_runs_zeroize_drop`).
 name: miri
 
+# Run JavaScript-based actions on Node.js 24 (newest stable/secure runtime), not
+# the deprecated Node 20. GitHub forces this by 2026-06-16; opt in now.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   push:
     paths: ["crates/crypto/**", ".github/workflows/miri.yml"]

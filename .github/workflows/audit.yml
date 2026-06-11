@@ -6,6 +6,11 @@
 # scripts/audit-deps.sh used locally, so CI and developer results match.
 name: audit
 
+# Run JavaScript-based actions on Node.js 24 (newest stable/secure runtime), not
+# the deprecated Node 20. GitHub forces this by 2026-06-16; opt in now.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   push:
     paths: ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".github/workflows/audit.yml", "scripts/audit-deps.sh"]

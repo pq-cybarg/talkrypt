@@ -4,6 +4,12 @@
 # rebuilds and deploys the site. --strict fails the build on a broken link.
 name: pages
 
+# Run JavaScript-based actions on Node.js 24 — the newest stable, security-
+# maintained runtime — instead of the deprecated Node 20. GitHub forces this by
+# 2026-06-16; opting in now keeps every action on the supported, patched runtime.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   push:
     branches: [main]
