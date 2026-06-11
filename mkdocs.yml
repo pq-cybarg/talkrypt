@@ -1,0 +1,63 @@
+# MkDocs config for the talkrypt feature wiki — published to GitHub Pages by
+# .github/workflows/pages.yml. Source pages live in docs/wiki/ (also browsable
+# directly on GitHub). Build locally with:
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install mkdocs-material && mkdocs serve   # http://127.0.0.1:8000
+site_name: talkrypt
+site_description: Post-quantum, end-to-end-encrypted, forward-secret chat over Tor.
+docs_dir: docs/wiki
+site_dir: site
+
+theme:
+  name: material
+  icon:
+    logo: material/shield-lock
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Getting Started: Getting-Started.md
+  - CLI Reference: CLI-Reference.md
+  - Cryptography: Cryptography.md
+  - Identity & Accounts: Identity-and-Accounts.md
+  - Messaging & Transport: Messaging-and-Transport.md
+  - Key Custody & Storage: Key-Custody.md
+  - Classification & Compliance: Classification-and-Compliance.md
+  - Platforms & Clients: Platforms-and-Clients.md
+  - Packaging & Release: Packaging-and-Release.md
+  - Security Assurance: Security-Assurance.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+
+# The folder README is for GitHub's directory view only; keep it out of the site.
+exclude_docs: |
+  README.md

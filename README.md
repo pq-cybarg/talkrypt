@@ -128,7 +128,7 @@ crates/cli         the `talkrypt` binary (demo / host / join REPL)
 
 ## Documentation
 
-A feature-oriented **[wiki](docs/wiki/Home.md)** covers everything talkrypt does
+A feature-oriented **[wiki](docs/wiki/index.md)** covers everything talkrypt does
 — [cryptography](docs/wiki/Cryptography.md),
 [identity & accounts](docs/wiki/Identity-and-Accounts.md),
 [messaging & transport](docs/wiki/Messaging-and-Transport.md),
@@ -136,7 +136,7 @@ A feature-oriented **[wiki](docs/wiki/Home.md)** covers everything talkrypt does
 [the CLI](docs/wiki/CLI-Reference.md),
 [packaging & release](docs/wiki/Packaging-and-Release.md), and
 [security assurance](docs/wiki/Security-Assurance.md). Start at
-[`docs/wiki/Home.md`](docs/wiki/Home.md), or [Getting Started](docs/wiki/Getting-Started.md).
+[`docs/wiki/index.md`](docs/wiki/index.md), or [Getting Started](docs/wiki/Getting-Started.md). It's also published as a website via GitHub Pages (`mkdocs.yml`).
 
 ## Build & run
 

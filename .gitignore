@@ -3,6 +3,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# --- docs site (MkDocs / GitHub Pages build output) ---
+/site
+/.venv
+
 # --- cargo-fuzz ---
 /fuzz/target
 /fuzz/artifacts

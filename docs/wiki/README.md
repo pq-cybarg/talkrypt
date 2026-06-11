@@ -1,8 +1,9 @@
 # talkrypt wiki
 
-This directory is the talkrypt feature wiki. **Start at [Home](Home.md).**
+This directory is the talkrypt feature wiki. **Start at [Home](index.md).**
+Published as a site via GitHub Pages (see `mkdocs.yml` + `.github/workflows/pages.yml`).
 
-- [Home](Home.md) — overview + full navigation
+- [Home](index.md) — overview + full navigation
 - [Getting Started](Getting-Started.md)
 - [CLI Reference](CLI-Reference.md)
 - [Cryptography](Cryptography.md)
