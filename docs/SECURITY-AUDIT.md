@@ -121,6 +121,69 @@ external review). No talkrypt-introduced timing leak was found.
 
 ---
 
+### 3b. RAM-capture mitigation (R-8)
+
+**Threat.** An attacker who can read this process's memory recovers live
+secrets — the identity seed, ratchet chain keys, group keys, message plaintext.
+The capture vectors, by how privileged the attacker is:
+
+| Vector | Privilege | Mitigated? |
+| --- | --- | --- |
+| Secret paged to **swap**, read later from the swap file | disk access | Yes — `mlock` (`LockedBox`) keeps the identity seed off swap |
+| **Core dump** on crash spills memory to disk | disk access | Yes — `setrlimit(RLIMIT_CORE,0)` + `MADV_DONTDUMP` on the locked pages |
+| **`ptrace` / `/proc/<pid>/mem`** by a same-uid process | same-uid code exec | Yes (Linux/Android) — `prctl(PR_SET_DUMPABLE,0)` |
+| **Cold-boot / DMA** read of physical RAM | physical access | Partial — only the *window* shrinks (zeroize-on-drop, FS); a live secret in RAM is readable |
+| **Root / kernel** attacker reads arbitrary process memory | full device compromise | No — unwinnable in software, and (today) not closable by hardware either; see residual |
+
+**What is implemented** (`crates/crypto/src/mem.rs`, wired into CLI `main` and
+every FFI keygen via `ensure_hardened`):
+
+1. **`LockedBox<N>`** — a heap-pinned secret buffer that is `mlock`'d (never
+   swapped), `madvise(MADV_DONTDUMP)`'d (excluded from core dumps on
+   Linux/Android), and zeroized-then-unlocked on drop. The ML-DSA-87 identity
+   seed — the single most valuable long-lived secret — now lives here, and is
+   generated *directly into* locked memory (`OsRng.fill_bytes(seed.as_mut_array())`)
+   so it never transits an unpinned temporary. The drop path is Miri-verified
+   free of UB (`mem::` tests in the `miri` workflow).
+2. **`harden_process`** — at startup, disables core dumps process-wide and marks
+   the process non-dumpable. Best-effort and idempotent; a denied syscall
+   degrades hardening but never breaks functionality.
+
+These compose with two properties already in place: **comprehensive
+zeroize-on-drop** (F-3, Miri-verified) bounds every transient secret's lifetime,
+and the **Double Ratchet's forward secrecy** means a single capture cannot
+unwind past traffic.
+
+**Residual (honest).** On a *fully compromised device* — a kernel-level or root
+attacker who can read arbitrary process memory while talkrypt runs — RAM capture
+is **not** defeatable in software: a secret must be plaintext in RAM at the
+instant it is used. The mitigations above shrink the window and close the
+disk-spill and same-uid vectors; they do not change the hostile-device verdict,
+which is folded into F-1.
+
+The defense that *would* remove the raw key from app RAM during use is a secure
+element that performs the signature on-chip. **That option does not exist for us
+today:** Android StrongBox / Titan M2, the Solana Seeker's secure element, Apple's
+Secure Enclave, and TPMs implement only *classical* primitives (P-256 ECDSA/ECDH,
+RSA, AES) — **none can generate, store, or sign with ML-DSA-87**. talkrypt's
+identity is post-quantum by design ([[ec-never-load-bearing]]), so a classical
+secure element cannot custody it. Putting the PQ signing key in hardware is
+therefore blocked on **PQC-capable silicon shipping in commodity secure
+elements**, not on talkrypt integration work — it is a hardware-roadmap
+dependency, and we do not claim it as available mitigation.
+
+What hardware *can* do today is protect the key **at rest, not in use**: a
+classical key held in the secure element (biometric/PIN-gated, non-exportable)
+can wrap the encryption key that seals the stored ML-DSA seed, so the seed cannot
+be decrypted off-device or without user presence. This is exactly the
+`CustodyTier::HardwareBacked` the FFI already surfaces
+(`SoftwareSealed` / `OsKeystore` / `HardwareBacked`) — hardware-backed *sealing*
+of the seed, distinct from hardware-backed *signing*. It hardens the at-rest and
+theft cases; it does **not** help the live-RAM attacker, because the seed is
+still unwrapped into (locked) RAM to sign. Tracked as **R-8**.
+
+---
+
 ## 4. Findings register
 
 Severity reflects impact *on the project's own claims*, assuming an honest user
@@ -142,6 +205,7 @@ who has read the disclaimers.
 | F-12 | Info | The RFC 9420 conformance harness (`crates/crypto/src/mls/`) names the standard AES-128-GCM ciphersuite and derives 16-byte key-schedule bytes to match official MLS vectors. It instantiates no cipher, is not a registrable suite, and is not on any message path. | By design — `docs/CONFORMANCE.md`; walled off by F-11 + the AEAD type |
 | F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
 | F-14 | Medium | Remote-DoS panic in the ratchet-header decoder: a hybrid / padded-PQ-pure `RatchetPublic` whose length-prefixed X25519/pad field was shorter than 32 bytes triggered an out-of-range slice index (`hybrid.rs::to_32`), panicking the receiver on a single malformed inbound message. Found by the new `ratchet_header` fuzz target (R-6), in ~3.5k executions. | **Resolved** — decode path now uses a fallible `try_to_32` returning `Malformed`; regression test `short_x25519_or_pad_field_is_rejected_not_panic` + corpus seed `corpus/ratchet_header/regression-short-x25519-field` |
+| F-15 | Medium | RAM-capture exposure: long-lived secrets (notably the ML-DSA-87 identity seed) could be paged to swap or written to a core dump, and no process hardening blocked `ptrace`/`/proc/<pid>/mem` scraping. On a fully compromised (root/kernel) device this is unwinnable in software, but the disk-spill and same-uid vectors are mitigable. | **Resolved (mitigated)** — identity seed now in `mlock`'d, `MADV_DONTDUMP`, zeroize-on-drop page-locked memory (`mem::LockedBox`); startup `harden_process` disables core dumps + sets non-dumpable. Residual (hostile-device) folded into F-1. Hardware-backed *signing* of the PQ key is impossible on today's classical-only secure elements (StrongBox / Seeker SE / Secure Enclave / TPM lack ML-DSA); hardware-backed *at-rest sealing* is the available next step (R-8). See §3b |
 
 ### Detail on the notable findings
 
@@ -294,6 +358,7 @@ ignore list reviewed.
 | R-5 | Done | POST (`self_test`/`ensure_self_tested`) + per-keygen PCT, abort on failure. **CAVP-traceable KATs against official vectors:** AES-256-GCM + SHA3-384/SHA-384 (NIST), ML-DSA-87 keyGen (FIPS-204 reference example, exact), and **ML-KEM-1024 keyGen/encaps/decaps against NIST FIPS-203 ACVP** (usnistgov/ACVP-Server — `selftest::kem_kat` + `tests/nist_mlkem_acvp.rs`, exact). Only the KDF (talkrypt's own KMAC256/HKDF) remains an implementation KAT. (Recorded en route: the C2SP/CCTV ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final implementation — use NIST ACVP.) |
 | R-6 | Done | Fuzz harness expanded from 2 to 9 targets covering every attacker-reachable decoder: `wire_reader`, `descriptor_parser`, `identity_chain`, `signed_claim`, `revocation`, `presentation`, `ratchet_header`, `beacon_body`, `suite_scheme` (`fuzz/fuzz_targets/`; the two crate-private codecs reached via the crypto crate's `fuzzing`-gated `fuzz_header_roundtrip`/`fuzz_beacon_roundtrip` hooks). Each ran ≥12 s clean except `ratchet_header`, which found a remote-DoS panic (F-14) in ~3.5k runs — now fixed, with a regression test + corpus seed, and re-fuzzed 30 s (3.9M runs) clean. Decoders are checked for no-panic and structural round-trip. A CI smoke job (`.github/workflows/fuzz.yml`) builds all targets and runs each 45 s on every decoder/harness change, re-exercising the regression corpus. Next: a longer (hours/days) external campaign. |
 | R-7 | Low | Sign and notarize desktop packages once a release identity exists; sign the `.deb`. (F-8) |
+| R-8 | In progress | RAM-capture hardening (§3b, F-15). **Done:** identity seed in `mlock`'d/`MADV_DONTDUMP`/zeroize-on-drop `LockedBox` (Miri-verified drop), `harden_process` (no core dumps + non-dumpable) wired into CLI + FFI startup. **Next (host integration, available now):** wrap the at-rest seed-sealing KEK with a secure-element classical key (biometric/PIN-gated) when the host reports `CustodyTier::HardwareBacked` — hardware-backed *sealing*. **Blocked (hardware roadmap):** hardware-backed *signing* of the PQ key is impossible until PQC-capable secure elements ship — StrongBox / the Seeker's SE / Secure Enclave / TPMs are classical-only and cannot hold ML-DSA-87. Not a talkrypt task; a silicon dependency. |
 
 ---
 

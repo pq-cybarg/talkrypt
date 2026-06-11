@@ -104,6 +104,16 @@ fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+/// One-time secure init run by every FFI entry point that may create or load a
+/// secret: first harden the process against RAM capture (disable core dumps /
+/// ptrace — SECURITY-AUDIT R-8), then run the FIPS power-on self-test and abort
+/// if any primitive is broken (R-5). Both are `Once`-guarded, so this is cheap
+/// to call on every constructor.
+fn ffi_secure_init() {
+    talkrypt_crypto::ensure_hardened();
+    talkrypt_crypto::ensure_self_tested();
+}
+
 uniffi::setup_scaffolding!();
 
 /// Errors surfaced across the FFI boundary.
@@ -816,7 +826,7 @@ impl Account {
     /// Generate a fresh account.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -825,7 +835,7 @@ impl Account {
     /// Reload an account from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),
@@ -865,7 +875,7 @@ impl DeviceKey {
     /// Generate a fresh device key.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -874,7 +884,7 @@ impl DeviceKey {
     /// Reload a device key from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),
@@ -1026,7 +1036,7 @@ impl SegmentKey {
     /// Generate a fresh segment key.
     #[uniffi::constructor]
     pub fn generate() -> Arc<Self> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         Arc::new(Self {
             kp: IdentityKeyPair::generate(),
         })
@@ -1035,7 +1045,7 @@ impl SegmentKey {
     /// Reload a segment key from its 64-hex-char seed.
     #[uniffi::constructor]
     pub fn from_seed_hex(seed_hex: String) -> Result<Arc<Self>, FfiError> {
-        talkrypt_crypto::ensure_self_tested(); // FIPS POST before any keygen (R-5)
+        ffi_secure_init(); // RAM-capture hardening (R-8) + FIPS POST (R-5)
         let seed = parse_seed_hex(&seed_hex).map_err(FfiError::Failed)?;
         Ok(Arc::new(Self {
             kp: IdentityKeyPair::from_secret_bytes(seed),

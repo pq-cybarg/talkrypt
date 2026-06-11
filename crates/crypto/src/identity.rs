@@ -7,7 +7,9 @@
 //! strictly defense-in-depth — see [`crate::hybrid`]).
 //!
 //! The ML-DSA private key is stored as its 32-byte seed (the FIPS-204
-//! preferred serialization), held in a `Zeroizing` buffer and expanded on use.
+//! preferred serialization), held in a page-locked, zeroize-on-drop
+//! [`LockedBox`](crate::mem::LockedBox) — never swapped to disk or captured in a
+//! core dump — and expanded on use (SECURITY-AUDIT R-8).
 
 use ml_dsa::signature::{Signer, Verifier};
 use ml_dsa::Keypair;
@@ -16,18 +18,20 @@ use ml_dsa::{
 };
 use rand::RngCore;
 use sha3::Digest;
-use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, Result};
 use crate::hash::Hash;
+use crate::mem::LockedBox;
 
 /// Length of an identity fingerprint (the [`Hash`] output, 48 bytes).
 pub const FINGERPRINT_LEN: usize = 48;
 
 /// A long-term secret identity (ML-DSA-87). Not `Clone` — there should be one.
 pub struct IdentityKeyPair {
-    /// ML-DSA-87 signing seed (32 bytes), zeroized on drop.
-    sig_seed: Zeroizing<[u8; 32]>,
+    /// ML-DSA-87 signing seed (32 bytes). Held in page-locked memory so it is
+    /// never swapped to disk or captured in a core dump, and zeroized on drop
+    /// (SECURITY-AUDIT R-8 / F-3; see [`crate::mem`]).
+    sig_seed: LockedBox<32>,
     /// Cached public half.
     public: IdentityPublic,
 }
@@ -62,11 +66,13 @@ impl IdentityPublic {
 }
 
 impl IdentityKeyPair {
-    /// Generate a fresh identity from the OS CSPRNG.
+    /// Generate a fresh identity from the OS CSPRNG. The seed is drawn directly
+    /// into page-locked memory ([`LockedBox`]) so it never lands in an unpinned
+    /// temporary that could be swapped or dumped.
     pub fn generate() -> Self {
-        let mut seed = Zeroizing::new([0u8; 32]);
-        rand::rngs::OsRng.fill_bytes(seed.as_mut_slice());
-        let kp = Self::from_secret_bytes(*seed);
+        let mut seed = LockedBox::<32>::zeroed();
+        rand::rngs::OsRng.fill_bytes(seed.as_mut_array());
+        let kp = Self::from_locked_seed(seed);
         kp.pairwise_consistency_check();
         kp
     }
@@ -86,9 +92,16 @@ impl IdentityKeyPair {
         }
     }
 
-    /// Reconstruct from a stored ML-DSA seed.
+    /// Reconstruct from a stored ML-DSA seed. The `sig_seed` argument is the
+    /// caller's transient copy (e.g. just decrypted from at-rest storage); it is
+    /// copied into page-locked memory here, and the caller owns and should
+    /// zeroize their copy.
     pub fn from_secret_bytes(sig_seed: [u8; 32]) -> Self {
-        let sig_seed = Zeroizing::new(sig_seed);
+        Self::from_locked_seed(LockedBox::from_bytes(&sig_seed))
+    }
+
+    /// Build the keypair around an already-locked seed, deriving the public half.
+    fn from_locked_seed(sig_seed: LockedBox<32>) -> Self {
         let signing = signing_key_from_seed(&sig_seed);
         let vk = signing.verifying_key();
         let sig_vk = vk.encode().as_slice().to_vec();

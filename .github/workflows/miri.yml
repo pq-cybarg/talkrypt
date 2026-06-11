@@ -31,3 +31,5 @@ jobs:
         run: cargo miri test -p talkrypt-crypto drop_zeroizes
       - name: Miri — Zeroizing-returning KDF paths
         run: cargo miri test -p talkrypt-crypto 'kdf::'
+      - name: Miri — LockedBox drop soundness (RAM-capture hardening, R-8)
+        run: cargo miri test -p talkrypt-crypto 'mem::'

@@ -341,6 +341,10 @@ fn classification_from(s: &str) -> Option<Classification> {
 
 #[tokio::main]
 async fn main() {
+    // RAM-capture hardening (SECURITY-AUDIT R-8): disable core dumps and mark
+    // the process non-dumpable before any secret exists, so a crash or a
+    // same-uid attacker can't spill/scrape our memory.
+    talkrypt_crypto::ensure_hardened();
     // Power-on self-test (FIPS POST / SECURITY-AUDIT R-5): verify every crypto
     // primitive at start-up and abort if any is broken, before doing anything.
     talkrypt_crypto::ensure_self_tested();

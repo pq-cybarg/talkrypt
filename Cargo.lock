@@ -4810,6 +4810,7 @@ dependencies = [
  "aes-gcm",
  "aws-lc-rs",
  "hkdf",
+ "libc",
  "ml-dsa",
  "ml-kem",
  "proptest",

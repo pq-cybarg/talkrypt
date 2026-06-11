@@ -24,6 +24,12 @@ thiserror.workspace = true
 # Optional FIPS-validatable AEAD/hash backend (enabled by the `fips` feature).
 aws-lc-rs = { version = "1", optional = true }
 
+# Memory-hardening syscalls (mlock/munlock, madvise(DONTDUMP), prctl, setrlimit)
+# for RAM-capture mitigation. Unix only; on other targets the hardening calls
+# compile to no-ops. (SECURITY-AUDIT R-8.)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [features]
 default = []
 # Route AES-256-GCM through aws-lc-rs (its FIPS-validated module). For an

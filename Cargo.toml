@@ -32,6 +32,9 @@ ml-kem = { version = "0.2", features = ["deterministic"] }
 ml-dsa = "0.1"
 # support
 thiserror = "1"
+# Memory-hardening syscalls (mlock / madvise / prctl / setrlimit) for RAM-capture
+# mitigation; unix only at the call sites. (SECURITY-AUDIT R-8.)
+libc = "0.2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "io-util", "time"] }
 async-trait = "0.1"
 # dev
