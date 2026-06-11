@@ -126,11 +126,23 @@ crates/cli         the `talkrypt` binary (demo / host / join REPL)
   require. Custom suites implement the `CryptoSuite` trait and register against
   a security floor.
 
+## Documentation
+
+A feature-oriented **[wiki](docs/wiki/Home.md)** covers everything talkrypt does
+— [cryptography](docs/wiki/Cryptography.md),
+[identity & accounts](docs/wiki/Identity-and-Accounts.md),
+[messaging & transport](docs/wiki/Messaging-and-Transport.md),
+[key custody](docs/wiki/Key-Custody.md),
+[the CLI](docs/wiki/CLI-Reference.md),
+[packaging & release](docs/wiki/Packaging-and-Release.md), and
+[security assurance](docs/wiki/Security-Assurance.md). Start at
+[`docs/wiki/Home.md`](docs/wiki/Home.md), or [Getting Started](docs/wiki/Getting-Started.md).
+
 ## Build & run
 
 ```
 cargo build --workspace
-cargo test  --workspace      # 55 tests, fully offline (loopback transport)
+cargo test  --workspace      # ~243 tests, fully offline (loopback transport)
 cargo run -p talkrypt-cli -- demo
 ```
 
