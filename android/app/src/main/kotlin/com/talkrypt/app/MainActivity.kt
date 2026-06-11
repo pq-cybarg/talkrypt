@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
@@ -143,23 +144,11 @@ class MainActivity : Activity() {
         col.addView(channel, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
         col.addView(label("POSTURE").also { it.setPadding(0, dp(20), 0, dp(8)) })
-        val posture = Spinner(this).also {
-            it.background = roundRect(field, 14)
-            it.adapter = ArrayAdapter(
-                this, android.R.layout.simple_spinner_dropdown_item,
-                listOf("pq-pure", "hybrid", "pq-pure-compact"),
-            )
-        }
+        val posture = darkSpinner(listOf("pq-pure", "hybrid", "pq-pure-compact"))
         col.addView(posture, lp(MATCH_PARENT, WRAP_CONTENT))
 
         col.addView(label("ACCESS").also { it.setPadding(0, dp(20), 0, dp(8)) })
-        val access = Spinner(this).also {
-            it.background = roundRect(field, 14)
-            it.adapter = ArrayAdapter(
-                this, android.R.layout.simple_spinner_dropdown_item,
-                listOf("open", "contacts", "friends"),
-            )
-        }
+        val access = darkSpinner(listOf("open", "contacts", "friends"))
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
 
         val torBox = CheckBox(this).apply {
@@ -1248,6 +1237,33 @@ class MainActivity : Activity() {
 
     private fun roundRect(color: Int, radius: Int) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(radius).toFloat()
+    }
+
+    /** A dark-themed dropdown: light text on a dark field + dark popup. The stock
+     *  `ArrayAdapter` colors items with the default theme's (dark) text, which is
+     *  unreadable on talkrypt's dark background — so set the text color explicitly
+     *  for both the collapsed selection and the dropdown rows. */
+    private fun darkSpinner(items: List<String>): Spinner {
+        val sp = Spinner(this)
+        sp.background = roundRect(field, 14)
+        sp.setPopupBackgroundDrawable(roundRect(panel, 12))
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, items) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+                (super.getView(position, convertView, parent) as TextView).apply {
+                    setTextColor(fg)
+                    setPadding(dp(12), paddingTop, dp(12), paddingBottom)
+                }
+
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+                (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                    setTextColor(fg)
+                    setBackgroundColor(panel)
+                    setPadding(dp(16), dp(12), dp(16), dp(12))
+                }
+        }
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        sp.adapter = adapter
+        return sp
     }
 
     private fun circle(color: Int) = GradientDrawable().apply {

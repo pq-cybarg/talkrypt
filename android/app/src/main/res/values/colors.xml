@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- talkrypt's deep-dark base (matches the app background). -->
+    <color name="ic_launcher_background">#0B0E13</color>
+</resources>

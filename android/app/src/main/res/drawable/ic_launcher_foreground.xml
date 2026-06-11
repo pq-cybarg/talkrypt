@@ -1,0 +1,27 @@
+<!-- talkrypt launcher icon foreground: a shield with a keyhole (post-quantum,
+     encrypted). Drawn in the app accent green on the adaptive-icon's dark
+     background. 108x108 viewport; artwork kept within the central safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- shield body -->
+    <path
+        android:fillColor="#2EA043"
+        android:pathData="M54,28 L80,38 L80,58 C80,74 69,82.5 54,87 C39,82.5 28,74 28,58 L28,38 Z" />
+
+    <!-- subtle inner highlight for depth -->
+    <path
+        android:fillColor="#3FB950"
+        android:pathData="M54,33 L75,41 L75,58 C75,71 66,78 54,82 C54,82 54,33 54,33 Z" />
+
+    <!-- keyhole, cut to the dark background colour -->
+    <path
+        android:fillColor="#0B0E13"
+        android:pathData="M54,52 m-7,0 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 Z" />
+    <path
+        android:fillColor="#0B0E13"
+        android:pathData="M50.5,57 L57.5,57 L59,70 L49,70 Z" />
+</vector>
