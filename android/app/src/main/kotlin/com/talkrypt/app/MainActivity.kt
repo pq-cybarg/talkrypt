@@ -50,11 +50,20 @@ import uniffi.talkrypt_ffi.linkedSegmentChain
  */
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
-    private var client: TalkryptClient? = null
-    private var messages: LinearLayout? = null
+    private val sessions = Sessions()
+    private val store by lazy { ChatStore(this) }
+    private var messages: LinearLayout? = null   // message list of the on-screen chat (null on other screens)
     private var scroll: ScrollView? = null
     private var shareServer: ApkShareServer? = null
     private var useTor = false // route the next host/join over Tor (.onion)
+    private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
+    private val pendingSaves = HashSet<String>()
+
+    /** Currently rendered chat id, or null on the list/other screens. */
+    private val activeId: String? get() = sessions.active
+
+    private enum class Back { HOME, LIST_CHILD }
+    private var backState = Back.HOME
 
     /** Writable state dir for Arti (onion keys + dir cache) under app storage. */
     private fun torStateDir(): String = java.io.File(filesDir, "tor").absolutePath
@@ -77,8 +86,35 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tintSystemBars()
-        setContentView(setupScreen())
+        loadSavedChats()
+        setContentView(chatListScreen())
+        pollAll()
         handleDeepLink(intent)
+    }
+
+    /** Hydrate the chat list from sealed storage (history only; not connected). */
+    private fun loadSavedChats() {
+        for (id in runCatching { store.ids() }.getOrDefault(emptyList())) {
+            val (meta, hist) = store.load(id) ?: continue
+            val lc = sessions.open(meta, null)
+            lc.history.clear(); lc.history.addAll(hist)
+        }
+    }
+
+    @Suppress("DEPRECATION", "MissingSuperCall")
+    override fun onBackPressed() {
+        when {
+            activeId != null -> setContentView(chatListScreen())       // chat → list (stays live)
+            backState == Back.LIST_CHILD -> setContentView(chatListScreen())  // subscreen → list
+            else -> super.onBackPressed()                              // list → exit
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        for (lc in sessions.all()) if (lc.meta.persistence != Persistence.EPHEMERAL) {
+            runCatching { store.save(lc.meta, lc.history) }
+        }
     }
 
     // Match the system bars to the app background. The setters are deprecated on
@@ -126,18 +162,11 @@ class MainActivity : Activity() {
     }
 
     // ---------- setup screen ----------
-    private fun setupScreen(): View {
-        val tier = runCatching { CustodyBridge.detectTier().name }.getOrDefault("UNKNOWN")
+    private fun newChatScreen(): View {
+        backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
 
-        col.addView(text("talkrypt", 32f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
-        col.addView(text("post-quantum · end-to-end encrypted", 14f, muted))
-
-        // custody/probe status pill
-        val pill = text("🔒  $tier  ·  ML-DSA-87", 13f, accent).apply {
-            background = roundRect(panel, 18); setPadding(dp(16), dp(10), dp(16), dp(10))
-        }
-        col.addView(pill, lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(20), bottom = dp(28)))
+        col.addView(text("New chat", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
 
         col.addView(label("CHANNEL"))
         val channel = inputField("#general")
@@ -150,6 +179,10 @@ class MainActivity : Activity() {
         col.addView(label("ACCESS").also { it.setPadding(0, dp(20), 0, dp(8)) })
         val access = darkSpinner(listOf("open", "contacts", "friends"))
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
+
+        col.addView(label("PERSISTENCE").also { it.setPadding(0, dp(20), 0, dp(8)) })
+        val persistence = darkSpinner(listOf("Ephemeral (memory only)", "Persistent (saved, reconnectable)", "Always-on (Phase 2)"))
+        col.addView(persistence, lp(MATCH_PARENT, WRAP_CONTENT))
 
         val torBox = CheckBox(this).apply {
             text = "Route over Tor (.onion; slow to start)"
@@ -164,9 +197,11 @@ class MainActivity : Activity() {
                 channel.text.toString().ifBlank { "#general" },
                 posture.selectedItem.toString(),
                 access.selectedItem.toString(),
+                tierOf(persistence),
             )
         }, lp(MATCH_PARENT, dp(54), top = dp(32)))
         col.addView(pillButton("Registry-restricted chat", panel, fg) {
+            pendingTier = tierOf(persistence)
             setContentView(restrictedHostScreen(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString()))
         }, lp(MATCH_PARENT, dp(50), top = dp(10)))
 
@@ -175,7 +210,7 @@ class MainActivity : Activity() {
         col.addView(invite, lp(MATCH_PARENT, WRAP_CONTENT))
         col.addView(pillButton("Join", panel, fg) {
             val uri = invite.text.toString().trim()
-            if (uri.startsWith("talkrypt://")) startJoin(uri) else toast("Paste a talkrypt:// invite")
+            if (uri.startsWith("talkrypt://")) { pendingTier = tierOf(persistence); startJoin(uri) } else toast("Paste a talkrypt:// invite")
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
 
         // In-person: find a nearby host, or send this very app P2P.
@@ -186,19 +221,143 @@ class MainActivity : Activity() {
         col.addView(pillButton("Share app (P2P over Wi-Fi)", panel, fg) {
             shareApp()
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
-        col.addView(pillButton("Anchors (username directory)", panel, fg) {
-            setContentView(anchorsScreen())
-        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
-        col.addView(pillButton("Contacts", panel, fg) {
-            setContentView(contactsScreen())
-        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
-        col.addView(pillButton("Linked devices", panel, fg) {
-            setContentView(linkedDevicesScreen())
-        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
-        col.addView(pillButton("Segments (contextual identities)", panel, fg) {
-            setContentView(segmentsScreen())
-        }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
 
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    /** Map the persistence spinner to a tier (Always-on downgrades to persistent in Phase 1). */
+    private fun tierOf(sp: Spinner): Persistence = when (sp.selectedItemPosition) {
+        0 -> Persistence.EPHEMERAL
+        2 -> { toast("Always-on lands in Phase 2 — saved as persistent for now"); Persistence.PERSISTENT_LOCAL }
+        else -> Persistence.PERSISTENT_LOCAL
+    }
+
+    private fun chatId(seed: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(24)
+
+    // ---------- chat list (home) ----------
+    private fun chatListScreen(): View {
+        sessions.setActive(null)
+        messages = null; scroll = null
+        backState = Back.HOME
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
+
+        val tier = runCatching { CustodyBridge.detectTier().name }.getOrDefault("UNKNOWN")
+        val headRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val titleCol = column(Color.TRANSPARENT)
+        titleCol.addView(text("talkrypt", 26f, fg, bold = true))
+        titleCol.addView(text("🔒 $tier · ML-DSA-87", 12f, accent))
+        headRow.addView(titleCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        headRow.addView(text("⋯", 26f, muted).apply { setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { setContentView(utilitiesScreen()) } })
+        col.addView(headRow, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+
+        col.addView(pillButton("＋  New chat", accent, Color.WHITE) { setContentView(newChatScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(16), bottom = dp(8)))
+
+        val chats = sessions.ordered()
+        if (chats.isEmpty()) {
+            col.addView(text("No chats yet — tap ＋ to host or join.", 14f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(40)))
+        } else {
+            for (lc in chats) col.addView(chatRow(lc), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+        }
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    /** One Telegram-style row: glyph · title · last-sender preview · time · unread/live. */
+    private fun chatRow(lc: LiveChat): View {
+        val m = lc.meta
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = roundRect(panel, 14); setPadding(dp(14), dp(12), dp(14), dp(12))
+            setOnClickListener { openChat(m.id) }
+            setOnLongClickListener { chatRowMenu(lc); true }
+        }
+        val glyph = text(if (m.group) "#" else "✺", 20f, Color.WHITE, center = true).apply {
+            background = circle(if (m.group) accent else peerBubble); gravity = Gravity.CENTER
+        }
+        row.addView(glyph, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(12) })
+
+        val mid = column(Color.TRANSPARENT)
+        mid.addView(text(m.title, 16f, fg, bold = true))
+        val last = lc.history.lastOrNull { it.kind == MsgKind.MESSAGE }
+        val preview = when {
+            last != null && last.mine -> "you: ${last.text}"
+            last != null -> "${last.display ?: last.sender?.take(8) ?: "?"}: ${last.text}"
+            else -> if (m.role == Role.HOST) "hosting" else "joined"
+        }
+        val members = lc.roster.size
+        val sub = if (m.group && members > 0) "$preview · $members members" else preview
+        mid.addView(text(sub, 13f, muted).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+        row.addView(mid, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        val right = column(Color.TRANSPARENT).apply { gravity = Gravity.END }
+        right.addView(text(relTime(m.lastActivityAt), 11f, muted))
+        if (lc.unread > 0) {
+            right.addView(text(lc.unread.toString(), 11f, Color.WHITE, center = true).apply {
+                background = circle(accent); setPadding(dp(7), dp(2), dp(7), dp(2)); gravity = Gravity.CENTER
+            }, lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
+        } else if (lc.client != null) {
+            right.addView(text("●", 12f, accent), lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
+        }
+        row.addView(right, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        return row
+    }
+
+    private fun relTime(ts: Long): String {
+        val d = System.currentTimeMillis() - ts
+        return when {
+            d < 60_000 -> "now"
+            d < 3_600_000 -> "${d / 60_000}m"
+            d < 86_400_000 -> "${d / 3_600_000}h"
+            else -> "${d / 86_400_000}d"
+        }
+    }
+
+    private fun chatRowMenu(lc: LiveChat) {
+        val id = lc.meta.id
+        android.app.AlertDialog.Builder(this)
+            .setTitle(lc.meta.title)
+            .setItems(arrayOf("Re-share invite", "Leave (disconnect, keep history)", "Delete (erase)")) { _, which ->
+                when (which) {
+                    0 -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
+                    1 -> { sessions.disconnect(id); setContentView(chatListScreen()) }
+                    2 -> { sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen()) }
+                }
+            }.show()
+    }
+
+    private fun openChat(id: String) {
+        sessions.setActive(id)
+        setContentView(chatScreen(id))
+    }
+
+    /** Register a freshly-connected client as a session, persist if kept, open it. */
+    private fun enterSession(meta: ChatMeta, c: TalkryptClient, sysMsg: String) {
+        val lc = sessions.open(meta, c)
+        if (meta.persistence != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
+        openChat(meta.id)
+        sysLine(meta.id, sysMsg)
+    }
+
+    private fun shareText(s: String) {
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, s) }, "Share invite"))
+    }
+
+    /** The old utility buttons, moved off the chat-first home (⋯ on the list). */
+    private fun utilitiesScreen(): View {
+        backState = Back.LIST_CHILD
+        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        col.addView(text("More", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
+        col.addView(pillButton("Anchors (username directory)", panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(8)))
+        col.addView(pillButton("Contacts", panel, fg) { setContentView(contactsScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        col.addView(pillButton("Linked devices", panel, fg) { setContentView(linkedDevicesScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        col.addView(pillButton("Segments (contextual identities)", panel, fg) { setContentView(segmentsScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -226,7 +385,7 @@ class MainActivity : Activity() {
                 }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
             }
         }
-        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -266,7 +425,7 @@ class MainActivity : Activity() {
         col.addView(text(url, 14f, accent, center = true).also { it.setPadding(0, dp(18), 0, dp(24)) })
         col.addView(pillButton("Done", panel, fg) {
             shareServer?.stop(); shareServer = null
-            setContentView(setupScreen())
+            setContentView(chatListScreen())
         }, lp(MATCH_PARENT, dp(50)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -380,7 +539,7 @@ class MainActivity : Activity() {
             if (u.startsWith("talkrypt://")) setContentView(acceptLinkConfirmScreen(u)) else toast("paste the link offer URI")
         }, lp(MATCH_PARENT, dp(50), top = dp(10)))
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -432,7 +591,7 @@ class MainActivity : Activity() {
         col.addView(pillButton("Accept link on this device", accent, Color.WHITE) {
             acceptLink(uri)
         }, lp(MATCH_PARENT, dp(54)))
-        col.addView(pillButton("Cancel", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
+        col.addView(pillButton("Cancel", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(10)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -463,9 +622,9 @@ class MainActivity : Activity() {
                 val sn = c.safetyNumber()
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
-                    setContentView(chatScreen("chat", "linked · safety ${sn.take(11)} · peers ${c.peerCount()}"))
-                    system("joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
-                    bind(c); poll()
+                    val now = System.currentTimeMillis()
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (uri.contains(".onion")) uri else null, pendingTier, sn.take(11), now, now)
+                    enterSession(meta, c, "joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
                 }
             } catch (e: Exception) {
                 ui.post { toast("join failed: ${e.message}") }
@@ -554,7 +713,7 @@ class MainActivity : Activity() {
             addSegment(n); toast("created segment “$n”"); setContentView(segmentsScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(10)))
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -577,9 +736,9 @@ class MainActivity : Activity() {
                 val sn = c.safetyNumber()
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
-                    setContentView(chatScreen("chat", "segment “$name” · safety ${sn.take(11)} · peers ${c.peerCount()}"))
-                    system("joined as segment “$name”")
-                    bind(c); poll()
+                    val now = System.currentTimeMillis()
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (uri.contains(".onion")) uri else null, pendingTier, sn.take(11), now, now)
+                    enterSession(meta, c, "joined as segment “$name”")
                 }
             } catch (e: Exception) {
                 ui.post { toast("join failed: ${e.message}") }
@@ -615,7 +774,7 @@ class MainActivity : Activity() {
         col.addView(list, lp(MATCH_PARENT, WRAP_CONTENT))
         col.addView(text("…", 13f, muted, center = true).also { it.setPadding(0, dp(16), 0, dp(16)) })
         col.addView(pillButton("Back", panel, fg) {
-            stopNearby(); setContentView(setupScreen())
+            stopNearby(); setContentView(chatListScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -800,7 +959,7 @@ class MainActivity : Activity() {
 
         col.addView(result, lp(MATCH_PARENT, WRAP_CONTENT))
         col.addView(pillButton("Back", panel, fg) {
-            setContentView(setupScreen())
+            setContentView(chatListScreen())
         }, lp(MATCH_PARENT, dp(50), top = dp(20)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -897,7 +1056,7 @@ class MainActivity : Activity() {
                 }
             }
         }
-        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -956,11 +1115,11 @@ class MainActivity : Activity() {
                 val members = c.restrictToAnchor(anchorUri)
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
-                    setContentView(chatScreen(channel, "restricted · $members member(s) · safety ${sn.take(11)}"))
-                    system("registry-restricted — only the $members anchor member(s) can join")
+                    val now = System.currentTimeMillis()
+                    val meta = ChatMeta(chatId(invite), channel, Role.HOST, false, posture, "restricted", invite, if (useTor) invite else null, pendingTier, sn.take(11), now, now)
+                    enterSession(meta, c, "registry-restricted — only the $members anchor member(s) can join")
                     messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")
-                    bind(c); poll()
                     startNearbyAdvertising(invite)
                 }
             } catch (e: Exception) {
@@ -970,27 +1129,41 @@ class MainActivity : Activity() {
     }
 
     // ---------- chat screen ----------
-    private fun chatScreen(title: String, subtitle: String): View {
+    private fun chatScreen(chatId: String): View {
+        val lc = sessions.get(chatId) ?: return chatListScreen()
+        sessions.setActive(chatId)
         val root = column(bg)
 
-        // header bar — MUST be WRAP_CONTENT height. `column()` defaults children
-        // to MATCH_PARENT height, which (with no weight) would expand to fill the
-        // whole screen and push the messages list + input bar off the bottom —
-        // that was the "no text-entry field" bug. Pin explicit heights so only
-        // the messages ScrollView (weight 1) takes the remaining space.
-        val header = column(panel).apply { setPadding(dp(20), dp(14), dp(20), dp(14)) }
-        header.addView(text(title, 17f, fg, bold = true))
-        header.addView(text(subtitle, 12f, muted).also { it.setPadding(0, dp(2), 0, 0) })
+        // header: back · title/subtitle · overflow. Heights pinned WRAP_CONTENT so
+        // only the messages ScrollView (weight 1) takes the remaining space.
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(panel); setPadding(dp(8), dp(10), dp(12), dp(10))
+        }
+        header.addView(text("‹", 30f, fg).apply { setPadding(dp(10), 0, dp(10), 0); setOnClickListener { setContentView(chatListScreen()) } })
+        val titles = column(Color.TRANSPARENT)
+        titles.addView(text(lc.meta.title, 17f, fg, bold = true))
+        val tierLabel = when (lc.meta.persistence) { Persistence.EPHEMERAL -> "ephemeral"; Persistence.ALWAYS_ON -> "always-on"; else -> "persistent" }
+        val memberStr = if (lc.roster.isNotEmpty()) "${lc.roster.size} members · " else ""
+        titles.addView(text("$memberStr safety ${lc.meta.safety} · $tierLabel", 12f, muted).also { it.setPadding(0, dp(2), 0, 0) })
+        header.addView(titles, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        header.addView(text("⋯", 22f, muted).apply { setPadding(dp(10), dp(4), dp(8), dp(4)); setOnClickListener { chatRowMenu(lc) } })
         root.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // messages — the only weighted child; takes all space between header/bar
+        // messages — the only weighted child
         val list = column(bg).apply { setPadding(dp(12), dp(12), dp(12), dp(12)) }
         messages = list
         val sv = ScrollView(this).apply { isFillViewport = true; addView(list) }
         scroll = sv
         root.addView(sv, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // input bar — pinned to the bottom, WRAP_CONTENT height
+        // replay this chat's stored history into the view
+        for (m in lc.history) when (m.kind) {
+            MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking)
+            MsgKind.SYSTEM, MsgKind.ACTION -> system(m.text)
+        }
+
+        // input bar — pinned to the bottom
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(panel); setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -1003,7 +1176,7 @@ class MainActivity : Activity() {
         }
         send.setOnClickListener {
             val t = input.text.toString()
-            if (t.isNotEmpty()) { input.setText(""); sendMessage(t) }
+            if (t.isNotEmpty()) { input.setText(""); sendMessage(chatId, t) }
         }
         bar.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(10) })
         root.addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -1056,7 +1229,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
-    private fun startHost(channel: String, posture: String, access: String = "open") {
+    private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL) {
         toast("creating chat…")
         thread {
             try {
@@ -1069,23 +1242,24 @@ class MainActivity : Activity() {
                     val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
                     TalkryptClient.host(listen, channel, posture)
                 }
-                // Present our account so peers (and registry-restricted hosts)
-                // can resolve us as that account.
                 runCatching { c.presentAccount(account(), null) }
                 runCatching { loadContacts(c) } // recognize saved contacts
-                // Apply the chosen access mode (open / contacts / friends).
                 runCatching { c.setAccessMode(access) }
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
-                    val tag = if (access == "open") posture else "$posture · $access only"
-                    setContentView(chatScreen(channel, "$tag · safety ${sn.take(11)}"))
-                    system("hosting — let a friend scan this to join:")
+                    val now = System.currentTimeMillis()
+                    val meta = ChatMeta(
+                        id = chatId(invite), title = channel, role = Role.HOST, group = false,
+                        posture = posture, access = access, inviteUri = invite,
+                        onion = if (useTor) invite else null, persistence = tier,
+                        safety = sn.take(11), createdAt = now, lastActivityAt = now,
+                    )
+                    val lc = sessions.open(meta, c)
+                    if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
+                    openChat(meta.id)
+                    sysLine(meta.id, "hosting — share the invite to let a friend join:")
                     messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")
-                    bind(c); poll()
-                    // Also broadcast the invite over BLE + Wi-Fi Direct so a
-                    // nearby phone can find it with no QR (best-effort; opt-in
-                    // via the granted radios).
                     startNearbyAdvertising(invite)
                 }
             } catch (e: Exception) { ui.post { toast("host failed: ${e.message}") } }
@@ -1133,7 +1307,7 @@ class MainActivity : Activity() {
         col.addView(pillButton("Join as pseudonym (unlinkable)", panel, fg) {
             doJoin(uri, null, presentAccount = false)
         }, lp(MATCH_PARENT, dp(50), top = dp(10)))
-        col.addView(pillButton("Back", panel, fg) { setContentView(setupScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -1141,76 +1315,108 @@ class MainActivity : Activity() {
 
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
         toast(if (useTor) "joining over Tor…" else "joining…")
+        val tier = pendingTier
         thread {
             try {
                 val c = if (useTor) TalkryptClient.joinTor(uri, torStateDir()) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
-                // Present our account (optionally as a username) so a registry-
-                // restricted host can admit us and the peer can friend us. A
-                // pseudonym presents nothing and won't pass a restricted gate.
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
+                val title = runCatching { inviteChannel(uri) }.getOrDefault("chat")
                 ui.post {
-                    setContentView(chatScreen("chat", "safety ${sn.take(11)} · peers ${c.peerCount()}"))
-                    system(if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
-                    bind(c); poll()
+                    val now = System.currentTimeMillis()
+                    val meta = ChatMeta(
+                        id = chatId(uri), title = title, role = Role.JOIN, group = false,
+                        posture = "", access = "open", inviteUri = uri,
+                        onion = if (uri.contains(".onion")) uri else null, persistence = tier,
+                        safety = sn.take(11), createdAt = now, lastActivityAt = now,
+                    )
+                    val lc = sessions.open(meta, c)
+                    if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
+                    openChat(meta.id)
+                    sysLine(meta.id, if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
                 }
             } catch (e: Exception) { ui.post { toast("join failed: ${e.message}") } }
         }
     }
 
-    private fun sendMessage(t: String) {
-        val c = client ?: return
+    private fun sendMessage(chatId: String, t: String) {
+        val lc = sessions.get(chatId) ?: return
+        val c = lc.client ?: run { toast("disconnected — reopen to reconnect"); return }
+        val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null, ts = System.currentTimeMillis())
+        lc.history.add(msg); sessions.touch(chatId, msg.ts)
         addBubble(t, mine = true)
+        scheduleSave(chatId)
         thread { runCatching { c.send(t) }.onFailure { ui.post { toast("send failed") } } }
     }
 
-    private fun bind(c: TalkryptClient) { client = c }
-
-    private fun poll() {
+    /** One loop drains every connected chat; events route to their room. The
+     *  active chat renders live, others accrue an unread badge. Started in onCreate. */
+    private fun pollAll() {
         ui.postDelayed(object : Runnable {
             override fun run() {
-                val c = client ?: return
-                while (true) {
-                    val e = runCatching { c.pollEvent() }.getOrNull() ?: break
-                    when (e) {
-                        is FfiEvent.Message ->
-                            addBubble(e.text, mine = false, sender = e.from.take(8),
-                                marking = e.marking.ifEmpty { null })
-                        is FfiEvent.Connected -> system("● ${e.fingerprint.take(8)} connected")
-                        is FfiEvent.Identity -> {
-                            val who = e.username.ifEmpty { e.accountFingerprint.take(8) }
-                            system(
-                                when {
-                                    e.friend -> "✓ friend $who"
-                                    e.contact -> "• contact $who"
-                                    else -> "• account $who (not a contact)"
-                                },
-                            )
-                            // Offer to recognize an unknown account (verify the
-                            // safety number out of band first).
-                            if (!e.contact) {
-                                val fp = e.accountFingerprint
-                                val name = e.username
-                                addAction("Add “$who” as a contact") {
-                                    val cl = client
-                                    if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) {
-                                        saveContacts(cl)
-                                        system("added contact $who")
-                                    } else {
-                                        toast("could not add (account not seen)")
-                                    }
-                                }
-                            }
-                        }
-                        is FfiEvent.Disconnected -> system("○ ${e.fingerprint.take(8)} left")
-                        is FfiEvent.Error -> system("! ${e.message}")
+                for (lc in sessions.live()) {
+                    val c = lc.client ?: continue
+                    val id = lc.meta.id
+                    while (true) {
+                        val e = runCatching { c.pollEvent() }.getOrNull() ?: break
+                        handleEvent(id, lc, e)
                     }
                 }
                 ui.postDelayed(this, 250)
             }
         }, 250)
     }
+
+    private fun handleEvent(id: String, lc: LiveChat, e: FfiEvent) {
+        val now = System.currentTimeMillis()
+        when (e) {
+            is FfiEvent.Message -> {
+                sessions.recordIncoming(id, ChatMsg(MsgKind.MESSAGE, e.from, e.from.take(8), false, e.text, e.marking.ifEmpty { null }, now))
+                if (activeId == id) addBubble(e.text, mine = false, sender = e.from.take(8), marking = e.marking.ifEmpty { null })
+                else refreshListRowIfVisible()
+                scheduleSave(id)
+            }
+            is FfiEvent.Connected -> { lc.roster.getOrPut(e.fingerprint) { Member(e.fingerprint) }.connected = true; sysLine(id, "● ${e.fingerprint.take(8)} connected") }
+            is FfiEvent.Disconnected -> { lc.roster[e.fingerprint]?.connected = false; sysLine(id, "○ ${e.fingerprint.take(8)} left") }
+            is FfiEvent.Identity -> {
+                val mem = lc.roster.getOrPut(e.accountFingerprint) { Member(e.accountFingerprint) }
+                mem.display = e.username.ifEmpty { e.accountFingerprint.take(8) }; mem.contact = e.contact; mem.friend = e.friend
+                val who = mem.display!!
+                sysLine(id, when { e.friend -> "✓ friend $who"; e.contact -> "• contact $who"; else -> "• account $who (not a contact)" })
+                if (!e.contact && activeId == id) {
+                    val fp = e.accountFingerprint; val name = e.username
+                    addAction("Add “$who” as a contact") {
+                        val cl = lc.client
+                        if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) { saveContacts(cl); system("added contact $who") }
+                        else toast("could not add (account not seen)")
+                    }
+                }
+            }
+            is FfiEvent.Error -> sysLine(id, "! ${e.message}")
+        }
+    }
+
+    /** Append a system line to a chat; render if it's the on-screen chat. */
+    private fun sysLine(id: String, s: String) {
+        sessions.recordIncoming(id, ChatMsg(MsgKind.SYSTEM, null, null, false, s, null, System.currentTimeMillis()))
+        if (activeId == id) system(s)
+        scheduleSave(id)
+    }
+
+    /** Persist a kept chat shortly after activity (debounced); ephemeral chats skip disk. */
+    private fun scheduleSave(id: String) {
+        val lc = sessions.get(id) ?: return
+        if (lc.meta.persistence == Persistence.EPHEMERAL) return
+        if (!pendingSaves.add(id)) return
+        ui.postDelayed({
+            pendingSaves.remove(id)
+            sessions.get(id)?.let { runCatching { store.save(it.meta, it.history) } }
+        }, 1500)
+    }
+
+    /** Redraw the chat list if it's the visible screen (to refresh unread/preview). */
+    private fun refreshListRowIfVisible() { if (activeId == null) ui.post { setContentView(chatListScreen()) } }
 
     // ---------- view helpers ----------
     // The pre-30 inset getters are deprecated; suppressed at function level so
