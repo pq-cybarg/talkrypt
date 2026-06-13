@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- talkrypt logo: a shield with a keyhole (post-quantum, encrypted), in the
+     app accent green on the deep-dark base. Canonical source for the Android
+     adaptive icon, the macOS .icns, the Linux .png, and the docs. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0B0E13"/>
+  <!-- shield body -->
+  <path fill="#2EA043"
+        d="M256 96 L392 152 L392 268 C392 360 332 410 256 440 C180 410 120 360 120 268 L120 152 Z"/>
+  <!-- inner highlight for depth -->
+  <path fill="#3FB950"
+        d="M256 122 L368 168 L368 268 C368 344 318 388 256 414 Z"/>
+  <!-- keyhole, cut to the dark base colour -->
+  <circle cx="256" cy="246" r="34" fill="#0B0E13"/>
+  <path fill="#0B0E13" d="M238 270 L274 270 L284 338 L228 338 Z"/>
+</svg>

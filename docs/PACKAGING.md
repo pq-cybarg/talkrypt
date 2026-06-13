@@ -21,6 +21,7 @@ on top of the FFI is possible later (see `docs/PLATFORMS.md`) but is not built.
 | `scripts/build-ios.sh` | iOS XCFramework + Swift bindings; `--testflight` archives + uploads (needs Xcode app project + Apple account). |
 | `scripts/hash-dist.sh` | Hashes **all** of `dist/` with SHA-256 **and** SHA3-256; writes `SHA256SUMS`, `SHA3-256SUMS`, `MANIFEST.txt`, and the `verify.sh` / `verify.ps1` checkers. The single hashing authority. |
 | `scripts/build-portable.sh` | Bare, self-contained `talkrypt` binaries per target (hand one to a peer; it just runs). |
+| `scripts/gen-icons.sh` | Regenerate the app icons (macOS `.icns`, Linux PNGs) from `assets/talkrypt-logo.svg`. |
 
 ```sh
 bash scripts/release.sh            # build desktop + mobile, hash everything

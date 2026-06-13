@@ -141,6 +141,8 @@ if [[ -n "$mac_arm" || -n "$mac_x86" ]] && command -v lipo >/dev/null 2>&1; then
   app="$STAGE/talkrypt.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$uni" "$app/Contents/MacOS/talkrypt-bin"
+  # Bundle the app icon (assets/icons/talkrypt.icns; see scripts/gen-icons.sh).
+  [[ -f "$ROOT/assets/icons/talkrypt.icns" ]] && cp "$ROOT/assets/icons/talkrypt.icns" "$app/Contents/Resources/talkrypt.icns"
   # Launcher opens Terminal on the CLI (the shipped product is the CLI/TUI).
   cat > "$app/Contents/MacOS/talkrypt" <<'EOF'
 #!/bin/bash
@@ -158,6 +160,7 @@ EOF
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>talkrypt</string>
+  <key>CFBundleIconFile</key><string>talkrypt</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
 </dict></plist>
@@ -202,18 +205,23 @@ build_deb() {
   command -v ar >/dev/null 2>&1 || { SKIPPED+=(".deb($pkg/$arch) — 'ar' not found"); return 0; }
   echo "==> building .deb ($pkg, $arch) from $t"
   local d="$STAGE/deb-$pkg-$arch"
-  rm -rf "$d"; mkdir -p "$d/usr/bin" "$d/usr/share/doc/$pkg" "$d/usr/share/applications" "$d/DEBIAN"
+  rm -rf "$d"; mkdir -p "$d/usr/bin" "$d/usr/share/doc/$pkg" "$d/usr/share/applications" \
+    "$d/usr/share/icons/hicolor/256x256/apps" "$d/usr/share/icons/hicolor/512x512/apps" "$d/DEBIAN"
   for entry in "${BINS[@]}"; do
     local name="${entry%%:*}"
     cp "$reldir/$name" "$d/usr/bin/" 2>/dev/null || true
     strip "$d/usr/bin/$name" 2>/dev/null || true
   done
   cp README.md LICENSE "$d/usr/share/doc/$pkg/" 2>/dev/null || true
+  # App icon (hicolor theme; see scripts/gen-icons.sh).
+  cp "$ROOT/assets/icons/talkrypt-256.png" "$d/usr/share/icons/hicolor/256x256/apps/talkrypt.png" 2>/dev/null || true
+  cp "$ROOT/assets/icons/talkrypt-512.png" "$d/usr/share/icons/hicolor/512x512/apps/talkrypt.png" 2>/dev/null || true
   cat > "$d/usr/share/applications/talkrypt.desktop" <<EOF
 [Desktop Entry]
 Name=talkrypt
 Comment=Post-quantum end-to-end encrypted chat (CLI)
 Exec=x-terminal-emulator -e talkrypt
+Icon=talkrypt
 Terminal=true
 Type=Application
 Categories=Network;InstantMessaging;Security;
