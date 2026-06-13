@@ -27,6 +27,7 @@ android {
             java.srcDirs += 'src/main/kotlin'
             jniLibs.srcDirs = ['src/main/jniLibs']
         }
+        test { java.srcDirs += 'src/test/kotlin' }
     }
 }
 
@@ -38,4 +39,6 @@ dependencies {
     // no camera). Scanning is delegated to the OS camera via a talkrypt:// deep
     // link, so no camera permission is needed in-app.
     implementation 'com.google.zxing:core:3.5.3'
+    // JVM unit tests for dependency-free logic (models, session manager).
+    testImplementation 'junit:junit:4.13.2'
 }
