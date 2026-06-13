@@ -45,4 +45,27 @@ class SessionsTest {
         assertEquals(null, s.get("a"))
         assertEquals(0, s.all().size)
     }
+
+    private fun metaOf(role: Role, onion: String?, invite: String?) = ChatMeta(
+        "id", "#c", role, false, "pq-pure", "open", invite, onion,
+        Persistence.PERSISTENT_LOCAL, "SAFE", 0, 0,
+    )
+
+    @Test fun reconnect_plan_selects_transport_and_role() {
+        assertEquals(ReconnectPlan.HOST_TOR, reconnectPlan(metaOf(Role.HOST, "abc.onion", "talkrypt://x")))
+        assertEquals(ReconnectPlan.HOST_LAN, reconnectPlan(metaOf(Role.HOST, null, "talkrypt://x")))
+        assertEquals(ReconnectPlan.JOIN_TOR, reconnectPlan(metaOf(Role.JOIN, "abc.onion", "talkrypt://x")))
+        assertEquals(ReconnectPlan.JOIN_LAN, reconnectPlan(metaOf(Role.JOIN, null, "talkrypt://x")))
+        // A join with no saved invite cannot reconnect.
+        assertEquals(ReconnectPlan.IMPOSSIBLE, reconnectPlan(metaOf(Role.JOIN, null, null)))
+    }
+
+    @Test fun any_always_on_predicate() {
+        val s = Sessions()
+        s.open(meta("a", 1), null)   // PERSISTENT_LOCAL
+        assertEquals(false, anyAlwaysOn(s))
+        val m = meta("b", 1).copy(persistence = Persistence.ALWAYS_ON)
+        s.open(m, null)
+        assertEquals(true, anyAlwaysOn(s))
+    }
 }

@@ -65,8 +65,10 @@ class MainActivity : Activity() {
     private enum class Back { HOME, LIST_CHILD }
     private var backState = Back.HOME
 
-    /** Writable state dir for Arti (onion keys + dir cache) under app storage. */
-    private fun torStateDir(): String = java.io.File(filesDir, "tor").absolutePath
+    // Per-chat Arti state dirs live under filesDir/tor/<sub>. A chat stores its
+    // <sub> in ChatMeta.torDir so reconnecting reuses the same onion identity.
+    private fun torDirPath(sub: String): String = java.io.File(java.io.File(filesDir, "tor"), sub).absolutePath
+    private fun freshTorSub(): String = "c" + System.nanoTime().toString(36)
 
     // Nearby discovery (BLE + Wi-Fi Direct) state.
     private var nearby: List<NearbyDiscovery> = emptyList()
@@ -320,19 +322,31 @@ class MainActivity : Activity() {
 
     private fun chatRowMenu(lc: LiveChat) {
         val id = lc.meta.id
+        val connected = lc.client != null
+        val items = buildList {
+            add("Re-share invite")
+            if (!connected) add("Reconnect")
+            add("Leave (disconnect, keep history)")
+            add("Delete (erase)")
+        }
         android.app.AlertDialog.Builder(this)
             .setTitle(lc.meta.title)
-            .setItems(arrayOf("Re-share invite", "Leave (disconnect, keep history)", "Delete (erase)")) { _, which ->
-                when (which) {
-                    0 -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
-                    1 -> { sessions.disconnect(id); setContentView(chatListScreen()) }
-                    2 -> { sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen()) }
+            .setItems(items.toTypedArray()) { _, which ->
+                when (items[which]) {
+                    "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
+                    "Reconnect" -> reconnect(id)
+                    "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
+                    "Delete (erase)" -> { sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen()) }
                 }
             }.show()
     }
 
     private fun openChat(id: String) {
         sessions.setActive(id)
+        // Lazily reconnect a saved-but-disconnected persistent chat when opened.
+        val lc = sessions.get(id)
+        if (lc != null && lc.client == null && lc.meta.persistence != Persistence.EPHEMERAL &&
+            reconnectPlan(lc.meta) != ReconnectPlan.IMPOSSIBLE) reconnect(id)
         setContentView(chatScreen(id))
     }
 
@@ -1235,9 +1249,11 @@ class MainActivity : Activity() {
             try {
                 // Bind to the LAN/hotspot address (not loopback) so the invite is
                 // dialable from another device — required for QR/nearby joining.
-                // Over Tor, host an onion service instead (the .onion goes in the invite).
+                // Over Tor, host an onion service in a per-chat state dir so the
+                // .onion is stable across reconnects/restarts.
+                val torSub = if (useTor) freshTorSub() else null
                 val c = if (useTor) {
-                    TalkryptClient.hostTor(channel, posture, torStateDir())
+                    TalkryptClient.hostTor(channel, posture, torDirPath(torSub!!))
                 } else {
                     val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
                     TalkryptClient.host(listen, channel, posture)
@@ -1252,7 +1268,7 @@ class MainActivity : Activity() {
                         id = chatId(invite), title = channel, role = Role.HOST, group = false,
                         posture = posture, access = access, inviteUri = invite,
                         onion = if (useTor) invite else null, persistence = tier,
-                        safety = sn.take(11), createdAt = now, lastActivityAt = now,
+                        safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
                     )
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
@@ -1316,9 +1332,10 @@ class MainActivity : Activity() {
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
         toast(if (useTor) "joining over Tor…" else "joining…")
         val tier = pendingTier
+        val torSub = if (useTor) freshTorSub() else null
         thread {
             try {
-                val c = if (useTor) TalkryptClient.joinTor(uri, torStateDir()) else TalkryptClient.join(uri)
+                val c = if (useTor) TalkryptClient.joinTor(uri, torDirPath(torSub!!)) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1329,7 +1346,7 @@ class MainActivity : Activity() {
                         id = chatId(uri), title = title, role = Role.JOIN, group = false,
                         posture = "", access = "open", inviteUri = uri,
                         onion = if (uri.contains(".onion")) uri else null, persistence = tier,
-                        safety = sn.take(11), createdAt = now, lastActivityAt = now,
+                        safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
                     )
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
@@ -1340,9 +1357,43 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Re-establish a saved chat's connection (Phase 2a). Reuses its onion dir so
+     *  a Tor host comes back on the SAME .onion. No-op if already connected. */
+    private fun reconnect(id: String) {
+        val lc = sessions.get(id) ?: return
+        if (lc.client != null) return
+        val m = lc.meta
+        val plan = reconnectPlan(m)
+        if (plan == ReconnectPlan.IMPOSSIBLE) { toast("can't reconnect — no saved invite"); return }
+        toast("reconnecting…")
+        thread {
+            try {
+                val pst = m.posture.ifEmpty { "pq-pure" }
+                val c = when (plan) {
+                    ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(m.title, pst, torDirPath(m.torDir ?: freshTorSub()))
+                    ReconnectPlan.HOST_LAN -> TalkryptClient.host("${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779", m.title, pst)
+                    ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(m.inviteUri!!, torDirPath(m.torDir ?: freshTorSub()))
+                    ReconnectPlan.JOIN_LAN -> TalkryptClient.join(m.inviteUri!!)
+                    ReconnectPlan.IMPOSSIBLE -> return@thread
+                }
+                runCatching { c.presentAccount(account(), null) }
+                runCatching { loadContacts(c) }
+                if (m.role == Role.HOST) runCatching { c.setAccessMode(m.access) }
+                val freshInvite = if (m.role == Role.HOST) runCatching { c.inviteUri() }.getOrNull() else null
+                ui.post {
+                    lc.client = c
+                    // A re-hosted LAN chat gets a fresh invite; keep the same chatId.
+                    if (freshInvite != null) lc.meta = lc.meta.copy(inviteUri = freshInvite)
+                    sysLine(id, "reconnected")
+                    when (activeId) { id -> setContentView(chatScreen(id)); null -> setContentView(chatListScreen()); else -> {} }
+                }
+            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed: ${e.message}"); toast("reconnect failed") } }
+        }
+    }
+
     private fun sendMessage(chatId: String, t: String) {
         val lc = sessions.get(chatId) ?: return
-        val c = lc.client ?: run { toast("disconnected — reopen to reconnect"); return }
+        val c = lc.client ?: run { reconnect(chatId); toast("reconnecting — resend in a moment"); return }
         val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null, ts = System.currentTimeMillis())
         lc.history.add(msg); sessions.touch(chatId, msg.ts)
         addBubble(t, mine = true)
