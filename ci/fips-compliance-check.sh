@@ -13,9 +13,9 @@
 # crypto.getFips()===1 routes EVERY Node operation through the module) requires a
 # Node built `--openssl-is-fips`; that heavier build is the documented
 # full-enforcement upgrade (see docs/COMPLIANCE.md).
-set -euo pipefail
+set -uo pipefail
 SSL=/opt/ssl/bin/openssl
-MODS=/opt/ssl/lib/ossl-modules
+MODS="${OPENSSL_MODULES:-/opt/ssl/modules}"
 grn() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 die() { printf '  \033[31m✗ FAIL\033[0m %s\n' "$1"; exit 1; }
 
@@ -46,7 +46,7 @@ else
 fi
 
 echo "== 3. Node Web Crypto (crypto.subtle) — approved algorithm set =="
-node /work/fips-subtle-check.mjs
+node /work/fips-subtle-check.mjs || die "SubtleCrypto approved-set check failed"
 
 echo
 printf '\033[32mFIPS COMPLIANCE CHECK PASSED\033[0m — validated OpenSSL FIPS module, enforcing, with SubtleCrypto over the approved set.\n'

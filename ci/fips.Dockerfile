@@ -31,7 +31,11 @@ RUN set -eux; \
 
 # openssl.cnf: load the FIPS + base providers and make fips the default for all
 # algorithm fetches (so Node's crypto uses the FIPS module).
+# OpenSSL installs to lib/ on some arches and lib64/ on others (e.g. x86_64), so
+# resolve the real module directory and expose it at a STABLE path everything
+# points at — avoids a hardcoded lib-vs-lib64 mismatch across architectures.
 RUN MODDIR="$(dirname "$(find /opt/ssl -name fips.so | head -1)")"; \
+    ln -sfn "$MODDIR" /opt/ssl/modules; \
     { \
       echo 'config_diagnostics = 1'; \
       echo 'openssl_conf = openssl_init'; \
@@ -46,10 +50,9 @@ RUN MODDIR="$(dirname "$(find /opt/ssl -name fips.so | head -1)")"; \
       echo 'activate = 1'; \
       echo '[algorithm_sect]'; \
       echo 'default_properties = fips=yes'; \
-    } > /opt/ssl/openssl.cnf; \
-    echo "MODDIR=$MODDIR" > /opt/ssl/moddir.env
+    } > /opt/ssl/openssl.cnf
 
-# Point Node's OpenSSL at the FIPS config + provider module directory.
+# Point Node's OpenSSL at the FIPS config + the (arch-stable) module directory.
 ENV OPENSSL_CONF=/opt/ssl/openssl.cnf
-ENV OPENSSL_MODULES=/opt/ssl/lib/ossl-modules
+ENV OPENSSL_MODULES=/opt/ssl/modules
 WORKDIR /work
