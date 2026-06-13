@@ -1629,6 +1629,36 @@ mod tests {
         assert_eq!(joiner.peer_count(), 1);
     }
 
+    /// Multi-session foundation: two independent chats run at once and don't
+    /// cross-talk — the assumption the Android session manager relies on.
+    #[test]
+    fn two_concurrent_chats_are_independent() {
+        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into()).expect("host a");
+        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into()).expect("host b");
+        let ja = TalkryptClient::join(a.invite_uri()).expect("join a");
+        let jb = TalkryptClient::join(b.invite_uri()).expect("join b");
+        ja.send("alpha".into()).expect("send a");
+        jb.send("beta".into()).expect("send b");
+
+        let mut on_a: Vec<String> = Vec::new();
+        let mut on_b: Vec<String> = Vec::new();
+        for _ in 0..50 {
+            while let Some(ev) = a.poll_event() {
+                if let FfiEvent::Message { text, .. } = ev { on_a.push(text); }
+            }
+            while let Some(ev) = b.poll_event() {
+                if let FfiEvent::Message { text, .. } = ev { on_b.push(text); }
+            }
+            if !on_a.is_empty() && !on_b.is_empty() { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(on_a.contains(&"alpha".to_string()), "chat A got: {on_a:?}");
+        assert!(on_b.contains(&"beta".to_string()), "chat B got: {on_b:?}");
+        // No cross-talk between the two rooms.
+        assert!(!on_a.contains(&"beta".to_string()));
+        assert!(!on_b.contains(&"alpha".to_string()));
+    }
+
     /// A Rust stand-in for a host's secure element, exercising the
     /// `HardwareKeyWrapper` callback seam the way Android/iOS will. "Wraps" by
     /// XOR-ing with a per-instance pad so a different instance (a different
