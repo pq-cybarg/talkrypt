@@ -300,7 +300,20 @@ impl TalkryptClient {
     /// (default/zero-EC), `hybrid`, or `pq-pure-compact`; an empty/unknown
     /// value falls back to PQ-pure.
     #[uniffi::constructor]
-    pub fn host(listen: String, channel: String, posture: String) -> Result<Arc<Self>, FfiError> {
+    /// Host a plain-TCP chat. `listen` is the bind address (`host:port`).
+    /// `endpoint`, if given, is advertised in the invite *instead of* `listen`
+    /// — use it when the address peers must dial differs from the one you bind:
+    /// bind `0.0.0.0` but hand out your LAN/public IP, or on an Android emulator
+    /// hand out the host-loopback alias `10.0.2.2` (bridge the port with
+    /// `adb forward`). Mirrors the CLI's `host --endpoint`. The session root is
+    /// unaffected — it derives from the invite token, not the endpoint (the same
+    /// reason `host_tor` can swap the published `.onion` into the invite).
+    pub fn host(
+        listen: String,
+        channel: String,
+        posture: String,
+        endpoint: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
         let rt = Runtime::new().map_err(FfiError::from)?;
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
         let suite_id = dr_suite_id(profile);
@@ -317,7 +330,13 @@ impl TalkryptClient {
         let transport = Arc::new(TcpTransport::new(&listen));
         let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc);
         rt.block_on(core.host()).map_err(FfiError::from)?;
-        let invite = core.descriptor().to_uri();
+        // Advertise the dial address peers should use. Defaults to the bound
+        // `listen` when no override is supplied.
+        let mut d = core.descriptor().clone();
+        if let Some(ep) = endpoint {
+            d.endpoints = vec![ep];
+        }
+        let invite = d.to_uri();
         Ok(Arc::new(Self {
             rt,
             core,
@@ -1448,7 +1467,7 @@ mod tests {
         // A host pins the account; the "work" segment joins and resolves AS the
         // account (contact = true), proving the segment belongs to the account.
         let host =
-            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into())
+            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None)
                 .expect("host");
         host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
         let joiner =
@@ -1537,7 +1556,7 @@ mod tests {
         // host→joiner identity travels the reactive responder path (the exact
         // on-device scenario that surfaced "identity chain did not bind").
         let host =
-            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into())
+            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None)
                 .expect("host");
         let host_account = Account::generate();
         host.present_account(host_account.clone(), Some("bob".into()));
@@ -1604,7 +1623,7 @@ mod tests {
     #[test]
     fn ffi_host_join_send_receive() {
         let addr = "127.0.0.1:19922".to_string();
-        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into()).expect("host");
+        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None).expect("host");
         let uri = host.invite_uri();
         assert!(uri.starts_with("talkrypt://"));
         assert!(!host.safety_number().is_empty());
@@ -1633,8 +1652,8 @@ mod tests {
     /// cross-talk — the assumption the Android session manager relies on.
     #[test]
     fn two_concurrent_chats_are_independent() {
-        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into()).expect("host a");
-        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into()).expect("host b");
+        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None).expect("host a");
+        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None).expect("host b");
         let ja = TalkryptClient::join(a.invite_uri()).expect("join a");
         let jb = TalkryptClient::join(b.invite_uri()).expect("join b");
         ja.send("alpha".into()).expect("send a");
@@ -1657,6 +1676,45 @@ mod tests {
         // No cross-talk between the two rooms.
         assert!(!on_a.contains(&"beta".to_string()));
         assert!(!on_b.contains(&"alpha".to_string()));
+    }
+
+    /// `host` with an endpoint override advertises that address in the invite
+    /// (not the bound one), yet a joiner dialing the advertised address still
+    /// completes the handshake + exchanges a message. This is what lets a host
+    /// bind 0.0.0.0 but hand out a reachable LAN/public IP (or, on an Android
+    /// emulator, the host-loopback alias 10.0.2.2). It also proves the endpoint
+    /// is a dial hint only — never part of the session root — the same property
+    /// `host_tor`'s onion-swap depends on.
+    #[test]
+    fn host_endpoint_override_advertises_not_binds() {
+        let host = TalkryptClient::host(
+            "0.0.0.0:19933".into(),
+            "#ep".into(),
+            "pq-pure".into(),
+            Some("127.0.0.1:19933".into()),
+        )
+        .expect("host");
+        // The invite carries the advertised endpoint, not the 0.0.0.0 bind addr.
+        let desc = ChatDescriptor::from_uri(&host.invite_uri()).expect("decode invite");
+        assert_eq!(desc.endpoints, vec!["127.0.0.1:19933".to_string()]);
+
+        // A joiner dialing the advertised address handshakes + delivers.
+        let joiner = TalkryptClient::join(host.invite_uri()).expect("join");
+        joiner.send("via advertised endpoint".into()).expect("send");
+        let mut got = None;
+        for _ in 0..50 {
+            while let Some(ev) = host.poll_event() {
+                if let FfiEvent::Message { text, .. } = ev {
+                    got = Some(text);
+                }
+            }
+            if got.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(got.as_deref(), Some("via advertised endpoint"));
+        assert_eq!(joiner.peer_count(), 1);
     }
 
     /// A Rust stand-in for a host's secure element, exercising the

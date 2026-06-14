@@ -70,6 +70,25 @@ class MainActivity : Activity() {
     private fun torDirPath(sub: String): String = java.io.File(java.io.File(filesDir, "tor"), sub).absolutePath
     private fun freshTorSub(): String = "c" + System.nanoTime().toString(36)
 
+    // ---- LAN hosting addresses ----
+    // Bind on every interface so the listener is reachable via whatever address
+    // we advertise (loopback, the Wi-Fi IP, or the emulator's eth0).
+    private val LAN_PORT = 9779
+    private fun lanBind(): String = "0.0.0.0:$LAN_PORT"
+    /** The dial address a joiner should use. On a real device that's our
+     *  Wi-Fi/hotspot IP. On an Android emulator every instance shares 10.0.2.15,
+     *  so the only cross-reachable address is the host-loopback alias 10.0.2.2 —
+     *  bridge the port from the Mac with `adb forward tcp:9779 tcp:9779`. */
+    private fun lanAdvertise(): String =
+        if (isEmulator()) "10.0.2.2:$LAN_PORT" else "${ApkShareServer.lanIp() ?: "127.0.0.1"}:$LAN_PORT"
+    /** Heuristic: are we on the Android emulator (vs. a real handset)? */
+    private fun isEmulator(): Boolean {
+        val fp = Build.FINGERPRINT ?: ""
+        return fp.startsWith("generic") || fp.contains("emulator") || fp.contains("sdk_gphone") ||
+            Build.MODEL.contains("sdk_gphone") || Build.PRODUCT.contains("sdk_gphone") ||
+            Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish")
+    }
+
     // Nearby discovery (BLE + Wi-Fi Direct) state.
     private var nearby: List<NearbyDiscovery> = emptyList()
     private val foundInvites = LinkedHashMap<String, NearbyDiscovery.Peer>()
@@ -1122,8 +1141,7 @@ class MainActivity : Activity() {
         toast("creating restricted chat…")
         thread {
             try {
-                val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
-                val c = TalkryptClient.host(listen, channel, posture)
+                val c = TalkryptClient.host(lanBind(), channel, posture, lanAdvertise())
                 runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
                 val members = c.restrictToAnchor(anchorUri)
@@ -1255,8 +1273,8 @@ class MainActivity : Activity() {
                 val c = if (useTor) {
                     TalkryptClient.hostTor(channel, posture, torDirPath(torSub!!))
                 } else {
-                    val listen = "${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779"
-                    TalkryptClient.host(listen, channel, posture)
+                    // Bind every interface; advertise the address peers can dial.
+                    TalkryptClient.host(lanBind(), channel, posture, lanAdvertise())
                 }
                 runCatching { c.presentAccount(account(), null) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1371,7 +1389,7 @@ class MainActivity : Activity() {
                 val pst = m.posture.ifEmpty { "pq-pure" }
                 val c = when (plan) {
                     ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(m.title, pst, torDirPath(m.torDir ?: freshTorSub()))
-                    ReconnectPlan.HOST_LAN -> TalkryptClient.host("${ApkShareServer.lanIp() ?: "127.0.0.1"}:9779", m.title, pst)
+                    ReconnectPlan.HOST_LAN -> TalkryptClient.host(lanBind(), m.title, pst, lanAdvertise())
                     ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(m.inviteUri!!, torDirPath(m.torDir ?: freshTorSub()))
                     ReconnectPlan.JOIN_LAN -> TalkryptClient.join(m.inviteUri!!)
                     ReconnectPlan.IMPOSSIBLE -> return@thread
