@@ -1526,14 +1526,16 @@ class MainActivity : Activity() {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
                 (super.getView(position, convertView, parent) as TextView).apply {
                     setTextColor(fg)
-                    setPadding(dp(12), paddingTop, dp(12), paddingBottom)
+                    // Match the input fields' padding so the collapsed selection
+                    // isn't cramped against the rounded field edges.
+                    setPadding(dp(16), dp(14), dp(16), dp(14))
                 }
 
             override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
                 (super.getDropDownView(position, convertView, parent) as TextView).apply {
                     setTextColor(fg)
                     setBackgroundColor(panel)
-                    setPadding(dp(16), dp(12), dp(16), dp(12))
+                    setPadding(dp(16), dp(14), dp(16), dp(14))
                 }
         }
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
