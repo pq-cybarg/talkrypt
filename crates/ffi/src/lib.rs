@@ -1411,6 +1411,17 @@ pub fn invite_channel(uri: String) -> String {
         .unwrap_or_default()
 }
 
+/// True if the invite's dial endpoint is a Tor onion address — so the joiner
+/// must route over Tor (`join_tor`) rather than plain TCP (`join`). The `.onion`
+/// lives inside the base32-encoded descriptor, not the literal URI text, so this
+/// decodes the descriptor to check. False on a malformed URI or a LAN invite.
+#[uniffi::export]
+pub fn invite_is_onion(uri: String) -> bool {
+    ChatDescriptor::from_uri(&uri)
+        .map(|d| d.endpoints.iter().any(|e| e.contains(".onion")))
+        .unwrap_or(false)
+}
+
 /// Register `account` under `username` at the anchor at `uri` (you must hold the
 /// account key). The binding is self-signed by the account, so the anchor can't
 /// forge it. Blocking (runs its own runtime).
@@ -1715,6 +1726,31 @@ mod tests {
         }
         assert_eq!(got.as_deref(), Some("via advertised endpoint"));
         assert_eq!(joiner.peer_count(), 1);
+    }
+
+    /// A joiner must pick its transport from the INVITE, not a UI toggle: an
+    /// onion invite needs Tor, a LAN invite needs plain TCP. `invite_is_onion`
+    /// drives that — it decodes the descriptor (the `.onion` is inside the base32,
+    /// never in the URI text, so a substring check on the URI always fails).
+    #[test]
+    fn invite_is_onion_detects_endpoint_kind() {
+        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None)
+            .expect("lan host");
+        assert!(!invite_is_onion(lan.invite_uri()), "LAN invite is not onion");
+        // A naive substring check on the URI text wrongly reports false even for onions.
+        assert!(!lan.invite_uri().contains(".onion"));
+
+        let onionish = TalkryptClient::host(
+            "127.0.0.1:19935".into(),
+            "#x".into(),
+            "pq-pure".into(),
+            Some("abcdefghij234567.onion:9779".into()),
+        )
+        .expect("onion-advertised host");
+        assert!(invite_is_onion(onionish.invite_uri()), "onion endpoint detected");
+        assert!(!onionish.invite_uri().contains(".onion")); // proves the substring check is insufficient
+
+        assert!(!invite_is_onion("talkrypt://not-base32!!!".into()));
     }
 
     /// A Rust stand-in for a host's secure element, exercising the

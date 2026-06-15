@@ -39,6 +39,7 @@ import uniffi.talkrypt_ffi.accountSegmentChain
 import uniffi.talkrypt_ffi.anchorRegister
 import uniffi.talkrypt_ffi.anchorResolve
 import uniffi.talkrypt_ffi.inviteChannel
+import uniffi.talkrypt_ffi.inviteIsOnion
 import uniffi.talkrypt_ffi.linkAccept
 import uniffi.talkrypt_ffi.linkedSegmentChain
 
@@ -194,6 +195,10 @@ class MainActivity : Activity() {
 
         col.addView(label("PERSISTENCE").also { it.setPadding(0, dp(20), 0, dp(8)) })
         val persistence = darkSpinner(listOf("Ephemeral (memory only)", "Persistent (saved, reconnectable)", "Always-on (Phase 2)"))
+        // Default to Persistent (matches pendingTier's default): a real chat is
+        // never silently ephemeral if a dropdown tap is missed, and Ephemeral
+        // stays an explicit one-tap opt-in.
+        persistence.setSelection(1)
         col.addView(persistence, lp(MATCH_PARENT, WRAP_CONTENT))
 
         val torBox = CheckBox(this).apply {
@@ -659,7 +664,7 @@ class MainActivity : Activity() {
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
                     val now = System.currentTimeMillis()
-                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (uri.contains(".onion")) uri else null, pendingTier, sn.take(11), now, now)
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn.take(11), now, now)
                     enterSession(meta, c, "joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
                 }
             } catch (e: Exception) {
@@ -773,7 +778,7 @@ class MainActivity : Activity() {
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
                     val now = System.currentTimeMillis()
-                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (uri.contains(".onion")) uri else null, pendingTier, sn.take(11), now, now)
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn.take(11), now, now)
                     enterSession(meta, c, "joined as segment “$name”")
                 }
             } catch (e: Exception) {
@@ -1339,12 +1344,17 @@ class MainActivity : Activity() {
     }
 
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
-        toast(if (useTor) "joining over Tor…" else "joining…")
+        // Route over Tor if the invite is an onion (decoded from the descriptor —
+        // the `.onion` is inside the base32, not the URI text), OR the user asked.
+        // Otherwise a pasted onion invite would be plain-TCP dialed and fail.
+        val isOnion = runCatching { inviteIsOnion(uri) }.getOrDefault(false)
+        val tor = useTor || isOnion
+        toast(if (tor) "joining over Tor…" else "joining…")
         val tier = pendingTier
-        val torSub = if (useTor) freshTorSub() else null
+        val torSub = if (tor) freshTorSub() else null
         thread {
             try {
-                val c = if (useTor) TalkryptClient.joinTor(uri, torDirPath(torSub!!)) else TalkryptClient.join(uri)
+                val c = if (tor) TalkryptClient.joinTor(uri, torDirPath(torSub!!)) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1354,7 +1364,7 @@ class MainActivity : Activity() {
                     val meta = ChatMeta(
                         id = chatId(uri), title = title, role = Role.JOIN, group = false,
                         posture = "", access = "open", inviteUri = uri,
-                        onion = if (uri.contains(".onion")) uri else null, persistence = tier,
+                        onion = if (isOnion) uri else null, persistence = tier,
                         safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
                     )
                     val lc = sessions.open(meta, c)
