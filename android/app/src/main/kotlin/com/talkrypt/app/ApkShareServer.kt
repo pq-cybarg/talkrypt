@@ -92,20 +92,38 @@ class ApkShareServer(private val apkPath: String) {
         /** This app's installed APK path (the base.apk for this package). */
         fun apkPath(ctx: Context): String = ctx.applicationInfo.sourceDir
 
-        /** First non-loopback IPv4 address — the LAN / hotspot address. */
+        /**
+         * The best LAN IPv4 to advertise so a peer on the same Wi-Fi can dial us.
+         * The old "first non-loopback IPv4" was fragile: on a device that's
+         * USB-connected (rndis), tethering, on cellular (rmnet), or running
+         * Wi-Fi Direct (p2p), it could hand out an address the peer can't reach.
+         * We now skip those interfaces and prefer Wi-Fi (wlan*), then any
+         * site-local (192.168/10/172.16) address.
+         */
         fun lanIp(): String? {
+            val candidates = mutableListOf<Pair<Int, String>>() // (priority, ip) — lower is better
             try {
                 for (nif in NetworkInterface.getNetworkInterfaces()) {
-                    if (!nif.isUp || nif.isLoopback) continue
+                    if (!nif.isUp || nif.isLoopback || nif.isVirtual) continue
+                    val name = (nif.name ?: "").lowercase()
+                    // Skip USB-tethering, cellular, and Wi-Fi Direct interfaces.
+                    if (name.startsWith("rndis") || name.startsWith("usb") ||
+                        name.startsWith("rmnet") || name.startsWith("p2p")
+                    ) continue
                     for (addr in nif.inetAddresses) {
-                        if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                            return addr.hostAddress
+                        if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr !is Inet4Address) continue
+                        val ip = addr.hostAddress ?: continue
+                        val priority = when {
+                            name.startsWith("wlan") -> 0     // Wi-Fi — best
+                            addr.isSiteLocalAddress -> 1     // any private LAN address
+                            else -> 2                        // public/other — last resort
                         }
+                        candidates.add(priority to ip)
                     }
                 }
             } catch (_: Exception) {
             }
-            return null
+            return candidates.minByOrNull { it.first }?.second
         }
     }
 }
