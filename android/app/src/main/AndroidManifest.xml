@@ -26,6 +26,15 @@
         android:maxSdkVersion="32" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+
+    <!-- Always-on tier: a foreground service keeps the process (hence the chat
+         connections) alive in the background; the notification is required by
+         Android and is also honest — the user sees talkrypt holding links. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Reconnect always-on chats after a reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:label="talkrypt"
         android:icon="@mipmap/ic_launcher"
@@ -50,5 +59,20 @@
                 <data android:scheme="talkrypt" />
             </intent-filter>
         </activity>
+
+        <!-- Always-on tier: keeps connections alive in the background. -->
+        <service
+            android:name="com.talkrypt.app.ChatService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Restart always-on chats after a reboot. -->
+        <receiver
+            android:name="com.talkrypt.app.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

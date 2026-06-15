@@ -50,7 +50,9 @@ import uniffi.talkrypt_ffi.linkedSegmentChain
  */
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
-    private val sessions = Sessions()
+
+    /** Shared with the always-on [ChatService] so both see one set of live chats. */
+    private val sessions get() = SessionHub.sessions
     private val store by lazy { ChatStore(this) }
     private var messages: LinearLayout? = null   // message list of the on-screen chat (null on other screens)
     private var scroll: ScrollView? = null
@@ -58,6 +60,7 @@ class MainActivity : Activity() {
     private var useTor = false // route the next host/join over Tor (.onion)
     private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
     private val pendingSaves = HashSet<String>()
+    private var polling = false   // guards a single foreground drain+render loop
 
     /** Currently rendered chat id, or null on the list/other screens. */
     private val activeId: String? get() = sessions.active
@@ -67,27 +70,13 @@ class MainActivity : Activity() {
 
     // Per-chat Arti state dirs live under filesDir/tor/<sub>. A chat stores its
     // <sub> in ChatMeta.torDir so reconnecting reuses the same onion identity.
-    private fun torDirPath(sub: String): String = java.io.File(java.io.File(filesDir, "tor"), sub).absolutePath
-    private fun freshTorSub(): String = "c" + System.nanoTime().toString(36)
-
-    // ---- LAN hosting addresses ----
-    // Bind on every interface so the listener is reachable via whatever address
-    // we advertise (loopback, the Wi-Fi IP, or the emulator's eth0).
-    private val LAN_PORT = 9779
-    private fun lanBind(): String = "0.0.0.0:$LAN_PORT"
-    /** The dial address a joiner should use. On a real device that's our
-     *  Wi-Fi/hotspot IP. On an Android emulator every instance shares 10.0.2.15,
-     *  so the only cross-reachable address is the host-loopback alias 10.0.2.2 —
-     *  bridge the port from the Mac with `adb forward tcp:9779 tcp:9779`. */
-    private fun lanAdvertise(): String =
-        if (isEmulator()) "10.0.2.2:$LAN_PORT" else "${ApkShareServer.lanIp() ?: "127.0.0.1"}:$LAN_PORT"
-    /** Heuristic: are we on the Android emulator (vs. a real handset)? */
-    private fun isEmulator(): Boolean {
-        val fp = Build.FINGERPRINT ?: ""
-        return fp.startsWith("generic") || fp.contains("emulator") || fp.contains("sdk_gphone") ||
-            Build.MODEL.contains("sdk_gphone") || Build.PRODUCT.contains("sdk_gphone") ||
-            Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish")
-    }
+    // Connection helpers live in ChatNet (shared with ChatService); these thin
+    // delegates keep the Activity's existing call sites readable.
+    private fun torDirPath(sub: String): String = ChatNet.torDirPath(this, sub)
+    private fun freshTorSub(): String = ChatNet.freshTorSub()
+    private fun lanBind(): String = ChatNet.lanBind()
+    private fun lanAdvertise(): String = ChatNet.lanAdvertise()
+    private fun isEmulator(): Boolean = ChatNet.isEmulator()
 
     // Nearby discovery (BLE + Wi-Fi Direct) state.
     private var nearby: List<NearbyDiscovery> = emptyList()
@@ -107,19 +96,17 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tintSystemBars()
-        loadSavedChats()
+        SessionHub.hydrate(this)   // load saved chats (skips any already live)
         setContentView(chatListScreen())
-        pollAll()
         handleDeepLink(intent)
+        // The drain+render poll loop starts in onResume (paired with the
+        // foreground flag that hands draining to/from the always-on service).
     }
 
-    /** Hydrate the chat list from sealed storage (history only; not connected). */
-    private fun loadSavedChats() {
-        for (id in runCatching { store.ids() }.getOrDefault(emptyList())) {
-            val (meta, hist) = store.load(id) ?: continue
-            val lc = sessions.open(meta, null)
-            lc.history.clear(); lc.history.addAll(hist)
-        }
+    override fun onResume() {
+        super.onResume()
+        SessionHub.foreground = true   // this Activity drains + renders events
+        pollAll()
     }
 
     @Suppress("DEPRECATION", "MissingSuperCall")
@@ -133,9 +120,12 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        SessionHub.foreground = false   // hand event draining to the service (if running)
         for (lc in sessions.all()) if (lc.meta.persistence != Persistence.EPHEMERAL) {
             runCatching { store.save(lc.meta, lc.history) }
         }
+        // Keep any always-on chats connected while we're backgrounded.
+        ChatService.startIfNeeded(this)
     }
 
     // Match the system bars to the app background. The setters are deprecated on
@@ -179,6 +169,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_NEARBY = 0x4E42 // "NB"
+        private const val REQ_NOTIF = 0x4E54  // "NT" — POST_NOTIFICATIONS for the always-on service
         private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
     }
 
@@ -252,7 +243,7 @@ class MainActivity : Activity() {
     /** Map the persistence spinner to a tier (Always-on downgrades to persistent in Phase 1). */
     private fun tierOf(sp: Spinner): Persistence = when (sp.selectedItemPosition) {
         0 -> Persistence.EPHEMERAL
-        2 -> { toast("Always-on lands in Phase 2 — saved as persistent for now"); Persistence.PERSISTENT_LOCAL }
+        2 -> Persistence.ALWAYS_ON        // Phase 2b: backed by the foreground ChatService
         else -> Persistence.PERSISTENT_LOCAL
     }
 
@@ -366,7 +357,19 @@ class MainActivity : Activity() {
         val lc = sessions.get(id)
         if (lc != null && lc.client == null && lc.meta.persistence != Persistence.EPHEMERAL &&
             reconnectPlan(lc.meta) != ReconnectPlan.IMPOSSIBLE) reconnect(id)
+        ensureAlwaysOn()
         setContentView(chatScreen(id))
+    }
+
+    /** If any chat is on the always-on tier, ensure notifications are permitted
+     *  (API 33+) and the foreground [ChatService] is running to keep it alive. */
+    private fun ensureAlwaysOn() {
+        if (!anyAlwaysOn(sessions)) return
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            runCatching { requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF) }
+        }
+        ChatService.startIfNeeded(this)
     }
 
     /** Register a freshly-connected client as a session, persist if kept, open it. */
@@ -889,17 +892,9 @@ class MainActivity : Activity() {
     // ---------- anchors (username registry directory) ----------
     private var anchorNode: AnchorNode? = null
 
-    /** Load this device's account, generating + persisting one on first use. */
-    private fun account(): Account {
-        val prefs = getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
-        val seed = prefs.getString("account_seed", null)
-        if (seed != null) {
-            runCatching { return Account.fromSeedHex(seed) }
-        }
-        val a = Account.generate()
-        prefs.edit().putString("account_seed", a.seedHex()).apply()
-        return a
-    }
+    /** Load this device's account, generating + persisting one on first use.
+     *  Delegates to [ChatNet] so the service builds the same account. */
+    private fun account(): Account = ChatNet.account(this)
 
     // ----- contacts (recognized accounts), persisted across sessions -----
     private val contactSep = "\u001F"
@@ -923,11 +918,7 @@ class MainActivity : Activity() {
     }
 
     /** Re-add persisted contacts into a fresh client (call after creating it). */
-    private fun loadContacts(client: TalkryptClient) {
-        storedContacts().forEach { (pk, name, friend) ->
-            client.addContactHex(pk, name.ifEmpty { null }, friend)
-        }
-    }
+    private fun loadContacts(client: TalkryptClient) = ChatNet.loadContacts(this, client)
 
     // Anchors you are bound at (where you registered a username) — the only
     // registries it makes sense to gate a chat by, since you're a member.
@@ -1386,17 +1377,8 @@ class MainActivity : Activity() {
         toast("reconnecting…")
         thread {
             try {
-                val pst = m.posture.ifEmpty { "pq-pure" }
-                val c = when (plan) {
-                    ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(m.title, pst, torDirPath(m.torDir ?: freshTorSub()))
-                    ReconnectPlan.HOST_LAN -> TalkryptClient.host(lanBind(), m.title, pst, lanAdvertise())
-                    ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(m.inviteUri!!, torDirPath(m.torDir ?: freshTorSub()))
-                    ReconnectPlan.JOIN_LAN -> TalkryptClient.join(m.inviteUri!!)
-                    ReconnectPlan.IMPOSSIBLE -> return@thread
-                }
-                runCatching { c.presentAccount(account(), null) }
-                runCatching { loadContacts(c) }
-                if (m.role == Role.HOST) runCatching { c.setAccessMode(m.access) }
+                // Shared with ChatService — one place builds a client from a meta.
+                val c = ChatNet.connect(this, m)
                 val freshInvite = if (m.role == Role.HOST) runCatching { c.inviteUri() }.getOrNull() else null
                 ui.post {
                     lc.client = c
@@ -1421,9 +1403,15 @@ class MainActivity : Activity() {
 
     /** One loop drains every connected chat; events route to their room. The
      *  active chat renders live, others accrue an unread badge. Started in onCreate. */
+    /** Foreground drain+render loop. Gated on [SessionHub.foreground] so it stops
+     *  when the Activity pauses (the service drains in the background) and a
+     *  single loop runs at a time. */
     private fun pollAll() {
+        if (polling) return
+        polling = true
         ui.postDelayed(object : Runnable {
             override fun run() {
+                if (!SessionHub.foreground) { polling = false; return }
                 for (lc in sessions.live()) {
                     val c = lc.client ?: continue
                     val id = lc.meta.id
@@ -1437,33 +1425,25 @@ class MainActivity : Activity() {
         }, 250)
     }
 
+    /** Record the event into the shared model ([applyEvent]) then render it if
+     *  its chat is on screen. The recording is shared with the headless service;
+     *  only the rendering is Activity-specific. */
     private fun handleEvent(id: String, lc: LiveChat, e: FfiEvent) {
-        val now = System.currentTimeMillis()
-        when (e) {
-            is FfiEvent.Message -> {
-                sessions.recordIncoming(id, ChatMsg(MsgKind.MESSAGE, e.from, e.from.take(8), false, e.text, e.marking.ifEmpty { null }, now))
-                if (activeId == id) addBubble(e.text, mine = false, sender = e.from.take(8), marking = e.marking.ifEmpty { null })
-                else refreshListRowIfVisible()
-                scheduleSave(id)
-            }
-            is FfiEvent.Connected -> { lc.roster.getOrPut(e.fingerprint) { Member(e.fingerprint) }.connected = true; sysLine(id, "● ${e.fingerprint.take(8)} connected") }
-            is FfiEvent.Disconnected -> { lc.roster[e.fingerprint]?.connected = false; sysLine(id, "○ ${e.fingerprint.take(8)} left") }
-            is FfiEvent.Identity -> {
-                val mem = lc.roster.getOrPut(e.accountFingerprint) { Member(e.accountFingerprint) }
-                mem.display = e.username.ifEmpty { e.accountFingerprint.take(8) }; mem.contact = e.contact; mem.friend = e.friend
-                val who = mem.display!!
-                sysLine(id, when { e.friend -> "✓ friend $who"; e.contact -> "• contact $who"; else -> "• account $who (not a contact)" })
-                if (!e.contact && activeId == id) {
-                    val fp = e.accountFingerprint; val name = e.username
-                    addAction("Add “$who” as a contact") {
-                        val cl = lc.client
-                        if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) { saveContacts(cl); system("added contact $who") }
-                        else toast("could not add (account not seen)")
-                    }
+        val msg = applyEvent(sessions, id, lc, e)
+        if (activeId == id) {
+            if (msg.kind == MsgKind.MESSAGE) addBubble(msg.text, mine = false, sender = msg.display, marking = msg.marking)
+            else system(msg.text)
+            if (e is FfiEvent.Identity && !e.contact) {
+                val who = lc.roster[e.accountFingerprint]?.display ?: e.accountFingerprint.take(8)
+                val fp = e.accountFingerprint; val name = e.username
+                addAction("Add “$who” as a contact") {
+                    val cl = lc.client
+                    if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) { saveContacts(cl); system("added contact $who") }
+                    else toast("could not add (account not seen)")
                 }
             }
-            is FfiEvent.Error -> sysLine(id, "! ${e.message}")
-        }
+        } else refreshListRowIfVisible()
+        scheduleSave(id)
     }
 
     /** Append a system line to a chat; render if it's the on-screen chat. */
