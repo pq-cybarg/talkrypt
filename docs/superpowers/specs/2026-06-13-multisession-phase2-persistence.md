@@ -1,6 +1,8 @@
 # Multi-session chats — Phase 2 design (persistence tiers)
 
-**Status:** approved direction (the 3-phase plan); Phase 2 spec.
+**Status:** DELIVERED — 2a (reconnect) in commit 5903bd1, 2b (always-on service +
+boot reconnect) in commit 89f6d49 (`SessionHub`, `ChatNet`, `ChatEvents`,
+`ChatService`, `BootReceiver`; verified on-device).
 **Builds on:** Phase 1 (`Sessions`, `ChatStore`, chat list, per-room history).
 **Scope:** Android app only. The Rust core/FFI already expose what's needed
 (`hostTor`/`joinTor` take a per-call `stateDir`; reconnect = re-host/re-join).
