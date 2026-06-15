@@ -18,9 +18,26 @@ object ChatNet {
     const val LAN_PORT = 9779
     private const val CONTACT_SEP = "\u001F"
 
-    /** Bind every interface so the listener is reachable via whatever address we
-     *  advertise (loopback, the Wi-Fi IP, or the emulator's eth0). */
-    fun lanBind(): String = "0.0.0.0:$LAN_PORT"
+    /**
+     * Find a LAN port that's free right now, starting at [LAN_PORT] and stepping
+     * up. Each hosted chat needs its OWN TCP listener, so a fixed port would let
+     * only one chat host at a time (the second bind fails — "transport error").
+     * There's a tiny TOCTOU window before the native transport binds it; fine for
+     * user-driven hosting. Falls back to [LAN_PORT] if the whole range is busy.
+     */
+    fun allocLanPort(): Int {
+        for (p in LAN_PORT until LAN_PORT + 64) {
+            try {
+                java.net.ServerSocket().use { it.bind(java.net.InetSocketAddress("0.0.0.0", p)) }
+                return p
+            } catch (_: Exception) { /* in use — try the next */ }
+        }
+        return LAN_PORT
+    }
+
+    /** Bind every interface (on [port]) so the listener is reachable via whatever
+     *  address we advertise (loopback, the Wi-Fi IP, or the emulator's eth0). */
+    fun lanBind(port: Int): String = "0.0.0.0:$port"
 
     /** Heuristic: are we on the Android emulator (vs. a real handset)? */
     fun isEmulator(): Boolean {
@@ -30,10 +47,10 @@ object ChatNet {
             Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish")
     }
 
-    /** The dial address a joiner should use: our Wi-Fi/hotspot IP on a real
-     *  device, or the host-loopback alias 10.0.2.2 on an emulator. */
-    fun lanAdvertise(): String =
-        if (isEmulator()) "10.0.2.2:$LAN_PORT" else "${ApkShareServer.lanIp() ?: "127.0.0.1"}:$LAN_PORT"
+    /** The dial address a joiner should use (on [port]): our Wi-Fi/hotspot IP on a
+     *  real device, or the host-loopback alias 10.0.2.2 on an emulator. */
+    fun lanAdvertise(port: Int): String =
+        if (isEmulator()) "10.0.2.2:$port" else "${ApkShareServer.lanIp() ?: "127.0.0.1"}:$port"
 
     fun torDirPath(ctx: Context, sub: String): String =
         File(File(ctx.filesDir, "tor"), sub).absolutePath
@@ -74,7 +91,7 @@ object ChatNet {
         val pst = meta.posture.ifEmpty { "pq-pure" }
         val c = when (reconnectPlan(meta)) {
             ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, torDirPath(ctx, meta.torDir ?: freshTorSub()))
-            ReconnectPlan.HOST_LAN -> TalkryptClient.host(lanBind(), meta.title, pst, lanAdvertise())
+            ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p)) }
             ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, torDirPath(ctx, meta.torDir ?: freshTorSub()))
             ReconnectPlan.JOIN_LAN -> TalkryptClient.join(meta.inviteUri!!)
             ReconnectPlan.IMPOSSIBLE -> throw IllegalStateException("no saved invite to reconnect")

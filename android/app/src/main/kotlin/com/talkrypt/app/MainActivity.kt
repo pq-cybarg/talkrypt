@@ -75,8 +75,6 @@ class MainActivity : Activity() {
     // delegates keep the Activity's existing call sites readable.
     private fun torDirPath(sub: String): String = ChatNet.torDirPath(this, sub)
     private fun freshTorSub(): String = ChatNet.freshTorSub()
-    private fun lanBind(): String = ChatNet.lanBind()
-    private fun lanAdvertise(): String = ChatNet.lanAdvertise()
     private fun isEmulator(): Boolean = ChatNet.isEmulator()
 
     // Nearby discovery (BLE + Wi-Fi Direct) state.
@@ -1137,7 +1135,8 @@ class MainActivity : Activity() {
         toast("creating restricted chat…")
         thread {
             try {
-                val c = TalkryptClient.host(lanBind(), channel, posture, lanAdvertise())
+                val port = ChatNet.allocLanPort()
+                val c = TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
                 runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
                 val members = c.restrictToAnchor(anchorUri)
@@ -1269,8 +1268,10 @@ class MainActivity : Activity() {
                 val c = if (useTor) {
                     TalkryptClient.hostTor(channel, posture, torDirPath(torSub!!))
                 } else {
-                    // Bind every interface; advertise the address peers can dial.
-                    TalkryptClient.host(lanBind(), channel, posture, lanAdvertise())
+                    // Bind a free port (so multiple chats can host at once); advertise
+                    // the address peers dial.
+                    val port = ChatNet.allocLanPort()
+                    TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
                 }
                 runCatching { c.presentAccount(account(), null) }
                 runCatching { loadContacts(c) } // recognize saved contacts
