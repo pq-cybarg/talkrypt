@@ -18,8 +18,8 @@ path = "src/main.rs"
 # added per-target below (Cargo features are additive) so non-Linux builds don't
 # pull X11/Wayland deps. Targets: macOS, Windows 10+, and Linux on
 # amd64/arm64/armv7 across the distro matrix (see docs/ROADMAP.md).
-eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts"] }
-egui = "0.28"
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.31"
 qrcode = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
 talkrypt-core = { path = "../core" }
@@ -32,4 +32,4 @@ talkrypt-transport = { path = "../transport" }
 # Alpine/postmarketOS, Void, Slackware, Gentoo, Tails/Whonix/Qubes/etc., RPi OS,
 # Trisquel) on amd64/arm64/armv7.
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.28", default-features = false, features = ["wayland", "x11"] }
+eframe = { version = "0.31", default-features = false, features = ["wayland", "x11"] }
