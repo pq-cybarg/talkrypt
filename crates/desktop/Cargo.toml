@@ -1,0 +1,35 @@
+[package]
+name = "talkrypt-desktop"
+version = "0.1.0"
+edition = "2021"
+
+# A native desktop GUI client (egui/eframe) that links the Rust core directly —
+# no FFI. Host shows a big QR so a phone on the same Wi-Fi scans it and joins in
+# seconds (desktops have no nearby radios, so QR is their onboarding path).
+# NOT certified / NOT audited.
+
+[[bin]]
+name = "talkrypt-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# glow (OpenGL) backend + bundled fonts on every desktop OS. macOS and Windows
+# use their native windowing through eframe; the Linux windowing backends are
+# added per-target below (Cargo features are additive) so non-Linux builds don't
+# pull X11/Wayland deps. Targets: macOS, Windows 10+, and Linux on
+# amd64/arm64/armv7 across the distro matrix (see docs/ROADMAP.md).
+eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.28"
+qrcode = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
+talkrypt-core = { path = "../core" }
+talkrypt-crypto = { path = "../crypto" }
+talkrypt-transport = { path = "../transport" }
+
+# Linux desktop windowing backends — added only when targeting Linux so macOS /
+# Windows builds don't pull X11/Wayland. Keeps the GUI first-class on the full
+# Linux distro matrix (Debian family, Fedora/RHEL/openSUSE, Arch/AUR, Nix/Guix,
+# Alpine/postmarketOS, Void, Slackware, Gentoo, Tails/Whonix/Qubes/etc., RPi OS,
+# Trisquel) on amd64/arm64/armv7.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.28", default-features = false, features = ["wayland", "x11"] }
