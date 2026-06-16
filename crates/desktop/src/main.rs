@@ -21,6 +21,71 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 const LAN_PORT: u16 = 9779;
 
+// Palette mirrored from the Android app (MainActivity) so desktop and mobile
+// look like the same product.
+const BG: egui::Color32 = egui::Color32::from_rgb(0x0B, 0x0E, 0x13);
+const PANEL: egui::Color32 = egui::Color32::from_rgb(0x16, 0x1B, 0x22);
+const FIELD: egui::Color32 = egui::Color32::from_rgb(0x1C, 0x22, 0x30);
+const FG: egui::Color32 = egui::Color32::from_rgb(0xE6, 0xED, 0xF3);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(0x8B, 0x94, 0x9E);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x2E, 0xA0, 0x43);
+const PEER_BUBBLE: egui::Color32 = egui::Color32::from_rgb(0x22, 0x2B, 0x36);
+
+/// Apply the mobile dark theme to egui's visuals.
+fn apply_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(FG);
+    v.panel_fill = BG;
+    v.window_fill = BG;
+    v.faint_bg_color = PANEL;
+    v.extreme_bg_color = FIELD; // text-edit background
+    v.selection.bg_fill = ACCENT.linear_multiply(0.5);
+    let r = egui::CornerRadius::same(12);
+    v.widgets.noninteractive.bg_fill = PANEL;
+    v.widgets.noninteractive.corner_radius = r;
+    v.widgets.inactive.bg_fill = FIELD;
+    v.widgets.inactive.weak_bg_fill = FIELD;
+    v.widgets.inactive.corner_radius = r;
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, FG);
+    v.widgets.hovered.bg_fill = PEER_BUBBLE;
+    v.widgets.hovered.weak_bg_fill = PEER_BUBBLE;
+    v.widgets.hovered.corner_radius = r;
+    v.widgets.active.bg_fill = ACCENT;
+    v.widgets.active.weak_bg_fill = ACCENT;
+    v.widgets.active.corner_radius = r;
+    ctx.set_visuals(v);
+    let mut style = (*ctx.style()).clone();
+    style.spacing.button_padding = egui::vec2(14.0, 10.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    ctx.set_style(style);
+}
+
+/// A full-width green "pill" primary button (matches the mobile accent button).
+fn pill(ui: &mut egui::Ui, label: &str, fill: egui::Color32, text: egui::Color32) -> egui::Response {
+    let text = egui::RichText::new(label).color(text).strong();
+    ui.add_sized(
+        [ui.available_width(), 46.0],
+        egui::Button::new(text).fill(fill).corner_radius(egui::CornerRadius::same(14)),
+    )
+}
+
+/// A rounded chat bubble (Signal/Telegram style) with optional sender label.
+fn bubble(ui: &mut egui::Ui, fill: egui::Color32, who: Option<&str>, text: &str, txt: egui::Color32) {
+    egui::Frame::default()
+        .fill(fill)
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width() * 0.78);
+            ui.vertical(|ui| {
+                if let Some(w) = who {
+                    ui.label(egui::RichText::new(w).small().strong().color(ACCENT));
+                }
+                ui.label(egui::RichText::new(text).color(txt));
+            });
+        });
+}
+
 /// Commands from the UI thread to the async worker that owns the `Core`.
 enum Cmd {
     Host { channel: String },
@@ -184,6 +249,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
         let (cmd_tx, ui_rx) = spawn_worker(cc.egui_ctx.clone());
         Self {
             cmd_tx,
@@ -253,99 +319,124 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain(ctx);
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("talkrypt");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(&self.status).small().weak());
+        // Header: title + crypto subtitle (mirrors the mobile header), status right.
+        egui::TopBottomPanel::top("top")
+            .frame(egui::Frame::default().fill(PANEL).inner_margin(egui::Margin::symmetric(16, 10)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("talkrypt").size(22.0).strong().color(FG));
+                        ui.label(egui::RichText::new("🔒 ML-KEM-1024 · ML-DSA-87").small().color(ACCENT));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(&self.status).small().color(MUTED));
+                    });
                 });
             });
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.screen {
-            Screen::Home => {
-                ui.add_space(8.0);
-                ui.label("Host a chat — share the QR to bring someone in:");
-                ui.horizontal(|ui| {
-                    ui.label("channel");
-                    ui.text_edit_singleline(&mut self.channel_input);
-                });
-                if ui.button("▶  Host").clicked() {
-                    let ch = if self.channel_input.trim().is_empty() {
-                        "#general".into()
-                    } else {
-                        self.channel_input.clone()
-                    };
-                    let _ = self.cmd_tx.send(Cmd::Host { channel: ch });
-                    self.screen = Screen::Hosting;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(16)))
+            .show(ctx, |ui| match self.screen {
+                Screen::Home => {
+                    ui.label(egui::RichText::new("New chat").size(26.0).strong().color(FG));
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("CHANNEL").small().strong().color(MUTED));
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.channel_input).desired_width(f32::INFINITY));
+                    ui.add_space(14.0);
+                    if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
+                        let ch = if self.channel_input.trim().is_empty() {
+                            "#general".into()
+                        } else {
+                            self.channel_input.clone()
+                        };
+                        let _ = self.cmd_tx.send(Cmd::Host { channel: ch });
+                        self.screen = Screen::Hosting;
+                    }
+                    ui.add_space(20.0);
+                    ui.label(egui::RichText::new("— or join —").color(MUTED));
+                    ui.add_space(8.0);
+                    ui.add(egui::TextEdit::multiline(&mut self.join_input).hint_text("talkrypt://…").desired_rows(2).desired_width(f32::INFINITY));
+                    ui.add_space(8.0);
+                    if pill(ui, "Join", PANEL, FG).clicked() {
+                        let uri = self.join_input.trim().to_string();
+                        if uri.starts_with("talkrypt://") {
+                            let _ = self.cmd_tx.send(Cmd::Join { uri });
+                            self.status = "joining…".into();
+                        } else {
+                            self.status = "paste a talkrypt:// invite".into();
+                        }
+                    }
                 }
-                ui.separator();
-                ui.label("…or join with an invite:");
-                ui.text_edit_multiline(&mut self.join_input);
-                if ui.button("Join").clicked() {
-                    let uri = self.join_input.trim().to_string();
-                    if uri.starts_with("talkrypt://") {
-                        let _ = self.cmd_tx.send(Cmd::Join { uri });
-                        self.status = "joining…".into();
-                    } else {
-                        self.status = "paste a talkrypt:// invite".into();
-                    }
-                }
-            }
-            Screen::Hosting => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Scan to join").heading());
-                    ui.label("point a phone camera at this code");
-                    ui.add_space(8.0);
-                    if let Some(tex) = &self.qr {
-                        ui.image((tex.id(), tex.size_vec2()));
-                    } else {
-                        ui.spinner();
-                        ui.label("publishing invite…");
-                    }
-                    ui.add_space(8.0);
-                    if let Some(inv) = &self.invite {
-                        ui.collapsing("invite text", |ui| {
-                            ui.label(egui::RichText::new(inv).monospace().small());
-                        });
-                    }
-                    if ui.button("open chat").clicked() {
-                        self.screen = Screen::Chat;
-                    }
-                });
-            }
-            Screen::Chat => {
-                ui.label(format!("peers: {}", self.peers));
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(ui.available_height() - 40.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for (mine, who, text) in &self.transcript {
-                            if *mine {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                    ui.label(egui::RichText::new(text).strong());
-                                });
-                            } else if who == "•" {
-                                ui.label(egui::RichText::new(text).italics().weak());
-                            } else {
-                                ui.label(format!("{who}: {text}"));
-                            }
+                Screen::Hosting => {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Scan to join").size(22.0).strong().color(FG));
+                        ui.label(egui::RichText::new("point a phone camera at this code").small().color(MUTED));
+                        ui.add_space(12.0);
+                        if let Some(tex) = &self.qr {
+                            // White quiet-zone frame so the QR scans on the dark bg.
+                            egui::Frame::default()
+                                .fill(egui::Color32::WHITE)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(10))
+                                .show(ui, |ui| ui.image((tex.id(), tex.size_vec2())));
+                        } else {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("publishing invite…").color(MUTED));
+                        }
+                        ui.add_space(14.0);
+                        if let Some(inv) = &self.invite {
+                            ui.collapsing(egui::RichText::new("invite text").color(MUTED), |ui| {
+                                ui.label(egui::RichText::new(inv).monospace().small().color(MUTED));
+                            });
+                        }
+                        ui.add_space(6.0);
+                        if pill(ui, "Open chat", PANEL, FG).clicked() {
+                            self.screen = Screen::Chat;
                         }
                     });
-                ui.horizontal(|ui| {
-                    let resp = ui.text_edit_singleline(&mut self.msg_input);
-                    let send = ui.button("send").clicked()
-                        || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                    if send && !self.msg_input.trim().is_empty() {
-                        let _ = self.cmd_tx.send(Cmd::Send(self.msg_input.trim().to_string()));
-                        self.msg_input.clear();
-                    }
-                });
-            }
-        });
+                }
+                Screen::Chat => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(ui.available_height() - 56.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for (mine, who, text) in &self.transcript {
+                                ui.add_space(4.0);
+                                if *mine {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        bubble(ui, ACCENT, None, text, egui::Color32::WHITE);
+                                    });
+                                } else if who == "•" {
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(egui::RichText::new(text).small().italics().color(MUTED));
+                                    });
+                                } else {
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                        bubble(ui, PEER_BUBBLE, Some(who), text, FG);
+                                    });
+                                }
+                            }
+                        });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let send_w = 72.0;
+                        let resp = ui.add_sized(
+                            [ui.available_width() - send_w, 38.0],
+                            egui::TextEdit::singleline(&mut self.msg_input).hint_text("Message"),
+                        );
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let clicked = pill(ui, "Send", ACCENT, egui::Color32::WHITE).clicked();
+                        if (clicked || enter) && !self.msg_input.trim().is_empty() {
+                            let _ = self.cmd_tx.send(Cmd::Send(self.msg_input.trim().to_string()));
+                            self.msg_input.clear();
+                            resp.request_focus();
+                        }
+                    });
+                }
+            });
     }
 }
 
