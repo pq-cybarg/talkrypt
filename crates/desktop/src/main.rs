@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
-use talkrypt_crypto::{IdentityKeyPair, SuiteRegistry, DEFAULT_SUITE_ID};
+use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID};
 use talkrypt_transport::TcpTransport;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -69,6 +69,22 @@ fn pill(ui: &mut egui::Ui, label: &str, fill: egui::Color32, text: egui::Color32
     )
 }
 
+/// A labeled, full-width dropdown section (mobile: muted caption + dark field),
+/// with the mobile's generous vertical spacing.
+fn combo_section(ui: &mut egui::Ui, label: &str, id: &str, value: &mut String, options: &[&str]) {
+    ui.add_space(18.0);
+    ui.label(egui::RichText::new(label).size(12.0).strong().color(MUTED));
+    ui.add_space(6.0);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(egui::RichText::new(value.clone()).color(FG))
+        .width(ui.available_width() - 8.0)
+        .show_ui(ui, |ui| {
+            for opt in options {
+                ui.selectable_value(value, (*opt).to_string(), *opt);
+            }
+        });
+}
+
 /// A rounded chat bubble (Signal/Telegram style) with optional sender label.
 fn bubble(ui: &mut egui::Ui, fill: egui::Color32, who: Option<&str>, text: &str, txt: egui::Color32) {
     egui::Frame::default()
@@ -88,9 +104,24 @@ fn bubble(ui: &mut egui::Ui, fill: egui::Color32, who: Option<&str>, text: &str,
 
 /// Commands from the UI thread to the async worker that owns the `Core`.
 enum Cmd {
-    Host { channel: String },
-    Join { uri: String },
+    Host {
+        channel: String,
+        posture: String,
+        access: String,
+    },
+    Join {
+        uri: String,
+    },
     Send(String),
+}
+
+/// Map a posture label to a KEM profile (mirrors the CLI / mobile postures).
+fn profile_from(posture: &str) -> KemProfile {
+    match posture {
+        "hybrid" => KemProfile::hybrid(),
+        "pq-pure-compact" => KemProfile::pq_pure_compact(),
+        _ => KemProfile::pq_pure(),
+    }
 }
 
 /// Updates from the worker back to the UI.
@@ -142,25 +173,36 @@ fn spawn_worker(ctx: egui::Context) -> (UnboundedSender<Cmd>, std::sync::mpsc::R
                     cmd = cmd_rx.recv() => {
                         let Some(cmd) = cmd else { break };
                         match cmd {
-                            Cmd::Host { channel } => {
+                            Cmd::Host { channel, posture, access } => {
+                                // Posture selects the suite; access sets who's heard.
+                                let suite_id = dr_suite_id(profile_from(&posture));
+                                let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
+                                    Ok(s) => s,
+                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad posture: {e}"))); ctx.request_repaint(); continue; }
+                                };
                                 let listen = format!("0.0.0.0:{LAN_PORT}");
                                 let advertised = format!("{}:{LAN_PORT}", lan_ip());
                                 let desc = ChatDescriptor::new(
                                     TopologyKind::P2P,
                                     Persistence::Ephemeral,
-                                    DEFAULT_SUITE_ID,
+                                    &suite_id,
                                     vec![listen.clone()],
                                     channel,
                                 );
                                 let transport = Arc::new(TcpTransport::new(listen.as_str()));
-                                let (c, rx) = Core::new(IdentityKeyPair::generate(), suite.clone(), transport, desc);
+                                let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
                                 match c.host().await {
                                     Ok(_) => {
+                                        match access.as_str() {
+                                            "contacts" => c.restrict_to_contacts(),
+                                            "friends" => c.restrict_to_friends(),
+                                            _ => c.open_access(),
+                                        }
                                         // Advertise the reachable LAN address in the invite.
                                         let mut d = c.descriptor().clone();
                                         d.endpoints = vec![advertised];
                                         let _ = ui_tx.send(UiEvt::Invite(d.to_uri()));
-                                        let _ = ui_tx.send(UiEvt::Status("hosting — share the QR".into()));
+                                        let _ = ui_tx.send(UiEvt::Status(format!("hosting · {posture} · {access}")));
                                         core = Some(c);
                                         events = Some(rx);
                                     }
@@ -170,9 +212,12 @@ fn spawn_worker(ctx: egui::Context) -> (UnboundedSender<Cmd>, std::sync::mpsc::R
                             Cmd::Join { uri } => {
                                 match ChatDescriptor::from_uri(&uri) {
                                     Ok(desc) => {
+                                        // Use the invite's own suite (posture), falling back to default.
+                                        let sid = desc.resolved_suite_id().to_string();
+                                        let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| suite.clone());
                                         let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
                                         let transport = Arc::new(TcpTransport::new("0.0.0.0:0"));
-                                        let (c, rx) = Core::new(IdentityKeyPair::generate(), suite.clone(), transport, desc);
+                                        let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
                                         match c.connect(&endpoint).await {
                                             Ok(_) => {
                                                 let _ = ui_tx.send(UiEvt::Status(format!("joined — connected to {endpoint}")));
@@ -238,6 +283,10 @@ struct App {
     ui_rx: std::sync::mpsc::Receiver<UiEvt>,
     screen: Screen,
     channel_input: String,
+    posture: String,
+    access: String,
+    persistence: String,
+    use_tor: bool,
     join_input: String,
     msg_input: String,
     invite: Option<String>,
@@ -256,6 +305,10 @@ impl App {
             ui_rx,
             screen: Screen::Home,
             channel_input: "#general".into(),
+            posture: "pq-pure".into(),
+            access: "open".into(),
+            persistence: "Persistent".into(), // default Persistent, matching mobile
+            use_tor: false,
             join_input: String::new(),
             msg_input: String::new(),
             invite: None,
@@ -339,18 +392,39 @@ impl eframe::App for App {
             .show(ctx, |ui| match self.screen {
                 Screen::Home => {
                     ui.label(egui::RichText::new("New chat").size(26.0).strong().color(FG));
-                    ui.add_space(14.0);
-                    ui.label(egui::RichText::new("CHANNEL").small().strong().color(MUTED));
-                    ui.add_space(4.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.channel_input).desired_width(f32::INFINITY));
-                    ui.add_space(14.0);
+                    ui.add_space(16.0);
+                    // CHANNEL
+                    ui.label(egui::RichText::new("CHANNEL").size(12.0).strong().color(MUTED));
+                    ui.add_space(6.0);
+                    ui.add_sized(
+                        [ui.available_width(), 40.0],
+                        egui::TextEdit::singleline(&mut self.channel_input)
+                            .font(egui::FontId::proportional(15.0)),
+                    );
+                    // POSTURE / ACCESS / PERSISTENCE dropdowns (match mobile).
+                    combo_section(ui, "POSTURE", "posture", &mut self.posture,
+                        &["pq-pure", "hybrid", "pq-pure-compact"]);
+                    combo_section(ui, "ACCESS", "access", &mut self.access,
+                        &["open", "contacts", "friends"]);
+                    combo_section(ui, "PERSISTENCE", "persistence", &mut self.persistence,
+                        &["Ephemeral", "Persistent", "Always-on"]);
+                    ui.add_space(16.0);
+                    ui.checkbox(
+                        &mut self.use_tor,
+                        egui::RichText::new("Route over Tor (.onion; needs the Tor build)").color(MUTED),
+                    );
+                    ui.add_space(20.0);
                     if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
                         let ch = if self.channel_input.trim().is_empty() {
                             "#general".into()
                         } else {
                             self.channel_input.clone()
                         };
-                        let _ = self.cmd_tx.send(Cmd::Host { channel: ch });
+                        let _ = self.cmd_tx.send(Cmd::Host {
+                            channel: ch,
+                            posture: self.posture.clone(),
+                            access: self.access.clone(),
+                        });
                         self.screen = Screen::Hosting;
                     }
                     ui.add_space(20.0);
