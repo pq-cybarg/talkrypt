@@ -218,6 +218,12 @@ pub struct PrekeySecretHandle(Box<dyn std::any::Any + Send + Sync>);
 pub trait SessionHandle: Send {
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>>;
     fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>>;
+    /// Whether [`encrypt`](Self::encrypt) can succeed right now. A responder
+    /// cannot send until it has received the peer's first message; callers queue
+    /// rather than drop messages sent before then. Defaults to `true`.
+    fn can_send(&self) -> bool {
+        true
+    }
 }
 
 // ----- Built-in: PQ Double Ratchet suite (posture-selectable) -----
@@ -294,6 +300,9 @@ impl SessionHandle for Session {
     fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>> {
         Session::decrypt(self, message)
     }
+    fn can_send(&self) -> bool {
+        Session::can_send(self)
+    }
 }
 
 // ----- Built-in: PQ-Noise suite (session-granularity forward secrecy) -----
@@ -361,6 +370,9 @@ impl SessionHandle for NoiseSession {
     }
     fn decrypt(&mut self, message: &[u8]) -> Result<Vec<u8>> {
         NoiseSession::decrypt(self, message)
+    }
+    fn can_send(&self) -> bool {
+        NoiseSession::can_send(self)
     }
 }
 

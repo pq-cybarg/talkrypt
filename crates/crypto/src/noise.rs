@@ -140,6 +140,14 @@ impl NoiseSession {
         Ok(())
     }
 
+    /// Whether [`encrypt`](Self::encrypt) can succeed right now. A responder
+    /// cannot send until it has received the initiator's first message; the
+    /// initiator can establish its sending chain on demand. Callers use this to
+    /// queue rather than drop a message sent before the session is keyed.
+    pub fn can_send(&self) -> bool {
+        self.send_chain.is_some() || self.initiator
+    }
+
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         if self.send_chain.is_none() {
             if self.initiator {

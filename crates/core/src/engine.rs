@@ -333,6 +333,11 @@ struct Peer {
     fingerprint: [u8; 48],
     writer: SharedWriter,
     session: SharedSession,
+    /// Pairwise payloads queued because the session wasn't send-ready yet (a
+    /// responder can't send before receiving the initiator's first frame).
+    /// Flushed, in order, by the reader loop once the session is keyed — so the
+    /// host's opening line isn't silently dropped.
+    pending: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 struct Inner {
@@ -928,8 +933,17 @@ impl Core {
                     text: text.to_string(),
                     marking,
                 };
-                for (session, writer, _) in collect_peers(&self.inner) {
-                    let _ = send_payload(&session, &writer, &frame.encode()).await;
+                let payload = frame.encode();
+                for (session, writer, fp) in collect_peers(&self.inner) {
+                    // A responder can't encrypt until it's received the peer's
+                    // first frame; queue (don't drop) — the reader loop flushes
+                    // it once the session is keyed.
+                    let ready = { session.lock().await.can_send() };
+                    if ready {
+                        let _ = send_payload(&session, &writer, &payload).await;
+                    } else if let Some(pending) = pending_for(&self.inner, fp) {
+                        pending.lock().unwrap().push(payload.clone());
+                    }
                 }
             }
             GroupRole::Host | GroupRole::Member => {
@@ -966,6 +980,17 @@ fn peer_handles(inner: &Arc<Inner>, fp: [u8; 48]) -> Option<(SharedSession, Shar
         .iter()
         .find(|p| p.fingerprint == fp)
         .map(|p| (p.session.clone(), p.writer.clone()))
+}
+
+/// The outbound queue for a peer (messages held until its session is send-ready).
+fn pending_for(inner: &Arc<Inner>, fp: [u8; 48]) -> Option<Arc<Mutex<Vec<Vec<u8>>>>> {
+    inner
+        .peers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.fingerprint == fp)
+        .map(|p| p.pending.clone())
 }
 
 /// Encrypt a pairwise payload (a `Frame` or a `Routed` envelope) and send it.
@@ -1034,6 +1059,7 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
         fingerprint,
         writer: writer.clone(),
         session: session.clone(),
+        pending: Arc::new(Mutex::new(Vec::new())),
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
@@ -1108,6 +1134,19 @@ async fn reader_loop(
             if let Some(bytes) = pending {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+                }
+            }
+        }
+        // The session is now send-ready: flush any pairwise payloads queued
+        // before it was keyed (e.g. the host's opening message), in order, after
+        // the identity presentation above. Empty (no-op) on later iterations.
+        let queued: Vec<Vec<u8>> = pending_for(&inner, fingerprint)
+            .map(|p| p.lock().unwrap().drain(..).collect())
+            .unwrap_or_default();
+        if !queued.is_empty() {
+            if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                for payload in queued {
+                    let _ = send_payload(&s, &w, &payload).await;
                 }
             }
         }
@@ -1579,6 +1618,43 @@ mod tests {
             desc.clone(),
             is_host,
         )
+    }
+
+    /// The host (responder) cannot encrypt before it has received the joiner's
+    /// first frame. A message sent in that window must be QUEUED and delivered
+    /// once the session is keyed — not silently dropped (the "host's opening
+    /// line vanishes" bug). With no account presented, the initiator sends
+    /// nothing on connect, so the host stays not-send-ready until the joiner's
+    /// first chat — a deterministic queue window.
+    #[tokio::test]
+    async fn host_message_before_peer_speaks_is_queued_not_dropped() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#q",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Host speaks first — responder isn't send-ready, so this is queued.
+        host.send("welcome").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Joiner speaks → host session becomes send-ready → queued "welcome"
+        // flushes. Both directions then deliver.
+        joiner.send("hi there").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hi there");
+        assert_eq!(
+            next_message(&mut joiner_rx).await.0,
+            "welcome",
+            "the host's pre-ratchet message must be delivered, not dropped"
+        );
     }
 
     /// Full TreeKEM group chat through the engine over loopback: a host and two

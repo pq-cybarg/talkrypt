@@ -174,6 +174,15 @@ impl Session {
         }
     }
 
+    /// Whether [`encrypt`](Self::encrypt) can succeed right now. A fresh
+    /// responder has no sending chain and no peer ratchet key, so it cannot send
+    /// until it has received the initiator's first message (which sets
+    /// `peer_ratchet` and lets `ratchet_send` derive a sending chain). Callers use
+    /// this to queue rather than drop a message sent before the session is keyed.
+    pub fn can_send(&self) -> bool {
+        self.send_ck.is_some() || self.peer_ratchet.is_some()
+    }
+
     /// Encrypt `plaintext`, advancing the sending ratchet. Returns the full
     /// wire message (header ‖ AEAD ciphertext).
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
