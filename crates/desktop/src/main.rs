@@ -11,6 +11,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui;
@@ -27,6 +28,7 @@ mod headless;
 /// it, a plain TCP transport bound to `listen` is used (the same-Wi-Fi fast
 /// path). Bootstrapping Tor takes time, so a status line is emitted first.
 async fn make_transport(
+    id: u64,
     use_tor: bool,
     listen: &str,
     ui_tx: &std::sync::mpsc::Sender<UiEvt>,
@@ -35,9 +37,10 @@ async fn make_transport(
         #[cfg(feature = "tor")]
         {
             use talkrypt_transport::{ArtiTransport, OnionPersistence};
-            let _ = ui_tx.send(UiEvt::Status(
-                "bootstrapping Tor (Arti) — this can take up to a minute…".into(),
-            ));
+            let _ = ui_tx.send(UiEvt::Status {
+                id,
+                text: "bootstrapping Tor (Arti) — this can take up to a minute…".into(),
+            });
             let t = ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt")
                 .await
                 .map_err(|e| format!("tor bootstrap failed: {e}"))?;
@@ -45,7 +48,7 @@ async fn make_transport(
         }
         #[cfg(not(feature = "tor"))]
         {
-            let _ = ui_tx;
+            let _ = (id, ui_tx);
             return Err("this build has Tor disabled (rebuild with --features tor)".into());
         }
     }
@@ -135,19 +138,31 @@ fn bubble(ui: &mut egui::Ui, fill: egui::Color32, who: Option<&str>, text: &str,
         });
 }
 
-/// Commands from the UI thread to the async worker that owns the `Core`.
+/// Commands from the UI thread to the async worker that owns the `Core`s. Every
+/// command carries the UI-allocated session `id` it applies to, so the worker
+/// can hold many concurrent chats (one `Core` each) and route to the right one.
 enum Cmd {
     Host {
+        id: u64,
         channel: String,
         posture: String,
         access: String,
         use_tor: bool,
     },
     Join {
+        id: u64,
         uri: String,
         use_tor: bool,
     },
-    Send(String),
+    Send {
+        id: u64,
+        text: String,
+    },
+    /// Re-dial a joined session whose transport dropped (the host stays listening
+    /// on its onion/port, so the joiner just re-runs the initiator handshake).
+    Reconnect {
+        id: u64,
+    },
 }
 
 /// Map a posture label to a KEM profile (mirrors the CLI / mobile postures).
@@ -159,14 +174,15 @@ fn profile_from(posture: &str) -> KemProfile {
     }
 }
 
-/// Updates from the worker back to the UI.
+/// Updates from the worker back to the UI, each tagged with the session `id`
+/// it belongs to so the UI updates the right chat.
 enum UiEvt {
-    Invite(String),
-    Status(String),
-    Connected(String),
-    Disconnected(String),
+    Invite { id: u64, uri: String },
+    Status { id: u64, text: String },
+    Connected { id: u64, who: String },
+    Disconnected { id: u64, who: String },
     /// `mine = true` for our own echoed line; else an inbound peer message.
-    Line { mine: bool, who: String, text: String },
+    Line { id: u64, mine: bool, who: String, text: String },
 }
 
 /// LAN IPv4 to advertise, found via the default route (no packets sent). Falls
@@ -190,131 +206,149 @@ fn short(fp: &[u8; 48]) -> String {
 /// after every state change — the GUI uses it to request a repaint; the headless
 /// driver uses a no-op. This is the single networking code path shared by the
 /// egui app and the `--headless` harness, so they can never drift.
-async fn worker_loop(
+async fn worker_loop<F: Fn() + Clone + Send + 'static>(
     mut cmd_rx: UnboundedReceiver<Cmd>,
     ui_tx: std::sync::mpsc::Sender<UiEvt>,
-    on_event: impl Fn(),
+    on_event: F,
 ) {
-    let mut core: Option<Core> = None;
-    let mut events: Option<UnboundedReceiver<Event>> = None;
-    let suite = SuiteRegistry::with_defaults()
+    // One Core per live session, keyed by the UI-allocated id. Each Core's event
+    // stream is drained by its own forwarder task (spawn_forwarder) that tags
+    // events with the id, so all sessions stay live concurrently.
+    let mut cores: HashMap<u64, Core> = HashMap::new();
+    // Joined sessions remember their dial endpoint so Reconnect can re-dial.
+    let mut rejoin: HashMap<u64, String> = HashMap::new();
+    let default_suite = SuiteRegistry::with_defaults()
         .get(DEFAULT_SUITE_ID)
         .expect("default suite");
 
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break };
-                match cmd {
-                    Cmd::Host { channel, posture, access, use_tor } => {
-                        // Posture selects the suite; access sets who's heard.
-                        let suite_id = dr_suite_id(profile_from(&posture));
-                        let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
-                            Ok(s) => s,
-                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad posture: {e}"))); on_event(); continue; }
-                        };
-                        // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr
-                        // (the onion service picks its own virtual port).
-                        let listen = format!("0.0.0.0:{LAN_PORT}");
-                        let transport = match make_transport(use_tor, &listen, &ui_tx).await {
-                            Ok(t) => t,
-                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("host failed: {e}"))); on_event(); continue; }
-                        };
-                        let desc = ChatDescriptor::new(
-                            TopologyKind::P2P,
-                            Persistence::Ephemeral,
-                            &suite_id,
-                            vec![listen.clone()],
-                            channel,
-                        );
-                        let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
-                        match c.host().await {
-                            // `host()` returns the listener endpoint: the dialable
-                            // `.onion:port` over Tor, or the local bind over TCP.
-                            Ok(bound) => {
-                                match access.as_str() {
-                                    "contacts" => c.restrict_to_contacts(),
-                                    "friends" => c.restrict_to_friends(),
-                                    _ => c.open_access(),
-                                }
-                                // Over Tor advertise the onion endpoint as-is
-                                // (globally dialable, no NAT); over TCP swap the
-                                // wildcard bind for this machine's LAN IP.
-                                let advertised = if use_tor { bound } else { format!("{}:{LAN_PORT}", lan_ip()) };
-                                let mut d = c.descriptor().clone();
-                                d.endpoints = vec![advertised];
-                                let net = if use_tor { "tor" } else { "lan" };
-                                let _ = ui_tx.send(UiEvt::Invite(d.to_uri()));
-                                let _ = ui_tx.send(UiEvt::Status(format!("hosting · {net} · {posture} · {access}")));
-                                core = Some(c);
-                                events = Some(rx);
-                            }
-                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("host failed: {e}"))); }
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            Cmd::Host { id, channel, posture, access, use_tor } => {
+                // Posture selects the suite; access sets who's heard.
+                let suite_id = dr_suite_id(profile_from(&posture));
+                let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
+                    Ok(s) => s,
+                    Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("bad posture: {e}") }); on_event(); continue; }
+                };
+                // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr (the onion
+                // service picks its own virtual port).
+                let listen = format!("0.0.0.0:{LAN_PORT}");
+                let transport = match make_transport(id, use_tor, &listen, &ui_tx).await {
+                    Ok(t) => t,
+                    Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); on_event(); continue; }
+                };
+                let desc = ChatDescriptor::new(
+                    TopologyKind::P2P,
+                    Persistence::Ephemeral,
+                    &suite_id,
+                    vec![listen.clone()],
+                    channel,
+                );
+                let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
+                match c.host().await {
+                    // `host()` returns the listener endpoint: the dialable
+                    // `.onion:port` over Tor, or the local bind over TCP.
+                    Ok(bound) => {
+                        match access.as_str() {
+                            "contacts" => c.restrict_to_contacts(),
+                            "friends" => c.restrict_to_friends(),
+                            _ => c.open_access(),
                         }
+                        // Over Tor advertise the onion endpoint as-is (globally
+                        // dialable, no NAT); over TCP swap the wildcard bind for
+                        // this machine's LAN IP.
+                        let advertised = if use_tor { bound } else { format!("{}:{LAN_PORT}", lan_ip()) };
+                        let mut d = c.descriptor().clone();
+                        d.endpoints = vec![advertised];
+                        let net = if use_tor { "tor" } else { "lan" };
+                        let _ = ui_tx.send(UiEvt::Invite { id, uri: d.to_uri() });
+                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("hosting · {net} · {posture} · {access}") });
+                        spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
+                        cores.insert(id, c);
                     }
-                    Cmd::Join { uri, use_tor } => {
-                        match ChatDescriptor::from_uri(&uri) {
-                            Ok(desc) => {
-                                // Use the invite's own suite (posture), falling back to default.
-                                let sid = desc.resolved_suite_id().to_string();
-                                let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| suite.clone());
-                                let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
-                                // Auto-route to Tor when the invite is an onion,
-                                // regardless of the toggle (a `.onion` is only
-                                // reachable through Tor).
-                                let join_tor = use_tor || endpoint.contains(".onion");
-                                let transport = match make_transport(join_tor, "0.0.0.0:0", &ui_tx).await {
-                                    Ok(t) => t,
-                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("join failed: {e}"))); on_event(); continue; }
-                                };
-                                let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
-                                match c.connect(&endpoint).await {
-                                    Ok(_) => {
-                                        let _ = ui_tx.send(UiEvt::Status(format!("joined — connected to {endpoint}")));
-                                        core = Some(c);
-                                        events = Some(rx);
-                                    }
-                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("join failed: {e}"))); }
-                                }
-                            }
-                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad invite: {e}"))); }
-                        }
-                    }
-                    Cmd::Send(text) => {
-                        if let Some(c) = &core {
-                            match c.send(&text).await {
-                                Ok(_) => { let _ = ui_tx.send(UiEvt::Line { mine: true, who: "me".into(), text }); }
-                                Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("send failed: {e}"))); }
-                            }
-                        }
-                    }
+                    Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); }
                 }
-                on_event();
             }
-            ev = async {
-                match &mut events {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match ev {
-                    Some(Event::Message { from, text, .. }) =>
-                        { let _ = ui_tx.send(UiEvt::Line { mine: false, who: short(&from), text }); }
-                    Some(Event::Connected { fingerprint }) =>
-                        { let _ = ui_tx.send(UiEvt::Connected(short(&fingerprint))); }
-                    Some(Event::Disconnected { fingerprint }) =>
-                        { let _ = ui_tx.send(UiEvt::Disconnected(short(&fingerprint))); }
-                    Some(Event::Identity { account_fingerprint, username, .. }) => {
-                        let who = username.unwrap_or_else(|| short(&account_fingerprint));
-                        let _ = ui_tx.send(UiEvt::Status(format!("identity: {who}")));
+            Cmd::Join { id, uri, use_tor } => {
+                match ChatDescriptor::from_uri(&uri) {
+                    Ok(desc) => {
+                        // Use the invite's own suite (posture), falling back to default.
+                        let sid = desc.resolved_suite_id().to_string();
+                        let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| default_suite.clone());
+                        let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
+                        // Auto-route to Tor when the invite is an onion, regardless
+                        // of the toggle (a `.onion` is only reachable through Tor).
+                        let join_tor = use_tor || endpoint.contains(".onion");
+                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx).await {
+                            Ok(t) => t,
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
+                        };
+                        let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
+                        match c.connect(&endpoint).await {
+                            Ok(_) => {
+                                let _ = ui_tx.send(UiEvt::Status { id, text: format!("joined — connected to {endpoint}") });
+                                rejoin.insert(id, endpoint);
+                                spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
+                                cores.insert(id, c);
+                            }
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); }
+                        }
                     }
-                    Some(Event::Error(m)) => { let _ = ui_tx.send(UiEvt::Status(format!("! {m}"))); }
-                    _ => {}
+                    Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("bad invite: {e}") }); }
                 }
-                on_event();
+            }
+            Cmd::Send { id, text } => {
+                if let Some(c) = cores.get(&id) {
+                    match c.send(&text).await {
+                        Ok(_) => { let _ = ui_tx.send(UiEvt::Line { id, mine: true, who: "me".into(), text }); }
+                        Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("send failed: {e}") }); }
+                    }
+                }
+            }
+            Cmd::Reconnect { id } => {
+                // A joined session re-dials its host (which is still listening on
+                // the same onion/port). A host has nothing to re-dial — it just
+                // keeps listening for the peer to come back.
+                if let Some(endpoint) = rejoin.get(&id).cloned() {
+                    if let Some(c) = cores.get(&id) {
+                        let _ = ui_tx.send(UiEvt::Status { id, text: "reconnecting…".into() });
+                        match c.connect(&endpoint).await {
+                            Ok(_) => { let _ = ui_tx.send(UiEvt::Status { id, text: "reconnected".into() }); }
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("reconnect failed: {e}") }); }
+                        }
+                    }
+                } else {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: "still hosting — waiting for peer to rejoin".into() });
+                }
             }
         }
+        on_event();
     }
+}
+
+/// Drain one session's event stream on its own task, tagging each event with the
+/// session `id` so the UI updates the right chat and repaints.
+fn spawn_forwarder<F: Fn() + Send + 'static>(
+    id: u64,
+    mut rx: UnboundedReceiver<Event>,
+    ui_tx: std::sync::mpsc::Sender<UiEvt>,
+    on_event: F,
+) {
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                Event::Message { from, text, .. } => { let _ = ui_tx.send(UiEvt::Line { id, mine: false, who: short(&from), text }); }
+                Event::Connected { fingerprint } => { let _ = ui_tx.send(UiEvt::Connected { id, who: short(&fingerprint) }); }
+                Event::Disconnected { fingerprint } => { let _ = ui_tx.send(UiEvt::Disconnected { id, who: short(&fingerprint) }); }
+                Event::Identity { account_fingerprint, username, .. } => {
+                    let who = username.unwrap_or_else(|| short(&account_fingerprint));
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
+                }
+                Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
+            }
+            on_event();
+        }
+    });
 }
 
 /// Spawn the async worker on its own thread + Tokio runtime (the GUI path).
@@ -335,30 +369,69 @@ fn spawn_worker(ctx: egui::Context) -> (UnboundedSender<Cmd>, std::sync::mpsc::R
     (cmd_tx, ui_rx)
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Screen {
+    /// The list of chats you're in (the home, like mobile).
     Home,
-    Hosting,
+    /// The host/join form for starting a new chat.
+    NewChat,
+    /// One open chat's transcript.
     Chat,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Kind {
+    Host,
+    Join,
+}
+
+/// One live chat the worker holds a `Core` for. The UI mirrors its state here.
+struct Session {
+    id: u64,
+    kind: Kind,
+    title: String,
+    transcript: Vec<(bool, String, String)>, // (mine, who, text)
+    peers: usize,
+    connected: bool,
+    invite: Option<String>,
+    qr: Option<egui::TextureHandle>,
+    status: String,
+}
+
+impl Session {
+    fn new(id: u64, kind: Kind, title: String) -> Self {
+        Self {
+            id,
+            kind,
+            title,
+            transcript: Vec::new(),
+            peers: 0,
+            connected: false,
+            invite: None,
+            qr: None,
+            status: "starting…".into(),
+        }
+    }
 }
 
 struct App {
     cmd_tx: UnboundedSender<Cmd>,
     ui_rx: std::sync::mpsc::Receiver<UiEvt>,
     screen: Screen,
-    title: String,
+    sessions: Vec<Session>,
+    active: Option<u64>, // id of the chat currently open on the Chat screen
+    next_id: u64,
+    // ----- new-chat form -----
     channel_input: String,
     posture: String,
     access: String,
     persistence: String,
     use_tor: bool,
     join_input: String,
+    // ----- chat screen -----
     msg_input: String,
-    invite: Option<String>,
-    qr: Option<egui::TextureHandle>,
-    status: String,
-    transcript: Vec<(bool, String, String)>, // (mine, who, text)
-    peers: usize,
+    show_invite: bool, // toggles the invite/QR panel inside a chat
+    notice: String,    // transient form message on the new-chat screen
 }
 
 impl App {
@@ -369,7 +442,9 @@ impl App {
             cmd_tx,
             ui_rx,
             screen: Screen::Home,
-            title: "#general".into(),
+            sessions: Vec::new(),
+            active: None,
+            next_id: 1,
             channel_input: "#general".into(),
             posture: "pq-pure".into(),
             access: "open".into(),
@@ -379,70 +454,372 @@ impl App {
             use_tor: cfg!(feature = "tor"),
             join_input: String::new(),
             msg_input: String::new(),
-            invite: None,
-            qr: None,
-            status: "ML-KEM-1024 · ML-DSA-87 · AES-256-GCM · NOT audited".into(),
-            transcript: Vec::new(),
-            peers: 0,
+            show_invite: false,
+            notice: String::new(),
         }
     }
 
-    /// Render the invite as a QR texture (black/white module grid).
-    fn build_qr(&mut self, ctx: &egui::Context, invite: &str) {
-        let Ok(code) = qrcode::QrCode::new(invite.as_bytes()) else { return };
-        let modules = code.to_colors();
-        let dim = (modules.len() as f64).sqrt() as usize;
-        let quiet = 4usize;
-        // Target ~240px total so the QR doesn't swallow the window; pick an
-        // integer module scale (>=2) so modules stay crisp under NEAREST.
-        let scale = (240 / (dim + quiet * 2)).max(2);
-        let px = (dim + quiet * 2) * scale;
-        let mut img = egui::ColorImage::new([px, px], egui::Color32::WHITE);
-        for y in 0..dim {
-            for x in 0..dim {
-                let dark = modules[y * dim + x] == qrcode::Color::Dark;
-                if !dark {
-                    continue;
-                }
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let ix = (x + quiet) * scale + dx;
-                        let iy = (y + quiet) * scale + dy;
-                        img.pixels[iy * px + ix] = egui::Color32::BLACK;
-                    }
-                }
-            }
-        }
-        self.qr = Some(ctx.load_texture("invite-qr", img, egui::TextureOptions::NEAREST));
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn session_mut(&mut self, id: u64) -> Option<&mut Session> {
+        self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
+    fn active_session(&self) -> Option<&Session> {
+        self.active.and_then(|id| self.sessions.iter().find(|s| s.id == id))
+    }
+
+    /// Open `id` on the Chat screen.
+    fn open(&mut self, id: u64) {
+        self.active = Some(id);
+        self.show_invite = false;
+        self.msg_input.clear();
+        self.screen = Screen::Chat;
     }
 
     fn drain(&mut self, ctx: &egui::Context) {
         while let Ok(evt) = self.ui_rx.try_recv() {
             match evt {
-                UiEvt::Invite(uri) => {
-                    self.build_qr(ctx, &uri);
-                    self.invite = Some(uri);
+                UiEvt::Invite { id, uri } => {
+                    let tex = render_qr(ctx, id, &uri);
+                    if let Some(s) = self.session_mut(id) {
+                        s.qr = tex;
+                        s.invite = Some(uri);
+                    }
                 }
-                UiEvt::Status(s) => self.status = s,
-                UiEvt::Connected(w) => {
-                    self.peers += 1;
-                    self.transcript.push((false, "•".into(), format!("{w} connected")));
-                    self.screen = Screen::Chat;
+                UiEvt::Status { id, text } => {
+                    if let Some(s) = self.session_mut(id) {
+                        s.status = text;
+                    }
                 }
-                UiEvt::Disconnected(w) => {
-                    self.peers = self.peers.saturating_sub(1);
-                    self.transcript.push((false, "•".into(), format!("{w} left")));
+                UiEvt::Connected { id, who } => {
+                    if let Some(s) = self.session_mut(id) {
+                        s.peers += 1;
+                        s.connected = true;
+                        s.transcript.push((false, "•".into(), format!("{who} connected")));
+                    }
                 }
-                UiEvt::Line { mine, who, text } => self.transcript.push((mine, who, text)),
+                UiEvt::Disconnected { id, who } => {
+                    if let Some(s) = self.session_mut(id) {
+                        s.peers = s.peers.saturating_sub(1);
+                        if s.peers == 0 {
+                            s.connected = false;
+                        }
+                        s.transcript.push((false, "•".into(), format!("{who} left")));
+                    }
+                }
+                UiEvt::Line { id, mine, who, text } => {
+                    if let Some(s) = self.session_mut(id) {
+                        s.transcript.push((mine, who, text));
+                    }
+                }
             }
         }
+    }
+}
+
+/// Render an invite string as a QR texture (black/white module grid). Named per
+/// session id so concurrent chats don't share/overwrite one texture.
+fn render_qr(ctx: &egui::Context, id: u64, invite: &str) -> Option<egui::TextureHandle> {
+    let code = qrcode::QrCode::new(invite.as_bytes()).ok()?;
+    let modules = code.to_colors();
+    let dim = (modules.len() as f64).sqrt() as usize;
+    let quiet = 4usize;
+    // Target ~240px total so the QR doesn't swallow the window; pick an integer
+    // module scale (>=2) so modules stay crisp under NEAREST.
+    let scale = (240 / (dim + quiet * 2)).max(2);
+    let px = (dim + quiet * 2) * scale;
+    let mut img = egui::ColorImage::new([px, px], egui::Color32::WHITE);
+    for y in 0..dim {
+        for x in 0..dim {
+            if modules[y * dim + x] != qrcode::Color::Dark {
+                continue;
+            }
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let ix = (x + quiet) * scale + dx;
+                    let iy = (y + quiet) * scale + dy;
+                    img.pixels[iy * px + ix] = egui::Color32::BLACK;
+                }
+            }
+        }
+    }
+    Some(ctx.load_texture(format!("invite-qr-{id}"), img, egui::TextureOptions::NEAREST))
+}
+
+impl App {
+    /// Home: the list of chats you're in, plus a "New chat" entry point.
+    fn home_screen(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.label(egui::RichText::new("Chats").size(26.0).strong().color(FG));
+            ui.add_space(12.0);
+            if pill(ui, "＋  New chat", ACCENT, egui::Color32::WHITE).clicked() {
+                self.notice.clear();
+                self.screen = Screen::NewChat;
+            }
+            ui.add_space(14.0);
+            if self.sessions.is_empty() {
+                ui.add_space(24.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("No chats yet").color(MUTED));
+                    ui.label(egui::RichText::new("Host one, or join with an invite / QR.").small().color(MUTED));
+                });
+                return;
+            }
+            // Snapshot the rows so we don't hold a borrow across the click handler.
+            let rows: Vec<(u64, String, String, bool, usize, bool)> = self
+                .sessions
+                .iter()
+                .map(|s| (s.id, s.title.clone(), s.status.clone(), s.connected, s.peers, matches!(s.kind, Kind::Host)))
+                .collect();
+            let mut open_id: Option<u64> = None;
+            for (id, title, status, connected, peers, is_host) in rows {
+                let dot = if connected { ACCENT } else { MUTED };
+                let inner = egui::Frame::default()
+                    .fill(PANEL)
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("●").color(dot));
+                            ui.add_space(4.0);
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(&title).strong().color(FG));
+                                let sub = if connected {
+                                    format!("{peers} online · {}", if is_host { "hosting" } else { "joined" })
+                                } else {
+                                    status.clone()
+                                };
+                                ui.label(egui::RichText::new(sub).small().color(MUTED));
+                            });
+                        });
+                    });
+                if inner.response.interact(egui::Sense::click()).clicked() {
+                    open_id = Some(id);
+                }
+                ui.add_space(8.0);
+            }
+            if let Some(id) = open_id {
+                self.open(id);
+            }
+        });
+    }
+
+    /// New chat: the host/join form. Both actions allocate a session and open it.
+    fn new_chat_screen(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
+                    self.screen = Screen::Home;
+                }
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("New chat").size(22.0).strong().color(FG));
+            });
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("CHANNEL").size(12.0).strong().color(MUTED));
+            ui.add_space(6.0);
+            ui.add_sized(
+                [ui.available_width(), 40.0],
+                egui::TextEdit::singleline(&mut self.channel_input)
+                    .font(egui::FontId::proportional(15.0))
+                    .vertical_align(egui::Align::Center)
+                    .margin(egui::Margin::symmetric(14, 8)),
+            );
+            combo_section(ui, "POSTURE", "posture", &mut self.posture, &["pq-pure", "hybrid", "pq-pure-compact"]);
+            combo_section(ui, "ACCESS", "access", &mut self.access, &["open", "contacts", "friends"]);
+            combo_section(ui, "PERSISTENCE", "persistence", &mut self.persistence, &["Ephemeral", "Persistent", "Always-on"]);
+            ui.add_space(16.0);
+            ui.checkbox(
+                &mut self.use_tor,
+                egui::RichText::new("Route over Tor (.onion — works across any network, no NAT)").color(MUTED),
+            );
+            ui.add_space(20.0);
+            if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
+                let ch = if self.channel_input.trim().is_empty() { "#general".into() } else { self.channel_input.clone() };
+                let id = self.alloc_id();
+                self.sessions.push(Session::new(id, Kind::Host, ch.clone()));
+                let _ = self.cmd_tx.send(Cmd::Host {
+                    id,
+                    channel: ch,
+                    posture: self.posture.clone(),
+                    access: self.access.clone(),
+                    use_tor: self.use_tor,
+                });
+                self.open(id);
+                self.show_invite = true; // hosts land on the QR so they can share it
+            }
+            ui.add_space(20.0);
+            ui.label(egui::RichText::new("— or join —").color(MUTED));
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut self.join_input)
+                    .hint_text("talkrypt://…")
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .margin(egui::Margin::symmetric(14, 8)),
+            );
+            ui.add_space(8.0);
+            if pill(ui, "Join", PANEL, FG).clicked() {
+                let uri = self.join_input.trim().to_string();
+                if uri.starts_with("talkrypt://") {
+                    let title = ChatDescriptor::from_uri(&uri).map(|d| d.channel).unwrap_or_else(|_| "chat".into());
+                    let id = self.alloc_id();
+                    self.sessions.push(Session::new(id, Kind::Join, title));
+                    let _ = self.cmd_tx.send(Cmd::Join { id, uri, use_tor: self.use_tor });
+                    self.join_input.clear();
+                    self.notice.clear();
+                    self.open(id);
+                } else {
+                    self.notice = "paste a talkrypt:// invite".into();
+                }
+            }
+            if !self.notice.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(&self.notice).small().color(egui::Color32::from_rgb(0xFF, 0xD1, 0x66)));
+            }
+        });
+    }
+
+    /// One open chat: header (back / invite / online / reconnect), an optional
+    /// invite-QR panel, the transcript, and the message composer.
+    fn chat_screen(&mut self, ui: &mut egui::Ui) {
+        let Some(id) = self.active else { self.screen = Screen::Home; return };
+        let Some(idx) = self.sessions.iter().position(|s| s.id == id) else { self.screen = Screen::Home; return };
+        let (title, connected, peers, invite, is_host) = {
+            let s = &self.sessions[idx];
+            (s.title.clone(), s.connected, s.peers, s.invite.clone(), matches!(s.kind, Kind::Host))
+        };
+
+        let mut go_home = false;
+        let mut toggle_invite = false;
+        let mut do_reconnect = false;
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
+                go_home = true;
+            }
+            ui.label(egui::RichText::new(&title).strong().color(FG));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if invite.is_some() && ui.add(egui::Button::new(egui::RichText::new("⧉ Invite").color(ACCENT)).fill(PANEL)).clicked() {
+                    toggle_invite = true;
+                }
+                let (txt, col) = if connected {
+                    (format!("● {peers} online"), ACCENT)
+                } else {
+                    ("○ offline".to_string(), MUTED)
+                };
+                ui.label(egui::RichText::new(txt).small().color(col));
+                // A joined session can re-dial a dropped host; a host just waits.
+                if !connected && !is_host
+                    && ui.add(egui::Button::new(egui::RichText::new("⟳ Reconnect").color(FG)).fill(PANEL)).clicked()
+                {
+                    do_reconnect = true;
+                }
+            });
+        });
+        if go_home {
+            self.screen = Screen::Home;
+            return;
+        }
+        if toggle_invite {
+            self.show_invite = !self.show_invite;
+        }
+        if do_reconnect {
+            let _ = self.cmd_tx.send(Cmd::Reconnect { id });
+        }
+        ui.add_space(6.0);
+        ui.separator();
+
+        // Invite/QR panel (toggle via the ⧉ button; auto-on for a fresh host).
+        if self.show_invite {
+            if let Some(inv) = invite.clone() {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    if let Some(tex) = self.sessions[idx].qr.as_ref() {
+                        egui::Frame::default()
+                            .fill(egui::Color32::WHITE)
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| ui.image((tex.id(), tex.size_vec2())));
+                    } else {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("publishing invite…").color(MUTED));
+                    }
+                });
+                ui.add_space(8.0);
+                if pill(ui, "Copy invite link", PANEL, FG).clicked() {
+                    ui.ctx().copy_text(inv);
+                }
+                ui.add_space(6.0);
+                ui.separator();
+            }
+        }
+
+        // Transcript.
+        let avail = ui.available_height();
+        egui::ScrollArea::vertical()
+            .id_salt("transcript")
+            .auto_shrink([false, false])
+            .max_height((avail - 52.0).max(80.0))
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for (mine, who, text) in &self.sessions[idx].transcript {
+                    ui.add_space(4.0);
+                    if *mine {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            bubble(ui, ACCENT, None, text, egui::Color32::WHITE);
+                        });
+                    } else if who == "•" {
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(text).small().italics().color(MUTED));
+                        });
+                    } else {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                            bubble(ui, PEER_BUBBLE, Some(who), text, FG);
+                        });
+                    }
+                }
+            });
+        ui.add_space(8.0);
+        // Message row: padded field + a Send button the SAME height.
+        ui.horizontal(|ui| {
+            let send_w = 64.0;
+            let resp = ui.add_sized(
+                [ui.available_width() - send_w - 8.0, 40.0],
+                egui::TextEdit::singleline(&mut self.msg_input)
+                    .hint_text("Message")
+                    .vertical_align(egui::Align::Center)
+                    .margin(egui::Margin::symmetric(14, 8)),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let clicked = ui
+                .add_sized(
+                    [send_w, 40.0],
+                    egui::Button::new(egui::RichText::new("Send").color(egui::Color32::WHITE).strong())
+                        .fill(ACCENT)
+                        .corner_radius(egui::CornerRadius::same(12)),
+                )
+                .clicked();
+            if (clicked || enter) && !self.msg_input.trim().is_empty() {
+                let _ = self.cmd_tx.send(Cmd::Send { id, text: self.msg_input.trim().to_string() });
+                self.msg_input.clear();
+                resp.request_focus();
+            }
+        });
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain(ctx);
-        // Header: title + crypto subtitle (mirrors the mobile header), status right.
+        // Header: brand + crypto subtitle; right side shows the open chat's status.
+        let header_status = self
+            .active_session()
+            .map(|s| s.status.clone())
+            .unwrap_or_else(|| "ML-KEM-1024 · ML-DSA-87 · AES-256-GCM · NOT audited".into());
         egui::TopBottomPanel::top("top")
             .frame(egui::Frame::default().fill(PANEL).inner_margin(egui::Margin::symmetric(16, 10)))
             .show(ctx, |ui| {
@@ -452,7 +829,7 @@ impl eframe::App for App {
                         ui.label(egui::RichText::new("🔒 ML-KEM-1024 · ML-DSA-87").small().color(ACCENT));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(&self.status).small().color(MUTED));
+                        ui.label(egui::RichText::new(header_status).small().color(MUTED));
                     });
                 });
             });
@@ -460,175 +837,9 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| match self.screen {
-                Screen::Home => {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.label(egui::RichText::new("New chat").size(26.0).strong().color(FG));
-                    ui.add_space(16.0);
-                    // CHANNEL
-                    ui.label(egui::RichText::new("CHANNEL").size(12.0).strong().color(MUTED));
-                    ui.add_space(6.0);
-                    ui.add_sized(
-                        [ui.available_width(), 40.0],
-                        egui::TextEdit::singleline(&mut self.channel_input)
-                            .font(egui::FontId::proportional(15.0))
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(14, 8)), // match the dropdowns' inset
-                    );
-                    // POSTURE / ACCESS / PERSISTENCE dropdowns (match mobile).
-                    combo_section(ui, "POSTURE", "posture", &mut self.posture,
-                        &["pq-pure", "hybrid", "pq-pure-compact"]);
-                    combo_section(ui, "ACCESS", "access", &mut self.access,
-                        &["open", "contacts", "friends"]);
-                    combo_section(ui, "PERSISTENCE", "persistence", &mut self.persistence,
-                        &["Ephemeral", "Persistent", "Always-on"]);
-                    ui.add_space(16.0);
-                    ui.checkbox(
-                        &mut self.use_tor,
-                        egui::RichText::new("Route over Tor (.onion — works across any network, no NAT)").color(MUTED),
-                    );
-                    ui.add_space(20.0);
-                    if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
-                        let ch = if self.channel_input.trim().is_empty() {
-                            "#general".into()
-                        } else {
-                            self.channel_input.clone()
-                        };
-                        self.title = ch.clone();
-                        let _ = self.cmd_tx.send(Cmd::Host {
-                            channel: ch,
-                            posture: self.posture.clone(),
-                            access: self.access.clone(),
-                            use_tor: self.use_tor,
-                        });
-                        self.screen = Screen::Hosting;
-                    }
-                    ui.add_space(20.0);
-                    ui.label(egui::RichText::new("— or join —").color(MUTED));
-                    ui.add_space(8.0);
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.join_input)
-                            .hint_text("talkrypt://…")
-                            .desired_rows(2)
-                            .desired_width(f32::INFINITY)
-                            .margin(egui::Margin::symmetric(14, 8)), // same inset as the fields above
-                    );
-                    ui.add_space(8.0);
-                    if pill(ui, "Join", PANEL, FG).clicked() {
-                        let uri = self.join_input.trim().to_string();
-                        if uri.starts_with("talkrypt://") {
-                            self.title = ChatDescriptor::from_uri(&uri)
-                                .map(|d| d.channel)
-                                .unwrap_or_else(|_| "chat".into());
-                            let _ = self.cmd_tx.send(Cmd::Join { uri, use_tor: self.use_tor });
-                            self.status = "joining…".into();
-                        } else {
-                            self.status = "paste a talkrypt:// invite".into();
-                        }
-                    }
-                    });
-                }
-                Screen::Hosting => {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Scan to join").size(22.0).strong().color(FG));
-                        ui.label(egui::RichText::new("point a phone camera at this code").small().color(MUTED));
-                        ui.add_space(12.0);
-                        if let Some(tex) = &self.qr {
-                            // White quiet-zone frame so the QR scans on the dark bg.
-                            egui::Frame::default()
-                                .fill(egui::Color32::WHITE)
-                                .corner_radius(egui::CornerRadius::same(10))
-                                .inner_margin(egui::Margin::same(10))
-                                .show(ui, |ui| ui.image((tex.id(), tex.size_vec2())));
-                        } else {
-                            ui.spinner();
-                            ui.label(egui::RichText::new("publishing invite…").color(MUTED));
-                        }
-                        ui.add_space(14.0);
-                        if let Some(inv) = self.invite.clone() {
-                            if pill(ui, "Copy invite link", PANEL, FG).clicked() {
-                                ui.ctx().copy_text(inv.clone());
-                                self.status = "invite copied".into();
-                            }
-                            ui.add_space(8.0);
-                            ui.label(egui::RichText::new(&inv).monospace().size(10.0).color(MUTED));
-                        }
-                        ui.add_space(12.0);
-                        if pill(ui, "Open chat", ACCENT, egui::Color32::WHITE).clicked() {
-                            self.screen = Screen::Chat;
-                        }
-                    });
-                    });
-                }
-                Screen::Chat => {
-                    // Header: back · title · peers · share-invite (host only).
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
-                            self.screen = Screen::Home;
-                        }
-                        ui.label(egui::RichText::new(&self.title).strong().color(FG));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(inv) = self.invite.clone() {
-                                if ui.add(egui::Button::new(egui::RichText::new("⧉ Invite").color(ACCENT)).fill(PANEL)).clicked() {
-                                    ui.ctx().copy_text(inv);
-                                    self.status = "invite copied".into();
-                                }
-                            }
-                            ui.label(egui::RichText::new(format!("{} online", self.peers)).small().color(MUTED));
-                        });
-                    });
-                    ui.add_space(6.0);
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(ui.available_height() - 52.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for (mine, who, text) in &self.transcript {
-                                ui.add_space(4.0);
-                                if *mine {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                        bubble(ui, ACCENT, None, text, egui::Color32::WHITE);
-                                    });
-                                } else if who == "•" {
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(egui::RichText::new(text).small().italics().color(MUTED));
-                                    });
-                                } else {
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                                        bubble(ui, PEER_BUBBLE, Some(who), text, FG);
-                                    });
-                                }
-                            }
-                        });
-                    ui.add_space(8.0);
-                    // Message row: padded field + a Send button the SAME height.
-                    ui.horizontal(|ui| {
-                        let send_w = 64.0;
-                        let resp = ui.add_sized(
-                            [ui.available_width() - send_w - 8.0, 40.0],
-                            egui::TextEdit::singleline(&mut self.msg_input)
-                                .hint_text("Message")
-                                .vertical_align(egui::Align::Center)
-                                .margin(egui::Margin::symmetric(14, 8)),
-                        );
-                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let clicked = ui
-                            .add_sized(
-                                [send_w, 40.0],
-                                egui::Button::new(egui::RichText::new("Send").color(egui::Color32::WHITE).strong())
-                                    .fill(ACCENT)
-                                    .corner_radius(egui::CornerRadius::same(12)),
-                            )
-                            .clicked();
-                        if (clicked || enter) && !self.msg_input.trim().is_empty() {
-                            let _ = self.cmd_tx.send(Cmd::Send(self.msg_input.trim().to_string()));
-                            self.msg_input.clear();
-                            resp.request_focus();
-                        }
-                    });
-                }
+                Screen::Home => self.home_screen(ui),
+                Screen::NewChat => self.new_chat_screen(ui),
+                Screen::Chat => self.chat_screen(ui),
             });
     }
 }

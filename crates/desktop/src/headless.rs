@@ -47,15 +47,20 @@ pub fn run(args: &[String]) -> i32 {
         .expect("tokio runtime");
     rt.spawn(worker_loop(cmd_rx, ui_tx, || {}));
 
+    // The driver manages exactly one session; this is its id.
+    const SID: u64 = 1;
+
     // Kick off the requested action.
     let initial = match &cfg.action {
         Action::Host { channel, posture, access } => Cmd::Host {
+            id: SID,
             channel: channel.clone(),
             posture: posture.clone(),
             access: access.clone(),
             use_tor: cfg.use_tor,
         },
         Action::Join { uri } => Cmd::Join {
+            id: SID,
             uri: uri.clone(),
             use_tor: cfg.use_tor,
         },
@@ -76,7 +81,7 @@ pub fn run(args: &[String]) -> i32 {
             if line.is_empty() {
                 continue;
             }
-            if send_tx.send(Cmd::Send(line)).is_err() {
+            if send_tx.send(Cmd::Send { id: SID, text: line }).is_err() {
                 break;
             }
         }
@@ -86,11 +91,11 @@ pub fn run(args: &[String]) -> i32 {
     let mut out = std::io::stdout();
     while let Ok(evt) = ui_rx.recv() {
         let line = match evt {
-            UiEvt::Invite(uri) => format!("INVITE {uri}"),
-            UiEvt::Status(s) => format!("STATUS {s}"),
-            UiEvt::Connected(w) => format!("CONNECTED {w}"),
-            UiEvt::Disconnected(w) => format!("DISCONNECTED {w}"),
-            UiEvt::Line { mine, who, text } => {
+            UiEvt::Invite { uri, .. } => format!("INVITE {uri}"),
+            UiEvt::Status { text, .. } => format!("STATUS {text}"),
+            UiEvt::Connected { who, .. } => format!("CONNECTED {who}"),
+            UiEvt::Disconnected { who, .. } => format!("DISCONNECTED {who}"),
+            UiEvt::Line { mine, who, text, .. } => {
                 if mine {
                     format!("> me: {text}")
                 } else {
