@@ -27,6 +27,13 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
+    <!-- In-app QR scanner: capture an invite QR with the camera (Camera2 + ZXing
+         decode, on-device, no network). Optional hardware so camera-less devices
+         still install and use paste/deep-link onboarding. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
     <!-- Always-on tier: a foreground service keeps the process (hence the chat
          connections) alive in the background; the notification is required by
          Android and is also honest — the user sees talkrypt holding links. -->
@@ -59,6 +66,14 @@
                 <data android:scheme="talkrypt" />
             </intent-filter>
         </activity>
+
+        <!-- In-app QR scanner (Camera2 + ZXing decode). Returns the scanned
+             talkrypt:// invite to MainActivity via startActivityForResult. -->
+        <activity
+            android:name="com.talkrypt.app.QrScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <!-- Always-on tier: keeps connections alive in the background. -->
         <service

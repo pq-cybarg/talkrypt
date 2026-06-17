@@ -35,9 +35,13 @@ dependencies {
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.25'
     // uniffi 0.31 Kotlin bindings runtime.
     implementation 'net.java.dev.jna:jna:5.14.0@aar'
-    // ZXing core: render invites / share URLs as scannable QR (encoder only;
-    // no camera). Scanning is delegated to the OS camera via a talkrypt:// deep
-    // link, so no camera permission is needed in-app.
+    // ZXing core: both ENCODE (render invites as scannable QR) and DECODE (the
+    // in-app camera scanner feeds camera frames to ZXing's QRCodeReader). It's
+    // Apache-2.0, standalone, fully offline — NO Google Play Services, no
+    // network. The "com.google.zxing" group is historical (ZXing began as an
+    // open-source Google 20% project); the artifact phones nothing home. The
+    // camera side is the platform Camera2 API directly, so no AndroidX wrapper
+    // (this app is deliberately AndroidX-free) and no extra dependency.
     implementation 'com.google.zxing:core:3.5.3'
     // JVM unit tests for dependency-free logic (models, session manager).
     testImplementation 'junit:junit:4.13.2'

@@ -168,8 +168,25 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_NEARBY = 0x4E42 // "NB"
+        private const val REQ_SCAN = 0x5343
         private const val REQ_NOTIF = 0x4E54  // "NT" — POST_NOTIFICATIONS for the always-on service
         private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
+    }
+
+    /** Open the in-app camera QR scanner; the result returns to [onActivityResult]. */
+    private fun launchScanner() {
+        startActivityForResult(Intent(this, QrScanActivity::class.java), REQ_SCAN)
+    }
+
+    /** Result from the in-app QR scanner: route a scanned talkrypt:// invite the
+     *  same way a deep link would (link offer vs. chat join). */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_SCAN || resultCode != RESULT_OK) return
+        val uri = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)?.trim().orEmpty()
+        if (!uri.startsWith("talkrypt://")) { toast("Not a talkrypt QR"); return }
+        val isLink = runCatching { inviteChannel(uri) == "#link" }.getOrDefault(false)
+        if (isLink) setContentView(acceptLinkConfirmScreen(uri)) else { toast("opening invite…"); startJoin(uri) }
     }
 
     // ---------- setup screen ----------
@@ -227,6 +244,10 @@ class MainActivity : Activity() {
             val uri = invite.text.toString().trim()
             if (uri.startsWith("talkrypt://")) { pendingTier = tierOf(persistence); startJoin(uri) } else toast("Paste a talkrypt:// invite")
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
+        col.addView(pillButton("⃞ Scan QR to join", accent, Color.WHITE) {
+            pendingTier = tierOf(persistence)
+            launchScanner()
+        }, lp(MATCH_PARENT, dp(50), top = dp(10)))
 
         // In-person: find a nearby host, or send this very app P2P.
         col.addView(text("— in person —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
