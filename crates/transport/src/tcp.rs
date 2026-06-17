@@ -7,10 +7,19 @@
 //!
 //! The transport carries only opaque ciphertext — it sees no plaintext or keys.
 
+use std::time::Duration;
+
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 use async_trait::async_trait;
+
+/// How long a `dial` waits for the TCP handshake before giving up. Without this,
+/// connecting to an unreachable peer (e.g. an endpoint that isn't routable from
+/// this network realm) blocks on the OS SYN-retry timeout — tens of seconds to
+/// minutes — and surfaces to the user as an indefinite "connecting…" with no
+/// error. A bounded timeout turns that into a prompt, actionable failure.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::framing::{read_frame, write_frame};
 use crate::{
@@ -102,7 +111,15 @@ impl Transport for TcpTransport {
     }
 
     async fn dial(&self, endpoint: &Endpoint) -> Result<Box<dyn Stream>> {
-        let stream = TcpStream::connect(endpoint).await.map_err(io)?;
+        let stream = match tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(endpoint)).await {
+            Ok(res) => res.map_err(io)?,
+            Err(_) => {
+                return Err(TransportError::Io(format!(
+                    "timed out after {}s connecting to {endpoint} (host unreachable from this network?)",
+                    DIAL_TIMEOUT.as_secs()
+                )))
+            }
+        };
         stream.set_nodelay(true).ok();
         Ok(Box::new(TcpFramed { inner: stream }))
     }
@@ -140,6 +157,25 @@ mod tests {
         cs.send_frame(b"ping").await.unwrap();
         assert_eq!(cs.recv_frame().await.unwrap(), b"pong");
         assert_eq!(accept.await.unwrap(), b"ping");
+    }
+
+    #[tokio::test]
+    async fn dial_to_unreachable_host_times_out_with_error() {
+        // 10.255.255.1 is a non-routable address that black-holes the SYN, so
+        // the connect never completes — exactly the cross-realm case where the
+        // old code hung indefinitely. We assert the dial returns a bounded
+        // error instead. tokio's paused clock lets us advance past the timeout
+        // without actually waiting 10 wall-clock seconds.
+        tokio::time::pause();
+        let client = TcpTransport::new("127.0.0.1:0");
+        let endpoint: Endpoint = "10.255.255.1:9".to_string();
+        let dial = tokio::spawn(async move { client.dial(&endpoint).await.map(|_| ()) });
+        tokio::time::advance(DIAL_TIMEOUT + Duration::from_secs(1)).await;
+        let err = dial.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
     }
 
     #[tokio::test]
