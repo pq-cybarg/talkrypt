@@ -73,11 +73,17 @@ pub struct AntiCensorship {
     pub transports: Vec<PluggableTransport>,
 }
 
-/// A Tor transport backed by a bootstrapped Arti client.
+/// A Tor transport backed by a bootstrapped Arti client. A single bootstrapped
+/// client is designed to be SHARED across many sessions (it multiplexes streams
+/// and can run several onion services), so callers should `Arc` it once and
+/// reuse it rather than bootstrapping per chat.
 pub struct ArtiTransport {
     client: TorClient<PreferredRuntime>,
     nickname: String,
     onion_addr: Mutex<Option<String>>,
+    // Distinguishes onion services when one shared client hosts several chats:
+    // the first keeps the base nickname (stable .onion), the rest are suffixed.
+    svc_counter: std::sync::atomic::AtomicU64,
     // Kept alive so the ephemeral state dir is not deleted early.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -107,6 +113,7 @@ impl ArtiTransport {
             client,
             nickname: nickname.to_string(),
             onion_addr: Mutex::new(None),
+            svc_counter: std::sync::atomic::AtomicU64::new(0),
             _tempdir: tempdir,
         })
     }
@@ -232,8 +239,12 @@ impl Listener for ArtiListener {
 #[async_trait]
 impl Transport for ArtiTransport {
     async fn listen(&self) -> Result<Box<dyn Listener>> {
-        let nickname =
-            HsNickname::new(self.nickname.clone()).map_err(|e| io(format!("nickname: {e}")))?;
+        // First service on this client keeps the base nickname; additional ones
+        // (a shared client hosting several chats) get a `_N` suffix so Arti
+        // doesn't reject the duplicate nickname.
+        let n = self.svc_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nick = if n == 0 { self.nickname.clone() } else { format!("{}_{n}", self.nickname) };
+        let nickname = HsNickname::new(nick).map_err(|e| io(format!("nickname: {e}")))?;
         let svc_config = OnionServiceConfigBuilder::default()
             .nickname(nickname)
             .build()

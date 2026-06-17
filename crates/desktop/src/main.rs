@@ -22,33 +22,76 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 mod headless;
 
+/// Persistent Tor state dir (consensus/descriptor cache + onion keys). Reusing
+/// it across launches lets warm starts skip the directory bootstrap and keeps a
+/// stable `.onion`. Overridable via `TALKRYPT_TOR_STATE` — used to give two
+/// instances on one host separate dirs (Arti locks its state dir).
+#[cfg(feature = "tor")]
+fn tor_state_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(dir) = std::env::var_os("TALKRYPT_TOR_STATE") {
+        return PathBuf::from(dir);
+    }
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    };
+    base.unwrap_or_else(std::env::temp_dir).join("talkrypt").join("tor")
+}
+
+/// Bootstrap the shared Tor transport at most once and reuse it for every onion
+/// session. A concurrent caller awaits the in-flight bootstrap instead of
+/// starting a second one — so a 2nd/3rd chat reuses the already-warm client.
+#[cfg(feature = "tor")]
+async fn init_tor(
+    cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
+    ui_tx: &std::sync::mpsc::Sender<UiEvt>,
+    id: u64,
+) -> Result<Arc<dyn Transport>, String> {
+    use talkrypt_transport::{ArtiTransport, OnionPersistence};
+    if let Some(t) = cell.get() {
+        return Ok(t.clone());
+    }
+    let _ = ui_tx.send(UiEvt::Status {
+        id,
+        text: "bootstrapping Tor (Arti) — one-time, ~a minute…".into(),
+    });
+    cell.get_or_try_init(|| async {
+        let dir = tor_state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        ArtiTransport::bootstrap(OnionPersistence::Persistent { state_dir: dir }, "talkrypt")
+            .await
+            .map(|t| Arc::new(t) as Arc<dyn Transport>)
+            .map_err(|e| format!("tor bootstrap failed: {e}"))
+    })
+    .await
+    .map(|t| t.clone())
+}
+
 /// Build the network transport for a host/join action. With `use_tor` (the
-/// default) this bootstraps a Tor (Arti) client and hosts/dials onion services —
-/// the NAT-free path, since both peers dial out into the Tor network. Without
-/// it, a plain TCP transport bound to `listen` is used (the same-Wi-Fi fast
-/// path). Bootstrapping Tor takes time, so a status line is emitted first.
+/// default) it reuses the shared, pre-warmed Tor client (onion = NAT-free, both
+/// peers dial out). Without it, a fresh TCP transport bound to `listen` is used
+/// (the same-Wi-Fi fast path).
 async fn make_transport(
     id: u64,
     use_tor: bool,
     listen: &str,
     ui_tx: &std::sync::mpsc::Sender<UiEvt>,
+    tor_cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
 ) -> Result<Arc<dyn Transport>, String> {
     if use_tor {
         #[cfg(feature = "tor")]
         {
-            use talkrypt_transport::{ArtiTransport, OnionPersistence};
-            let _ = ui_tx.send(UiEvt::Status {
-                id,
-                text: "bootstrapping Tor (Arti) — this can take up to a minute…".into(),
-            });
-            let t = ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt")
-                .await
-                .map_err(|e| format!("tor bootstrap failed: {e}"))?;
-            return Ok(Arc::new(t) as Arc<dyn Transport>);
+            return init_tor(tor_cell, ui_tx, id).await;
         }
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (id, ui_tx);
+            let _ = (id, ui_tx, tor_cell);
             return Err("this build has Tor disabled (rebuild with --features tor)".into());
         }
     }
@@ -221,6 +264,21 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
         .get(DEFAULT_SUITE_ID)
         .expect("default suite");
 
+    // One shared, pre-warmed Tor client for ALL onion sessions (bootstrapped at
+    // most once). Pre-warm in the background so it's ready before the first
+    // host/join, without blocking LAN-only use.
+    let tor_cell: Arc<tokio::sync::OnceCell<Arc<dyn Transport>>> = Arc::new(tokio::sync::OnceCell::new());
+    #[cfg(feature = "tor")]
+    {
+        let cell = tor_cell.clone();
+        let ui = ui_tx.clone();
+        let ev = on_event.clone();
+        tokio::spawn(async move {
+            let _ = init_tor(&cell, &ui, 0).await; // id 0 = no session; status is dropped
+            ev();
+        });
+    }
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Cmd::Host { id, channel, posture, access, use_tor } => {
@@ -233,7 +291,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                 // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr (the onion
                 // service picks its own virtual port).
                 let listen = format!("0.0.0.0:{LAN_PORT}");
-                let transport = match make_transport(id, use_tor, &listen, &ui_tx).await {
+                let transport = match make_transport(id, use_tor, &listen, &ui_tx, &tor_cell).await {
                     Ok(t) => t,
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); on_event(); continue; }
                 };
@@ -279,7 +337,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         // Auto-route to Tor when the invite is an onion, regardless
                         // of the toggle (a `.onion` is only reachable through Tor).
                         let join_tor = use_tor || endpoint.contains(".onion");
-                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx).await {
+                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx, &tor_cell).await {
                             Ok(t) => t,
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
                         };
