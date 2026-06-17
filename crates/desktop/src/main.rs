@@ -77,7 +77,7 @@ fn combo_section(ui: &mut egui::Ui, label: &str, id: &str, value: &mut String, o
     ui.add_space(6.0);
     egui::ComboBox::from_id_salt(id)
         .selected_text(egui::RichText::new(value.clone()).color(FG))
-        .width(ui.available_width() - 8.0)
+        .width(ui.available_width()) // match the full-width text fields
         .show_ui(ui, |ui| {
             for opt in options {
                 ui.selectable_value(value, (*opt).to_string(), *opt);
@@ -401,7 +401,8 @@ impl eframe::App for App {
                         [ui.available_width(), 40.0],
                         egui::TextEdit::singleline(&mut self.channel_input)
                             .font(egui::FontId::proportional(15.0))
-                            .vertical_align(egui::Align::Center),
+                            .vertical_align(egui::Align::Center)
+                            .margin(egui::Margin::symmetric(14, 8)), // match the dropdowns' inset
                     );
                     // POSTURE / ACCESS / PERSISTENCE dropdowns (match mobile).
                     combo_section(ui, "POSTURE", "posture", &mut self.posture,
@@ -432,7 +433,13 @@ impl eframe::App for App {
                     ui.add_space(20.0);
                     ui.label(egui::RichText::new("— or join —").color(MUTED));
                     ui.add_space(8.0);
-                    ui.add(egui::TextEdit::multiline(&mut self.join_input).hint_text("talkrypt://…").desired_rows(2).desired_width(f32::INFINITY));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.join_input)
+                            .hint_text("talkrypt://…")
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(14, 8)), // same inset as the fields above
+                    );
                     ui.add_space(8.0);
                     if pill(ui, "Join", PANEL, FG).clicked() {
                         let uri = self.join_input.trim().to_string();
