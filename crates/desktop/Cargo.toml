@@ -12,6 +12,15 @@ edition = "2021"
 name = "talkrypt-desktop"
 path = "src/main.rs"
 
+[features]
+# Tor is the default transport: hosting launches an onion service and joining
+# dials a `.onion`, so two clients reach each other through the Tor network with
+# no inbound routability, no port-forwarding, and no NAT/realm concern (both
+# sides dial out and meet at a rendezvous). Build `--no-default-features` for a
+# small, LAN-only (TCP) binary when Tor's bootstrap weight isn't wanted.
+default = ["tor"]
+tor = ["talkrypt-transport/tor"]
+
 [dependencies]
 # glow (OpenGL) backend + bundled fonts on every desktop OS. macOS and Windows
 # use their native windowing through eframe; the Linux windowing backends are

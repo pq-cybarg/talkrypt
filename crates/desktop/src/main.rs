@@ -16,8 +16,41 @@ use std::sync::Arc;
 use eframe::egui;
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
 use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID};
-use talkrypt_transport::TcpTransport;
+use talkrypt_transport::{TcpTransport, Transport};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+mod headless;
+
+/// Build the network transport for a host/join action. With `use_tor` (the
+/// default) this bootstraps a Tor (Arti) client and hosts/dials onion services —
+/// the NAT-free path, since both peers dial out into the Tor network. Without
+/// it, a plain TCP transport bound to `listen` is used (the same-Wi-Fi fast
+/// path). Bootstrapping Tor takes time, so a status line is emitted first.
+async fn make_transport(
+    use_tor: bool,
+    listen: &str,
+    ui_tx: &std::sync::mpsc::Sender<UiEvt>,
+) -> Result<Arc<dyn Transport>, String> {
+    if use_tor {
+        #[cfg(feature = "tor")]
+        {
+            use talkrypt_transport::{ArtiTransport, OnionPersistence};
+            let _ = ui_tx.send(UiEvt::Status(
+                "bootstrapping Tor (Arti) — this can take up to a minute…".into(),
+            ));
+            let t = ArtiTransport::bootstrap(OnionPersistence::Ephemeral, "talkrypt")
+                .await
+                .map_err(|e| format!("tor bootstrap failed: {e}"))?;
+            return Ok(Arc::new(t) as Arc<dyn Transport>);
+        }
+        #[cfg(not(feature = "tor"))]
+        {
+            let _ = ui_tx;
+            return Err("this build has Tor disabled (rebuild with --features tor)".into());
+        }
+    }
+    Ok(Arc::new(TcpTransport::new(listen)) as Arc<dyn Transport>)
+}
 
 const LAN_PORT: u16 = 9779;
 
@@ -108,9 +141,11 @@ enum Cmd {
         channel: String,
         posture: String,
         access: String,
+        use_tor: bool,
     },
     Join {
         uri: String,
+        use_tor: bool,
     },
     Send(String),
 }
@@ -150,10 +185,143 @@ fn short(fp: &[u8; 48]) -> String {
     fp[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Spawn the async worker (its own Tokio runtime + the `Core`). Returns the
-/// command sender and a std receiver the UI drains each frame.
+/// The async worker that owns the `Core`: it consumes [`Cmd`]s, drives the
+/// transport (TCP or Tor), and reports back as [`UiEvt`]s. `on_event` is invoked
+/// after every state change — the GUI uses it to request a repaint; the headless
+/// driver uses a no-op. This is the single networking code path shared by the
+/// egui app and the `--headless` harness, so they can never drift.
+async fn worker_loop(
+    mut cmd_rx: UnboundedReceiver<Cmd>,
+    ui_tx: std::sync::mpsc::Sender<UiEvt>,
+    on_event: impl Fn(),
+) {
+    let mut core: Option<Core> = None;
+    let mut events: Option<UnboundedReceiver<Event>> = None;
+    let suite = SuiteRegistry::with_defaults()
+        .get(DEFAULT_SUITE_ID)
+        .expect("default suite");
+
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break };
+                match cmd {
+                    Cmd::Host { channel, posture, access, use_tor } => {
+                        // Posture selects the suite; access sets who's heard.
+                        let suite_id = dr_suite_id(profile_from(&posture));
+                        let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
+                            Ok(s) => s,
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad posture: {e}"))); on_event(); continue; }
+                        };
+                        // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr
+                        // (the onion service picks its own virtual port).
+                        let listen = format!("0.0.0.0:{LAN_PORT}");
+                        let transport = match make_transport(use_tor, &listen, &ui_tx).await {
+                            Ok(t) => t,
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("host failed: {e}"))); on_event(); continue; }
+                        };
+                        let desc = ChatDescriptor::new(
+                            TopologyKind::P2P,
+                            Persistence::Ephemeral,
+                            &suite_id,
+                            vec![listen.clone()],
+                            channel,
+                        );
+                        let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
+                        match c.host().await {
+                            // `host()` returns the listener endpoint: the dialable
+                            // `.onion:port` over Tor, or the local bind over TCP.
+                            Ok(bound) => {
+                                match access.as_str() {
+                                    "contacts" => c.restrict_to_contacts(),
+                                    "friends" => c.restrict_to_friends(),
+                                    _ => c.open_access(),
+                                }
+                                // Over Tor advertise the onion endpoint as-is
+                                // (globally dialable, no NAT); over TCP swap the
+                                // wildcard bind for this machine's LAN IP.
+                                let advertised = if use_tor { bound } else { format!("{}:{LAN_PORT}", lan_ip()) };
+                                let mut d = c.descriptor().clone();
+                                d.endpoints = vec![advertised];
+                                let net = if use_tor { "tor" } else { "lan" };
+                                let _ = ui_tx.send(UiEvt::Invite(d.to_uri()));
+                                let _ = ui_tx.send(UiEvt::Status(format!("hosting · {net} · {posture} · {access}")));
+                                core = Some(c);
+                                events = Some(rx);
+                            }
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("host failed: {e}"))); }
+                        }
+                    }
+                    Cmd::Join { uri, use_tor } => {
+                        match ChatDescriptor::from_uri(&uri) {
+                            Ok(desc) => {
+                                // Use the invite's own suite (posture), falling back to default.
+                                let sid = desc.resolved_suite_id().to_string();
+                                let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| suite.clone());
+                                let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
+                                // Auto-route to Tor when the invite is an onion,
+                                // regardless of the toggle (a `.onion` is only
+                                // reachable through Tor).
+                                let join_tor = use_tor || endpoint.contains(".onion");
+                                let transport = match make_transport(join_tor, "0.0.0.0:0", &ui_tx).await {
+                                    Ok(t) => t,
+                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("join failed: {e}"))); on_event(); continue; }
+                                };
+                                let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
+                                match c.connect(&endpoint).await {
+                                    Ok(_) => {
+                                        let _ = ui_tx.send(UiEvt::Status(format!("joined — connected to {endpoint}")));
+                                        core = Some(c);
+                                        events = Some(rx);
+                                    }
+                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("join failed: {e}"))); }
+                                }
+                            }
+                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad invite: {e}"))); }
+                        }
+                    }
+                    Cmd::Send(text) => {
+                        if let Some(c) = &core {
+                            match c.send(&text).await {
+                                Ok(_) => { let _ = ui_tx.send(UiEvt::Line { mine: true, who: "me".into(), text }); }
+                                Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("send failed: {e}"))); }
+                            }
+                        }
+                    }
+                }
+                on_event();
+            }
+            ev = async {
+                match &mut events {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match ev {
+                    Some(Event::Message { from, text, .. }) =>
+                        { let _ = ui_tx.send(UiEvt::Line { mine: false, who: short(&from), text }); }
+                    Some(Event::Connected { fingerprint }) =>
+                        { let _ = ui_tx.send(UiEvt::Connected(short(&fingerprint))); }
+                    Some(Event::Disconnected { fingerprint }) =>
+                        { let _ = ui_tx.send(UiEvt::Disconnected(short(&fingerprint))); }
+                    Some(Event::Identity { account_fingerprint, username, .. }) => {
+                        let who = username.unwrap_or_else(|| short(&account_fingerprint));
+                        let _ = ui_tx.send(UiEvt::Status(format!("identity: {who}")));
+                    }
+                    Some(Event::Error(m)) => { let _ = ui_tx.send(UiEvt::Status(format!("! {m}"))); }
+                    _ => {}
+                }
+                on_event();
+            }
+        }
+    }
+}
+
+/// Spawn the async worker on its own thread + Tokio runtime (the GUI path).
+/// Returns the command sender and a std receiver the UI drains each frame; the
+/// worker requests an egui repaint after every event.
 fn spawn_worker(ctx: egui::Context) -> (UnboundedSender<Cmd>, std::sync::mpsc::Receiver<UiEvt>) {
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvt>();
 
     std::thread::spawn(move || {
@@ -161,111 +329,7 @@ fn spawn_worker(ctx: egui::Context) -> (UnboundedSender<Cmd>, std::sync::mpsc::R
             .enable_all()
             .build()
             .expect("tokio runtime");
-        rt.block_on(async move {
-            let mut core: Option<Core> = None;
-            let mut events: Option<UnboundedReceiver<Event>> = None;
-            let suite = SuiteRegistry::with_defaults()
-                .get(DEFAULT_SUITE_ID)
-                .expect("default suite");
-
-            loop {
-                tokio::select! {
-                    cmd = cmd_rx.recv() => {
-                        let Some(cmd) = cmd else { break };
-                        match cmd {
-                            Cmd::Host { channel, posture, access } => {
-                                // Posture selects the suite; access sets who's heard.
-                                let suite_id = dr_suite_id(profile_from(&posture));
-                                let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
-                                    Ok(s) => s,
-                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad posture: {e}"))); ctx.request_repaint(); continue; }
-                                };
-                                let listen = format!("0.0.0.0:{LAN_PORT}");
-                                let advertised = format!("{}:{LAN_PORT}", lan_ip());
-                                let desc = ChatDescriptor::new(
-                                    TopologyKind::P2P,
-                                    Persistence::Ephemeral,
-                                    &suite_id,
-                                    vec![listen.clone()],
-                                    channel,
-                                );
-                                let transport = Arc::new(TcpTransport::new(listen.as_str()));
-                                let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
-                                match c.host().await {
-                                    Ok(_) => {
-                                        match access.as_str() {
-                                            "contacts" => c.restrict_to_contacts(),
-                                            "friends" => c.restrict_to_friends(),
-                                            _ => c.open_access(),
-                                        }
-                                        // Advertise the reachable LAN address in the invite.
-                                        let mut d = c.descriptor().clone();
-                                        d.endpoints = vec![advertised];
-                                        let _ = ui_tx.send(UiEvt::Invite(d.to_uri()));
-                                        let _ = ui_tx.send(UiEvt::Status(format!("hosting · {posture} · {access}")));
-                                        core = Some(c);
-                                        events = Some(rx);
-                                    }
-                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("host failed: {e}"))); }
-                                }
-                            }
-                            Cmd::Join { uri } => {
-                                match ChatDescriptor::from_uri(&uri) {
-                                    Ok(desc) => {
-                                        // Use the invite's own suite (posture), falling back to default.
-                                        let sid = desc.resolved_suite_id().to_string();
-                                        let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| suite.clone());
-                                        let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
-                                        let transport = Arc::new(TcpTransport::new("0.0.0.0:0"));
-                                        let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
-                                        match c.connect(&endpoint).await {
-                                            Ok(_) => {
-                                                let _ = ui_tx.send(UiEvt::Status(format!("joined — connected to {endpoint}")));
-                                                core = Some(c);
-                                                events = Some(rx);
-                                            }
-                                            Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("join failed: {e}"))); }
-                                        }
-                                    }
-                                    Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("bad invite: {e}"))); }
-                                }
-                            }
-                            Cmd::Send(text) => {
-                                if let Some(c) = &core {
-                                    match c.send(&text).await {
-                                        Ok(_) => { let _ = ui_tx.send(UiEvt::Line { mine: true, who: "me".into(), text }); }
-                                        Err(e) => { let _ = ui_tx.send(UiEvt::Status(format!("send failed: {e}"))); }
-                                    }
-                                }
-                            }
-                        }
-                        ctx.request_repaint();
-                    }
-                    ev = async {
-                        match &mut events {
-                            Some(rx) => rx.recv().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        match ev {
-                            Some(Event::Message { from, text, .. }) =>
-                                { let _ = ui_tx.send(UiEvt::Line { mine: false, who: short(&from), text }); }
-                            Some(Event::Connected { fingerprint }) =>
-                                { let _ = ui_tx.send(UiEvt::Connected(short(&fingerprint))); }
-                            Some(Event::Disconnected { fingerprint }) =>
-                                { let _ = ui_tx.send(UiEvt::Disconnected(short(&fingerprint))); }
-                            Some(Event::Identity { account_fingerprint, username, .. }) => {
-                                let who = username.unwrap_or_else(|| short(&account_fingerprint));
-                                let _ = ui_tx.send(UiEvt::Status(format!("identity: {who}")));
-                            }
-                            Some(Event::Error(m)) => { let _ = ui_tx.send(UiEvt::Status(format!("! {m}"))); }
-                            _ => {}
-                        }
-                        ctx.request_repaint();
-                    }
-                }
-            }
-        });
+        rt.block_on(worker_loop(cmd_rx, ui_tx, move || ctx.request_repaint()));
     });
 
     (cmd_tx, ui_rx)
@@ -310,7 +374,9 @@ impl App {
             posture: "pq-pure".into(),
             access: "open".into(),
             persistence: "Persistent".into(), // default Persistent, matching mobile
-            use_tor: false,
+            // Tor on by default whenever this build can do Tor; a LAN-only
+            // (--no-default-features) build starts unchecked.
+            use_tor: cfg!(feature = "tor"),
             join_input: String::new(),
             msg_input: String::new(),
             invite: None,
@@ -418,7 +484,7 @@ impl eframe::App for App {
                     ui.add_space(16.0);
                     ui.checkbox(
                         &mut self.use_tor,
-                        egui::RichText::new("Route over Tor (.onion; needs the Tor build)").color(MUTED),
+                        egui::RichText::new("Route over Tor (.onion — works across any network, no NAT)").color(MUTED),
                     );
                     ui.add_space(20.0);
                     if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
@@ -432,6 +498,7 @@ impl eframe::App for App {
                             channel: ch,
                             posture: self.posture.clone(),
                             access: self.access.clone(),
+                            use_tor: self.use_tor,
                         });
                         self.screen = Screen::Hosting;
                     }
@@ -452,7 +519,7 @@ impl eframe::App for App {
                             self.title = ChatDescriptor::from_uri(&uri)
                                 .map(|d| d.channel)
                                 .unwrap_or_else(|_| "chat".into());
-                            let _ = self.cmd_tx.send(Cmd::Join { uri });
+                            let _ = self.cmd_tx.send(Cmd::Join { uri, use_tor: self.use_tor });
                             self.status = "joining…".into();
                         } else {
                             self.status = "paste a talkrypt:// invite".into();
@@ -567,6 +634,12 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
+    // Headless driver path: no window, scriptable over argv + stdin/stdout.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "--headless") {
+        std::process::exit(headless::run(&argv));
+    }
+
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 640.0])
