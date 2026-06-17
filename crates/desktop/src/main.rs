@@ -557,7 +557,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.label(egui::RichText::new("Chats").size(26.0).strong().color(FG));
             ui.add_space(12.0);
-            if pill(ui, "＋  New chat", ACCENT, egui::Color32::WHITE).clicked() {
+            if pill(ui, "+ New chat", ACCENT, egui::Color32::WHITE).clicked() {
                 self.notice.clear();
                 self.screen = Screen::NewChat;
             }
@@ -578,23 +578,24 @@ impl App {
                 .collect();
             let mut open_id: Option<u64> = None;
             for (id, title, status, connected, peers, is_host) in rows {
-                let dot = if connected { ACCENT } else { MUTED };
+                let (badge, badge_col) = if connected { ("online", ACCENT) } else { ("offline", MUTED) };
                 let inner = egui::Frame::default()
                     .fill(PANEL)
                     .corner_radius(egui::CornerRadius::same(12))
                     .inner_margin(egui::Margin::symmetric(14, 12))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("●").color(dot));
-                            ui.add_space(4.0);
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(&title).strong().color(FG));
                                 let sub = if connected {
-                                    format!("{peers} online · {}", if is_host { "hosting" } else { "joined" })
+                                    format!("{peers} connected · {}", if is_host { "hosting" } else { "joined" })
                                 } else {
                                     status.clone()
                                 };
                                 ui.label(egui::RichText::new(sub).small().color(MUTED));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(badge).small().strong().color(badge_col));
                             });
                         });
                     });
@@ -613,7 +614,7 @@ impl App {
     fn new_chat_screen(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new("< Back").color(FG)).fill(PANEL)).clicked() {
                     self.screen = Screen::Home;
                 }
                 ui.add_space(6.0);
@@ -698,23 +699,23 @@ impl App {
         let mut toggle_invite = false;
         let mut do_reconnect = false;
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("< Back").color(FG)).fill(PANEL)).clicked() {
                 go_home = true;
             }
             ui.label(egui::RichText::new(&title).strong().color(FG));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if invite.is_some() && ui.add(egui::Button::new(egui::RichText::new("⧉ Invite").color(ACCENT)).fill(PANEL)).clicked() {
+                if invite.is_some() && ui.add(egui::Button::new(egui::RichText::new("Invite").color(ACCENT)).fill(PANEL)).clicked() {
                     toggle_invite = true;
                 }
                 let (txt, col) = if connected {
-                    (format!("● {peers} online"), ACCENT)
+                    (format!("{peers} online"), ACCENT)
                 } else {
-                    ("○ offline".to_string(), MUTED)
+                    ("offline".to_string(), MUTED)
                 };
                 ui.label(egui::RichText::new(txt).small().color(col));
                 // A joined session can re-dial a dropped host; a host just waits.
                 if !connected && !is_host
-                    && ui.add(egui::Button::new(egui::RichText::new("⟳ Reconnect").color(FG)).fill(PANEL)).clicked()
+                    && ui.add(egui::Button::new(egui::RichText::new("Reconnect").color(FG)).fill(PANEL)).clicked()
                 {
                     do_reconnect = true;
                 }
