@@ -57,6 +57,12 @@ class QrScanActivity : Activity() {
     // Guards against re-entrant decode + double-finishing once we have a hit.
     private val decoding = AtomicBoolean(false)
     private val done = AtomicBoolean(false)
+    // Single-flight guards: the camera can be opened from several callbacks
+    // (resume, surface-ready, permission-granted). Without these the device gets
+    // opened twice and the second open disconnects the first, crashing the
+    // first's onOpened in startPreview (CAMERA_DISCONNECTED).
+    @Volatile private var opening = false
+    @Volatile private var paused = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -106,8 +112,7 @@ class QrScanActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                // Permission just granted — the surface may already be ready.
-                if (textureView.isAvailable) openCamera()
+                maybeOpenCamera()
             } else {
                 hint.text = "Camera permission needed to scan"
             }
@@ -116,21 +121,22 @@ class QrScanActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        paused = false
         bgThread = HandlerThread("qr-cam").also { it.start() }
         bgHandler = Handler(bgThread!!.looper)
-        if (textureView.isAvailable) {
-            openCamera()
-        } else {
-            textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) = openCamera()
-                override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
-                override fun onSurfaceTextureDestroyed(s: SurfaceTexture) = true
-                override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
-            }
+        // Register the surface listener once; every open path funnels through the
+        // single-flight maybeOpenCamera(), so duplicate triggers are harmless.
+        textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) { maybeOpenCamera() }
+            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
+            override fun onSurfaceTextureDestroyed(s: SurfaceTexture) = true
+            override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
         }
+        maybeOpenCamera()
     }
 
     override fun onPause() {
+        paused = true
         closeCamera()
         bgThread?.quitSafely()
         bgThread = null
@@ -138,9 +144,12 @@ class QrScanActivity : Activity() {
         super.onPause()
     }
 
-    private fun openCamera() {
+    /** Idempotent, single-flight camera open. Safe to call from any callback. */
+    private fun maybeOpenCamera() {
+        if (paused || opening || cameraDevice != null) return
+        if (!textureView.isAvailable) return
+        if (bgHandler == null) return
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
-        if (cameraDevice != null) return
         val mgr = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
             val id = pickBackCamera(mgr) ?: run { hint.text = "No camera found"; return }
@@ -151,15 +160,20 @@ class QrScanActivity : Activity() {
             imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, android.graphics.ImageFormat.YUV_420_888, 2).apply {
                 setOnImageAvailableListener({ r -> onFrame(r) }, bgHandler)
             }
+            opening = true
             mgr.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
+                    opening = false
+                    // If we paused/finished while opening, don't touch the camera.
+                    if (paused || isFinishing) { device.close(); cameraDevice = null; return }
                     cameraDevice = device
                     startPreview()
                 }
-                override fun onDisconnected(device: CameraDevice) { device.close(); cameraDevice = null }
-                override fun onError(device: CameraDevice, error: Int) { device.close(); cameraDevice = null; runOnUiThread { hint.text = "Camera error $error" } }
+                override fun onDisconnected(device: CameraDevice) { opening = false; device.close(); cameraDevice = null }
+                override fun onError(device: CameraDevice, error: Int) { opening = false; device.close(); cameraDevice = null; runOnUiThread { hint.text = "Camera error $error" } }
             }, bgHandler)
         } catch (e: Exception) {
+            opening = false
             runOnUiThread { hint.text = "Camera unavailable: ${e.message}" }
         }
     }
@@ -167,23 +181,29 @@ class QrScanActivity : Activity() {
     private fun startPreview() {
         val device = cameraDevice ?: return
         val texture = textureView.surfaceTexture ?: return
-        texture.setDefaultBufferSize(previewSize.width, previewSize.height)
-        val previewSurface = Surface(texture)
-        val readerSurface = imageReader!!.surface
-        val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewSurface)
-            addTarget(readerSurface)
-            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-        }
-        @Suppress("DEPRECATION")
-        device.createCaptureSession(listOf(previewSurface, readerSurface), object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) {
-                if (cameraDevice == null) return
-                session = s
-                runCatching { s.setRepeatingRequest(req.build(), null, bgHandler) }
+        try {
+            texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            val previewSurface = Surface(texture)
+            val readerSurface = imageReader!!.surface
+            val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(previewSurface)
+                addTarget(readerSurface)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             }
-            override fun onConfigureFailed(s: CameraCaptureSession) { runOnUiThread { hint.text = "Camera config failed" } }
-        }, bgHandler)
+            @Suppress("DEPRECATION")
+            device.createCaptureSession(listOf(previewSurface, readerSurface), object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    if (cameraDevice == null || paused) return
+                    session = s
+                    runCatching { s.setRepeatingRequest(req.build(), null, bgHandler) }
+                }
+                override fun onConfigureFailed(s: CameraCaptureSession) { runOnUiThread { hint.text = "Camera config failed" } }
+            }, bgHandler)
+        } catch (e: Exception) {
+            // Device disconnected/closed between open and preview — bail quietly
+            // instead of crashing (the CAMERA_DISCONNECTED case).
+            runOnUiThread { hint.text = "Camera unavailable: ${e.message}" }
+        }
     }
 
     private fun onFrame(rdr: ImageReader) {
@@ -235,6 +255,7 @@ class QrScanActivity : Activity() {
     }
 
     private fun closeCamera() {
+        opening = false
         runCatching { session?.close() }; session = null
         runCatching { cameraDevice?.close() }; cameraDevice = null
         runCatching { imageReader?.close() }; imageReader = null

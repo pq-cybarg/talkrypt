@@ -244,7 +244,7 @@ class MainActivity : Activity() {
             val uri = invite.text.toString().trim()
             if (uri.startsWith("talkrypt://")) { pendingTier = tierOf(persistence); startJoin(uri) } else toast("Paste a talkrypt:// invite")
         }, lp(MATCH_PARENT, dp(50), top = dp(12)))
-        col.addView(pillButton("⃞ Scan QR to join", accent, Color.WHITE) {
+        col.addView(pillButton("Scan a QR code", accent, Color.WHITE) {
             pendingTier = tierOf(persistence)
             launchScanner()
         }, lp(MATCH_PARENT, dp(50), top = dp(10)))
