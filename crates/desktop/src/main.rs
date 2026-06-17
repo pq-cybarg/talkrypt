@@ -282,6 +282,7 @@ struct App {
     cmd_tx: UnboundedSender<Cmd>,
     ui_rx: std::sync::mpsc::Receiver<UiEvt>,
     screen: Screen,
+    title: String,
     channel_input: String,
     posture: String,
     access: String,
@@ -304,6 +305,7 @@ impl App {
             cmd_tx,
             ui_rx,
             screen: Screen::Home,
+            title: "#general".into(),
             channel_input: "#general".into(),
             posture: "pq-pure".into(),
             access: "open".into(),
@@ -324,8 +326,10 @@ impl App {
         let Ok(code) = qrcode::QrCode::new(invite.as_bytes()) else { return };
         let modules = code.to_colors();
         let dim = (modules.len() as f64).sqrt() as usize;
-        let scale = 6usize;
         let quiet = 4usize;
+        // Target ~240px total so the QR doesn't swallow the window; pick an
+        // integer module scale (>=2) so modules stay crisp under NEAREST.
+        let scale = (240 / (dim + quiet * 2)).max(2);
         let px = (dim + quiet * 2) * scale;
         let mut img = egui::ColorImage::new([px, px], egui::Color32::WHITE);
         for y in 0..dim {
@@ -423,6 +427,7 @@ impl eframe::App for App {
                         } else {
                             self.channel_input.clone()
                         };
+                        self.title = ch.clone();
                         let _ = self.cmd_tx.send(Cmd::Host {
                             channel: ch,
                             posture: self.posture.clone(),
@@ -444,6 +449,9 @@ impl eframe::App for App {
                     if pill(ui, "Join", PANEL, FG).clicked() {
                         let uri = self.join_input.trim().to_string();
                         if uri.starts_with("talkrypt://") {
+                            self.title = ChatDescriptor::from_uri(&uri)
+                                .map(|d| d.channel)
+                                .unwrap_or_else(|_| "chat".into());
                             let _ = self.cmd_tx.send(Cmd::Join { uri });
                             self.status = "joining…".into();
                         } else {
@@ -471,22 +479,43 @@ impl eframe::App for App {
                             ui.label(egui::RichText::new("publishing invite…").color(MUTED));
                         }
                         ui.add_space(14.0);
-                        if let Some(inv) = &self.invite {
-                            ui.collapsing(egui::RichText::new("invite text").color(MUTED), |ui| {
-                                ui.label(egui::RichText::new(inv).monospace().small().color(MUTED));
-                            });
+                        if let Some(inv) = self.invite.clone() {
+                            if pill(ui, "Copy invite link", PANEL, FG).clicked() {
+                                ui.ctx().copy_text(inv.clone());
+                                self.status = "invite copied".into();
+                            }
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new(&inv).monospace().size(10.0).color(MUTED));
                         }
-                        ui.add_space(6.0);
-                        if pill(ui, "Open chat", PANEL, FG).clicked() {
+                        ui.add_space(12.0);
+                        if pill(ui, "Open chat", ACCENT, egui::Color32::WHITE).clicked() {
                             self.screen = Screen::Chat;
                         }
                     });
                     });
                 }
                 Screen::Chat => {
+                    // Header: back · title · peers · share-invite (host only).
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new("‹ Back").color(FG)).fill(PANEL)).clicked() {
+                            self.screen = Screen::Home;
+                        }
+                        ui.label(egui::RichText::new(&self.title).strong().color(FG));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(inv) = self.invite.clone() {
+                                if ui.add(egui::Button::new(egui::RichText::new("⧉ Invite").color(ACCENT)).fill(PANEL)).clicked() {
+                                    ui.ctx().copy_text(inv);
+                                    self.status = "invite copied".into();
+                                }
+                            }
+                            ui.label(egui::RichText::new(format!("{} online", self.peers)).small().color(MUTED));
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.separator();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .max_height(ui.available_height() - 56.0)
+                        .max_height(ui.available_height() - 52.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             for (mine, who, text) in &self.transcript {
@@ -506,15 +535,26 @@ impl eframe::App for App {
                                 }
                             }
                         });
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
+                    // Message row: padded field + a Send button the SAME height.
                     ui.horizontal(|ui| {
-                        let send_w = 72.0;
+                        let send_w = 64.0;
                         let resp = ui.add_sized(
-                            [ui.available_width() - send_w, 38.0],
-                            egui::TextEdit::singleline(&mut self.msg_input).hint_text("Message"),
+                            [ui.available_width() - send_w - 8.0, 40.0],
+                            egui::TextEdit::singleline(&mut self.msg_input)
+                                .hint_text("Message")
+                                .vertical_align(egui::Align::Center)
+                                .margin(egui::Margin::symmetric(14, 8)),
                         );
                         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let clicked = pill(ui, "Send", ACCENT, egui::Color32::WHITE).clicked();
+                        let clicked = ui
+                            .add_sized(
+                                [send_w, 40.0],
+                                egui::Button::new(egui::RichText::new("Send").color(egui::Color32::WHITE).strong())
+                                    .fill(ACCENT)
+                                    .corner_radius(egui::CornerRadius::same(12)),
+                            )
+                            .clicked();
                         if (clicked || enter) && !self.msg_input.trim().is_empty() {
                             let _ = self.cmd_tx.send(Cmd::Send(self.msg_input.trim().to_string()));
                             self.msg_input.clear();
