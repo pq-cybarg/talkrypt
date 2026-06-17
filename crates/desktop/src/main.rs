@@ -391,6 +391,7 @@ impl eframe::App for App {
             .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| match self.screen {
                 Screen::Home => {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.label(egui::RichText::new("New chat").size(26.0).strong().color(FG));
                     ui.add_space(16.0);
                     // CHANNEL
@@ -399,7 +400,8 @@ impl eframe::App for App {
                     ui.add_sized(
                         [ui.available_width(), 40.0],
                         egui::TextEdit::singleline(&mut self.channel_input)
-                            .font(egui::FontId::proportional(15.0)),
+                            .font(egui::FontId::proportional(15.0))
+                            .vertical_align(egui::Align::Center),
                     );
                     // POSTURE / ACCESS / PERSISTENCE dropdowns (match mobile).
                     combo_section(ui, "POSTURE", "posture", &mut self.posture,
@@ -441,8 +443,10 @@ impl eframe::App for App {
                             self.status = "paste a talkrypt:// invite".into();
                         }
                     }
+                    });
                 }
                 Screen::Hosting => {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new("Scan to join").size(22.0).strong().color(FG));
@@ -469,6 +473,7 @@ impl eframe::App for App {
                         if pill(ui, "Open chat", PANEL, FG).clicked() {
                             self.screen = Screen::Chat;
                         }
+                    });
                     });
                 }
                 Screen::Chat => {
