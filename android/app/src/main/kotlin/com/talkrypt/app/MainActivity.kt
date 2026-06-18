@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
+import android.provider.Settings
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -819,6 +821,18 @@ class MainActivity : Activity() {
                     onError = { msg -> toast(msg) },
                 )
             }
+            promptWifiIfOff()
+        }
+    }
+
+    /** Wi-Fi Direct needs the Wi-Fi radio on. If it's off, offer a one-tap enable
+     *  via the system Wi-Fi panel (Bluetooth discovery still works regardless). */
+    private fun promptWifiIfOff() {
+        val wifi = getSystemService(WifiManager::class.java)
+        if (wifi?.isWifiEnabled == false) {
+            toast("Wi-Fi is off — turn it on for Wi-Fi Direct (Bluetooth still works)")
+            // API 29+ slide-up Wi-Fi panel; apps can't toggle Wi-Fi directly.
+            runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
         }
     }
 

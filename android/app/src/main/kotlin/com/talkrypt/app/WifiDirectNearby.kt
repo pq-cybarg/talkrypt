@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Handler
@@ -42,6 +43,7 @@ import kotlin.concurrent.thread
 class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
     private val main = Handler(Looper.getMainLooper())
     private val manager = context.getSystemService(WifiP2pManager::class.java)
+    private val wifi = context.getSystemService(WifiManager::class.java)
     private var channel: WifiP2pManager.Channel? = null
     private var receiver: BroadcastReceiver? = null
     private var server: ServerSocket? = null
@@ -59,20 +61,44 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
         return channel != null
     }
 
+    /** Wi-Fi Direct rides on the Wi-Fi radio; `discoverPeers` fails with a bare
+     *  BUSY/ERROR code when Wi-Fi is off, so we check first and say so plainly. */
+    private fun wifiOff(): Boolean = wifi?.isWifiEnabled != true
+
+    private fun reasonText(reason: Int): String = when (reason) {
+        WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct isn't supported on this device"
+        WifiP2pManager.BUSY -> "Wi-Fi Direct is busy — try again in a moment"
+        WifiP2pManager.ERROR ->
+            if (wifiOff()) "Turn on Wi-Fi to use Wi-Fi Direct" else "Wi-Fi Direct error"
+        else -> "Wi-Fi Direct failed ($reason)"
+    }
+
+    /** Run discoverPeers, retrying once on the transient BUSY code. */
     @SuppressLint("MissingPermission")
-    override fun startAdvertising(inviteUri: String) {
-        if (!ensureChannel()) return
-        // Serve the invite to whoever connects to us (we may become group owner).
-        startInviteServer(inviteUri)
-        registerReceiver()
+    private fun discover(onError: (String) -> Unit, retries: Int = 1) {
         try {
             manager?.discoverPeers(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {}
-                override fun onFailure(reason: Int) {}
+                override fun onFailure(reason: Int) {
+                    if (reason == WifiP2pManager.BUSY && retries > 0) {
+                        main.postDelayed({ discover(onError, retries - 1) }, 1200)
+                    } else {
+                        main.post { onError(reasonText(reason)) }
+                    }
+                }
             })
         } catch (e: SecurityException) {
-            // permission handled by caller
+            main.post { onError("Nearby Wi-Fi permission denied") }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun startAdvertising(inviteUri: String) {
+        if (!ensureChannel() || wifiOff()) return
+        // Serve the invite to whoever connects to us (we may become group owner).
+        startInviteServer(inviteUri)
+        registerReceiver()
+        discover({})
     }
 
     @SuppressLint("MissingPermission")
@@ -84,19 +110,14 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
             onError("Wi-Fi Direct unavailable")
             return
         }
+        if (wifiOff()) {
+            onError("Turn on Wi-Fi to use Wi-Fi Direct")
+            return
+        }
         onFoundCb = onFound
         onErrorCb = onError
         registerReceiver()
-        try {
-            manager?.discoverPeers(channel, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {}
-                override fun onFailure(reason: Int) {
-                    main.post { onError("Wi-Fi Direct discovery failed ($reason)") }
-                }
-            })
-        } catch (e: SecurityException) {
-            onError("Nearby Wi-Fi permission denied")
-        }
+        discover(onError)
     }
 
     /** Group owner socket: hand the invite to any peer that connects. */
