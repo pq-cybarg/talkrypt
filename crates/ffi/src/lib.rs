@@ -11,7 +11,7 @@
 //!
 //! Transport is TCP here for portability; an Arti onion build is a feature swap.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -37,6 +37,38 @@ fn tor_persistence(state_dir: &str) -> talkrypt_transport::OnionPersistence {
     let path = std::path::PathBuf::from(state_dir);
     let _ = std::fs::create_dir_all(&path);
     talkrypt_transport::OnionPersistence::Persistent { state_dir: path }
+}
+
+/// One process-global Tokio runtime shared by every client. It outlives any
+/// single client (it's `static`), so background tasks spawned by the shared Tor
+/// client — circuit/dir managers, the onion rendezvous pump — keep running for
+/// the life of the process instead of dying when one client is dropped.
+fn rt() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| Runtime::new().expect("tokio runtime"))
+}
+
+/// One shared, bootstrapped Arti client reused by every Tor host/join. Avoids
+/// the per-chat (and per-launch) cold directory bootstrap that made Tor "very
+/// slow": the first onion action bootstraps once on the persistent [`rt`] using
+/// the first `state_dir`; later chats reuse the warm client. Onion services get
+/// unique nicknames (handled in `ArtiTransport::listen`) so one client can host
+/// several chats. A rare race may bootstrap twice; the `OnceLock` keeps one.
+#[cfg(feature = "tor")]
+fn shared_tor(state_dir: &str) -> Result<Arc<talkrypt_transport::ArtiTransport>, FfiError> {
+    static TOR: OnceLock<Arc<talkrypt_transport::ArtiTransport>> = OnceLock::new();
+    if let Some(t) = TOR.get() {
+        return Ok(t.clone());
+    }
+    install_tor_panic_logger(state_dir);
+    let built = Arc::new(
+        rt().block_on(talkrypt_transport::ArtiTransport::bootstrap(
+            tor_persistence(state_dir),
+            "talkrypt",
+        ))
+        .map_err(FfiError::from)?,
+    );
+    Ok(TOR.get_or_init(|| built).clone())
 }
 
 /// Route panics (incl. on Arti's worker threads, which Android can't surface) to
@@ -285,7 +317,7 @@ fn posture_from(s: &str) -> Option<KemProfile> {
 /// A talkrypt chat client, exported to other languages.
 #[derive(uniffi::Object)]
 pub struct TalkryptClient {
-    rt: Runtime,
+    rt: &'static Runtime,
     core: Core,
     events: Mutex<UnboundedReceiver<Event>>,
     /// The shareable invite URI. For Tor hosts this carries the published
@@ -314,7 +346,7 @@ impl TalkryptClient {
         posture: String,
         endpoint: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
         let suite_id = dr_suite_id(profile);
         let suite = SuiteRegistry::with_defaults()
@@ -363,22 +395,16 @@ impl TalkryptClient {
         }
         #[cfg(feature = "tor")]
         {
-            use talkrypt_transport::ArtiTransport;
-            install_tor_panic_logger(&state_dir);
-            let rt = Runtime::new().map_err(FfiError::from)?;
+            let rt = rt();
             let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
             let suite_id = dr_suite_id(profile);
             let suite = SuiteRegistry::with_defaults()
                 .get(&suite_id)
                 .map_err(FfiError::from)?;
-            // Arti needs a writable state dir for onion keys + the dir cache. On
-            // Android the temp dir isn't usable, so the host passes a persistent
-            // path (the app's filesDir).
-            let persistence = tor_persistence(&state_dir);
-            let arti = Arc::new(
-                rt.block_on(ArtiTransport::bootstrap(persistence, "talkrypt"))
-                    .map_err(FfiError::from)?,
-            );
+            // One shared, warm Arti client (bootstrapped once) hosts this chat as
+            // a fresh onion service. Arti needs a writable state dir; on Android
+            // the app passes a persistent path (its filesDir).
+            let arti = shared_tor(&state_dir)?;
             let desc = ChatDescriptor::new(
                 TopologyKind::P2P,
                 Persistence::Ephemeral,
@@ -406,7 +432,7 @@ impl TalkryptClient {
     /// Join an existing chat from a `talkrypt://` invite URI.
     #[uniffi::constructor]
     pub fn join(uri: String) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
         // Resolve the chat's scheme by fingerprint (handles blank/optional
         // posture and custom schemes); must be registered in this build.
@@ -444,17 +470,13 @@ impl TalkryptClient {
         }
         #[cfg(feature = "tor")]
         {
-            use talkrypt_transport::ArtiTransport;
-            install_tor_panic_logger(&state_dir);
-            let rt = Runtime::new().map_err(FfiError::from)?;
+            let rt = rt();
             let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
             let suite = SuiteRegistry::with_defaults()
                 .get_by_scheme_hash(&desc.scheme_hash())
                 .map_err(FfiError::from)?;
-            let arti = Arc::new(
-                rt.block_on(ArtiTransport::bootstrap(tor_persistence(&state_dir), "talkrypt"))
-                    .map_err(FfiError::from)?,
-            );
+            // Reuse the shared, warm Arti client (no per-chat cold bootstrap).
+            let arti = shared_tor(&state_dir)?;
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti, desc.clone());
             rt.block_on(async {
                 for_kind(desc.topology)
@@ -484,7 +506,7 @@ impl TalkryptClient {
         chain_hex: String,
         username: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
         let suite = SuiteRegistry::with_defaults()
             .get_by_scheme_hash(&desc.scheme_hash())
@@ -531,7 +553,7 @@ impl TalkryptClient {
         chain_hex: String,
         username: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
         let suite_id = dr_suite_id(profile);
         let suite = SuiteRegistry::with_defaults()
@@ -579,7 +601,7 @@ impl TalkryptClient {
         chain_hex: String,
         username: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
         let suite = SuiteRegistry::with_defaults()
             .get_by_scheme_hash(&desc.scheme_hash())
@@ -623,7 +645,7 @@ impl TalkryptClient {
         chain_hex: String,
         username: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
         let suite_id = dr_suite_id(profile);
         let suite = SuiteRegistry::with_defaults()
@@ -1133,7 +1155,7 @@ impl DeviceKey {
 #[derive(uniffi::Object)]
 pub struct LinkOffer {
     // The runtime keeps the linking accept loop alive.
-    _rt: Runtime,
+    _rt: &'static Runtime,
     uri: String,
     account_safety_number: String,
 }
@@ -1150,7 +1172,7 @@ impl LinkOffer {
         listen: String,
         username: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let suite = SuiteRegistry::with_defaults()
             .get(DEFAULT_SUITE_ID)
             .map_err(FfiError::from)?;
@@ -1338,7 +1360,7 @@ pub fn linked_segment_chain(
 #[derive(uniffi::Object)]
 pub struct AnchorNode {
     // The runtime keeps the registry's background accept loop alive.
-    _rt: Runtime,
+    _rt: &'static Runtime,
     uri: String,
     _server: RegistryServer,
 }
@@ -1350,7 +1372,7 @@ impl AnchorNode {
     /// whose `uri()` is the shareable anchor location.
     #[uniffi::constructor]
     pub fn host(listen: String, channel: String) -> Result<Arc<Self>, FfiError> {
-        let rt = Runtime::new().map_err(FfiError::from)?;
+        let rt = rt();
         let suite = SuiteRegistry::with_defaults()
             .get(DEFAULT_SUITE_ID)
             .map_err(FfiError::from)?;

@@ -1297,11 +1297,11 @@ class MainActivity : Activity() {
             try {
                 // Bind to the LAN/hotspot address (not loopback) so the invite is
                 // dialable from another device — required for QR/nearby joining.
-                // Over Tor, host an onion service in a per-chat state dir so the
-                // .onion is stable across reconnects/restarts.
-                val torSub = if (useTor) freshTorSub() else null
+                // Over Tor, all chats share one Arti client + state dir (see
+                // ChatNet.sharedTorDir); the onion service is per-chat within it.
+                val torSub = if (useTor) "shared" else null
                 val c = if (useTor) {
-                    TalkryptClient.hostTor(channel, posture, torDirPath(torSub!!))
+                    TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this))
                 } else {
                     // Bind a free port (so multiple chats can host at once); advertise
                     // the address peers dial.
@@ -1387,10 +1387,10 @@ class MainActivity : Activity() {
         val tor = useTor || isOnion
         toast(if (tor) "joining over Tor…" else "joining…")
         val tier = pendingTier
-        val torSub = if (tor) freshTorSub() else null
+        val torSub = if (tor) "shared" else null
         thread {
             try {
-                val c = if (tor) TalkryptClient.joinTor(uri, torDirPath(torSub!!)) else TalkryptClient.join(uri)
+                val c = if (tor) TalkryptClient.joinTor(uri, ChatNet.sharedTorDir(this)) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts

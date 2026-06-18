@@ -57,6 +57,16 @@ object ChatNet {
 
     fun freshTorSub(): String = "c" + System.nanoTime().toString(36)
 
+    /**
+     * One STABLE Tor state dir shared by every chat. The FFI bootstraps a single
+     * Arti client (process-global) the first time Tor is used and reuses it for
+     * all chats, so they must share one state dir — and a stable path lets the
+     * directory cache (consensus/descriptors) persist across launches, turning
+     * cold ~minute bootstraps into warm ~seconds ones. (Per-chat random subdirs
+     * would defeat both: Arti locks its dir, and a fresh dir each launch is cold.)
+     */
+    fun sharedTorDir(ctx: Context): String = torDirPath(ctx, "shared")
+
     /** The persistent pseudonymous account (generated + saved on first use). */
     fun account(ctx: Context): Account {
         val prefs = ctx.getSharedPreferences("talkrypt", Context.MODE_PRIVATE)
@@ -90,9 +100,9 @@ object ChatNet {
     fun connect(ctx: Context, meta: ChatMeta): TalkryptClient {
         val pst = meta.posture.ifEmpty { "pq-pure" }
         val c = when (reconnectPlan(meta)) {
-            ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, torDirPath(ctx, meta.torDir ?: freshTorSub()))
+            ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, sharedTorDir(ctx))
             ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p)) }
-            ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, torDirPath(ctx, meta.torDir ?: freshTorSub()))
+            ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, sharedTorDir(ctx))
             ReconnectPlan.JOIN_LAN -> TalkryptClient.join(meta.inviteUri!!)
             ReconnectPlan.IMPOSSIBLE -> throw IllegalStateException("no saved invite to reconnect")
         }
