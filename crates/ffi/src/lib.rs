@@ -43,9 +43,27 @@ fn tor_persistence(state_dir: &str) -> talkrypt_transport::OnionPersistence {
 /// single client (it's `static`), so background tasks spawned by the shared Tor
 /// client — circuit/dir managers, the onion rendezvous pump — keep running for
 /// the life of the process instead of dying when one client is dropped.
+///
+/// We floor the worker-thread count at 4. `Runtime::new()` sizes the pool from
+/// `available_parallelism()`, which Android can clamp to 1–2 for a constrained
+/// or backgrounded app regardless of physical cores — too few to service the
+/// inbound reader, the dial's circuit tasks, AND a joiner's onion publish at
+/// once, which starved host→joiner delivery on-device while desktop (always
+/// plenty of threads) worked fine. Hosting is preserved; we just guarantee the
+/// threads to run everything concurrently.
 fn rt() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
-    RT.get_or_init(|| Runtime::new().expect("tokio runtime"))
+    RT.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(4);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    })
 }
 
 /// One shared, bootstrapped Arti client reused by every Tor host/join. Avoids
@@ -470,6 +488,9 @@ impl TalkryptClient {
         }
         #[cfg(feature = "tor")]
         {
+            // Diagnostic: trace the inbound reader to a file we can pull on-device
+            // (Android doesn't surface Rust stderr). No-op once root-caused.
+            talkrypt_core::trace::set_path(&format!("{state_dir}/trace.log"));
             let rt = rt();
             let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
             let suite = SuiteRegistry::with_defaults()

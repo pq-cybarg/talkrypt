@@ -19,6 +19,7 @@ pub mod marking;
 pub mod registry;
 pub mod relay;
 pub mod seal;
+pub mod trace;
 
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
 pub use custody::{Capabilities, CustodyTier};
