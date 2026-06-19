@@ -111,4 +111,20 @@ object ChatNet {
         if (meta.role == Role.HOST) runCatching { c.setAccessMode(meta.access) }
         return c
     }
+
+    /** Turn a raw FFI/Arti error into a human, actionable line for the chat. */
+    fun friendlyError(raw: String?): String {
+        val m = (raw ?: "unknown error").lowercase()
+        return when {
+            m.contains("hidden service circuit") || m.contains("onion") ->
+                "host unreachable over Tor — its onion didn't answer (offline, or not republished yet)"
+            m.contains("timed out") || m.contains("timeout") ->
+                "timed out reaching the host (unreachable from this network?)"
+            m.contains("bootstrap") ->
+                "Tor isn't ready yet (still bootstrapping)"
+            m.contains("no saved invite") ->
+                "can't reconnect — no saved invite for this chat"
+            else -> raw ?: "unknown error"
+        }
+    }
 }

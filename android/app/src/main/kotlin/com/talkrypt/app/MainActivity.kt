@@ -1434,7 +1434,7 @@ class MainActivity : Activity() {
                     sysLine(id, "reconnected over $net")
                     when (activeId) { id -> setContentView(chatScreen(id)); null -> setContentView(chatListScreen()); else -> {} }
                 }
-            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed ($net): ${e.message}"); toast("reconnect failed") } }
+            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed ($net): ${ChatNet.friendlyError(e.message)}"); toast("reconnect failed") } }
         }
     }
 

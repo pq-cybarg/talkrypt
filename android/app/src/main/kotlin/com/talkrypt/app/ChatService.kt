@@ -60,29 +60,42 @@ class ChatService : Service() {
             if (lc.meta.persistence != Persistence.ALWAYS_ON || lc.client != null) continue
             val plan = reconnectPlan(lc.meta)
             if (plan == ReconnectPlan.IMPOSSIBLE) continue
-            val meta = lc.meta
             val net = if (plan == ReconnectPlan.HOST_TOR || plan == ReconnectPlan.JOIN_TOR) "Tor" else "LAN"
-            // Tell the user what's happening — which chat, over what — instead of
-            // a silent attempt (and a silently-swallowed failure).
-            sys(meta.id, lc, "reconnecting “${meta.title}” over $net…")
-            thread {
-                runCatching { ChatNet.connect(applicationContext, meta) }
-                    .onSuccess { c ->
-                        ui.post {
-                            lc.client = c
-                            if (meta.role == Role.HOST) {
-                                runCatching { lc.meta = lc.meta.copy(inviteUri = c.inviteUri()) }
-                            }
-                            sys(meta.id, lc, "reconnected “${meta.title}” over $net")
-                            updateNotification()
+            attemptReconnect(lc, net, retriesLeft = 2)
+        }
+    }
+
+    /** Try one reconnect; on a (likely transient) failure, retry a bounded number
+     *  of times with a delay. Every attempt/outcome is surfaced so the user sees
+     *  which chat, over what transport, and why it failed. */
+    private fun attemptReconnect(lc: LiveChat, net: String, retriesLeft: Int) {
+        if (lc.client != null) return
+        val meta = lc.meta
+        sys(meta.id, lc, "reconnecting “${meta.title}” over $net…")
+        thread {
+            runCatching { ChatNet.connect(applicationContext, meta) }
+                .onSuccess { c ->
+                    ui.post {
+                        lc.client = c
+                        if (meta.role == Role.HOST) {
+                            runCatching { lc.meta = lc.meta.copy(inviteUri = c.inviteUri()) }
+                        }
+                        sys(meta.id, lc, "reconnected “${meta.title}” over $net")
+                        updateNotification()
+                    }
+                }
+                .onFailure { e ->
+                    ui.post {
+                        if (lc.client != null) return@post
+                        val why = ChatNet.friendlyError(e.message)
+                        if (retriesLeft > 0) {
+                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): $why — retrying…")
+                            ui.postDelayed({ attemptReconnect(lc, net, retriesLeft - 1) }, RETRY_MS)
+                        } else {
+                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): $why")
                         }
                     }
-                    .onFailure { e ->
-                        ui.post {
-                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): ${e.message ?: e}")
-                        }
-                    }
-            }
+                }
         }
     }
 
@@ -167,6 +180,7 @@ class ChatService : Service() {
         private const val CHAN = "talkrypt.connections"
         private const val NOTIF_ID = 0x7A10
         private const val POLL_MS = 500L
+        private const val RETRY_MS = 8000L // delay between bounded reconnect retries
 
         /** Start the service if any always-on chat exists; no-op otherwise. */
         fun startIfNeeded(ctx: Context) {
