@@ -1082,10 +1082,6 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     // the initiator's first frame, its ratchet is send-ready.
     let present_reactively = present_pairwise && !is_initiator;
 
-    crate::trace::log(&format!(
-        "register fp={:02x}{:02x} initiator={is_initiator} present_reactively={present_reactively}",
-        fingerprint[0], fingerprint[1]
-    ));
     tokio::spawn(reader_loop(
         inner.clone(),
         reader,
@@ -1108,18 +1104,10 @@ async fn reader_loop(
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
     let mut approved = inner.access.lock().unwrap().is_open();
-    crate::trace::log(&format!(
-        "reader_loop START fp={:02x}{:02x} reactive={present_reactively}",
-        fingerprint[0], fingerprint[1]
-    ));
     loop {
         let frame = match reader.recv_frame().await {
-            Ok(f) => {
-                crate::trace::log(&format!("recv_frame OK fp={:02x}{:02x} len={}", fingerprint[0], fingerprint[1], f.len()));
-                f
-            }
+            Ok(f) => f,
             Err(_) => {
-                crate::trace::log(&format!("recv_frame ERR fp={:02x}{:02x} -> disconnect", fingerprint[0], fingerprint[1]));
                 let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
                 break;
             }
@@ -1131,14 +1119,12 @@ async fn reader_loop(
         let pt = match opened {
             Ok(pt) => pt,
             Err(_) => {
-                crate::trace::log("decrypt ERR");
                 let _ = inner
                     .events_tx
                     .send(Event::Error("frame failed to decrypt".into()));
                 continue;
             }
         };
-        crate::trace::log(&format!("decrypt OK len={}", pt.len()));
         // Now send-ready: if we're a responder with an identity to present, send
         // it back to this peer exactly once.
         if present_reactively && !presented {
@@ -1189,7 +1175,6 @@ async fn reader_loop(
                 text,
                 marking,
             }) => {
-                crate::trace::log(&format!("emit Message len={}", text.len()));
                 let _ = inner.events_tx.send(Event::Message {
                     from,
                     channel,

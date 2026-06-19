@@ -488,9 +488,6 @@ impl TalkryptClient {
         }
         #[cfg(feature = "tor")]
         {
-            // Diagnostic: trace the inbound reader to a file we can pull on-device
-            // (Android doesn't surface Rust stderr). No-op once root-caused.
-            talkrypt_core::trace::set_path(&format!("{state_dir}/trace.log"));
             let rt = rt();
             let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
             let suite = SuiteRegistry::with_defaults()
