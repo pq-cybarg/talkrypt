@@ -58,25 +58,41 @@ class ChatService : Service() {
     private fun reconnectAlwaysOn() {
         for (lc in SessionHub.sessions.all()) {
             if (lc.meta.persistence != Persistence.ALWAYS_ON || lc.client != null) continue
-            if (reconnectPlan(lc.meta) == ReconnectPlan.IMPOSSIBLE) continue
+            val plan = reconnectPlan(lc.meta)
+            if (plan == ReconnectPlan.IMPOSSIBLE) continue
             val meta = lc.meta
+            val net = if (plan == ReconnectPlan.HOST_TOR || plan == ReconnectPlan.JOIN_TOR) "Tor" else "LAN"
+            // Tell the user what's happening — which chat, over what — instead of
+            // a silent attempt (and a silently-swallowed failure).
+            sys(meta.id, lc, "reconnecting “${meta.title}” over $net…")
             thread {
-                runCatching { ChatNet.connect(applicationContext, meta) }.onSuccess { c ->
-                    ui.post {
-                        lc.client = c
-                        if (meta.role == Role.HOST) {
-                            runCatching { lc.meta = lc.meta.copy(inviteUri = c.inviteUri()) }
+                runCatching { ChatNet.connect(applicationContext, meta) }
+                    .onSuccess { c ->
+                        ui.post {
+                            lc.client = c
+                            if (meta.role == Role.HOST) {
+                                runCatching { lc.meta = lc.meta.copy(inviteUri = c.inviteUri()) }
+                            }
+                            sys(meta.id, lc, "reconnected “${meta.title}” over $net")
+                            updateNotification()
                         }
-                        sessions().recordIncoming(
-                            meta.id,
-                            ChatMsg(MsgKind.SYSTEM, null, null, false, "reconnected (always-on)", null, System.currentTimeMillis()),
-                        )
-                        runCatching { store.save(lc.meta, lc.history) }
-                        updateNotification()
                     }
-                }
+                    .onFailure { e ->
+                        ui.post {
+                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): ${e.message ?: e}")
+                        }
+                    }
             }
         }
+    }
+
+    /** Record + persist a system line for a chat (so reconnect detail survives). */
+    private fun sys(id: String, lc: LiveChat, text: String) {
+        sessions().recordIncoming(
+            id,
+            ChatMsg(MsgKind.SYSTEM, null, null, false, text, null, System.currentTimeMillis()),
+        )
+        runCatching { store.save(lc.meta, lc.history) }
     }
 
     /**

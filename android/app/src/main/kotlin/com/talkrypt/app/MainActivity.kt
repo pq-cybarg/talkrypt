@@ -1420,7 +1420,8 @@ class MainActivity : Activity() {
         val m = lc.meta
         val plan = reconnectPlan(m)
         if (plan == ReconnectPlan.IMPOSSIBLE) { toast("can't reconnect — no saved invite"); return }
-        toast("reconnecting…")
+        val net = if (plan == ReconnectPlan.HOST_TOR || plan == ReconnectPlan.JOIN_TOR) "Tor" else "LAN"
+        sysLine(id, "reconnecting over $net…"); toast("reconnecting over $net…")
         thread {
             try {
                 // Shared with ChatService — one place builds a client from a meta.
@@ -1430,10 +1431,10 @@ class MainActivity : Activity() {
                     lc.client = c
                     // A re-hosted LAN chat gets a fresh invite; keep the same chatId.
                     if (freshInvite != null) lc.meta = lc.meta.copy(inviteUri = freshInvite)
-                    sysLine(id, "reconnected")
+                    sysLine(id, "reconnected over $net")
                     when (activeId) { id -> setContentView(chatScreen(id)); null -> setContentView(chatListScreen()); else -> {} }
                 }
-            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed: ${e.message}"); toast("reconnect failed") } }
+            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed ($net): ${e.message}"); toast("reconnect failed") } }
         }
     }
 
