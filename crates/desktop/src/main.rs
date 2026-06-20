@@ -239,6 +239,8 @@ enum UiEvt {
     /// `mine = true` for our own echoed line; else an inbound peer message.
     Line { id: u64, mine: bool, who: String, text: String },
     /// Global Tor bootstrap progress (one shared client), `frac` in 0.0..=1.0.
+    /// Only constructed on a Tor build (init_tor); harmless dead variant otherwise.
+    #[cfg_attr(not(feature = "tor"), allow(dead_code))]
     TorProgress(f32),
 }
 
