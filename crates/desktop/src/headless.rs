@@ -95,6 +95,7 @@ pub fn run(args: &[String]) -> i32 {
             UiEvt::Status { text, .. } => format!("STATUS {text}"),
             UiEvt::Connected { who, .. } => format!("CONNECTED {who}"),
             UiEvt::Disconnected { who, .. } => format!("DISCONNECTED {who}"),
+            UiEvt::TorProgress(frac) => format!("TOR {}%", (frac * 100.0).round() as u32),
             UiEvt::Line { mine, who, text, .. } => {
                 if mine {
                     format!("> me: {text}")

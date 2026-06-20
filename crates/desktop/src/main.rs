@@ -48,26 +48,36 @@ fn tor_state_dir() -> std::path::PathBuf {
 /// session. A concurrent caller awaits the in-flight bootstrap instead of
 /// starting a second one — so a 2nd/3rd chat reuses the already-warm client.
 #[cfg(feature = "tor")]
-async fn init_tor(
+async fn init_tor<R: Fn() + Clone + Send + 'static>(
     cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
     ui_tx: &std::sync::mpsc::Sender<UiEvt>,
-    id: u64,
+    on_event: R,
 ) -> Result<Arc<dyn Transport>, String> {
     use talkrypt_transport::{ArtiTransport, OnionPersistence};
     if let Some(t) = cell.get() {
         return Ok(t.clone());
     }
-    let _ = ui_tx.send(UiEvt::Status {
-        id,
-        text: "bootstrapping Tor (Arti) — one-time, ~a minute…".into(),
+    // A live bootstrap-progress callback: report the fraction to the UI (global,
+    // since there's one shared Tor client) and request a repaint so the percent
+    // animates while the directory downloads.
+    let prog_tx = ui_tx.clone();
+    let prog_repaint = on_event;
+    let progress: Box<dyn Fn(f32) + Send> = Box::new(move |frac| {
+        let _ = prog_tx.send(UiEvt::TorProgress(frac));
+        prog_repaint();
     });
     cell.get_or_try_init(|| async {
         let dir = tor_state_dir();
         let _ = std::fs::create_dir_all(&dir);
-        ArtiTransport::bootstrap(OnionPersistence::Persistent { state_dir: dir }, "talkrypt")
-            .await
-            .map(|t| Arc::new(t) as Arc<dyn Transport>)
-            .map_err(|e| format!("tor bootstrap failed: {e}"))
+        ArtiTransport::bootstrap_with_progress(
+            OnionPersistence::Persistent { state_dir: dir },
+            "talkrypt",
+            None,
+            Some(progress),
+        )
+        .await
+        .map(|t| Arc::new(t) as Arc<dyn Transport>)
+        .map_err(|e| format!("tor bootstrap failed: {e}"))
     })
     .await
     .map(|t| t.clone())
@@ -77,21 +87,23 @@ async fn init_tor(
 /// default) it reuses the shared, pre-warmed Tor client (onion = NAT-free, both
 /// peers dial out). Without it, a fresh TCP transport bound to `listen` is used
 /// (the same-Wi-Fi fast path).
-async fn make_transport(
+async fn make_transport<R: Fn() + Clone + Send + 'static>(
     id: u64,
     use_tor: bool,
     listen: &str,
     ui_tx: &std::sync::mpsc::Sender<UiEvt>,
     tor_cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
+    on_event: R,
 ) -> Result<Arc<dyn Transport>, String> {
     if use_tor {
         #[cfg(feature = "tor")]
         {
-            return init_tor(tor_cell, ui_tx, id).await;
+            let _ = id;
+            return init_tor(tor_cell, ui_tx, on_event).await;
         }
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (id, ui_tx, tor_cell);
+            let _ = (id, ui_tx, tor_cell, on_event);
             return Err("this build has Tor disabled (rebuild with --features tor)".into());
         }
     }
@@ -226,6 +238,8 @@ enum UiEvt {
     Disconnected { id: u64, who: String },
     /// `mine = true` for our own echoed line; else an inbound peer message.
     Line { id: u64, mine: bool, who: String, text: String },
+    /// Global Tor bootstrap progress (one shared client), `frac` in 0.0..=1.0.
+    TorProgress(f32),
 }
 
 /// LAN IPv4 to advertise, found via the default route (no packets sent). Falls
@@ -274,7 +288,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
         let ui = ui_tx.clone();
         let ev = on_event.clone();
         tokio::spawn(async move {
-            let _ = init_tor(&cell, &ui, 0).await; // id 0 = no session; status is dropped
+            let _ = init_tor(&cell, &ui, ev.clone()).await;
             ev();
         });
     }
@@ -291,7 +305,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                 // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr (the onion
                 // service picks its own virtual port).
                 let listen = format!("0.0.0.0:{LAN_PORT}");
-                let transport = match make_transport(id, use_tor, &listen, &ui_tx, &tor_cell).await {
+                let transport = match make_transport(id, use_tor, &listen, &ui_tx, &tor_cell, on_event.clone()).await {
                     Ok(t) => t,
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); on_event(); continue; }
                 };
@@ -337,7 +351,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         // Auto-route to Tor when the invite is an onion, regardless
                         // of the toggle (a `.onion` is only reachable through Tor).
                         let join_tor = use_tor || endpoint.contains(".onion");
-                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx, &tor_cell).await {
+                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx, &tor_cell, on_event.clone()).await {
                             Ok(t) => t,
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
                         };
@@ -490,6 +504,7 @@ struct App {
     msg_input: String,
     show_invite: bool, // toggles the invite/QR panel inside a chat
     notice: String,    // transient form message on the new-chat screen
+    tor_progress: Option<f32>, // global Tor bootstrap fraction while < 1.0
 }
 
 impl App {
@@ -514,6 +529,7 @@ impl App {
             msg_input: String::new(),
             show_invite: false,
             notice: String::new(),
+            tor_progress: None,
         }
     }
 
@@ -574,6 +590,10 @@ impl App {
                     if let Some(s) = self.session_mut(id) {
                         s.transcript.push((mine, who, text));
                     }
+                }
+                UiEvt::TorProgress(frac) => {
+                    // Clear once fully bootstrapped; otherwise show the fraction.
+                    self.tor_progress = if frac >= 1.0 { None } else { Some(frac) };
                 }
             }
         }
@@ -874,7 +894,18 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain(ctx);
-        // Header: brand + crypto subtitle; right side shows the open chat's status.
+        // While Tor's one-time bootstrap runs, keep repainting so the percent
+        // animates (egui is otherwise event-driven).
+        if self.tor_progress.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+        // Header: brand + subtitle. The subtitle shows the live Tor bootstrap
+        // percent while it's running, else the crypto line; the right side shows
+        // the open chat's status.
+        let subtitle = match self.tor_progress {
+            Some(f) => format!("🔒 Bootstrapping Tor… {}%", (f * 100.0).round() as u32),
+            None => "🔒 ML-KEM-1024 · ML-DSA-87".to_string(),
+        };
         let header_status = self
             .active_session()
             .map(|s| s.status.clone())
@@ -885,7 +916,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("talkrypt").size(22.0).strong().color(FG));
-                        ui.label(egui::RichText::new("🔒 ML-KEM-1024 · ML-DSA-87").small().color(ACCENT));
+                        ui.label(egui::RichText::new(subtitle).small().color(ACCENT));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(header_status).small().color(MUTED));

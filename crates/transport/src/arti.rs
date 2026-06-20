@@ -100,13 +100,48 @@ impl ArtiTransport {
         nickname: &str,
         anti_censorship: Option<&AntiCensorship>,
     ) -> Result<Self> {
+        Self::bootstrap_with_progress(persistence, nickname, anti_censorship, None).await
+    }
+
+    /// Like [`bootstrap_with`], but reports directory-bootstrap progress as a
+    /// fraction in `0.0..=1.0` to `progress` as it runs — for a live
+    /// "Bootstrapping Tor X%" UI. The first cold bootstrap is the slow part; this
+    /// is what lets the user see how far along it is.
+    ///
+    /// [`bootstrap_with`]: Self::bootstrap_with
+    pub async fn bootstrap_with_progress(
+        persistence: OnionPersistence,
+        nickname: &str,
+        anti_censorship: Option<&AntiCensorship>,
+        progress: Option<Box<dyn Fn(f32) + Send>>,
+    ) -> Result<Self> {
         // rustls 0.23 panics if it can't auto-pick a CryptoProvider when more
         // than one (ring + aws-lc-rs) is compiled in — which happens via feature
         // unification in larger builds (e.g. Android). Install one explicitly,
         // process-wide, before any TLS is used. Idempotent; ignore "already set".
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (config, tempdir) = build_config(&persistence, anti_censorship)?;
-        let client = TorClient::create_bootstrapped(config)
+        // Create the client unbootstrapped so we can watch its bootstrap status
+        // stream while it bootstraps, then drive the bootstrap ourselves.
+        let client = TorClient::builder()
+            .config(config)
+            .bootstrap_behavior(arti_client::BootstrapBehavior::Manual)
+            .create_unbootstrapped()
+            .map_err(|e| io(format!("tor client init failed: {e}")))?;
+        if let Some(cb) = progress {
+            let mut events = client.bootstrap_events();
+            tokio::spawn(async move {
+                while let Some(status) = events.next().await {
+                    let frac = status.as_frac();
+                    cb(frac);
+                    if frac >= 1.0 {
+                        break;
+                    }
+                }
+            });
+        }
+        client
+            .bootstrap()
             .await
             .map_err(|e| io(format!("tor bootstrap failed: {e}")))?;
         Ok(Self {
