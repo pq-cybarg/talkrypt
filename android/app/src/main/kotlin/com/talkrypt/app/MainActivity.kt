@@ -42,6 +42,7 @@ import uniffi.talkrypt_ffi.anchorRegister
 import uniffi.talkrypt_ffi.anchorResolve
 import uniffi.talkrypt_ffi.inviteChannel
 import uniffi.talkrypt_ffi.inviteIsOnion
+import uniffi.talkrypt_ffi.torBootstrapPercent
 import uniffi.talkrypt_ffi.linkAccept
 import uniffi.talkrypt_ffi.linkedSegmentChain
 
@@ -1385,17 +1386,21 @@ class MainActivity : Activity() {
         // Otherwise a pasted onion invite would be plain-TCP dialed and fail.
         val isOnion = runCatching { inviteIsOnion(uri) }.getOrDefault(false)
         val tor = useTor || isOnion
-        toast(if (tor) "joining over Tor…" else "joining…")
+        val title = runCatching { inviteChannel(uri) }.getOrDefault("chat")
         val tier = pendingTier
         val torSub = if (tor) "shared" else null
+        // Show a connecting screen with live progress instead of a silent toast —
+        // the first Tor connect is slow and was previously opaque.
+        setContentView(connectingScreen(title, tor))
+        startConnectingPoll(tor)
         thread {
             try {
                 val c = if (tor) TalkryptClient.joinTor(uri, ChatNet.sharedTorDir(this)) else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
-                val title = runCatching { inviteChannel(uri) }.getOrDefault("chat")
                 ui.post {
+                    connecting = false
                     val now = System.currentTimeMillis()
                     val meta = ChatMeta(
                         id = chatId(uri), title = title, role = Role.JOIN, group = false,
@@ -1408,8 +1413,53 @@ class MainActivity : Activity() {
                     openChat(meta.id)
                     sysLine(meta.id, if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
                 }
-            } catch (e: Exception) { ui.post { toast("join failed: ${e.message}") } }
+            } catch (e: Exception) {
+                ui.post {
+                    connecting = false
+                    connectingLabel?.text = "failed: ${ChatNet.friendlyError(e.message)}"
+                    toast("join failed")
+                }
+            }
         }
+    }
+
+    private var connecting = false
+    private var connectingLabel: TextView? = null
+
+    /** A connecting screen with a live status line (Tor bootstrap % → handshake). */
+    private fun connectingScreen(title: String, tor: Boolean): View {
+        val col = column(bg).apply { setPadding(dp(24), dp(64), dp(24), dp(24)) }
+        col.addView(text("Connecting", 28f, fg, bold = true, center = true))
+        col.addView(text(title, 16f, muted, center = true).also { it.setPadding(0, dp(8), 0, dp(28)) })
+        val lbl = text(if (tor) "Bootstrapping Tor…" else "Connecting…", 16f, accent, center = true)
+        connectingLabel = lbl
+        col.addView(lbl)
+        if (tor) col.addView(
+            text("First Tor connect is slow; later ones are instant.", 12f, muted, center = true)
+                .also { it.setPadding(0, dp(16), 0, 0) },
+        )
+        col.addView(pillButton("Cancel", panel, fg) {
+            connecting = false; setContentView(chatListScreen())
+        }, lp(MATCH_PARENT, dp(50), top = dp(36)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
+    }
+
+    /** Poll the shared Tor client's bootstrap percent and update the label until
+     *  the connect finishes (the join thread clears `connecting`). */
+    private fun startConnectingPoll(tor: Boolean) {
+        if (!tor) return
+        connecting = true
+        ui.postDelayed(object : Runnable {
+            override fun run() {
+                if (!connecting) return
+                val pct = runCatching { torBootstrapPercent().toInt() }.getOrDefault(0)
+                connectingLabel?.text =
+                    if (pct < 100) "Bootstrapping Tor… $pct%" else "Building circuit + handshaking…"
+                ui.postDelayed(this, 300)
+            }
+        }, 300)
     }
 
     /** Re-establish a saved chat's connection (Phase 2a). Reuses its onion dir so

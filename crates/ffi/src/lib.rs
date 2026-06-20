@@ -11,6 +11,7 @@
 //!
 //! Transport is TCP here for portability; an Arti onion build is a feature swap.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::runtime::Runtime;
@@ -79,14 +80,31 @@ fn shared_tor(state_dir: &str) -> Result<Arc<talkrypt_transport::ArtiTransport>,
         return Ok(t.clone());
     }
     install_tor_panic_logger(state_dir);
+    // Feed the live bootstrap fraction into the global percent so the UI can poll
+    // tor_bootstrap_percent() and show how far along the (slow) first connect is.
+    let progress: Box<dyn Fn(f32) + Send> =
+        Box::new(|frac| TOR_BOOT_PCT.store((frac * 100.0).round() as u8, Ordering::Relaxed));
     let built = Arc::new(
-        rt().block_on(talkrypt_transport::ArtiTransport::bootstrap(
+        rt().block_on(talkrypt_transport::ArtiTransport::bootstrap_with_progress(
             tor_persistence(state_dir),
             "talkrypt",
+            None,
+            Some(progress),
         ))
         .map_err(FfiError::from)?,
     );
+    TOR_BOOT_PCT.store(100, Ordering::Relaxed);
     Ok(TOR.get_or_init(|| built).clone())
+}
+
+/// Latest Tor bootstrap progress, 0..=100. 100 once the shared client is up (or
+/// before any Tor use, since the cell starts at 0 and a warm client returns
+/// instantly). The connecting UI polls this to show "Bootstrapping Tor X%".
+static TOR_BOOT_PCT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[uniffi::export]
+pub fn tor_bootstrap_percent() -> u8 {
+    TOR_BOOT_PCT.load(Ordering::Relaxed)
 }
 
 /// Route panics (incl. on Arti's worker threads, which Android can't surface) to
