@@ -157,7 +157,15 @@ class ChatService : Service() {
             chan.setShowBadge(false)
             mgr.createNotificationChannel(chan)
         }
-        val n = sessions().all().count { it.meta.persistence == Persistence.ALWAYS_ON }
+        val alwaysOn = sessions().all().filter { it.meta.persistence == Persistence.ALWAYS_ON }
+        val n = alwaysOn.size
+        val connected = alwaysOn.count { it.client != null }
+        // Surface health, not just a count: how many are connected vs offline.
+        val status = when {
+            n == 0 -> "no always-on chats"
+            connected == n -> "$n always-on · all connected"
+            else -> "$n always-on · $connected connected, ${n - connected} offline"
+        }
         val openApp = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
         )
@@ -165,7 +173,7 @@ class ChatService : Service() {
         val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHAN) else Notification.Builder(this)
         return b
             .setContentTitle("talkrypt")
-            .setContentText("$n always-on chat${if (n == 1) "" else "s"} active")
+            .setContentText(status)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openApp)
             .setOngoing(true)

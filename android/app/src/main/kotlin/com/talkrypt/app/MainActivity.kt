@@ -340,11 +340,27 @@ class MainActivity : Activity() {
             right.addView(text(lc.unread.toString(), 11f, Color.WHITE, center = true).apply {
                 background = circle(accent); setPadding(dp(7), dp(2), dp(7), dp(2)); gravity = Gravity.CENTER
             }, lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
-        } else if (lc.client != null) {
-            right.addView(text("●", 12f, accent), lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
         }
+        val (cs, cc) = connInfo(lc)
+        right.addView(text("● $cs", 10f, cc), lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
         row.addView(right, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         return row
+    }
+
+    /** Amber for "up but no peer yet" states (host published / dialing). */
+    private val amber = Color.parseColor("#FFD166")
+
+    /** Connection state for a chat: a short label + a color. Distinguishes
+     *  offline (no session) from connected-with-peer from hosting/dialing-but-
+     *  alone, so the dot isn't just "a session exists". */
+    private fun connInfo(lc: LiveChat): Pair<String, Int> {
+        val online = lc.roster.values.count { it.connected }
+        return when {
+            lc.client == null -> "offline" to muted
+            online > 0 -> (if (online == 1) "online" else "$online online") to accent
+            lc.meta.role == Role.HOST -> "hosting" to amber
+            else -> "connecting" to amber
+        }
     }
 
     private fun relTime(ts: Long): String {
@@ -1208,7 +1224,12 @@ class MainActivity : Activity() {
         titles.addView(text(lc.meta.title, 17f, fg, bold = true))
         val tierLabel = when (lc.meta.persistence) { Persistence.EPHEMERAL -> "ephemeral"; Persistence.ALWAYS_ON -> "always-on"; else -> "persistent" }
         val memberStr = if (lc.roster.isNotEmpty()) "${lc.roster.size} members · " else ""
-        titles.addView(text("$memberStr safety ${lc.meta.safety} · $tierLabel", 12f, muted).also { it.setPadding(0, dp(2), 0, 0) })
+        // Header subtitle: a colored connection-state chip + muted chat details.
+        val (cs, cc) = connInfo(lc)
+        val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, 0) }
+        subRow.addView(text("● $cs", 12f, cc, bold = true))
+        subRow.addView(text("  ·  ${memberStr}safety ${lc.meta.safety} · $tierLabel", 12f, muted))
+        titles.addView(subRow)
         header.addView(titles, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         header.addView(text("⋯", 22f, muted).apply { setPadding(dp(10), dp(4), dp(8), dp(4)); setOnClickListener { chatRowMenu(lc) } })
         root.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -1528,8 +1549,12 @@ class MainActivity : Activity() {
     private fun handleEvent(id: String, lc: LiveChat, e: FfiEvent) {
         val msg = applyEvent(sessions, id, lc, e)
         if (activeId == id) {
-            if (msg.kind == MsgKind.MESSAGE) addBubble(msg.text, mine = false, sender = msg.display, marking = msg.marking)
-            else system(msg.text)
+            when {
+                // Re-render so the header connection indicator reflects the change.
+                e is FfiEvent.Connected || e is FfiEvent.Disconnected -> setContentView(chatScreen(id))
+                msg.kind == MsgKind.MESSAGE -> addBubble(msg.text, mine = false, sender = msg.display, marking = msg.marking)
+                else -> system(msg.text)
+            }
             if (e is FfiEvent.Identity && !e.contact) {
                 val who = lc.roster[e.accountFingerprint]?.display ?: e.accountFingerprint.take(8)
                 val fp = e.accountFingerprint; val name = e.username
