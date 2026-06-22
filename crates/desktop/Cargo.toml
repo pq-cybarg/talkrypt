@@ -20,6 +20,10 @@ path = "src/main.rs"
 # small, LAN-only (TCP) binary when Tor's bootstrap weight isn't wanted.
 default = ["tor"]
 tor = ["talkrypt-transport/tor"]
+# Optional Nym mixnet transport. When enabled, a "Nym" toggle multi-homes a host
+# over BOTH a Tor onion and a Nym mixnet address, and joiners dial by preference
+# (Nym → Tor → LAN). Opt-in and heavy (pulls the nym-sdk graph), so not default.
+nym = ["talkrypt-transport/nym"]
 
 [dependencies]
 # glow (OpenGL) backend + bundled fonts on every desktop OS. macOS and Windows

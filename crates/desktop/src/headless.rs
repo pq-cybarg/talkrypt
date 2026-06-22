@@ -58,11 +58,13 @@ pub fn run(args: &[String]) -> i32 {
             posture: posture.clone(),
             access: access.clone(),
             use_tor: cfg.use_tor,
+            use_nym: cfg.use_nym,
         },
         Action::Join { uri } => Cmd::Join {
             id: SID,
             uri: uri.clone(),
             use_tor: cfg.use_tor,
+            use_nym: cfg.use_nym,
         },
     };
     if cmd_tx.send(initial).is_err() {
@@ -125,6 +127,7 @@ enum Action {
 struct Config {
     action: Action,
     use_tor: bool,
+    use_nym: bool,
 }
 
 impl Config {
@@ -144,6 +147,8 @@ impl Config {
         let mut uri: Option<String> = None;
         // Default to Tor whenever this build supports it (matches the GUI).
         let mut use_tor = cfg!(feature = "tor");
+        // Nym is opt-in via --nym (multi-homes a host over Tor+Nym).
+        let mut use_nym = false;
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
@@ -153,6 +158,7 @@ impl Config {
                 "--uri" => uri = Some(it.next().ok_or("--uri needs a value")?.clone()),
                 "--tor" => use_tor = true,
                 "--no-tor" => use_tor = false,
+                "--nym" => use_nym = true,
                 other => return Err(format!("unknown flag `{other}`")),
             }
         }
@@ -164,7 +170,7 @@ impl Config {
             },
             other => return Err(format!("unknown action `{other}` (want `host` or `join`)")),
         };
-        Ok(Config { action, use_tor })
+        Ok(Config { action, use_tor, use_nym })
     }
 }
 

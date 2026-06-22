@@ -24,6 +24,10 @@ uniffi = { version = "0.31", features = ["cli"] }
 default = []
 # Run over real Tor (Arti). Pulls the large Arti tree into the .so.
 tor = ["talkrypt-transport/tor"]
+# Run over the Nym mixnet. Pulls the (large) nym-sdk tree into the .so; the
+# `host_nym`/`join_nym` constructors multi-home over Tor+Nym. Verified to
+# cross-compile to aarch64-linux-android. Opt-in (heavy), so not default.
+nym = ["talkrypt-transport/nym"]
 
 [[bin]]
 name = "uniffi-bindgen"

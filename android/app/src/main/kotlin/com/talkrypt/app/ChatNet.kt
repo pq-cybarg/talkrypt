@@ -100,8 +100,10 @@ object ChatNet {
     fun connect(ctx: Context, meta: ChatMeta): TalkryptClient {
         val pst = meta.posture.ifEmpty { "pq-pure" }
         val c = when (reconnectPlan(meta)) {
+            ReconnectPlan.HOST_NYM -> TalkryptClient.hostNym(meta.title, pst, sharedTorDir(ctx))
             ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, sharedTorDir(ctx))
             ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p)) }
+            ReconnectPlan.JOIN_NYM -> TalkryptClient.joinNym(meta.inviteUri!!, sharedTorDir(ctx))
             ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, sharedTorDir(ctx))
             ReconnectPlan.JOIN_LAN -> TalkryptClient.join(meta.inviteUri!!)
             ReconnectPlan.IMPOSSIBLE -> throw IllegalStateException("no saved invite to reconnect")

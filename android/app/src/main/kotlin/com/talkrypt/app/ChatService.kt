@@ -60,7 +60,11 @@ class ChatService : Service() {
             if (lc.meta.persistence != Persistence.ALWAYS_ON || lc.client != null) continue
             val plan = reconnectPlan(lc.meta)
             if (plan == ReconnectPlan.IMPOSSIBLE) continue
-            val net = if (plan == ReconnectPlan.HOST_TOR || plan == ReconnectPlan.JOIN_TOR) "Tor" else "LAN"
+            val net = when (plan) {
+                ReconnectPlan.HOST_NYM, ReconnectPlan.JOIN_NYM -> "Nym"
+                ReconnectPlan.HOST_TOR, ReconnectPlan.JOIN_TOR -> "Tor"
+                else -> "LAN"
+            }
             attemptReconnect(lc, net, retriesLeft = 2)
         }
     }

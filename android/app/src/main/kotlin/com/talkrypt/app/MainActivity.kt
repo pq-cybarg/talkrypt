@@ -42,6 +42,7 @@ import uniffi.talkrypt_ffi.anchorRegister
 import uniffi.talkrypt_ffi.anchorResolve
 import uniffi.talkrypt_ffi.inviteChannel
 import uniffi.talkrypt_ffi.inviteIsOnion
+import uniffi.talkrypt_ffi.inviteHasNym
 import uniffi.talkrypt_ffi.torBootstrapPercent
 import uniffi.talkrypt_ffi.linkAccept
 import uniffi.talkrypt_ffi.linkedSegmentChain
@@ -62,6 +63,7 @@ class MainActivity : Activity() {
     private var scroll: ScrollView? = null
     private var shareServer: ApkShareServer? = null
     private var useTor = false // route the next host/join over Tor (.onion)
+    private var useNym = false // also route over the Nym mixnet (multi-homed invite)
     private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
     private val pendingSaves = HashSet<String>()
     private var polling = false   // guards a single foreground drain+render loop
@@ -226,6 +228,17 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> useTor = checked }
         }
         col.addView(torBox, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16)))
+
+        // Optional Nym mixnet leg: multi-homes the invite over Tor+Nym for
+        // traffic-analysis resistance. Only functional if the .so was built with
+        // --features nym (else host/join over Nym returns a clear error).
+        val nymBox = CheckBox(this).apply {
+            text = "Also route over Nym mixnet (opt-in; multi-homes the invite)"
+            setTextColor(muted)
+            isChecked = useNym
+            setOnCheckedChangeListener { _, checked -> useNym = checked }
+        }
+        col.addView(nymBox, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
             startHost(
@@ -1321,8 +1334,11 @@ class MainActivity : Activity() {
                 // dialable from another device — required for QR/nearby joining.
                 // Over Tor, all chats share one Arti client + state dir (see
                 // ChatNet.sharedTorDir); the onion service is per-chat within it.
-                val torSub = if (useTor) "shared" else null
-                val c = if (useTor) {
+                // Nym multi-homes over Tor too, so it also uses the shared Tor dir.
+                val torSub = if (useTor || useNym) "shared" else null
+                val c = if (useNym) {
+                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this))
+                } else if (useTor) {
                     TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this))
                 } else {
                     // Bind a free port (so multiple chats can host at once); advertise
@@ -1339,8 +1355,9 @@ class MainActivity : Activity() {
                     val meta = ChatMeta(
                         id = chatId(invite), title = channel, role = Role.HOST, group = false,
                         posture = posture, access = access, inviteUri = invite,
-                        onion = if (useTor) invite else null, persistence = tier,
+                        onion = if (useTor || useNym) invite else null, persistence = tier,
                         safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
+                        mixnet = useNym,
                     )
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
@@ -1406,17 +1423,24 @@ class MainActivity : Activity() {
         // the `.onion` is inside the base32, not the URI text), OR the user asked.
         // Otherwise a pasted onion invite would be plain-TCP dialed and fail.
         val isOnion = runCatching { inviteIsOnion(uri) }.getOrDefault(false)
+        // A nym-bearing invite is dialed through the mixnet (auto, like onion→Tor),
+        // and the user can also opt in explicitly. joinNym picks the best endpoint
+        // by preference and falls back to the onion if present.
+        val isNymInvite = runCatching { inviteHasNym(uri) }.getOrDefault(false)
+        val nym = useNym || isNymInvite
         val tor = useTor || isOnion
         val title = runCatching { inviteChannel(uri) }.getOrDefault("chat")
         val tier = pendingTier
-        val torSub = if (tor) "shared" else null
+        val torSub = if (tor || nym) "shared" else null
         // Show a connecting screen with live progress instead of a silent toast —
-        // the first Tor connect is slow and was previously opaque.
-        setContentView(connectingScreen(title, tor))
-        startConnectingPoll(tor)
+        // the first Tor/mixnet connect is slow and was previously opaque.
+        setContentView(connectingScreen(title, tor || nym))
+        startConnectingPoll(tor || nym)
         thread {
             try {
-                val c = if (tor) TalkryptClient.joinTor(uri, ChatNet.sharedTorDir(this)) else TalkryptClient.join(uri)
+                val c = if (nym) TalkryptClient.joinNym(uri, ChatNet.sharedTorDir(this))
+                        else if (tor) TalkryptClient.joinTor(uri, ChatNet.sharedTorDir(this))
+                        else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1426,8 +1450,9 @@ class MainActivity : Activity() {
                     val meta = ChatMeta(
                         id = chatId(uri), title = title, role = Role.JOIN, group = false,
                         posture = "", access = "open", inviteUri = uri,
-                        onion = if (isOnion) uri else null, persistence = tier,
+                        onion = if (isOnion || nym) uri else null, persistence = tier,
                         safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
+                        mixnet = nym,
                     )
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
@@ -1491,7 +1516,11 @@ class MainActivity : Activity() {
         val m = lc.meta
         val plan = reconnectPlan(m)
         if (plan == ReconnectPlan.IMPOSSIBLE) { toast("can't reconnect — no saved invite"); return }
-        val net = if (plan == ReconnectPlan.HOST_TOR || plan == ReconnectPlan.JOIN_TOR) "Tor" else "LAN"
+        val net = when (plan) {
+            ReconnectPlan.HOST_NYM, ReconnectPlan.JOIN_NYM -> "Nym"
+            ReconnectPlan.HOST_TOR, ReconnectPlan.JOIN_TOR -> "Tor"
+            else -> "LAN"
+        }
         sysLine(id, "reconnecting over $net…"); toast("reconnecting over $net…")
         thread {
             try {

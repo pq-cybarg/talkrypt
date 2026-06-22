@@ -1,0 +1,6 @@
+/target
+*~
+zig-cache
+Cargo.lock
+tmp
+.swival/

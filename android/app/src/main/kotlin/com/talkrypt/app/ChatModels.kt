@@ -51,11 +51,13 @@ data class ChatMeta(
     val lastActivityAt: Long,
     /** Per-chat Tor state dir (stable across reconnects → same .onion); null if not Tor. */
     val torDir: String? = null,
+    /** Hosted/joined over the Nym mixnet (multi-homed); drives the reconnect plan. */
+    val mixnet: Boolean = false,
 ) {
     fun encode(): String = listOf(
         id, title, role.name, group.toString(), posture, access,
         inviteUri ?: "", onion ?: "", persistence.name, safety,
-        createdAt.toString(), lastActivityAt.toString(), torDir ?: "",
+        createdAt.toString(), lastActivityAt.toString(), torDir ?: "", mixnet.toString(),
     ).joinToString(US) { esc(it) }
 
     companion object {
@@ -67,6 +69,7 @@ data class ChatMeta(
                 onion = f[7].ifEmpty { null }, persistence = Persistence.valueOf(f[8]),
                 safety = f[9], createdAt = f[10].toLong(), lastActivityAt = f[11].toLong(),
                 torDir = f.getOrNull(12)?.ifEmpty { null },
+                mixnet = f.getOrNull(13)?.toBoolean() ?: false,
             )
         }
     }

@@ -12,16 +12,24 @@
 
 pub mod framing;
 pub mod loopback;
+pub mod multi;
 pub mod tcp;
 
 #[cfg(feature = "tor")]
 pub mod arti;
 
+#[cfg(feature = "nym")]
+pub mod nym;
+
 pub use loopback::{LoopbackFabric, LoopbackTransport};
+pub use multi::{endpoint_scheme, select_endpoint, split_endpoints, MultiTransport, Scheme};
 pub use tcp::TcpTransport;
 
 #[cfg(feature = "tor")]
 pub use arti::{AntiCensorship, ArtiTransport, OnionPersistence, PluggableTransport};
+
+#[cfg(feature = "nym")]
+pub use nym::NymTransport;
 
 use async_trait::async_trait;
 use thiserror::Error;

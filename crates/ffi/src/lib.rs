@@ -107,6 +107,23 @@ pub fn tor_bootstrap_percent() -> u8 {
     TOR_BOOT_PCT.load(Ordering::Relaxed)
 }
 
+/// One shared, connected Nym mixnet client, reused for every mixnet chat — the
+/// gateway handshake is the slow part (like a Tor bootstrap), so connect once.
+/// A rare race may connect twice; the `OnceLock` keeps one. Ephemeral identity
+/// (`connect_new`); paid/persistent credentials are a later addition.
+#[cfg(feature = "nym")]
+fn shared_nym() -> Result<Arc<talkrypt_transport::NymTransport>, FfiError> {
+    static NYM: OnceLock<Arc<talkrypt_transport::NymTransport>> = OnceLock::new();
+    if let Some(n) = NYM.get() {
+        return Ok(n.clone());
+    }
+    let built = Arc::new(
+        rt().block_on(talkrypt_transport::NymTransport::connect())
+            .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?,
+    );
+    Ok(NYM.get_or_init(|| built).clone())
+}
+
 /// Route panics (incl. on Arti's worker threads, which Android can't surface) to
 /// `<state_dir>/panic.txt`, so a Tor-bootstrap failure is diagnosable on device.
 /// Installed once before the first Tor bootstrap.
@@ -520,6 +537,120 @@ impl TalkryptClient {
                     .await
             })
             .map_err(FfiError::from)?;
+            let invite = core.descriptor().to_uri();
+            Ok(Arc::new(Self {
+                rt,
+                core,
+                events: Mutex::new(rx),
+                invite,
+            }))
+        }
+    }
+
+    /// Host a chat multi-homed over BOTH the Nym mixnet and (when this build has
+    /// Tor) a Tor onion. The invite advertises every endpoint so a joiner reaches
+    /// us on whichever network it prefers. Requires the FFI built with
+    /// `--features nym` (otherwise returns an error, like `host_tor`). `state_dir`
+    /// is Arti's writable state path (the app's filesDir), used for the Tor leg.
+    #[uniffi::constructor]
+    pub fn host_nym(
+        channel: String,
+        posture: String,
+        state_dir: String,
+    ) -> Result<Arc<Self>, FfiError> {
+        #[cfg(not(feature = "nym"))]
+        {
+            let _ = (channel, posture, state_dir);
+            Err(FfiError::Failed(
+                "this build has Nym disabled; rebuild the FFI with --features nym".into(),
+            ))
+        }
+        #[cfg(feature = "nym")]
+        {
+            use talkrypt_transport::{split_endpoints, MultiTransport, Scheme};
+            let _ = &state_dir;
+            let rt = rt();
+            let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
+            let suite_id = dr_suite_id(profile);
+            let suite = SuiteRegistry::with_defaults()
+                .get(&suite_id)
+                .map_err(FfiError::from)?;
+            // Multi-home: a Nym leg always, plus a Tor leg when available. The
+            // MultiTransport fans both listeners in and routes dials by scheme.
+            let mut multi = MultiTransport::new();
+            #[cfg(feature = "tor")]
+            {
+                multi = multi.with(Scheme::Onion, shared_tor(&state_dir)?);
+            }
+            multi = multi.with(Scheme::Nym, shared_nym()?);
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                &suite_id,
+                vec![],
+                channel,
+            );
+            let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc);
+            // `host()` returns the multi-homed listener endpoint (onion + nym
+            // joined); expand it into the invite so a joiner can pick by preference.
+            let bound = rt.block_on(core.host()).map_err(FfiError::from)?;
+            let mut d = core.descriptor().clone();
+            d.endpoints = split_endpoints(&bound);
+            let invite = d.to_uri();
+            Ok(Arc::new(Self {
+                rt,
+                core,
+                events: Mutex::new(rx),
+                invite,
+            }))
+        }
+    }
+
+    /// Join over the Nym mixnet from a multi-homed invite. Connects only to the
+    /// networks the invite actually advertises (a `nym:`-only invite never
+    /// bootstraps Tor), then dials the single best endpoint by preference
+    /// (Nym → Tor → LAN). Requires the FFI built with `--features nym`.
+    #[uniffi::constructor]
+    pub fn join_nym(uri: String, state_dir: String) -> Result<Arc<Self>, FfiError> {
+        #[cfg(not(feature = "nym"))]
+        {
+            let _ = (uri, state_dir);
+            Err(FfiError::Failed(
+                "this build has Nym disabled; rebuild the FFI with --features nym".into(),
+            ))
+        }
+        #[cfg(feature = "nym")]
+        {
+            use talkrypt_transport::{endpoint_scheme, select_endpoint, MultiTransport, Scheme};
+            let _ = &state_dir;
+            let rt = rt();
+            let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+            let suite = SuiteRegistry::with_defaults()
+                .get_by_scheme_hash(&desc.scheme_hash())
+                .map_err(FfiError::from)?;
+            // Build only the legs the invite needs.
+            let mut multi = MultiTransport::new();
+            #[cfg(feature = "tor")]
+            if desc.endpoints.iter().any(|e| e.contains(".onion")) {
+                multi = multi.with(Scheme::Onion, shared_tor(&state_dir)?);
+            }
+            if desc
+                .endpoints
+                .iter()
+                .any(|e| endpoint_scheme(e) == Scheme::Nym)
+            {
+                multi = multi.with(Scheme::Nym, shared_nym()?);
+            }
+            let (core, rx) =
+                Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc.clone());
+            // Dial one endpoint, preferring the mixnet; fall back so a peer is
+            // never stranded by a scheme we don't prefer.
+            let prefs: &[Scheme] = &[Scheme::Nym, Scheme::Onion, Scheme::Tcp];
+            let chosen: Vec<String> = select_endpoint(&desc.endpoints, prefs)
+                .map(|s| vec![s.to_string()])
+                .unwrap_or_default();
+            rt.block_on(async { for_kind(desc.topology).establish(&core, &chosen).await })
+                .map_err(FfiError::from)?;
             let invite = core.descriptor().to_uri();
             Ok(Arc::new(Self {
                 rt,
@@ -1477,6 +1608,16 @@ pub fn invite_channel(uri: String) -> String {
 pub fn invite_is_onion(uri: String) -> bool {
     ChatDescriptor::from_uri(&uri)
         .map(|d| d.endpoints.iter().any(|e| e.contains(".onion")))
+        .unwrap_or(false)
+}
+
+/// Whether an invite advertises a Nym mixnet endpoint (a `nym:` address in the
+/// decoded descriptor). The app uses this to route a mixnet invite through
+/// `join_nym`. False on a malformed URI or an invite with no Nym endpoint.
+#[uniffi::export]
+pub fn invite_has_nym(uri: String) -> bool {
+    ChatDescriptor::from_uri(&uri)
+        .map(|d| d.endpoints.iter().any(|e| e.starts_with("nym:")))
         .unwrap_or(false)
 }
 

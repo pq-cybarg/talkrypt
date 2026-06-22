@@ -65,13 +65,16 @@ class Sessions {
 }
 
 /** How a saved chat should re-establish its connection (pure; unit-tested). */
-enum class ReconnectPlan { HOST_TOR, HOST_LAN, JOIN_TOR, JOIN_LAN, IMPOSSIBLE }
+enum class ReconnectPlan { HOST_NYM, HOST_TOR, HOST_LAN, JOIN_NYM, JOIN_TOR, JOIN_LAN, IMPOSSIBLE }
 
-/** Decide how to reconnect from a chat's persisted metadata. */
+/** Decide how to reconnect from a chat's persisted metadata. A mixnet chat
+ *  re-establishes over Nym (multi-homed with Tor) ahead of Tor-only or LAN. */
 fun reconnectPlan(m: ChatMeta): ReconnectPlan = when {
+    m.role == Role.HOST && m.mixnet -> ReconnectPlan.HOST_NYM
     m.role == Role.HOST && m.onion != null -> ReconnectPlan.HOST_TOR
     m.role == Role.HOST -> ReconnectPlan.HOST_LAN
     m.inviteUri == null -> ReconnectPlan.IMPOSSIBLE       // a join needs its invite
+    m.mixnet -> ReconnectPlan.JOIN_NYM
     m.onion != null -> ReconnectPlan.JOIN_TOR
     else -> ReconnectPlan.JOIN_LAN
 }

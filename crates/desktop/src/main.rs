@@ -17,7 +17,9 @@ use std::sync::Arc;
 use eframe::egui;
 use talkrypt_core::{ChatDescriptor, Core, Event, Persistence, TopologyKind};
 use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry, DEFAULT_SUITE_ID};
-use talkrypt_transport::{TcpTransport, Transport};
+use talkrypt_transport::{
+    endpoint_scheme, select_endpoint, split_endpoints, Scheme, TcpTransport, Transport,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 mod headless;
@@ -83,27 +85,78 @@ async fn init_tor<R: Fn() + Clone + Send + 'static>(
     .map(|t| t.clone())
 }
 
-/// Build the network transport for a host/join action. With `use_tor` (the
-/// default) it reuses the shared, pre-warmed Tor client (onion = NAT-free, both
-/// peers dial out). Without it, a fresh TCP transport bound to `listen` is used
-/// (the same-Wi-Fi fast path).
+/// Connect the shared Nym mixnet transport at most once and reuse it for every
+/// mixnet session. The gateway handshake is the slow part (like a Tor
+/// bootstrap), so a 2nd/3rd chat reuses the already-connected client.
+#[cfg(feature = "nym")]
+async fn init_nym(
+    cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
+    ui_tx: &std::sync::mpsc::Sender<UiEvt>,
+) -> Result<Arc<dyn Transport>, String> {
+    use talkrypt_transport::NymTransport;
+    if let Some(t) = cell.get() {
+        return Ok(t.clone());
+    }
+    let _ = ui_tx.send(UiEvt::Status {
+        id: 0,
+        text: "connecting to Nym mixnet…".into(),
+    });
+    cell.get_or_try_init(|| async {
+        NymTransport::connect()
+            .await
+            .map(|t| Arc::new(t) as Arc<dyn Transport>)
+            .map_err(|e| format!("nym connect failed: {e}"))
+    })
+    .await
+    .map(|t| t.clone())
+}
+
+/// Build the network transport for a host/join action.
+///
+/// * `use_nym` (opt-in) multi-homes over BOTH a Tor onion and the Nym mixnet:
+///   a host is reachable on either network, and a [`MultiTransport`] routes each
+///   dial by the endpoint's scheme. This is the strongest privacy path (mixnet
+///   traffic-analysis resistance) and is why the host advertises several
+///   endpoints (a multi-homed invite).
+/// * `use_tor` (the default) reuses the shared, pre-warmed Tor client (onion =
+///   NAT-free, both peers dial out).
+/// * Otherwise a fresh TCP transport bound to `listen` is used (same-Wi-Fi fast
+///   path).
+#[allow(unused_variables)]
 async fn make_transport<R: Fn() + Clone + Send + 'static>(
     id: u64,
     use_tor: bool,
+    use_nym: bool,
     listen: &str,
     ui_tx: &std::sync::mpsc::Sender<UiEvt>,
     tor_cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
+    nym_cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
     on_event: R,
 ) -> Result<Arc<dyn Transport>, String> {
+    #[cfg(feature = "nym")]
+    if use_nym {
+        use talkrypt_transport::MultiTransport;
+        // Multi-home: a Nym leg always, plus a Tor leg when this build has Tor
+        // (it almost always does — both are dial-out anonymity networks, so the
+        // host is reachable to joiners on either). The MultiTransport fans in
+        // both listeners and routes dials by scheme.
+        let mut multi = MultiTransport::new();
+        #[cfg(feature = "tor")]
+        if use_tor {
+            let tor = init_tor(tor_cell, ui_tx, on_event.clone()).await?;
+            multi = multi.with(Scheme::Onion, tor);
+        }
+        let nym = init_nym(nym_cell, ui_tx).await?;
+        multi = multi.with(Scheme::Nym, nym);
+        return Ok(Arc::new(multi) as Arc<dyn Transport>);
+    }
     if use_tor {
         #[cfg(feature = "tor")]
         {
-            let _ = id;
             return init_tor(tor_cell, ui_tx, on_event).await;
         }
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (id, ui_tx, tor_cell, on_event);
             return Err("this build has Tor disabled (rebuild with --features tor)".into());
         }
     }
@@ -203,11 +256,13 @@ enum Cmd {
         posture: String,
         access: String,
         use_tor: bool,
+        use_nym: bool,
     },
     Join {
         id: u64,
         uri: String,
         use_tor: bool,
+        use_nym: bool,
     },
     Send {
         id: u64,
@@ -284,6 +339,9 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
     // most once). Pre-warm in the background so it's ready before the first
     // host/join, without blocking LAN-only use.
     let tor_cell: Arc<tokio::sync::OnceCell<Arc<dyn Transport>>> = Arc::new(tokio::sync::OnceCell::new());
+    // The Nym mixnet client is connected lazily on first opt-in use (unlike Tor,
+    // which is pre-warmed): a user who never enables Nym never touches a gateway.
+    let nym_cell: Arc<tokio::sync::OnceCell<Arc<dyn Transport>>> = Arc::new(tokio::sync::OnceCell::new());
     #[cfg(feature = "tor")]
     {
         let cell = tor_cell.clone();
@@ -297,7 +355,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            Cmd::Host { id, channel, posture, access, use_tor } => {
+            Cmd::Host { id, channel, posture, access, use_tor, use_nym } => {
                 // Posture selects the suite; access sets who's heard.
                 let suite_id = dr_suite_id(profile_from(&posture));
                 let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
@@ -307,7 +365,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                 // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr (the onion
                 // service picks its own virtual port).
                 let listen = format!("0.0.0.0:{LAN_PORT}");
-                let transport = match make_transport(id, use_tor, &listen, &ui_tx, &tor_cell, on_event.clone()).await {
+                let transport = match make_transport(id, use_tor, use_nym, &listen, &ui_tx, &tor_cell, &nym_cell, on_event.clone()).await {
                     Ok(t) => t,
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); on_event(); continue; }
                 };
@@ -328,13 +386,34 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                             "friends" => c.restrict_to_friends(),
                             _ => c.open_access(),
                         }
-                        // Over Tor advertise the onion endpoint as-is (globally
-                        // dialable, no NAT); over TCP swap the wildcard bind for
-                        // this machine's LAN IP.
-                        let advertised = if use_tor { bound } else { format!("{}:{LAN_PORT}", lan_ip()) };
+                        // With Nym, `host()` returns a multi-homed listener whose
+                        // endpoint is several globally-dialable addresses joined
+                        // together (onion + nym); expand them into the invite so a
+                        // joiner can pick by preference. Over Tor alone advertise
+                        // the onion as-is; over TCP swap the wildcard bind for this
+                        // machine's LAN IP.
+                        let endpoints = if use_nym {
+                            split_endpoints(&bound)
+                        } else if use_tor {
+                            vec![bound]
+                        } else {
+                            vec![format!("{}:{LAN_PORT}", lan_ip())]
+                        };
+                        // Label the chat by the networks it's actually homed on,
+                        // derived from the advertised endpoints (e.g. "nym",
+                        // "tor", "nym+tor", "lan") so it never claims a leg the
+                        // transport doesn't carry.
+                        let net = endpoints
+                            .iter()
+                            .map(|e| match endpoint_scheme(e) {
+                                Scheme::Nym => "nym",
+                                Scheme::Onion => "tor",
+                                Scheme::Tcp => "lan",
+                            })
+                            .collect::<Vec<_>>()
+                            .join("+");
                         let mut d = c.descriptor().clone();
-                        d.endpoints = vec![advertised];
-                        let net = if use_tor { "tor" } else { "lan" };
+                        d.endpoints = endpoints;
                         let _ = ui_tx.send(UiEvt::Invite { id, uri: d.to_uri() });
                         let _ = ui_tx.send(UiEvt::Status { id, text: format!("hosting · {net} · {posture} · {access}") });
                         spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
@@ -343,17 +422,30 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); }
                 }
             }
-            Cmd::Join { id, uri, use_tor } => {
+            Cmd::Join { id, uri, use_tor, use_nym } => {
                 match ChatDescriptor::from_uri(&uri) {
                     Ok(desc) => {
                         // Use the invite's own suite (posture), falling back to default.
                         let sid = desc.resolved_suite_id().to_string();
                         let join_suite = SuiteRegistry::with_defaults().get(&sid).unwrap_or_else(|_| default_suite.clone());
-                        let endpoint = desc.endpoints.first().cloned().unwrap_or_default();
-                        // Auto-route to Tor when the invite is an onion, regardless
-                        // of the toggle (a `.onion` is only reachable through Tor).
+                        // From a multi-homed invite, pick the best endpoint by
+                        // preference: Nym (mixnet) when enabled, else Tor, else LAN.
+                        // Falls back to the first endpoint so a peer is never
+                        // stranded by a scheme we don't prefer.
+                        let prefs: &[Scheme] = if use_nym {
+                            &[Scheme::Nym, Scheme::Onion, Scheme::Tcp]
+                        } else {
+                            &[Scheme::Onion, Scheme::Tcp]
+                        };
+                        let endpoint = select_endpoint(&desc.endpoints, prefs)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        // Route to the network the chosen endpoint lives on. A
+                        // `nym:` endpoint forces Nym; a `.onion` forces Tor (only
+                        // reachable that way) regardless of the toggle.
+                        let join_nym = use_nym && endpoint_scheme(&endpoint) == Scheme::Nym;
                         let join_tor = use_tor || endpoint.contains(".onion");
-                        let transport = match make_transport(id, join_tor, "0.0.0.0:0", &ui_tx, &tor_cell, on_event.clone()).await {
+                        let transport = match make_transport(id, join_tor, join_nym, "0.0.0.0:0", &ui_tx, &tor_cell, &nym_cell, on_event.clone()).await {
                             Ok(t) => t,
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
                         };
@@ -501,6 +593,7 @@ struct App {
     access: String,
     persistence: String,
     use_tor: bool,
+    use_nym: bool,
     join_input: String,
     // ----- chat screen -----
     msg_input: String,
@@ -527,6 +620,9 @@ impl App {
             // Tor on by default whenever this build can do Tor; a LAN-only
             // (--no-default-features) build starts unchecked.
             use_tor: cfg!(feature = "tor"),
+            // Nym mixnet is opt-in and off by default even in a `nym` build (it
+            // connects to a gateway only when the user asks for it).
+            use_nym: false,
             join_input: String::new(),
             msg_input: String::new(),
             show_invite: false,
@@ -718,6 +814,11 @@ impl App {
                 &mut self.use_tor,
                 egui::RichText::new("Route over Tor (.onion — works across any network, no NAT)").color(MUTED),
             );
+            #[cfg(feature = "nym")]
+            ui.checkbox(
+                &mut self.use_nym,
+                egui::RichText::new("Also route over Nym mixnet (traffic-analysis resistance; multi-homes the invite)").color(MUTED),
+            );
             ui.add_space(20.0);
             if pill(ui, "Host a chat", ACCENT, egui::Color32::WHITE).clicked() {
                 let ch = if self.channel_input.trim().is_empty() { "#general".into() } else { self.channel_input.clone() };
@@ -729,6 +830,7 @@ impl App {
                     posture: self.posture.clone(),
                     access: self.access.clone(),
                     use_tor: self.use_tor,
+                    use_nym: self.use_nym,
                 });
                 self.open(id);
                 self.show_invite = true; // hosts land on the QR so they can share it
@@ -750,7 +852,7 @@ impl App {
                     let title = ChatDescriptor::from_uri(&uri).map(|d| d.channel).unwrap_or_else(|_| "chat".into());
                     let id = self.alloc_id();
                     self.sessions.push(Session::new(id, Kind::Join, title));
-                    let _ = self.cmd_tx.send(Cmd::Join { id, uri, use_tor: self.use_tor });
+                    let _ = self.cmd_tx.send(Cmd::Join { id, uri, use_tor: self.use_tor, use_nym: self.use_nym });
                     self.join_input.clear();
                     self.notice.clear();
                     self.open(id);
