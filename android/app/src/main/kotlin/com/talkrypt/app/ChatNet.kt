@@ -67,6 +67,13 @@ object ChatNet {
      */
     fun sharedTorDir(ctx: Context): String = torDirPath(ctx, "shared")
 
+    /** The saved NYM wallet mnemonic for paid Nym bandwidth, or "" for free
+     *  ephemeral mode. Entered manually in the new-chat screen and used for the
+     *  paid (credentials) connect. Empty unless the user opted into paid Nym. */
+    fun nymMnemonic(ctx: Context): String =
+        ctx.getSharedPreferences("talkrypt", Context.MODE_PRIVATE)
+            .getString("nym_mnemonic", "") ?: ""
+
     /** The persistent pseudonymous account (generated + saved on first use). */
     fun account(ctx: Context): Account {
         val prefs = ctx.getSharedPreferences("talkrypt", Context.MODE_PRIVATE)
@@ -100,10 +107,10 @@ object ChatNet {
     fun connect(ctx: Context, meta: ChatMeta): TalkryptClient {
         val pst = meta.posture.ifEmpty { "pq-pure" }
         val c = when (reconnectPlan(meta)) {
-            ReconnectPlan.HOST_NYM -> TalkryptClient.hostNym(meta.title, pst, sharedTorDir(ctx))
+            ReconnectPlan.HOST_NYM -> TalkryptClient.hostNym(meta.title, pst, sharedTorDir(ctx), nymMnemonic(ctx))
             ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, sharedTorDir(ctx))
             ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p)) }
-            ReconnectPlan.JOIN_NYM -> TalkryptClient.joinNym(meta.inviteUri!!, sharedTorDir(ctx))
+            ReconnectPlan.JOIN_NYM -> TalkryptClient.joinNym(meta.inviteUri!!, sharedTorDir(ctx), nymMnemonic(ctx))
             ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, sharedTorDir(ctx))
             ReconnectPlan.JOIN_LAN -> TalkryptClient.join(meta.inviteUri!!)
             ReconnectPlan.IMPOSSIBLE -> throw IllegalStateException("no saved invite to reconnect")

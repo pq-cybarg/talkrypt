@@ -240,6 +240,23 @@ class MainActivity : Activity() {
         }
         col.addView(nymBox, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
+        // Optional NYM wallet mnemonic for PAID Nym bandwidth (zk-nym credentials).
+        // Left blank => free ephemeral mixnet. Saved to prefs as typed so reconnects
+        // can use it. NOTE: stored in plain SharedPreferences for now — it controls
+        // funds; a keystore/EncryptedSharedPreferences upgrade is a follow-up.
+        val nymMnem = inputField("NYM wallet mnemonic — paid bandwidth (optional)").apply {
+            setText(ChatNet.nymMnemonic(this@MainActivity))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    getSharedPreferences("talkrypt", android.content.Context.MODE_PRIVATE)
+                        .edit().putString("nym_mnemonic", s?.toString()?.trim() ?: "").apply()
+                }
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            })
+        }
+        col.addView(nymMnem, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
             startHost(
                 channel.text.toString().ifBlank { "#general" },
@@ -1337,7 +1354,7 @@ class MainActivity : Activity() {
                 // Nym multi-homes over Tor too, so it also uses the shared Tor dir.
                 val torSub = if (useTor || useNym) "shared" else null
                 val c = if (useNym) {
-                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this))
+                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this))
                 } else if (useTor) {
                     TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this))
                 } else {
@@ -1438,7 +1455,7 @@ class MainActivity : Activity() {
         startConnectingPoll(tor || nym)
         thread {
             try {
-                val c = if (nym) TalkryptClient.joinNym(uri, ChatNet.sharedTorDir(this))
+                val c = if (nym) TalkryptClient.joinNym(uri, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this))
                         else if (tor) TalkryptClient.joinTor(uri, ChatNet.sharedTorDir(this))
                         else TalkryptClient.join(uri)
                 val sn = c.safetyNumber()

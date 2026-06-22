@@ -61,7 +61,16 @@ pub struct NymTransport {
 }
 
 impl NymTransport {
-    /// Connect a fresh mixnet client (ephemeral identity).
+    /// Wrap an already-connected mixnet client.
+    fn from_client(client: MixnetClient) -> Self {
+        let nym_address = client.nym_address().to_string();
+        Self {
+            client: Arc::new(Mutex::new(client)),
+            nym_address,
+        }
+    }
+
+    /// Connect a fresh mixnet client (ephemeral identity, free default gateways).
     ///
     /// This performs the gateway handshake and is the slow part — like a Tor
     /// bootstrap — so connect once and share the result.
@@ -69,11 +78,46 @@ impl NymTransport {
         let client = MixnetClient::connect_new()
             .await
             .map_err(|e| io(format!("nym connect: {e}")))?;
-        let nym_address = client.nym_address().to_string();
-        Ok(Self {
-            client: Arc::new(Mutex::new(client)),
-            nym_address,
-        })
+        Ok(Self::from_client(client))
+    }
+
+    /// Connect in **paid** (credentials) mode: acquire a zk-nym bandwidth
+    /// credential by paying with the caller's NYM wallet `mnemonic`, then connect
+    /// using it. State (keys + the credential database) persists under
+    /// `state_dir`, so subsequent connects reuse the same identity and any
+    /// remaining bandwidth. This is the "bring your own Nym, pay for it" path;
+    /// `connect` (free, ephemeral) remains the default.
+    ///
+    /// The `mnemonic` controls real funds — it is used only to acquire bandwidth
+    /// and is never logged or persisted by this code (nym-sdk takes it by value
+    /// for the on-chain purchase).
+    pub async fn connect_paid(state_dir: &std::path::Path, mnemonic: &str) -> Result<Self> {
+        use nym_credentials_interface::TicketType;
+        use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
+
+        std::fs::create_dir_all(state_dir).map_err(io)?;
+        let paths = StoragePaths::new_from_dir(state_dir)
+            .map_err(|e| io(format!("nym storage paths: {e}")))?;
+        let disconnected = MixnetClientBuilder::new_with_default_storage(paths)
+            .await
+            .map_err(|e| io(format!("nym storage init: {e}")))?
+            .enable_credentials_mode()
+            .build()
+            .map_err(|e| io(format!("nym client build: {e}")))?;
+        // Acquire a bandwidth credential (pays on-chain with the mnemonic).
+        let bandwidth = disconnected
+            .create_bandwidth_client(mnemonic.to_string(), TicketType::V1MixnetEntry)
+            .await
+            .map_err(|e| io(format!("nym bandwidth client: {e}")))?;
+        bandwidth
+            .acquire()
+            .await
+            .map_err(|e| io(format!("nym bandwidth acquire (check funds/mnemonic): {e}")))?;
+        let client = disconnected
+            .connect_to_mixnet()
+            .await
+            .map_err(|e| io(format!("nym connect (paid): {e}")))?;
+        Ok(Self::from_client(client))
     }
 
     /// This node's mixnet address (bare, without the `nym:` scheme prefix).

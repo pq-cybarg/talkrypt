@@ -10495,6 +10495,7 @@ dependencies = [
  "async-trait",
  "futures",
  "libsqlite3-sys",
+ "nym-credentials-interface",
  "nym-sdk",
  "rustls 0.23.40",
  "safelog",

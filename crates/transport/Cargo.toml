@@ -45,13 +45,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring"], opti
 #     upstream 0.9.0 (`>=0.30.1, <0.38.0`). See [patch.crates-io] in the
 #     workspace-root Cargo.toml and vendor/sqlx-sqlite/.
 nym-sdk = { git = "https://github.com/nymtech/nym", rev = "7cee643c8577c21ee002a6044002bfc6789c02fe", optional = true }
+# `TicketType` for the paid-bandwidth (zk-nym) flow — pinned to the same rev.
+nym-credentials-interface = { git = "https://github.com/nymtech/nym", rev = "7cee643c8577c21ee002a6044002bfc6789c02fe", optional = true }
 
 [features]
 default = []
 # Pulls in the (large) Arti dependency tree and enables ArtiTransport.
 tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat", "dep:futures", "dep:tempfile", "dep:safelog", "dep:libsqlite3-sys", "dep:rustls"]
 # Pulls in the (large) Nym SDK dependency tree and enables NymTransport.
-nym = ["dep:nym-sdk"]
+nym = ["dep:nym-sdk", "dep:nym-credentials-interface"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

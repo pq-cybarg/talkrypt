@@ -28,7 +28,7 @@ mod headless;
 /// it across launches lets warm starts skip the directory bootstrap and keeps a
 /// stable `.onion`. Overridable via `TALKRYPT_TOR_STATE` — used to give two
 /// instances on one host separate dirs (Arti locks its state dir).
-#[cfg(feature = "tor")]
+#[cfg(any(feature = "tor", feature = "nym"))]
 fn tor_state_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Some(dir) = std::env::var_os("TALKRYPT_TOR_STATE") {
@@ -88,6 +88,11 @@ async fn init_tor<R: Fn() + Clone + Send + 'static>(
 /// Connect the shared Nym mixnet transport at most once and reuse it for every
 /// mixnet session. The gateway handshake is the slow part (like a Tor
 /// bootstrap), so a 2nd/3rd chat reuses the already-connected client.
+/// Connect the shared Nym client once. With a `TALKRYPT_NYM_MNEMONIC` env var
+/// set, connect in **paid** mode (acquire a zk-nym bandwidth credential paying
+/// with that NYM wallet mnemonic, persisting under `<state>/nym`); otherwise
+/// free ephemeral mode. The mnemonic controls funds — it's read from the env
+/// only, never logged.
 #[cfg(feature = "nym")]
 async fn init_nym(
     cell: &tokio::sync::OnceCell<Arc<dyn Transport>>,
@@ -97,14 +102,24 @@ async fn init_nym(
     if let Some(t) = cell.get() {
         return Ok(t.clone());
     }
+    let mnemonic = std::env::var("TALKRYPT_NYM_MNEMONIC").unwrap_or_default();
+    let paid = !mnemonic.trim().is_empty();
     let _ = ui_tx.send(UiEvt::Status {
         id: 0,
-        text: "connecting to Nym mixnet…".into(),
+        text: if paid {
+            "connecting to Nym mixnet (paid: acquiring bandwidth)…".into()
+        } else {
+            "connecting to Nym mixnet…".into()
+        },
     });
     cell.get_or_try_init(|| async {
-        NymTransport::connect()
-            .await
-            .map(|t| Arc::new(t) as Arc<dyn Transport>)
+        let nym = if paid {
+            let dir = tor_state_dir().join("nym");
+            NymTransport::connect_paid(&dir, mnemonic.trim()).await
+        } else {
+            NymTransport::connect().await
+        };
+        nym.map(|t| Arc::new(t) as Arc<dyn Transport>)
             .map_err(|e| format!("nym connect failed: {e}"))
     })
     .await

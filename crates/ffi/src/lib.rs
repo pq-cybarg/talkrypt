@@ -109,18 +109,29 @@ pub fn tor_bootstrap_percent() -> u8 {
 
 /// One shared, connected Nym mixnet client, reused for every mixnet chat — the
 /// gateway handshake is the slow part (like a Tor bootstrap), so connect once.
-/// A rare race may connect twice; the `OnceLock` keeps one. Ephemeral identity
-/// (`connect_new`); paid/persistent credentials are a later addition.
+/// A rare race may connect twice; the `OnceLock` keeps one.
+///
+/// `mnemonic` empty → free ephemeral mode (`connect`). Non-empty → paid mode:
+/// acquire a zk-nym bandwidth credential paying with that NYM wallet mnemonic,
+/// persisting state under `<state_dir>/nym`. The mode is fixed at first connect
+/// (the singleton client), so a paid mnemonic must be supplied on the first
+/// Nym host/join of the process.
 #[cfg(feature = "nym")]
-fn shared_nym() -> Result<Arc<talkrypt_transport::NymTransport>, FfiError> {
+fn shared_nym(state_dir: &str, mnemonic: &str) -> Result<Arc<talkrypt_transport::NymTransport>, FfiError> {
     static NYM: OnceLock<Arc<talkrypt_transport::NymTransport>> = OnceLock::new();
     if let Some(n) = NYM.get() {
         return Ok(n.clone());
     }
-    let built = Arc::new(
-        rt().block_on(talkrypt_transport::NymTransport::connect())
-            .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?,
-    );
+    let built = Arc::new(if mnemonic.is_empty() {
+        rt()
+            .block_on(talkrypt_transport::NymTransport::connect())
+            .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?
+    } else {
+        let nym_dir = std::path::Path::new(state_dir).join("nym");
+        rt()
+            .block_on(talkrypt_transport::NymTransport::connect_paid(&nym_dir, mnemonic))
+            .map_err(|e| FfiError::Failed(format!("nym paid connect failed: {e}")))?
+    });
     Ok(NYM.get_or_init(|| built).clone())
 }
 
@@ -557,10 +568,11 @@ impl TalkryptClient {
         channel: String,
         posture: String,
         state_dir: String,
+        mnemonic: String,
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "nym"))]
         {
-            let _ = (channel, posture, state_dir);
+            let _ = (channel, posture, state_dir, mnemonic);
             Err(FfiError::Failed(
                 "this build has Nym disabled; rebuild the FFI with --features nym".into(),
             ))
@@ -568,7 +580,6 @@ impl TalkryptClient {
         #[cfg(feature = "nym")]
         {
             use talkrypt_transport::{split_endpoints, MultiTransport, Scheme};
-            let _ = &state_dir;
             let rt = rt();
             let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
             let suite_id = dr_suite_id(profile);
@@ -582,7 +593,7 @@ impl TalkryptClient {
             {
                 multi = multi.with(Scheme::Onion, shared_tor(&state_dir)?);
             }
-            multi = multi.with(Scheme::Nym, shared_nym()?);
+            multi = multi.with(Scheme::Nym, shared_nym(&state_dir, &mnemonic)?);
             let desc = ChatDescriptor::new(
                 TopologyKind::P2P,
                 Persistence::Ephemeral,
@@ -611,10 +622,10 @@ impl TalkryptClient {
     /// bootstraps Tor), then dials the single best endpoint by preference
     /// (Nym → Tor → LAN). Requires the FFI built with `--features nym`.
     #[uniffi::constructor]
-    pub fn join_nym(uri: String, state_dir: String) -> Result<Arc<Self>, FfiError> {
+    pub fn join_nym(uri: String, state_dir: String, mnemonic: String) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "nym"))]
         {
-            let _ = (uri, state_dir);
+            let _ = (uri, state_dir, mnemonic);
             Err(FfiError::Failed(
                 "this build has Nym disabled; rebuild the FFI with --features nym".into(),
             ))
@@ -622,7 +633,6 @@ impl TalkryptClient {
         #[cfg(feature = "nym")]
         {
             use talkrypt_transport::{endpoint_scheme, select_endpoint, MultiTransport, Scheme};
-            let _ = &state_dir;
             let rt = rt();
             let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
             let suite = SuiteRegistry::with_defaults()
@@ -639,7 +649,7 @@ impl TalkryptClient {
                 .iter()
                 .any(|e| endpoint_scheme(e) == Scheme::Nym)
             {
-                multi = multi.with(Scheme::Nym, shared_nym()?);
+                multi = multi.with(Scheme::Nym, shared_nym(&state_dir, &mnemonic)?);
             }
             let (core, rx) =
                 Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc.clone());
