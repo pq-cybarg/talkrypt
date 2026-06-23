@@ -43,6 +43,7 @@ import uniffi.talkrypt_ffi.anchorResolve
 import uniffi.talkrypt_ffi.inviteChannel
 import uniffi.talkrypt_ffi.inviteIsOnion
 import uniffi.talkrypt_ffi.inviteHasNym
+import uniffi.talkrypt_ffi.nymImportTicketbook
 import uniffi.talkrypt_ffi.torBootstrapPercent
 import uniffi.talkrypt_ffi.linkAccept
 import uniffi.talkrypt_ffi.linkedSegmentChain
@@ -175,6 +176,7 @@ class MainActivity : Activity() {
         private const val REQ_NEARBY = 0x4E42 // "NB"
         private const val REQ_SCAN = 0x5343
         private const val REQ_NOTIF = 0x4E54  // "NT" — POST_NOTIFICATIONS for the always-on service
+        private const val REQ_TICKETBOOK = 0x544B // "TK" — pick a Nym ticketbook file to import
         private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
     }
 
@@ -183,15 +185,45 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(this, QrScanActivity::class.java), REQ_SCAN)
     }
 
-    /** Result from the in-app QR scanner: route a scanned talkrypt:// invite the
-     *  same way a deep link would (link offer vs. chat join). */
+    /** Pick a Nym ticketbook file (minted by the user's own Nym tooling) to import
+     *  as paid bandwidth — no wallet mnemonic ever enters talkrypt. */
+    private fun launchTicketbookImport() {
+        val pick = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(pick, REQ_TICKETBOOK)
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_SCAN || resultCode != RESULT_OK) return
-        val uri = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)?.trim().orEmpty()
-        if (!uri.startsWith("talkrypt://")) { toast("Not a talkrypt QR"); return }
-        val isLink = runCatching { inviteChannel(uri) == "#link" }.getOrDefault(false)
-        if (isLink) setContentView(acceptLinkConfirmScreen(uri)) else { toast("opening invite…"); startJoin(uri) }
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            REQ_SCAN -> {
+                // Route a scanned talkrypt:// invite like a deep link would.
+                val uri = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)?.trim().orEmpty()
+                if (!uri.startsWith("talkrypt://")) { toast("Not a talkrypt QR"); return }
+                val isLink = runCatching { inviteChannel(uri) == "#link" }.getOrDefault(false)
+                if (isLink) setContentView(acceptLinkConfirmScreen(uri)) else { toast("opening invite…"); startJoin(uri) }
+            }
+            REQ_TICKETBOOK -> {
+                val uri = data?.data ?: return
+                // Read off the UI thread; import touches the local credential store.
+                thread {
+                    val res = runCatching {
+                        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: throw java.io.IOException("could not read file")
+                        nymImportTicketbook(ChatNet.sharedTorDir(this), bytes)
+                    }
+                    ui.post {
+                        res.fold(
+                            { toast("Nym credential imported — paid mixnet ready (no mnemonic needed)") },
+                            { toast("import failed: ${ChatNet.friendlyError(it.message)}") },
+                        )
+                    }
+                }
+            }
+        }
     }
 
     // ---------- setup screen ----------
@@ -256,6 +288,13 @@ class MainActivity : Activity() {
             })
         }
         col.addView(nymMnem, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+
+        // Preferred no-mnemonic paid path: import a ticketbook minted with your
+        // own Nym tooling (the wallet seed stays there, never here).
+        col.addView(text("Or import a Nym credential file instead of a mnemonic:", 13f, muted)
+            .also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(pillButton("Import Nym credential", panel, fg) { launchTicketbookImport() },
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(4)))
 
         col.addView(pillButton("Host a chat", accent, Color.WHITE) {
             startHost(
