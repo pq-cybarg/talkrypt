@@ -120,6 +120,84 @@ impl NymTransport {
         Ok(Self::from_client(client))
     }
 
+    /// Connect in credentials mode using a credential **already in storage** —
+    /// no mnemonic, no on-chain purchase. Use after [`import_ticketbook`] has
+    /// loaded a ticketbook minted by the user's own Nym tooling. This is the
+    /// preferred "paid" path: the wallet seed never touches talkrypt.
+    ///
+    /// [`import_ticketbook`]: Self::import_ticketbook
+    pub async fn connect_credentials(state_dir: &std::path::Path) -> Result<Self> {
+        use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
+        std::fs::create_dir_all(state_dir).map_err(io)?;
+        let paths = StoragePaths::new_from_dir(state_dir)
+            .map_err(|e| io(format!("nym storage paths: {e}")))?;
+        let client = MixnetClientBuilder::new_with_default_storage(paths)
+            .await
+            .map_err(|e| io(format!("nym storage init: {e}")))?
+            .enable_credentials_mode()
+            .build()
+            .map_err(|e| io(format!("nym client build: {e}")))?
+            .connect_to_mixnet()
+            .await
+            .map_err(|e| io(format!("nym connect (credentials): {e}")))?;
+        Ok(Self::from_client(client))
+    }
+
+    /// Import a ticketbook (a spend-limited zk-nym bandwidth credential the user
+    /// minted with Nym's own tooling) into the persistent credential store at
+    /// `state_dir`, then drop the (unconnected) client. No mnemonic, no wallet
+    /// seed — only the bandwidth credential. `ticketbook` is the bytes of an
+    /// `ImportableTicketBook` (Nym's standard export). After this, connect with
+    /// [`connect_credentials`](Self::connect_credentials).
+    pub async fn import_ticketbook(
+        state_dir: &std::path::Path,
+        ticketbook: &[u8],
+    ) -> Result<()> {
+        use nym_credentials::ecash::bandwidth::importable::ImportableTicketBook;
+        use nym_credentials::ecash::bandwidth::serialiser::VersionedSerialise;
+        use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
+
+        let importable = ImportableTicketBook::try_unpack(ticketbook, None)
+            .map_err(|e| io(format!("bad ticketbook bytes: {e}")))?;
+        let decoded = importable
+            .try_unpack_full()
+            .map_err(|e| io(format!("ticketbook decode: {e}")))?;
+
+        std::fs::create_dir_all(state_dir).map_err(io)?;
+        let paths = StoragePaths::new_from_dir(state_dir)
+            .map_err(|e| io(format!("nym storage paths: {e}")))?;
+        let disconnected = MixnetClientBuilder::new_with_default_storage(paths)
+            .await
+            .map_err(|e| io(format!("nym storage init: {e}")))?
+            .enable_credentials_mode()
+            .build()
+            .map_err(|e| io(format!("nym client build: {e}")))?;
+        let importer = disconnected.begin_bandwidth_import();
+        importer
+            .import_ticketbook(&decoded.ticketbook)
+            .await
+            .map_err(|e| io(format!("import ticketbook: {e}")))?;
+        if let Some(k) = &decoded.master_verification_key {
+            importer
+                .import_master_verification_key(k)
+                .await
+                .map_err(|e| io(format!("import master key: {e}")))?;
+        }
+        if let Some(s) = &decoded.coin_index_signatures {
+            importer
+                .import_coin_index_signatures(s)
+                .await
+                .map_err(|e| io(format!("import coin-index sigs: {e}")))?;
+        }
+        if let Some(s) = &decoded.expiration_date_signatures {
+            importer
+                .import_expiration_date_signatures(s)
+                .await
+                .map_err(|e| io(format!("import expiration sigs: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// This node's mixnet address (bare, without the `nym:` scheme prefix).
     pub fn nym_address(&self) -> &str {
         &self.nym_address

@@ -122,17 +122,52 @@ fn shared_nym(state_dir: &str, mnemonic: &str) -> Result<Arc<talkrypt_transport:
     if let Some(n) = NYM.get() {
         return Ok(n.clone());
     }
-    let built = Arc::new(if mnemonic.is_empty() {
-        rt()
-            .block_on(talkrypt_transport::NymTransport::connect())
-            .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?
-    } else {
-        let nym_dir = std::path::Path::new(state_dir).join("nym");
+    let nym_dir = std::path::Path::new(state_dir).join("nym");
+    let built = Arc::new(if !mnemonic.is_empty() {
+        // Explicit mnemonic → acquire bandwidth on-chain (advanced path).
         rt()
             .block_on(talkrypt_transport::NymTransport::connect_paid(&nym_dir, mnemonic))
             .map_err(|e| FfiError::Failed(format!("nym paid connect failed: {e}")))?
+    } else if nym_dir.exists() {
+        // A ticketbook was imported (no mnemonic) → connect on the stored
+        // credential. This is the preferred paid path.
+        rt()
+            .block_on(talkrypt_transport::NymTransport::connect_credentials(&nym_dir))
+            .map_err(|e| FfiError::Failed(format!("nym credential connect failed: {e}")))?
+    } else {
+        // Nothing supplied → free ephemeral mixnet.
+        rt()
+            .block_on(talkrypt_transport::NymTransport::connect())
+            .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?
     });
     Ok(NYM.get_or_init(|| built).clone())
+}
+
+/// Import a Nym **ticketbook** (a spend-limited bandwidth credential the user
+/// minted with Nym's own tooling — the wallet seed never enters talkrypt) into
+/// the persistent credential store under `<state_dir>/nym`. After this, a Nym
+/// host/join with an empty mnemonic connects on the stored credential. Requires
+/// the FFI built with `--features nym`. `ticketbook` is the raw bytes of an
+/// `ImportableTicketBook` export.
+#[uniffi::export]
+pub fn nym_import_ticketbook(state_dir: String, ticketbook: Vec<u8>) -> Result<(), FfiError> {
+    #[cfg(not(feature = "nym"))]
+    {
+        let _ = (state_dir, ticketbook);
+        Err(FfiError::Failed(
+            "this build has Nym disabled; rebuild the FFI with --features nym".into(),
+        ))
+    }
+    #[cfg(feature = "nym")]
+    {
+        let nym_dir = std::path::Path::new(&state_dir).join("nym");
+        rt()
+            .block_on(talkrypt_transport::NymTransport::import_ticketbook(
+                &nym_dir,
+                &ticketbook,
+            ))
+            .map_err(|e| FfiError::Failed(format!("nym ticketbook import failed: {e}")))
+    }
 }
 
 /// Route panics (incl. on Arti's worker threads, which Android can't surface) to
