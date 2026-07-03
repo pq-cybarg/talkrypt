@@ -392,6 +392,12 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     channel,
                 );
                 let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
+                // Multi-homed (Nym+Tor) => gossip bridge: a group chat over this
+                // node re-floods across its transports, merging the islands.
+                // No-op for pairwise DMs (group frames only).
+                if use_nym {
+                    c.enable_gossip();
+                }
                 match c.host().await {
                     // `host()` returns the listener endpoint: the dialable
                     // `.onion:port` over Tor, or the local bind over TCP.
@@ -465,6 +471,10 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
                         };
                         let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
+                        // Multi-homed join => gossip bridge (see the host path).
+                        if join_nym {
+                            c.enable_gossip();
+                        }
                         match c.connect(&endpoint).await {
                             Ok(_) => {
                                 let _ = ui_tx.send(UiEvt::Status { id, text: format!("joined — connected to {endpoint}") });

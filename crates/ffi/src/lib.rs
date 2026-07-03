@@ -637,6 +637,10 @@ impl TalkryptClient {
                 channel,
             );
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc);
+            // Multi-homed => act as a gossip bridge: a group chat run over this
+            // node re-floods across all its transports, stitching Nym/Tor islands
+            // into one conversation (no-op for pairwise DMs — group frames only).
+            core.enable_gossip();
             // `host()` returns the multi-homed listener endpoint (onion + nym
             // joined); expand it into the invite so a joiner can pick by preference.
             let bound = rt.block_on(core.host()).map_err(FfiError::from)?;
@@ -688,6 +692,8 @@ impl TalkryptClient {
             }
             let (core, rx) =
                 Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc.clone());
+            // Multi-homed => gossip bridge (see host_nym); no-op for pairwise DMs.
+            core.enable_gossip();
             // Dial one endpoint, preferring the mixnet; fall back so a peer is
             // never stranded by a scheme we don't prefer.
             let prefs: &[Scheme] = &[Scheme::Nym, Scheme::Onion, Scheme::Tcp];
