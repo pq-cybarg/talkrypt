@@ -14,6 +14,9 @@ tokio.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 zeroize.workspace = true
+# SHA-256 for the gossip dedup key (a content fingerprint of forwarded group
+# ciphertext — see the seen-set in the engine).
+sha2.workspace = true
 # Argon2id for password-gated channels (mixes a channel password into the root).
 argon2 = "0.5"
 

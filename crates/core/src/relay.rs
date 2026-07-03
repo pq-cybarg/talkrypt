@@ -20,7 +20,7 @@ use talkrypt_crypto::{CryptoSuite, IdentityKeyPair};
 use talkrypt_transport::{Endpoint, FrameWriter, Transport};
 
 use crate::descriptor::ChatDescriptor;
-use crate::engine::{Route, Routed};
+use crate::engine::{gossip_id, Route, Routed, SeenSet};
 use crate::error::Result;
 use crate::handshake;
 
@@ -36,6 +36,9 @@ struct RelayPeer {
 struct Switch {
     peers: Mutex<Vec<RelayPeer>>,
     committer: Mutex<Option<[u8; 48]>>,
+    /// Dedup for a mesh of relays: an inner-frame fingerprint we've already
+    /// forwarded is dropped, so cross-connected relays don't duplicate or loop.
+    seen: Mutex<SeenSet>,
 }
 
 /// A standalone relay node. Hosts a listener and forwards routed frames between
@@ -63,6 +66,7 @@ impl RelayHub {
             switch: Arc::new(Switch {
                 peers: Mutex::new(Vec::new()),
                 committer: Mutex::new(None),
+                seen: Mutex::new(SeenSet::new()),
             }),
         }
     }
@@ -134,6 +138,12 @@ async fn forward_loop(
         let Some(routed) = Routed::decode(&pt) else {
             continue;
         };
+
+        // Dedup on the inner (group) ciphertext so a mesh of interconnected
+        // relays doesn't forward the same frame twice or loop it.
+        if !switch.seen.lock().unwrap().insert(gossip_id(&routed.inner)) {
+            continue;
+        }
 
         // Decide destinations, then forward the (still-encrypted) inner frame,
         // stamping the authoritative sender fingerprint.

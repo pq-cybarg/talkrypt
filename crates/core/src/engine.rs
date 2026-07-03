@@ -387,6 +387,62 @@ struct Inner {
     /// A KeyPackage is honored only from an admitted peer (under a restrictive
     /// policy), so group membership is gated like pairwise access.
     admitted_peers: Mutex<std::collections::HashSet<[u8; 48]>>,
+    /// Gossip bridge: when set, this node re-floods group ciphertext it receives
+    /// to every *other* peer — across all transports it's connected on. A
+    /// multi-homed member (e.g. on Nym + Tor) thus bridges otherwise-disjoint
+    /// transport islands into one chat. Off by default; enable with
+    /// [`Core::enable_gossip`]. Dedup (`seen`) keeps multi-path flooding from
+    /// duplicating or looping.
+    gossip: std::sync::atomic::AtomicBool,
+    /// Recently-seen group-ciphertext fingerprints (SHA-256), bounded LRU. A
+    /// re-flooded message (same ciphertext arriving via another path) is dropped
+    /// — no double display, no forward loop. Two encryptions of identical
+    /// plaintext differ (the group ratchet advances a nonce), so this only ever
+    /// collapses genuine duplicates, never distinct messages.
+    seen: Mutex<SeenSet>,
+}
+
+/// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
+/// the non-member relay ([`crate::relay`]) so a relay mesh dedups the same way.
+pub(crate) struct SeenSet {
+    order: std::collections::VecDeque<[u8; 32]>,
+    set: std::collections::HashSet<[u8; 32]>,
+}
+
+impl SeenSet {
+    /// Cap on remembered ids — generous for chat volume, tiny in memory (32 B
+    /// each), and enough to dedup across the time a message takes to flood a mesh.
+    const CAP: usize = 4096;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            order: std::collections::VecDeque::new(),
+            set: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Record `id`; return `true` if it is new (caller should process+forward),
+    /// `false` if already seen (caller should drop).
+    pub(crate) fn insert(&mut self, id: [u8; 32]) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+/// SHA-256 fingerprint of a (group) ciphertext, the gossip dedup key.
+pub(crate) fn gossip_id(ciphertext: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(ciphertext);
+    h.finalize().into()
 }
 
 /// The chat engine handle. Cheap to clone (shared inner state).
@@ -499,6 +555,8 @@ impl Core {
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
+            gossip: std::sync::atomic::AtomicBool::new(false),
+            seen: Mutex::new(SeenSet::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -759,6 +817,18 @@ impl Core {
     /// Number of connected peers.
     pub fn peer_count(&self) -> usize {
         self.inner.peers.lock().unwrap().len()
+    }
+
+    /// Turn this node into a **gossip bridge**: group ciphertext it receives is
+    /// re-flooded to every *other* connected peer, across all transports it's
+    /// on. A multi-homed member (e.g. Nym + Tor) thus stitches otherwise-disjoint
+    /// transport islands into one chat. Dedup (a bounded seen-set of ciphertext
+    /// fingerprints) keeps multi-path flooding from duplicating or looping.
+    /// Idempotent; off by default.
+    pub fn enable_gossip(&self) {
+        self.inner
+            .gossip
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The chat descriptor (shareable invite).
@@ -1516,6 +1586,14 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
 
 /// Decrypt a group message; the host also relays it to the other members.
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
+    // Dedup FIRST: the same group ciphertext can reach us over several paths in a
+    // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
+    // forward — so no double-render and no forwarding loop. Two encryptions of the
+    // same text differ (the group ratchet advances), so this only collapses a
+    // genuinely re-flooded message, never two distinct ones.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&gct)) {
+        return;
+    }
     let opened = {
         let mut g = inner.group.lock().await;
         g.as_mut().and_then(|grp| grp.decrypt(&gct).ok())
@@ -1535,9 +1613,12 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
             });
         }
     }
-    // In host-coordinated mode the host relays to the other members. In relayed
-    // mode the non-member relay does the fan-out, so participants never re-relay.
-    if !inner.relayed && inner.role == GroupRole::Host {
+    // Fan out to other members. In host-coordinated mode the host relays; a
+    // gossip bridge re-floods regardless of role (that's what bridges transport
+    // islands). Both only apply to direct peer links — in relayed mode the
+    // non-member relay does the fan-out (Routed envelopes), so we never re-relay.
+    let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
                 let _ = send_payload(&s, &w, &Frame::GroupMsg(gct.clone()).encode()).await;
@@ -1695,6 +1776,106 @@ mod tests {
         let (text2, from2) = next_message(&mut m2_rx).await;
         assert_eq!(text2, "from m1");
         assert_eq!(from2, m1.fingerprint(), "m2 must attribute to m1, not host");
+    }
+
+    /// The gossip dedup key: a bounded seen-set that reports first sightings as
+    /// new, repeats as duplicates, and evicts oldest ids past its cap. Plus the
+    /// fingerprint is deterministic and distinguishes distinct ciphertext.
+    #[test]
+    fn seen_set_dedups_and_evicts() {
+        let mut s = SeenSet::new();
+        let a = [7u8; 32];
+        assert!(s.insert(a), "first sighting is new");
+        assert!(!s.insert(a), "a repeat is a duplicate");
+        // Push CAP fresh, distinct ids so `a` (the oldest) is evicted.
+        for i in 0..(SeenSet::CAP as u32) {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&i.to_le_bytes());
+            id[31] = 1; // keep distinct from `a`
+            s.insert(id);
+        }
+        assert!(s.insert(a), "an evicted id is treated as new again");
+
+        // gossip_id: deterministic, collision-distinct for different ciphertext.
+        assert_eq!(gossip_id(b"same ciphertext"), gossip_id(b"same ciphertext"));
+        assert_ne!(gossip_id(b"one"), gossip_id(b"two"));
+    }
+
+    /// Cross-transport gossip: a multi-homed bridge stitches two otherwise-disjoint
+    /// transport "islands" into one chat. B hosts on BOTH networks (a
+    /// [`MultiTransport`] fan-in — here two loopback fabrics standing in for, say,
+    /// Nym and Tor). A joins over one, C over the other; a message A sends on its
+    /// network reaches C on the other, bridged through B — no shared transport.
+    #[tokio::test]
+    async fn gossip_bridges_two_transport_islands() {
+        use talkrypt_transport::{MultiTransport, Scheme};
+
+        let net_a = LoopbackFabric::new(); // A's network (e.g. Tor)
+        let net_c = LoopbackFabric::new(); // C's network (e.g. Nym) — disjoint
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["B".into()],
+            "#bridge",
+        );
+        let suite = SuiteRegistry::with_defaults()
+            .get(DEFAULT_SUITE_ID)
+            .unwrap();
+
+        // B is multi-homed: it hosts on both networks at once.
+        let b_transport = Arc::new(
+            MultiTransport::new()
+                .with(Scheme::Onion, Arc::new(net_a.transport("B")))
+                .with(Scheme::Nym, Arc::new(net_c.transport("nym:B"))),
+        );
+        let (b, _b_rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite.clone(),
+            b_transport,
+            desc.clone(),
+            true,
+        );
+        b.enable_gossip();
+        b.host().await.unwrap();
+
+        // A joins over net_a; C joins over net_c — no transport in common.
+        let (a, _a_rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite.clone(),
+            Arc::new(net_a.transport("A")),
+            desc.clone(),
+            false,
+        );
+        a.connect("B").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let (c, mut c_rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(net_c.transport("C")),
+            desc.clone(),
+            false,
+        );
+        c.connect("nym:B").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // A speaks on its island; C hears it on the other, bridged through B.
+        a.send("across the bridge").await.unwrap();
+        let (text, from) = next_message(&mut c_rx).await;
+        assert_eq!(text, "across the bridge");
+        assert_eq!(from, a.fingerprint(), "C attributes the message to A, not B");
+
+        // Dedup: exactly one delivery — no duplicate arrives on C's island.
+        let dup = tokio::time::timeout(Duration::from_millis(400), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(&mut c_rx).await {
+                    break text;
+                }
+            }
+        })
+        .await;
+        assert!(dup.is_err(), "C must receive the bridged message exactly once");
     }
 
     /// Two members join nearly simultaneously: the host serializes adds and
