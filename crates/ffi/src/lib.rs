@@ -629,17 +629,20 @@ impl TalkryptClient {
                 multi = multi.with(Scheme::Onion, shared_tor(&state_dir)?);
             }
             multi = multi.with(Scheme::Nym, shared_nym(&state_dir, &mnemonic)?);
+            // A Nym host is a TreeKEM GROUP committer (Hub topology), not a
+            // pairwise chat — even for two people. That's what lets a multi-homed
+            // node bridge transports: as committer it fans out group ciphertext to
+            // every member across Nym AND Tor, and gossip re-floods so several
+            // interconnected bridges merge into one chat without duplicates.
             let desc = ChatDescriptor::new(
-                TopologyKind::P2P,
+                TopologyKind::Hub,
                 Persistence::Ephemeral,
                 &suite_id,
                 vec![],
                 channel,
             );
-            let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc);
-            // Multi-homed => act as a gossip bridge: a group chat run over this
-            // node re-floods across all its transports, stitching Nym/Tor islands
-            // into one conversation (no-op for pairwise DMs — group frames only).
+            let (core, rx) =
+                Core::new_group(IdentityKeyPair::generate(), suite, Arc::new(multi), desc, true);
             core.enable_gossip();
             // `host()` returns the multi-homed listener endpoint (onion + nym
             // joined); expand it into the invite so a joiner can pick by preference.
@@ -690,9 +693,16 @@ impl TalkryptClient {
             {
                 multi = multi.with(Scheme::Nym, shared_nym(&state_dir, &mnemonic)?);
             }
-            let (core, rx) =
-                Core::new(IdentityKeyPair::generate(), suite, Arc::new(multi), desc.clone());
-            // Multi-homed => gossip bridge (see host_nym); no-op for pairwise DMs.
+            // Join as a TreeKEM group MEMBER (the host is the committer) — see
+            // host_nym. `establish` connects to the host and sends our KeyPackage;
+            // the host admits us and sends a Welcome. Gossip lets us re-flood too.
+            let (core, rx) = Core::new_group(
+                IdentityKeyPair::generate(),
+                suite,
+                Arc::new(multi),
+                desc.clone(),
+                false,
+            );
             core.enable_gossip();
             // Dial one endpoint, preferring the mixnet; fall back so a peer is
             // never stranded by a scheme we don't prefer.

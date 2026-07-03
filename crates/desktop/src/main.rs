@@ -384,20 +384,25 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     Ok(t) => t,
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); on_event(); continue; }
                 };
+                // A Nym host is a TreeKEM GROUP committer (Hub topology) so it can
+                // fan out / bridge across transports; otherwise a pairwise P2P chat.
+                let topology = if use_nym { TopologyKind::Hub } else { TopologyKind::P2P };
                 let desc = ChatDescriptor::new(
-                    TopologyKind::P2P,
+                    topology,
                     Persistence::Ephemeral,
                     &suite_id,
                     vec![listen.clone()],
                     channel,
                 );
-                let (c, rx) = Core::new(IdentityKeyPair::generate(), host_suite, transport, desc);
-                // Multi-homed (Nym+Tor) => gossip bridge: a group chat over this
-                // node re-floods across its transports, merging the islands.
-                // No-op for pairwise DMs (group frames only).
-                if use_nym {
+                let (c, rx) = if use_nym {
+                    let (c, rx) = Core::new_group(IdentityKeyPair::generate(), host_suite, transport, desc, true);
+                    // Multi-homed => gossip bridge: re-flood group ciphertext across
+                    // all transports, merging Nym/Tor islands into one chat.
                     c.enable_gossip();
-                }
+                    (c, rx)
+                } else {
+                    Core::new(IdentityKeyPair::generate(), host_suite, transport, desc)
+                };
                 match c.host().await {
                     // `host()` returns the listener endpoint: the dialable
                     // `.onion:port` over Tor, or the local bind over TCP.
@@ -470,11 +475,16 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                             Ok(t) => t,
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); on_event(); continue; }
                         };
-                        let (c, rx) = Core::new(IdentityKeyPair::generate(), join_suite, transport, desc);
-                        // Multi-homed join => gossip bridge (see the host path).
-                        if join_nym {
-                            c.enable_gossip();
-                        }
+                        // A Nym join is a TreeKEM group MEMBER (the host is the
+                        // committer); connect sends our KeyPackage and we get a
+                        // Welcome back. Otherwise a pairwise chat.
+                        let (c, rx) = if join_nym {
+                            let (c, rx) = Core::new_group(IdentityKeyPair::generate(), join_suite, transport, desc, false);
+                            c.enable_gossip(); // bridge (see the host path)
+                            (c, rx)
+                        } else {
+                            Core::new(IdentityKeyPair::generate(), join_suite, transport, desc)
+                        };
                         match c.connect(&endpoint).await {
                             Ok(_) => {
                                 let _ = ui_tx.send(UiEvt::Status { id, text: format!("joined — connected to {endpoint}") });
