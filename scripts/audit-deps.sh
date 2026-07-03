@@ -20,11 +20,25 @@ have() { command -v "$1" >/dev/null 2>&1; }
 echo "== cargo audit (RustSec advisory DB) =="
 if have cargo-audit; then
   # Fail on vulnerabilities (default). Unmaintained-crate notices print as
-  # warnings but do NOT fail the gate (they are not vulnerabilities). One
-  # advisory is ignored because it is fixed by a local source patch, not
-  # accepted as-is — see deny.toml + third-party/rsa/TALKRYPT-PATCH.md:
+  # warnings but do NOT fail the gate (they are not vulnerabilities). The ignore
+  # list below MUST mirror deny.toml [advisories].ignore (cargo-audit reads CLI
+  # flags, cargo-deny reads deny.toml) — each entry is justified there:
   #   RUSTSEC-2023-0071  rsa (Marvin) — vendored + blinded; tor-only; absent by default.
-  cargo audit --ignore RUSTSEC-2023-0071 || rc=1
+  #   RUSTSEC-2026-01xx / -2025-0141  Nym-feature-only advisories in the nym-sdk
+  #     transitive tree (libcrux-*, quick-xml, rustls-webpki via nym's rustls 0.21,
+  #     bincode). Absent from default AND tor builds; do NOT touch talkrypt's
+  #     content crypto (RustCrypto ML-KEM/ML-DSA). quinn-proto's advisory was
+  #     FIXED by upgrade (0.11.15), not ignored. See deny.toml for full rationale.
+  AUDIT_IGNORES=(
+    RUSTSEC-2023-0071
+    RUSTSEC-2026-0124 RUSTSEC-2026-0125 RUSTSEC-2026-0126
+    RUSTSEC-2026-0194 RUSTSEC-2026-0195
+    RUSTSEC-2026-0098 RUSTSEC-2026-0099 RUSTSEC-2026-0104
+    RUSTSEC-2025-0141
+  )
+  IGNORE_FLAGS=()
+  for id in "${AUDIT_IGNORES[@]}"; do IGNORE_FLAGS+=(--ignore "$id"); done
+  cargo audit "${IGNORE_FLAGS[@]}" || rc=1
 else
   echo "  cargo-audit not installed — 'cargo install cargo-audit'"; rc=2
 fi

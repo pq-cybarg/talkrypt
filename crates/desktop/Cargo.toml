@@ -2,6 +2,11 @@
 name = "talkrypt-desktop"
 version = "0.1.0"
 edition = "2021"
+# Not published (internal app, path deps); Apache-2.0 like the rest of the
+# workspace. Without these, cargo-deny treats it as a public crate — flagging it
+# `unlicensed` and rejecting its internal path deps as wildcards.
+publish = false
+license = "Apache-2.0"
 
 # A native desktop GUI client (egui/eframe) that links the Rust core directly —
 # no FFI. Host shows a big QR so a phone on the same Wi-Fi scans it and joins in
