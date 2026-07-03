@@ -16,6 +16,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Cross-compiling the FFI .so REQUIRES the rustup toolchain (it has the
+# aarch64-linux-android std). A Homebrew `rust` install shadows rustup on PATH
+# with a cargo/rustc that lacks the Android target ("can't find crate for
+# core/std"), so prefer rustup's cargo when present.
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
 NDK="${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/26.3.11579264}"
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 
