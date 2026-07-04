@@ -16,6 +16,8 @@ pub mod error;
 pub mod handshake;
 pub mod linking;
 pub mod marking;
+pub mod nametrust;
+pub mod presence;
 pub mod registry;
 pub mod relay;
 pub mod seal;
