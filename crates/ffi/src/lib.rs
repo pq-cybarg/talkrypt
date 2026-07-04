@@ -220,6 +220,20 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Validity window for a **self-presentation** certificate — an account
+/// certifying its OWN device/segment key to present to peers. 30 days
+/// (SECURITY-AUDIT L1): a `0` ("never") expiry meant a leaked presentation cert
+/// stayed valid forever; bounding it means it self-expires and the app simply
+/// re-presents (which it already does on reconnect). Distinct from the *link*
+/// cert (handed to a remote device via a QR) which is far shorter-lived
+/// (`LINK_CERT_TTL`, 24h). The clock-skew grace on `Cert::valid_at` still applies.
+const SELF_PRESENT_CERT_TTL: u64 = 30 * 24 * 3600;
+
+/// `now_secs()` plus the self-presentation validity window, saturating.
+fn self_present_expiry() -> u64 {
+    now_secs().saturating_add(SELF_PRESENT_CERT_TTL)
+}
+
 /// Lowercase hex of bytes.
 fn hex_bytes(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -1084,7 +1098,7 @@ impl TalkryptClient {
             self.core.identity_public(),
             "device:app",
             now_secs(),
-            0,
+            self_present_expiry(),
         );
         self.core.present_identity(chain, username);
         self.rt.block_on(self.core.announce_identity());
@@ -1583,8 +1597,9 @@ pub fn account_segment_chain(
     label: String,
 ) -> String {
     let now = now_secs();
-    let chain = IdentityChain::device(&account.kp, device.kp.public(), "device:app", now, 0)
-        .extend(&device.kp, segment.kp.public(), format!("segment:{label}"), now, 0);
+    let expiry = now.saturating_add(SELF_PRESENT_CERT_TTL);
+    let chain = IdentityChain::device(&account.kp, device.kp.public(), "device:app", now, expiry)
+        .extend(&device.kp, segment.kp.public(), format!("segment:{label}"), now, expiry);
     hex_bytes(&chain.encode())
 }
 
@@ -1608,7 +1623,7 @@ pub fn linked_segment_chain(
         segment.kp.public(),
         format!("segment:{label}"),
         now_secs(),
-        0,
+        self_present_expiry(),
     );
     Ok(hex_bytes(&chain.encode()))
 }
