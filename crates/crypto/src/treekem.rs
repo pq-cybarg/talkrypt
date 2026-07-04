@@ -185,10 +185,27 @@ fn put_node(w: &mut talkrypt_wire::Writer, n: &Node) {
     w.put_u32(n.span);
 }
 fn get_node(r: &mut talkrypt_wire::Reader) -> Result<Node> {
-    Ok(Node {
-        lo: r.get_u32()?,
-        span: r.get_u32()?,
-    })
+    let lo = r.get_u32()?;
+    let span = r.get_u32()?;
+    // A well-formed ratchet-tree node has a power-of-two span, a `lo` aligned to
+    // that span, and stays within the tree bound. Validating here keeps every
+    // downstream Node operation total on hostile input: `sibling`/`parent` no
+    // longer divide or modulo by a zero span, `parent` and `sibling` cannot
+    // overflow past the tree, and `children`'s halving terminates. Without this
+    // an attacker-supplied `span == 0` panics (`lo / span`) and an out-of-range
+    // `lo`/`span` overflows — a single crafted Commit/Welcome would crash the
+    // receiver (SECURITY-AUDIT: remote-DoS via malformed tree node).
+    if span == 0 || !span.is_power_of_two() {
+        return Err(CryptoError::Malformed("treekem node span not a power of two"));
+    }
+    if lo % span != 0 {
+        return Err(CryptoError::Malformed("treekem node lo not span-aligned"));
+    }
+    match lo.checked_add(span) {
+        Some(end) if end <= MAX_TREE_ITEMS => {}
+        _ => return Err(CryptoError::Malformed("treekem node out of range")),
+    }
+    Ok(Node { lo, span })
 }
 
 impl KeyPackage {
@@ -298,6 +315,12 @@ impl Commit {
             ciphertexts.push((a, b, blob));
         }
         let new_capacity = r.get_u32()?;
+        // Bound the declared capacity before `apply_commit` resizes `occupied` to
+        // it: an unbounded u32 (~4.3e9) would request a multi-gigabyte allocation
+        // and abort the process (`panic = abort`) from a single crafted Commit.
+        if new_capacity > MAX_TREE_ITEMS {
+            return Err(CryptoError::Malformed("treekem new_capacity too large"));
+        }
         Ok(Commit {
             proposals,
             pub_updates,
@@ -330,6 +353,11 @@ impl Welcome {
     pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<Welcome> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let capacity = r.get_u32()?;
+        // Same bound as Commit::new_capacity: a hostile Welcome must not be able to
+        // drive an unbounded capacity into the joined group's tree math.
+        if capacity > MAX_TREE_ITEMS {
+            return Err(CryptoError::Malformed("treekem welcome capacity too large"));
+        }
         let np = get_count(&mut r)?;
         let mut public = Vec::with_capacity(np as usize);
         for _ in 0..np {
@@ -526,7 +554,7 @@ impl TreeKemGroup {
             leaf,
             leaf_public: kp.leaf_public.clone(),
         }];
-        self.apply_proposals(&proposals);
+        self.apply_proposals(&proposals)?;
         let commit = self.rekey_path(proposals)?;
 
         let welcome = Welcome {
@@ -543,12 +571,22 @@ impl TreeKemGroup {
     /// Remove a member. The removed member cannot derive the new group secret.
     pub fn remove(&mut self, leaf: u32) -> Result<Commit> {
         let proposals = vec![Proposal::Remove { leaf }];
-        self.apply_proposals(&proposals);
+        self.apply_proposals(&proposals)?;
         self.rekey_path(proposals)
     }
 
-    fn apply_proposals(&mut self, proposals: &[Proposal]) {
+    fn apply_proposals(&mut self, proposals: &[Proposal]) -> Result<()> {
         for p in proposals {
+            // A proposal's leaf index is attacker-controlled on the receive path
+            // (`apply_commit`). Bounds-check it against the (already capacity-sized)
+            // `occupied` vector before indexing, so a crafted Commit can no longer
+            // panic the receiver with an out-of-range leaf.
+            let leaf = match p {
+                Proposal::Add { leaf, .. } | Proposal::Remove { leaf } => *leaf,
+            };
+            if leaf as usize >= self.occupied.len() {
+                return Err(CryptoError::Malformed("treekem proposal leaf out of range"));
+            }
             match p {
                 Proposal::Add { leaf, leaf_public } => {
                     self.occupied[*leaf as usize] = true;
@@ -564,6 +602,7 @@ impl TreeKemGroup {
                 }
             }
         }
+        Ok(())
     }
 
     fn blank_path_above(&mut self, leaf: u32) {
@@ -627,7 +666,7 @@ impl TreeKemGroup {
             self.capacity = commit.new_capacity;
             self.occupied.resize(self.capacity as usize, false);
         }
-        self.apply_proposals(&commit.proposals);
+        self.apply_proposals(&commit.proposals)?;
         let secret = self.process_update_path(commit)?;
         self.epoch += 1;
         self.epoch_secret = secret;
@@ -1012,5 +1051,133 @@ mod tests {
         let d = add_member(&mut a, &mut [&mut b, &mut c]);
         assert_eq!(a.group_secret(), d.group_secret());
         assert_eq!(a.member_count(), 4);
+    }
+
+    // ---- Remote-DoS regression tests (SECURITY-AUDIT: crafted Commit/Welcome) ----
+    //
+    // Each of these encodes a hostile Commit/Welcome that, before the decode/apply
+    // guards, crashed the receiving member (`panic = abort`) on a single inbound
+    // frame. They assert the malformed input is now rejected with `Err`, never a
+    // panic. A member reaches this path for any peer-delivered Commit
+    // (`engine::handle_commit`) / Welcome (`engine::handle_welcome`).
+
+    /// A path node with `span == 0` used to reach `Node::sibling`'s `lo / span`
+    /// (divide-by-zero) inside `process_update_path`. It must now be rejected at
+    /// decode. (F4)
+    #[test]
+    fn commit_with_zero_span_node_is_rejected_not_panic() {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(0); // proposals
+        w.put_u32(0); // pub_updates
+        w.put_u32(1); // path: one node ...
+        w.put_u32(0); // node.lo
+        w.put_u32(0); // node.span == 0  <-- malicious
+        w.put_u32(0); // ciphertexts
+        w.put_u32(0); // new_capacity
+        let bytes = w.into_vec();
+        assert!(Commit::decode(KemProfile::pq_pure(), &bytes).is_err());
+    }
+
+    /// A non-power-of-two / unaligned node span is also structurally invalid and
+    /// would break the tree math; reject it at decode. (F4)
+    #[test]
+    fn commit_with_nonpow2_span_node_is_rejected_not_panic() {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(0);
+        w.put_u32(0);
+        w.put_u32(1);
+        w.put_u32(0);
+        w.put_u32(3); // span = 3 is not a power of two
+        w.put_u32(0);
+        w.put_u32(0);
+        assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// `new_capacity == u32::MAX` used to drive `occupied.resize(~4.3e9)` in
+    /// `apply_commit` — a multi-gigabyte allocation that aborts the process. It
+    /// must now be rejected at decode. (F3)
+    #[test]
+    fn commit_with_huge_capacity_is_rejected_not_panic() {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(0); // proposals
+        w.put_u32(0); // pub_updates
+        w.put_u32(0); // path
+        w.put_u32(0); // ciphertexts
+        w.put_u32(u32::MAX); // new_capacity  <-- malicious
+        assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// The same bound applies to a hostile Welcome's declared capacity. (F3)
+    #[test]
+    fn welcome_with_huge_capacity_is_rejected_not_panic() {
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(u32::MAX); // capacity  <-- malicious
+        w.put_u32(0); // public entries
+        w.put_u32(0); // occupied entries
+        w.put_u32(0); // epoch
+        w.put_u32(0); // your_leaf
+        // (commit bytes never reached)
+        assert!(Welcome::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// A `Remove` proposal with an out-of-range leaf decodes fine (the leaf is an
+    /// unbounded u32 on the wire) but used to panic in `apply_proposals` at
+    /// `occupied[leaf]`. `apply_commit` must now return `Err`, not panic. (F5)
+    #[test]
+    fn commit_with_out_of_range_leaf_is_rejected_not_panic() {
+        let mut a = TreeKemGroup::create();
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(1); // one proposal ...
+        w.put_u8(1); //   Remove
+        w.put_u32(u32::MAX); //   leaf far past capacity  <-- malicious
+        w.put_u32(0); // pub_updates
+        w.put_u32(0); // path
+        w.put_u32(0); // ciphertexts
+        w.put_u32(0); // new_capacity (within bound, so we reach apply_proposals)
+        let commit = Commit::decode(a.profile(), &w.into_vec()).expect("decodes");
+        assert!(a.apply_commit(&commit).is_err());
+    }
+
+    /// VULNERABILITY DEMONSTRATION (SECURITY-AUDIT G1 — group message sender
+    /// forgery). Message keys are `sender_chain(epoch_secret, leaf)` where
+    /// `epoch_secret` is shared by every member and `leaf` is a public header
+    /// field, and group messages carry NO per-sender signature. So any member can
+    /// derive any other member's chain and produce a message that every receiver
+    /// accepts as coming from the victim's leaf.
+    ///
+    /// This test proves the forgery succeeds on the current wire format. It is
+    /// expected to FAIL (and should be inverted to `is_err()`) once per-sender
+    /// ML-DSA signatures are added — see the PR description. Fixing it properly
+    /// requires a versioned change to the KAT-locked group-message format, which
+    /// is a maintainer design decision (per-message ML-DSA-87 is ~4.6 KB; the
+    /// alternative is MLS-style per-leaf sender keys from the secret tree).
+    #[test]
+    fn member_can_forge_group_message_as_another_member() {
+        // Three members: a (victim), b (attacker), c (receiver of the forgery).
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        let victim_leaf = a.my_leaf();
+        assert_ne!(victim_leaf, b.my_leaf());
+
+        // b reconstructs a's sender chain purely from shared group state — no
+        // secret unique to a is required.
+        let forged_chain = sender_chain(&b.group_secret(), victim_leaf);
+        let (_next, mk_seed) = kdf_ck(&forged_chain);
+        let (key, nonce) = kdf_mk(&mk_seed);
+        let n = 0u32;
+        let aad = msg_aad(b.epoch, victim_leaf, n);
+        let ct = aead_seal(&key, &nonce, b"I never said this", &aad).unwrap();
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u32(b.epoch);
+        w.put_u32(victim_leaf); // stamp the VICTIM's leaf, not the attacker's
+        w.put_u32(n);
+        w.put_bytes(&ct);
+        let forged = w.into_vec();
+
+        // c accepts the forgery as authentic and attributes it (via sender_leaf)
+        // to the victim a. b has impersonated a to c.
+        assert_eq!(TreeKemGroup::sender_leaf(&forged), Some(victim_leaf));
+        assert_eq!(c.decrypt(&forged).unwrap(), b"I never said this");
     }
 }
