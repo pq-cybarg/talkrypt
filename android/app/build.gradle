@@ -43,6 +43,11 @@ dependencies {
     // camera side is the platform Camera2 API directly, so no AndroidX wrapper
     // (this app is deliberately AndroidX-free) and no extra dependency.
     implementation 'com.google.zxing:core:3.5.3'
+    // rustls-platform-verifier's Android support classes (the AAR bundled in the
+    // rustls-platform-verifier-android crate; repo wired in settings.gradle). nym's
+    // TLS stack calls into these via JNI after NymNative.initTlsVerifier(). Present
+    // for all builds but only exercised by nym builds.
+    implementation 'rustls:rustls-platform-verifier:0.1.1'
     // JVM unit tests for dependency-free logic (models, session manager).
     testImplementation 'junit:junit:4.13.2'
 }

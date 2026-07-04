@@ -170,6 +170,32 @@ pub fn nym_import_ticketbook(state_dir: String, ticketbook: Vec<u8>) -> Result<(
     }
 }
 
+/// JNI entry point: initialize `rustls-platform-verifier` with the Android app's
+/// JNI context. nym-sdk's HTTP client (reqwest) verifies TLS through this crate,
+/// which on Android aborts ("Expect rustls-platform-verifier to be initialized")
+/// unless set up with the JVM + Context before the first HTTPS call. The app must
+/// call this once at startup, before any Nym host/join. Idempotent.
+///
+/// Kotlin side (com.talkrypt.app):
+///   object NymNative { init { System.loadLibrary("talkrypt_ffi") }
+///     external fun initTlsVerifier(context: android.content.Context) }
+/// then `NymNative.initTlsVerifier(applicationContext)` in Application.onCreate.
+#[cfg(all(target_os = "android", feature = "nym"))]
+#[no_mangle]
+pub extern "system" fn Java_com_talkrypt_app_NymNative_initTlsVerifier<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _this: jni::objects::JObject<'local>,
+    context: jni::objects::JObject<'local>,
+) {
+    let outcome = env.with_env(|env| -> Result<(), jni::errors::Error> {
+        rustls_platform_verifier::android::init_with_env(env, context)?;
+        Ok(())
+    });
+    // Don't unwind across FFI; a failure just leaves TLS uninitialized (the next
+    // Nym call surfaces a normal error rather than crashing here).
+    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+
 /// Route panics (incl. on Arti's worker threads, which Android can't surface) to
 /// `<state_dir>/panic.txt`, so a Tor-bootstrap failure is diagnosable on device.
 /// Installed once before the first Tor bootstrap.

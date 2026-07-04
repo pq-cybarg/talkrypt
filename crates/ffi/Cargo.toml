@@ -20,14 +20,30 @@ thiserror.workspace = true
 zeroize.workspace = true
 uniffi = { version = "0.31", features = ["cli"] }
 
+# Android-only: nym-sdk's HTTP client (reqwest) verifies TLS via
+# rustls-platform-verifier, which on Android MUST be initialized with the app's
+# JNI context before first use — else it aborts ("Expect rustls-platform-verifier
+# to be initialized"). We expose a JNI init the app calls at startup. (The Kotlin
+# support classes come from the transitively-present rustls-platform-verifier-
+# android crate's classes.jar, wired into android/app/build.gradle.) Only pulled
+# under the `nym` feature; the init code is #[cfg(target_os = "android")].
+[target.'cfg(target_os = "android")'.dependencies]
+rustls-platform-verifier = { version = "0.7", optional = true }
+jni = { version = "0.22", optional = true }
+
 [features]
 default = []
 # Run over real Tor (Arti). Pulls the large Arti tree into the .so.
 tor = ["talkrypt-transport/tor"]
 # Run over the Nym mixnet. Pulls the (large) nym-sdk tree into the .so; the
 # `host_nym`/`join_nym` constructors multi-home over Tor+Nym. Verified to
-# cross-compile to aarch64-linux-android. Opt-in (heavy), so not default.
-nym = ["talkrypt-transport/nym"]
+# cross-compile to aarch64-linux-android. Opt-in (heavy), so not default. On
+# Android also enables the rustls-platform-verifier JNI init (see above).
+nym = [
+    "talkrypt-transport/nym",
+    "dep:rustls-platform-verifier",
+    "dep:jni",
+]
 
 [[bin]]
 name = "uniffi-bindgen"

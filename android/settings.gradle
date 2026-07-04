@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 pluginManagement {
     repositories {
         google()
@@ -9,7 +11,33 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // rustls-platform-verifier's Android support (its Kotlin classes) ships
+        // as an on-disk maven repo inside the `rustls-platform-verifier-android`
+        // crate (transitively pulled by the `nym` FFI build). Locate it via
+        // `cargo metadata` so the AAR resolves as `rustls:rustls-platform-verifier`.
+        maven {
+            url = findRustlsPlatformVerifierRepo()
+            metadataSources.artifact()
+        }
     }
 }
 rootProject.name = "talkrypt-android"
 include ':app'
+
+// file:// URL of the rustls-platform-verifier-android crate's bundled maven repo,
+// resolved from the FFI crate's dependency graph for the Android target. Requires
+// `cargo` on PATH (build-apk.sh prepends rustup's). Only referenced by the nym build.
+String findRustlsPlatformVerifierRepo() {
+    def ffiManifest = new File(settingsDir, "../crates/ffi/Cargo.toml").path
+    def dependencyText = providers.exec {
+        workingDir = new File(settingsDir, "..")
+        commandLine("cargo", "metadata", "--format-version", "1",
+                "--filter-platform", "aarch64-linux-android",
+                "--features", "nym",
+                "--manifest-path", ffiManifest)
+    }.standardOutput.asText.get()
+    def json = new JsonSlurper().parseText(dependencyText)
+    def pkg = json.packages.find { it.name == "rustls-platform-verifier-android" }
+    def manifestPath = new File(pkg.manifest_path)
+    return new File(manifestPath.parentFile, "maven").toURI().toString()
+}
