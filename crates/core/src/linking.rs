@@ -135,10 +135,15 @@ impl LinkReply {
     }
 }
 
-/// How long a freshly-issued device certificate is valid (seconds). The caller
-/// supplies `now`; `0` expiry would mean "never", but linked devices should be
-/// revocable, so we bound them. ~10 years.
-pub const LINK_CERT_TTL: u64 = 10 * 365 * 24 * 3600;
+/// Default validity of a freshly-issued device certificate (seconds) — **24
+/// hours** (SECURITY-AUDIT L1). A device link cert is short-lived on purpose: it
+/// lets the new device establish itself, after which it should re-key/rotate;
+/// long-lived certs meant one leaked QR granted account access for years. The
+/// window is configurable via [`LinkHost::with_cert_ttl`]; a `0` expiry ("never")
+/// is deliberately NOT the default, and the issuance path forbids it (see
+/// `grant_once`). Bounded so a compromised device cert self-expires quickly even
+/// if revocation never reaches a peer.
+pub const LINK_CERT_TTL: u64 = 24 * 3600;
 
 /// How long the primary keeps a link offer open before it expires. The linking
 /// descriptor is one-time and shared in person; bounding the accept window means
@@ -150,9 +155,11 @@ pub const LINK_CERT_TTL: u64 = 10 * 365 * 24 * 3600;
 pub const LINK_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Operator approval hook: given the requested device label, decide whether to
-/// certify it. Set via [`LinkHost::with_approval`]. When unset, the host
-/// auto-approves (legacy behavior) — interactive hosts should set it so linking
-/// requires an explicit, per-device human decision, not just token possession.
+/// certify it. Set via [`LinkHost::with_approval`]. By default the host **denies**
+/// (fail closed, SECURITY-AUDIT L1): certifying a new device — which grants
+/// account access — requires an explicit per-device human decision, never mere
+/// possession of the invite token. A caller that genuinely wants unattended
+/// pairing must opt in with [`LinkHost::auto_approve`].
 pub type ApprovalFn = dyn Fn(&str) -> bool + Send + Sync;
 
 /// The **primary** side of linking: holds the account key and certifies new
@@ -167,8 +174,12 @@ pub struct LinkHost {
     root0: [u8; 32],
     username: Option<String>,
     now: u64,
-    /// Optional per-device approval gate (see [`ApprovalFn`]).
+    /// Optional per-device approval gate (see [`ApprovalFn`]). `None` means DENY
+    /// (fail closed) — an explicit approval decision is required.
     approve: Option<Arc<ApprovalFn>>,
+    /// Validity window for issued device certs (seconds). Defaults to
+    /// [`LINK_CERT_TTL`] (24h).
+    cert_ttl: u64,
 }
 
 impl LinkHost {
@@ -190,6 +201,7 @@ impl LinkHost {
             username,
             now,
             approve: None,
+            cert_ttl: LINK_CERT_TTL,
         }
     }
 
@@ -199,6 +211,24 @@ impl LinkHost {
     /// human decision, not merely possession of the invite token (SECURITY-AUDIT L1).
     pub fn with_approval(mut self, approve: Arc<ApprovalFn>) -> Self {
         self.approve = Some(approve);
+        self
+    }
+
+    /// Opt in to **unattended** pairing: certify any device that presents the
+    /// one-time token, with no per-device human decision. Use only for headless
+    /// flows where token possession is the intended authorization; interactive
+    /// hosts should use [`with_approval`] instead (SECURITY-AUDIT L1).
+    ///
+    /// [`with_approval`]: LinkHost::with_approval
+    pub fn auto_approve(mut self) -> Self {
+        self.approve = Some(Arc::new(|_label: &str| true));
+        self
+    }
+
+    /// Override the issued device-cert validity window (seconds). Kept short by
+    /// default ([`LINK_CERT_TTL`], 24h) — extend only deliberately.
+    pub fn with_cert_ttl(mut self, ttl: u64) -> Self {
+        self.cert_ttl = ttl;
         self
     }
 
@@ -221,6 +251,7 @@ impl LinkHost {
         let username = self.username.clone();
         let now = self.now;
         let approve = self.approve.clone();
+        let cert_ttl = self.cert_ttl;
 
         tokio::spawn(async move {
             let _ = tokio::time::timeout(LINK_WINDOW, async move {
@@ -244,6 +275,7 @@ impl LinkHost {
                         username.clone(),
                         now,
                         approve.as_deref(),
+                        cert_ttl,
                     )
                     .await
                     {
@@ -267,6 +299,7 @@ async fn grant_once(
     username: Option<String>,
     now: u64,
     approve: Option<&ApprovalFn>,
+    cert_ttl: u64,
 ) -> bool {
     let mut stream = stream;
     let mut session = session;
@@ -280,14 +313,20 @@ async fn grant_once(
     };
     let mut granted = false;
     let reply = match LinkRequest::decode(&pt) {
-        Ok(req) if approve.map(|a| a(&req.label)) != Some(false) => {
-            // Certify the new device under the account: account → device.
+        // Fail closed: certify ONLY if an approval hook is present AND says yes.
+        // No hook -> deny (SECURITY-AUDIT L1); token possession alone is never
+        // enough to mint a device certificate.
+        Ok(req) if approve.map(|a| a(&req.label)) == Some(true) => {
+            // Certify the new device under the account: account → device. The cert
+            // is short-lived (cert_ttl, default 24h) and its expiry is always a
+            // bounded, non-zero timestamp — never "never".
+            let ttl = if cert_ttl == 0 { LINK_CERT_TTL } else { cert_ttl };
             let chain = IdentityChain::device(
                 &account,
                 &req.device,
                 format!("device:{}", req.label),
                 now,
-                now.saturating_add(LINK_CERT_TTL),
+                now.saturating_add(ttl),
             );
             granted = true;
             LinkReply::Grant {
@@ -412,7 +451,8 @@ mod tests {
             &desc,
             Some("alice".into()),
             NOW,
-        );
+        )
+        .auto_approve();
         // Leak so the accept loop lives for the test.
         let host = Box::leak(Box::new(host));
         host.run().await.unwrap();
@@ -496,7 +536,8 @@ mod tests {
             &desc,
             None,
             NOW,
-        );
+        )
+        .auto_approve();
         let host = Box::leak(Box::new(host));
         host.run().await.unwrap();
 
@@ -543,5 +584,40 @@ mod tests {
         )
         .await;
         assert!(res.is_err(), "an unapproved device must not be certified");
+    }
+
+    /// SECURITY-AUDIT L1: the DEFAULT posture (no approval hook set) is fail-closed
+    /// — a device that presents the one-time token but gets no explicit approval is
+    /// NOT certified. Possession of the invite must never be sufficient by itself.
+    #[tokio::test]
+    async fn default_without_approval_denies_certification() {
+        let fabric = LoopbackFabric::new();
+        let desc = link_desc();
+        let account = IdentityKeyPair::generate();
+        // No .auto_approve() and no .with_approval(): default deny.
+        let host = LinkHost::new(
+            account,
+            IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("primary5")),
+            &desc,
+            None,
+            NOW,
+        );
+        let host = Box::leak(Box::new(host));
+        host.run().await.unwrap();
+
+        let dev = IdentityKeyPair::generate();
+        let res = LinkClient::request(
+            &dev,
+            suite(),
+            Arc::new(fabric.transport("newdev5")),
+            &desc,
+            "primary5",
+            "laptop",
+            NOW,
+        )
+        .await;
+        assert!(res.is_err(), "no approval hook must mean deny (fail closed)");
     }
 }

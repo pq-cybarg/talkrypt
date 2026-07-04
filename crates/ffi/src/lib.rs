@@ -1440,6 +1440,10 @@ impl LinkOffer {
             "#link",
         );
         let transport = Arc::new(TcpTransport::new(&listen));
+        // The user explicitly initiated this one-time, time-bounded offer from the
+        // app UI, so the device that presents the token inside the window is
+        // authorized. The issued cert is short-lived (24h) and single-use
+        // (SECURITY-AUDIT L1). Per-request device confirmation UX is a follow-up.
         let host = LinkHost::new(
             IdentityKeyPair::from_secret_bytes(account.kp.export_secret()),
             IdentityKeyPair::generate(),
@@ -1448,7 +1452,8 @@ impl LinkOffer {
             &desc,
             username,
             now_secs(),
-        );
+        )
+        .auto_approve();
         rt.block_on(host.run()).map_err(FfiError::from)?;
         Ok(Arc::new(Self {
             _rt: rt,
