@@ -167,6 +167,12 @@ fn root_of(capacity: u32) -> Node {
 pub struct KeyPackage {
     pub leaf_public: RatchetPublic,
     pub sig_public: IdentityPublic,
+    /// Proof-of-possession: a signature by `sig_public`'s secret over
+    /// `POP_CONTEXT | leaf_public | sig_public` (SECURITY-AUDIT T-1). It proves the
+    /// joiner holds the leaf signing key and bound it to this leaf KEM key, so a
+    /// committer/relay cannot substitute a leaf signature key it does not control.
+    /// Verified in `KeyPackage::decode`, before any consumer trusts `sig_public`.
+    pub pop: Vec<u8>,
 }
 
 /// A joiner's private leaf key, kept until they process their Welcome. Bound to
@@ -201,7 +207,10 @@ impl LeafKeyPair {
 
     pub fn key_package(&self) -> KeyPackage {
         let (_, leaf_public) = RatchetSecret::derive_deterministic(self.profile, &self.secret);
-        KeyPackage { leaf_public, sig_public: self.sig.public().clone() }
+        let sig_public = self.sig.public().clone();
+        // Prove we hold the leaf signing key and bind it to this leaf KEM key (T-1).
+        let pop = self.sig.sign(&pop_transcript(&sig_public));
+        KeyPackage { leaf_public, sig_public, pop }
     }
 }
 
@@ -212,6 +221,10 @@ enum Proposal {
         leaf: u32,
         leaf_public: RatchetPublic,
         sig_public: IdentityPublic,
+        /// Proof-of-possession for `sig_public` over `(leaf_public, sig_public)`,
+        /// re-checked on the RECEIVE side so a malicious committer cannot bind a
+        /// leaf signature key it does not control (SECURITY-AUDIT T-1).
+        pop: Vec<u8>,
     },
     Remove {
         leaf: u32,
@@ -237,9 +250,11 @@ pub struct Welcome {
     occupied: Vec<bool>,
     epoch: u32,
     your_leaf: u32,
-    /// Every current member's leaf signature public key (SECURITY-AUDIT G1/G2), so
-    /// the joiner can verify messages from anyone already in the group.
-    sig_keys: Vec<(u32, IdentityPublic)>,
+    /// Every current member's leaf: (leaf, leaf_public, sig_public, pop). The joiner
+    /// RE-VERIFIES each proof-of-possession (SECURITY-AUDIT T-1) before trusting a
+    /// member's leaf signature key, so a malicious committer cannot seed the joiner
+    /// with substituted keys.
+    sig_keys: Vec<(u32, RatchetPublic, IdentityPublic, Vec<u8>)>,
     commit: Commit,
 }
 
@@ -278,25 +293,30 @@ impl KeyPackage {
         let mut w = talkrypt_wire::Writer::new();
         w.put_bytes(&self.leaf_public.encode());
         w.put_bytes(&self.sig_public.sig_vk);
+        w.put_bytes(&self.pop);
         w.into_vec()
     }
     pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<KeyPackage> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let leaf_public = RatchetPublic::decode(profile, r.get_bytes()?)?;
         let sig_public = decode_sig_public(r.get_bytes()?)?;
+        let pop = r.get_vec()?;
         r.finish()?;
-        Ok(KeyPackage { leaf_public, sig_public })
+        // Reject a KeyPackage whose leaf key is not proven-possessed (T-1).
+        verify_pop(&sig_public, &pop)?;
+        Ok(KeyPackage { leaf_public, sig_public, pop })
     }
 }
 
 impl Proposal {
     fn put(&self, w: &mut talkrypt_wire::Writer) {
         match self {
-            Proposal::Add { leaf, leaf_public, sig_public } => {
+            Proposal::Add { leaf, leaf_public, sig_public, pop } => {
                 w.put_u8(0);
                 w.put_u32(*leaf);
                 w.put_bytes(&leaf_public.encode());
                 w.put_bytes(&sig_public.sig_vk);
+                w.put_bytes(pop);
             }
             Proposal::Remove { leaf } => {
                 w.put_u8(1);
@@ -310,6 +330,7 @@ impl Proposal {
                 leaf: r.get_u32()?,
                 leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
                 sig_public: decode_sig_public(r.get_bytes()?)?,
+                pop: r.get_vec()?,
             }),
             1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
@@ -341,6 +362,34 @@ const GROUP_MSG_V2: u8 = 2;
 
 /// Domain-separation prefix for the per-sender group-message signature.
 const SIG_CONTEXT: &[u8] = b"talkrypt-treekem-msg-v2";
+
+/// Domain-separation prefix for a leaf key's proof-of-possession (SECURITY-AUDIT
+/// T-1). Distinct from `SIG_CONTEXT` so a PoP can never be replayed as a
+/// group-message signature or vice versa.
+const POP_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-pop-v2";
+
+/// The bytes a joiner signs (with its leaf signing key) to prove possession of it:
+/// `POP_CONTEXT | sig_vk`. The KEM leaf key is NOT bound here — it rotates on every
+/// commit (`rekey_path`) and the leaf index isn't known at KeyPackage-creation
+/// time, so neither is a stable target. Possession of the signing key is the
+/// property that matters: it stops a committer/relay substituting a leaf signature
+/// key whose secret it does not hold (SECURITY-AUDIT T-1).
+fn pop_transcript(sig_public: &IdentityPublic) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(POP_CONTEXT);
+    w.put_bytes(&sig_public.sig_vk);
+    w.into_vec()
+}
+
+/// Verify a proof-of-possession: `pop` must verify under `sig_public` over the
+/// POP transcript. Rejects a leaf signature key whose holder did not sign it
+/// (SECURITY-AUDIT T-1). A self-signature is sound here because ML-DSA is
+/// EUF-CMA: producing a valid PoP requires the corresponding secret key.
+fn verify_pop(sig_public: &IdentityPublic, pop: &[u8]) -> Result<()> {
+    sig_public
+        .verify(&pop_transcript(sig_public), pop)
+        .map_err(|_| CryptoError::BadSignature)
+}
 
 /// The bytes a sender signs (and a receiver verifies) for a v2 group message:
 /// `SIG_CONTEXT | epoch | leaf | n | ct`.
@@ -465,9 +514,11 @@ impl Welcome {
         w.put_u32(self.epoch);
         w.put_u32(self.your_leaf);
         w.put_u32(self.sig_keys.len() as u32);
-        for (leaf, k) in &self.sig_keys {
+        for (leaf, lp, k, pop) in &self.sig_keys {
             w.put_u32(*leaf);
+            w.put_bytes(&lp.encode());
             w.put_bytes(&k.sig_vk);
+            w.put_bytes(pop);
         }
         w.put_bytes(&self.commit.encode());
         w.into_vec()
@@ -496,13 +547,16 @@ impl Welcome {
         }
         let epoch = r.get_u32()?;
         let your_leaf = r.get_u32()?;
-        // Each sig_keys entry is leaf(4) + u32-prefixed vk(>=4). Bound the count.
-        let nsk = get_count(&mut r, 8)?;
+        // Each sig_keys entry is leaf(4) + leaf_public(>=4) + vk(>=4) + pop(>=4).
+        // Bound the count by the per-entry minimum.
+        let nsk = get_count(&mut r, 16)?;
         let mut sig_keys = Vec::with_capacity(nsk as usize);
         for _ in 0..nsk {
             let leaf = r.get_u32()?;
+            let lp = RatchetPublic::decode(profile, r.get_bytes()?)?;
             let k = decode_sig_public(r.get_bytes()?)?;
-            sig_keys.push((leaf, k));
+            let pop = r.get_vec()?;
+            sig_keys.push((leaf, lp, k, pop));
         }
         let commit = Commit::decode(profile, r.get_bytes()?)?;
         r.finish()?;
@@ -543,6 +597,10 @@ pub struct TreeKemGroup {
     /// members are added (via Add proposals / Welcome). Used to VERIFY per-sender
     /// group-message signatures (SECURITY-AUDIT G1/G2).
     leaf_sig_keys: HashMap<u32, IdentityPublic>,
+    /// leaf -> that member's proof-of-possession over its (leaf_public, sig_public)
+    /// binding (SECURITY-AUDIT T-1). Retained so a joiner learning members via a
+    /// Welcome can independently re-verify each member's leaf key.
+    leaf_pops: HashMap<u32, Vec<u8>>,
     /// This member's own leaf SIGNING key (the private half). `None` only in the
     /// degenerate test-built group; `create`/`join` always set it. Used to SIGN our
     /// outgoing group messages.
@@ -594,6 +652,7 @@ impl TreeKemGroup {
         let my_sig = IdentityKeyPair::generate();
         let mut leaf_sig_keys = HashMap::new();
         leaf_sig_keys.insert(0u32, my_sig.public().clone());
+
         let mut g = TreeKemGroup {
             profile,
             capacity,
@@ -607,6 +666,7 @@ impl TreeKemGroup {
             send_n: 0,
             recvs: HashMap::new(),
             leaf_sig_keys,
+            leaf_pops: HashMap::new(),
             my_sig: Some(my_sig),
         };
         g.occupied[0] = true;
@@ -623,6 +683,11 @@ impl TreeKemGroup {
         }
         let root_secret = *g.secrets.get(&root_of(capacity)).expect("root secret");
         g.epoch_secret = derive_commit_secret(&root_secret);
+        // Founder proof-of-possession over (leaf-0 KEM pub, sig pub) (SECURITY-AUDIT
+        // T-1), so a Welcome carrying the founder's key is independently verifiable.
+        let sig_pub = g.my_sig.as_ref().unwrap().public().clone();
+        let pop = g.my_sig.as_ref().unwrap().sign(&pop_transcript(&sig_pub));
+        g.leaf_pops.insert(0, pop);
         g.reset_epoch();
         g
     }
@@ -701,6 +766,7 @@ impl TreeKemGroup {
             leaf,
             leaf_public: kp.leaf_public.clone(),
             sig_public: kp.sig_public.clone(),
+            pop: kp.pop.clone(),
         }];
         self.apply_proposals(&proposals)?;
         let commit = self.rekey_path(proposals)?;
@@ -713,7 +779,15 @@ impl TreeKemGroup {
             your_leaf: leaf,
             // Every member's leaf sig key, so the joiner can verify all senders
             // (SECURITY-AUDIT G1/G2). Includes the joiner's own (just added).
-            sig_keys: self.leaf_sig_keys.iter().map(|(l, k)| (*l, k.clone())).collect(),
+            sig_keys: self
+                .leaf_sig_keys
+                .iter()
+                .filter_map(|(l, k)| {
+                    let lp = self.public.get(&Node::leaf(*l))?.clone();
+                    let pop = self.leaf_pops.get(l)?.clone();
+                    Some((*l, lp, k.clone(), pop))
+                })
+                .collect(),
             commit: commit.clone(),
         };
         Ok((leaf, commit, welcome))
@@ -751,12 +825,16 @@ impl TreeKemGroup {
                 return Err(CryptoError::Malformed("treekem proposal leaf out of range"));
             }
             match p {
-                Proposal::Add { leaf, leaf_public, sig_public } => {
+                Proposal::Add { leaf, leaf_public, sig_public, pop } => {
+                    // Re-verify proof-of-possession on the receive side: the leaf
+                    // key must be signed by its own holder over this exact leaf
+                    // (SECURITY-AUDIT T-1). A committer cannot bind a substituted
+                    // key it does not control.
+                    verify_pop(sig_public, pop)?;
                     self.occupied[*leaf as usize] = true;
                     self.public.insert(Node::leaf(*leaf), leaf_public.clone());
-                    // Bind the joiner's leaf signature key so we can verify their
-                    // group messages (SECURITY-AUDIT G1/G2).
                     self.leaf_sig_keys.insert(*leaf, sig_public.clone());
+                    self.leaf_pops.insert(*leaf, pop.clone());
                     // Blank the new leaf's ancestors so the committer re-keys.
                     self.blank_path_above(*leaf);
                 }
@@ -765,6 +843,7 @@ impl TreeKemGroup {
                     self.secrets.remove(&Node::leaf(*leaf));
                     self.public.remove(&Node::leaf(*leaf));
                     self.leaf_sig_keys.remove(leaf);
+                    self.leaf_pops.remove(leaf);
                     self.blank_path_above(*leaf);
                 }
             }
@@ -849,6 +928,16 @@ impl TreeKemGroup {
         let profile = keypair.profile;
         let secret = keypair.secret;
         let sig = IdentityKeyPair::from_secret_bytes(keypair.sig.export_secret());
+        // Learn every current member's leaf key from the Welcome, RE-VERIFYING each
+        // proof-of-possession (SECURITY-AUDIT T-1) so a malicious committer cannot
+        // seed us with substituted keys. A bad PoP aborts the join.
+        let mut leaf_sig_keys: HashMap<u32, IdentityPublic> = HashMap::new();
+        let mut leaf_pops: HashMap<u32, Vec<u8>> = HashMap::new();
+        for (leaf, _leaf_public, sig_public, pop) in &welcome.sig_keys {
+            verify_pop(sig_public, pop)?;
+            leaf_sig_keys.insert(*leaf, sig_public.clone());
+            leaf_pops.insert(*leaf, pop.clone());
+        }
         let mut g = TreeKemGroup {
             profile,
             capacity: welcome.capacity,
@@ -861,9 +950,8 @@ impl TreeKemGroup {
             send_chain: [0u8; 32],
             send_n: 0,
             recvs: HashMap::new(),
-            // Learn every current member's leaf sig key from the Welcome, plus our
-            // own (belt-and-suspenders — the committer includes it).
-            leaf_sig_keys: welcome.sig_keys.iter().cloned().collect(),
+            leaf_sig_keys,
+            leaf_pops,
             my_sig: Some(sig),
         };
         g.leaf_sig_keys
@@ -1155,6 +1243,7 @@ mod tests {
             send_n: 0,
             recvs: HashMap::new(),
             leaf_sig_keys: HashMap::new(),
+            leaf_pops: HashMap::new(),
             my_sig: None,
         };
         unsafe {
@@ -1531,6 +1620,42 @@ mod tests {
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(1_000_000);
         assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// SECURITY-AUDIT T-1: a KeyPackage whose proof-of-possession does not verify
+    /// under its own leaf signature key is REJECTED at decode. This stops a
+    /// committer/relay from substituting a leaf signature key it does not control:
+    /// forging a valid PoP requires the corresponding ML-DSA-87 secret.
+    #[test]
+    fn keypackage_with_bad_pop_is_rejected() {
+        let profile = KemProfile::pq_pure();
+        let kp = LeafKeyPair::generate_with(profile).key_package();
+        // A well-formed KeyPackage decodes.
+        let good = kp.encode();
+        assert!(KeyPackage::decode(profile, &good).is_ok());
+
+        // Substitute a DIFFERENT (attacker) sig key but keep the original PoP:
+        // the PoP was signed by the original key, so it cannot verify under the
+        // substituted key. Rebuild the wire bytes with the swapped sig key.
+        let attacker = crate::identity::IdentityKeyPair::generate();
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_bytes(&kp.leaf_public.encode());
+        w.put_bytes(&attacker.public().sig_vk); // swapped key
+        w.put_bytes(&kp.pop); // original PoP (over the ORIGINAL key)
+        assert!(matches!(
+            KeyPackage::decode(profile, &w.into_vec()),
+            Err(CryptoError::BadSignature)
+        ));
+
+        // Also: a PoP forged by the attacker over ITS OWN key is a valid PoP for
+        // that key (proof of possession is self-referential) — that is expected and
+        // fine; what T-1 forbids is a PoP that does not match the presented key.
+        let forged_pop = attacker.sign(&pop_transcript(attacker.public()));
+        let mut w2 = talkrypt_wire::Writer::new();
+        w2.put_bytes(&kp.leaf_public.encode());
+        w2.put_bytes(&attacker.public().sig_vk);
+        w2.put_bytes(&forged_pop);
+        assert!(KeyPackage::decode(profile, &w2.into_vec()).is_ok());
     }
 
     // ---- Property-based verification of the G1/G2 leaf-signature invariants.
