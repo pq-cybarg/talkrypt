@@ -1240,11 +1240,19 @@ async fn reader_loop(
             continue;
         }
         match decoded {
+            // Pairwise chat only. A group node (Host/Member) never legitimately
+            // receives a `Chat` frame — group content travels as `GroupMsg`
+            // (group-key-encrypted, attributed via the roster). Without this guard
+            // a relayed group member would surface a `Chat` frame lifted straight
+            // out of the relay-controlled `Routed` envelope, letting an untrusted
+            // relay inject forged plaintext attributed to any `from` it chooses
+            // (SECURITY-AUDIT G2). Restricting `Chat` to `role == None` closes that
+            // injection path; genuine pairwise chats are unaffected.
             Some(Frame::Chat {
                 channel,
                 text,
                 marking,
-            }) => {
+            }) if inner.role == GroupRole::None => {
                 let _ = inner.events_tx.send(Event::Message {
                     from,
                     channel,
@@ -2547,6 +2555,98 @@ mod tests {
         assert!(
             !saw_message,
             "diverging roots must not yield a plaintext message"
+        );
+    }
+
+    /// SECURITY-AUDIT G2: a malicious (non-member) relay must not be able to inject
+    /// forged plaintext into a relayed group. The relay terminates the pairwise
+    /// session with each member, so it fully controls the `Routed{from, inner}`
+    /// envelope. Here the relay crafts `Routed{ from: <spoofed committer>, inner:
+    /// Frame::Chat{..} }` and encrypts it to the member. Before the fix the member
+    /// surfaced this as an `Event::Message` from the spoofed sender; the
+    /// `role == None` guard on the `Chat` arm now drops it (group content only ever
+    /// arrives as group-key-encrypted `GroupMsg`).
+    #[tokio::test]
+    async fn malicious_relay_cannot_inject_chat_into_relayed_group() {
+        use talkrypt_transport::Transport;
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["relay".into()],
+            "#g2",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let root0 = desc.derive_root();
+
+        // The malicious relay: complete the pairwise handshake with the member,
+        // then push a forged Chat frame down the (relay-controlled) envelope.
+        let relay_suite = suite.clone();
+        let relay_transport = Arc::new(fabric.transport("relay"));
+        // Register the listener BEFORE the member connects, then accept in the task.
+        let mut listener = relay_transport.listen().await.unwrap();
+        tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let identity = IdentityKeyPair::generate();
+            let hs = crate::handshake::respond(
+                stream.as_mut(),
+                &identity,
+                relay_suite.as_ref(),
+                root0,
+            )
+            .await
+            .unwrap();
+            let mut session = hs.session;
+            let (mut writer, mut reader) = stream.into_split();
+            // The member is the ratchet initiator and sends its KeyPackage first;
+            // consume+decrypt it so our sending chain is keyed (exactly what a real
+            // relay does before it can forward). Then inject the forgery.
+            if let Ok(frame) = reader.recv_frame().await {
+                let _ = session.decrypt(&frame);
+            }
+            let forged = Routed {
+                to: Route::Broadcast,
+                from: [0x11; 48], // spoofed "committer" fingerprint
+                inner: Frame::Chat {
+                    channel: "#g2".into(),
+                    text: "forged by the relay".into(),
+                    marking: None,
+                }
+                .encode(),
+            }
+            .encode();
+            if let Ok(ct) = session.encrypt(&forged) {
+                let _ = writer.send_frame(&ct).await;
+            }
+            // Keep the connection (and session) alive for the member to read.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let (member, mut member_rx) = Core::new_relayed_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("member")),
+            desc,
+            false,
+        );
+        member.connect("relay").await.unwrap();
+
+        // The forged Chat must never surface as a message.
+        let mut saw_forged = false;
+        for _ in 0..4 {
+            if let Ok(Some(Event::Message { text, .. })) =
+                timeout(Duration::from_millis(250), member_rx.recv()).await
+            {
+                if text == "forged by the relay" {
+                    saw_forged = true;
+                }
+            }
+        }
+        assert!(
+            !saw_forged,
+            "a non-member relay must not be able to inject a forged Chat message"
         );
     }
 }
