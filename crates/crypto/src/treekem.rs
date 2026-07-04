@@ -575,6 +575,18 @@ impl TreeKemGroup {
         self.rekey_path(proposals)
     }
 
+    /// **Self-update** (the MLS `Update` operation): re-key ONLY this member's own
+    /// leaf→root path with fresh ML-KEM entropy, *without* any membership change.
+    /// The returned [`Commit`], applied by every other member, advances the epoch;
+    /// an adversary holding this member's *prior* path secrets cannot derive the new
+    /// epoch secret — i.e. **post-compromise security** on demand, not only when the
+    /// roster changes. Mechanically identical to add/remove's re-key, with no
+    /// proposals (roster unchanged). `rekey_path` already refreshes the caller's
+    /// path secrets and advances `self.epoch`/`epoch_secret`.
+    pub fn update(&mut self) -> Result<Commit> {
+        self.rekey_path(Vec::new())
+    }
+
     fn apply_proposals(&mut self, proposals: &[Proposal]) -> Result<()> {
         for p in proposals {
             // A proposal's leaf index is attacker-controlled on the receive path
@@ -1051,6 +1063,47 @@ mod tests {
         let d = add_member(&mut a, &mut [&mut b, &mut c]);
         assert_eq!(a.group_secret(), d.group_secret());
         assert_eq!(a.member_count(), 4);
+    }
+
+    /// The MLS `Update` op re-keys the caller's own path (no membership change),
+    /// advances the epoch, and every member converges on a NEW group secret —
+    /// on-demand post-compromise security. A message encrypted under the pre-update
+    /// epoch no longer decrypts under the new one (the old key material is stale).
+    #[test]
+    fn self_update_heals_without_membership_change() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        assert_eq!(a.group_secret(), b.group_secret());
+        let before = a.group_secret();
+
+        // A self-updates; B applies the resulting commit.
+        let commit = a.update().unwrap();
+        b.apply_commit(&commit).unwrap();
+
+        // Fresh entropy → new, converged group secret; roster unchanged.
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_ne!(a.group_secret(), before, "update must inject fresh entropy");
+        assert_eq!(a.member_count(), 2, "update changes no membership");
+
+        // The group still works post-update.
+        let m = a.encrypt(b"after update").unwrap();
+        assert_eq!(b.decrypt(&m).unwrap(), b"after update");
+    }
+
+    /// Post-compromise: a message captured under the epoch BEFORE a member's update
+    /// cannot be decrypted after the update is applied — the old epoch is gone.
+    #[test]
+    fn message_from_pre_update_epoch_is_stale_after_update() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let stale = a.encrypt(b"pre-update epoch").unwrap();
+        // B heals via a self-update; both advance past the captured epoch.
+        let commit = b.update().unwrap();
+        a.apply_commit(&commit).unwrap();
+        assert!(
+            a.decrypt(&stale).is_err(),
+            "a message from the pre-update epoch must not decrypt after healing"
+        );
     }
 
     // ---- Remote-DoS regression tests (SECURITY-AUDIT: crafted Commit/Welcome) ----
