@@ -376,12 +376,6 @@ struct Inner {
     /// after an out-of-band safety-number check — TOFU friending without pasting
     /// a 2592-byte key. See [`Core::pin_seen_account`].
     seen_accounts: Mutex<HashMap<[u8; 48], IdentityPublic>>,
-    /// Device identity keys learned from the authenticated handshake, keyed by
-    /// device fingerprint. This is the map used to VERIFY per-sender group-message
-    /// signatures (SECURITY-AUDIT G1/G2): the roster binds a leaf to a device
-    /// fingerprint, and this resolves that fingerprint to the ML-DSA-87 verifying
-    /// key the peer authenticated with at handshake.
-    device_keys: Mutex<HashMap<[u8; 48], IdentityPublic>>,
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
@@ -558,7 +552,6 @@ impl Core {
             present_chain: Mutex::new(None),
             contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
-            device_keys: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
@@ -1028,12 +1021,11 @@ impl Core {
                 let frame = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
-                        // Sign every group message with our ML-DSA-87 identity so
-                        // receivers can bind it to our leaf and reject impersonation
-                        // or relay restamping (SECURITY-AUDIT G1/G2).
-                        Some(grp) => Frame::GroupMsg(
-                            grp.encrypt_signed(&payload, |t| self.inner.identity.sign(t))?,
-                        ),
+                        // Sign every group message with our per-membership leaf
+                        // signature key so receivers can bind it to our leaf and
+                        // reject impersonation or relay restamping, without exposing
+                        // a long-term identity (SECURITY-AUDIT G1/G2).
+                        Some(grp) => Frame::GroupMsg(grp.encrypt_signed(&payload)?),
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
@@ -1137,14 +1129,6 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     let session = Arc::new(AsyncMutex::new(hs.session));
     let writer = Arc::new(AsyncMutex::new(writer));
 
-    // Remember the peer's authenticated device verifying key so we can check the
-    // signatures on its group messages (SECURITY-AUDIT G1/G2). The handshake has
-    // already proven the peer holds the matching secret.
-    inner
-        .device_keys
-        .lock()
-        .unwrap()
-        .insert(fingerprint, hs.peer_identity.clone());
     inner.peers.lock().unwrap().push(Peer {
         fingerprint,
         writer: writer.clone(),
@@ -1626,40 +1610,10 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // OR forward (SECURITY-AUDIT G1/G2). Resolve the claimed leaf -> roster
     // fingerprint -> device identity key; a message that does not verify under
     // that key is dropped (fail closed), so neither a member nor a relaying peer
-    // can forge or restamp the sender. `attributed` records the fingerprint the
-    // signature was checked against, so display attribution is exactly the
-    // cryptographically-verified sender.
-    let mut attributed: Option<[u8; 48]> = None;
+    // can forge or restamp the sender.
     let opened = {
         let mut g = inner.group.lock().await;
-        g.as_mut().and_then(|grp| {
-            grp.decrypt_verified(&gct, |leaf, transcript, sig| {
-                let fp = match inner.roster.lock().unwrap().get(&leaf).copied() {
-                    Some(fp) => fp,
-                    None => return false, // unknown leaf -> reject
-                };
-                // Verifying key for this device fingerprint: our own identity (a
-                // gossip echo of our own message), or the peer's device key learned
-                // at handshake. No key -> reject (fail closed).
-                let vk = if fp == inner.identity.public().fingerprint() {
-                    Some(inner.identity.public().clone())
-                } else {
-                    inner.device_keys.lock().unwrap().get(&fp).cloned()
-                };
-                match vk {
-                    None => false,
-                    Some(vk) => {
-                        if vk.verify(transcript, sig).is_ok() {
-                            attributed = Some(fp);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                }
-            })
-            .ok()
-        })
+        g.as_mut().and_then(|grp| grp.decrypt_verified(&gct).ok())
     };
     let Some(pt) = opened else {
         // Unauthenticated or undecryptable: drop it and do NOT forward — refusing
@@ -1668,8 +1622,11 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         return;
     };
     if let Some((marking, text)) = marking::decode_payload(&pt) {
-        // Attribute to the signature-verified sender (never the relaying peer).
-        let sender = attributed.unwrap_or(from);
+        // The signature has been verified against the sending leaf's tree-bound
+        // key, so leaf attribution is trustworthy; map it to a fingerprint.
+        let sender = TreeKemGroup::sender_leaf(&gct)
+            .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+            .unwrap_or(from);
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
             channel: inner.descriptor.channel.clone(),
