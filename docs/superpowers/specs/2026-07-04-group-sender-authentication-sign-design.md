@@ -1,23 +1,28 @@
-# Group Sender Authentication (SIGN) — Design
+# Group Hardening — Sender Authentication (SIGN) + On-Demand PCS
 
-> **Sub-project 1 of 3** in the group/relay security redesign. Ships first and stands alone.
-> Sub-project 2 = MLS-PQ single-committer PCS groups (task #74). Sub-project 3 = PQ-DCGKA
-> decentralized-PCS R&D (task #73). This doc is SIGN only.
+> **DECIDED DIRECTION (2026-07-04):** *harden the existing, already-post-quantum TreeKEM* with
+> **audited components + standard MLS patterns**, rather than build novel unaudited crypto. The
+> groups already run **ML-KEM-1024 + ML-DSA-87** (verified in `crypto/hybrid.rs`); nothing to migrate
+> on the PQ axis. This doc fixes the two real gaps: **(1) forgeable attribution** (G1/G2 — this spec's
+> §2–6) and **(2) no on-demand post-compromise healing** (the missing MLS `Update` op — §11).
+> Sequenced work: **① this hardening (now) → ② evaluate OpenMLS + PQ ciphersuite (#74) → ③ document
+> the novel decentralized PQ-DCGKA path (#73)**. Single-committer / host-coordinated is the audited
+> reality for PCS; the decentralized-multi-committer vision is deferred to #73 as a documented design.
 
-**Goal:** Make group and relayed message attribution **cryptographically unforgeable** — no group
-member can send as another (G1), and no untrusted relay can inject messages or rewrite attribution
-(G2), and no member/relay can forge membership commits (G3-auth) — by adding **per-identity
-ML-DSA-87 signatures** to every group/relayed message and **signed commits**, verified against
-**per-identity signing keys distributed by a signed presence**.
+**Goal:** Make group/relayed attribution **cryptographically unforgeable** (no member forges as
+another — G1; no relay injects/rewrites attribution — G2; no forged membership commits — G3-auth) via
+**per-identity ML-DSA-87 signatures** on every group/relayed message + **signed commits**, verified
+against **per-identity signing keys**; and add the standard MLS **`Update` self-rekey** so members
+**heal on demand** (PCS), not only on membership change.
 
-**Non-goal (explicit):** forward secrecy is already PQ (ML-KEM ratchets) and is untouched; **post-
-compromise security (PCS) is out of scope for SIGN** — it's Sub-project 2 (MLS-PQ) / 3 (PQ-DCGKA).
-SIGN is the authentication layer both later paths build on.
+**Audited-components posture:** signing/verify use the existing `ml-dsa` (ML-DSA-87) crate; the KEM is
+`ml-kem` (ML-KEM-1024). Both may optionally be moved to the **formally-verified `libcrux-ml-kem` /
+`libcrux-ml-dsa`** crates already present in the tree (pulled by nym) for maximal assurance — a
+drop-in primitive swap, no protocol change.
 
-**Why this is the right foundation:** authentication is orthogonal to key agreement. Signatures close
-the *forgery/attribution* ship-blockers immediately, are **gossip-safe and committer-independent**
-(a signature is verifiable by anyone holding the signer's pubkey, regardless of epoch, island, or
-transport), and compose with *any* future CGKA (single-committer MLS-PQ or decentralized PQ-DCGKA).
+**Why signatures are the load-bearing fix:** authentication is orthogonal to key agreement. Per-sender
+signatures are **self-verifying** (valid to anyone holding the signer's pubkey, regardless of epoch or
+transport), so they close G1/G2 on the *existing* tree and would compose with any future CGKA (#74/#73).
 
 ---
 
@@ -236,7 +241,49 @@ Single-committer PCS groups (Sub-project 2) have exactly one pinned committer.
 
 ## 10. Non-goals (deferred / tracked)
 
-- PCS / self-healing → #74 (MLS-PQ), #73 (PQ-DCGKA).
-- Forward-secrecy hardening beyond the existing ML-KEM ratchets (finer epoch ratchet) → fold into #74.
+- Decentralized multi-committer PCS → #73 (novel, documented-only for now).
+- Forward-secrecy hardening beyond the existing ML-KEM ratchets + the §11 `Update` op → fold into #74.
 - Metadata privacy, deniability → separate future items (documented in §8).
-- Multi-recipient KEM (mKEM) commit compression → a Layer-2 (PQ commit bandwidth) concern, not SIGN.
+- Multi-recipient KEM (mKEM) commit compression → an OpenMLS/#74 (PQ commit bandwidth) concern.
+
+---
+
+## 11. On-demand PCS — the MLS `Update` operation (task #75)
+
+**Gap:** `TreeKemGroup` today exposes only `add`/`remove` (`crypto/treekem.rs:548/572`) — there is **no
+`Update`**. So the group only re-keys (heals) when membership changes; a member who suspects
+compromise **cannot proactively re-key to heal.** That's weak PCS.
+
+**Fix (standard MLS pattern — audited/textbook):** add a self-rekey operation.
+```rust
+// crates/crypto/src/treekem.rs
+/// Re-key ONLY the caller's own leaf→root path with fresh ML-KEM entropy, without any
+/// membership change. The resulting Commit, applied by every member, advances the epoch and
+/// heals a compromise of this member's prior path secrets (post-compromise security). This is
+/// the MLS `Update` proposal+commit, self-authored.
+pub fn update(&mut self) -> Result<Commit> {
+    // No proposals; just rekey_path over an empty proposal set (fresh secrets leaf→root),
+    // exactly like add/remove do after applying their proposals.
+    self.rekey_path(Vec::new())
+}
+```
+- **Confidentiality/PCS:** `rekey_path` already generates fresh secrets leaf→root and ML-KEM-encrypts
+  each to the copath (the existing add/remove machinery) — so an `Update` injects fresh entropy up the
+  caller's path; an adversary holding the *old* path secrets cannot derive the new epoch secret. This
+  is exactly MLS post-compromise security, on the existing ML-KEM tree. No new crypto — reuses
+  `rekey_path`.
+- **Engine wiring:** `Core::update_group(&self)` builds the `Update` commit and routes it
+  (`Route::Broadcast`); the **commit is signed** (SIGN §5, `commit_sig`) so members verify it came from
+  the leaf that owns that path (an unauthorized `Update` for someone else's path is rejected).
+  Triggers: **on-demand** (user "heal now" / app resume) and **optional periodic** self-update (bounds
+  the compromise window — a coordination-free FS/PCS improvement, per-chat cadence like Sub-spec A's).
+- **Single-committer note:** in a host-coordinated group the host sequences commits; a member's
+  `Update` is a proposal the host commits (or, in the current direct model, a member re-keys its own
+  path and broadcasts — the signed commit + epoch ordering (`pending_commits`) keep members
+  consistent). Concurrency across islands (mesh mode) is the #73 concern; single-committer PCS is the
+  audited target here.
+
+**Testing (adds to §7):** post-compromise heal — capture epoch-N key material for member M; M sends an
+`Update`; assert the epoch-N material **cannot** derive the epoch-N+1 secret (M healed). An `Update`
+commit with a `commit_sig` from a non-owner of the path ⇒ rejected. `Update` with no membership change
+leaves the roster unchanged.
