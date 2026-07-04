@@ -35,6 +35,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::aead::{open as aead_open, seal as aead_seal};
 use crate::error::{CryptoError, Result};
 use crate::hybrid::{KemProfile, RatchetPublic, RatchetSecret};
+use crate::identity::{IdentityKeyPair, IdentityPublic};
 use crate::kdf::{kdf_ck, kdf_mk};
 use crate::ratchet::MAX_SKIP;
 
@@ -105,17 +106,25 @@ fn root_of(capacity: u32) -> Node {
     }
 }
 
-/// A joiner's pre-published leaf public key.
+/// A joiner's pre-published leaf: the KEM leaf key plus a per-membership ML-DSA-87
+/// **leaf signature key** used to authenticate this member's group messages
+/// (SECURITY-AUDIT G1/G2). The signature key is per-group and unlinkable to the
+/// device — it IS a segment/pseudonym key in talkrypt's identity model; binding it
+/// to a real account (linked mode) is a separate, optional layer.
 #[derive(Clone)]
 pub struct KeyPackage {
     pub leaf_public: RatchetPublic,
+    pub sig_public: IdentityPublic,
 }
 
 /// A joiner's private leaf key, kept until they process their Welcome. Bound to
-/// the group's [`KemProfile`] so the published leaf key matches the group.
+/// the group's [`KemProfile`] so the published leaf key matches the group. Also
+/// holds the per-membership ML-DSA-87 **leaf signature key** the joiner will use
+/// to sign its group messages (SECURITY-AUDIT G1/G2).
 pub struct LeafKeyPair {
     profile: KemProfile,
     secret: Secret,
+    sig: IdentityKeyPair,
 }
 
 impl LeafKeyPair {
@@ -130,7 +139,7 @@ impl LeafKeyPair {
     pub fn generate_with(profile: KemProfile) -> LeafKeyPair {
         let mut secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut secret);
-        LeafKeyPair { profile, secret }
+        LeafKeyPair { profile, secret, sig: IdentityKeyPair::generate() }
     }
 
     /// The KEM profile this leaf key is bound to.
@@ -140,7 +149,7 @@ impl LeafKeyPair {
 
     pub fn key_package(&self) -> KeyPackage {
         let (_, leaf_public) = RatchetSecret::derive_deterministic(self.profile, &self.secret);
-        KeyPackage { leaf_public }
+        KeyPackage { leaf_public, sig_public: self.sig.public().clone() }
     }
 }
 
@@ -150,6 +159,7 @@ enum Proposal {
     Add {
         leaf: u32,
         leaf_public: RatchetPublic,
+        sig_public: IdentityPublic,
     },
     Remove {
         leaf: u32,
@@ -175,6 +185,9 @@ pub struct Welcome {
     occupied: Vec<bool>,
     epoch: u32,
     your_leaf: u32,
+    /// Every current member's leaf signature public key (SECURITY-AUDIT G1/G2), so
+    /// the joiner can verify messages from anyone already in the group.
+    sig_keys: Vec<(u32, IdentityPublic)>,
     commit: Commit,
 }
 
@@ -210,22 +223,28 @@ fn get_node(r: &mut talkrypt_wire::Reader) -> Result<Node> {
 
 impl KeyPackage {
     pub fn encode(&self) -> Vec<u8> {
-        self.leaf_public.encode()
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_bytes(&self.leaf_public.encode());
+        w.put_bytes(&self.sig_public.sig_vk);
+        w.into_vec()
     }
     pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<KeyPackage> {
-        Ok(KeyPackage {
-            leaf_public: RatchetPublic::decode(profile, bytes)?,
-        })
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let leaf_public = RatchetPublic::decode(profile, r.get_bytes()?)?;
+        let sig_public = decode_sig_public(r.get_bytes()?)?;
+        r.finish()?;
+        Ok(KeyPackage { leaf_public, sig_public })
     }
 }
 
 impl Proposal {
     fn put(&self, w: &mut talkrypt_wire::Writer) {
         match self {
-            Proposal::Add { leaf, leaf_public } => {
+            Proposal::Add { leaf, leaf_public, sig_public } => {
                 w.put_u8(0);
                 w.put_u32(*leaf);
                 w.put_bytes(&leaf_public.encode());
+                w.put_bytes(&sig_public.sig_vk);
             }
             Proposal::Remove { leaf } => {
                 w.put_u8(1);
@@ -238,6 +257,7 @@ impl Proposal {
             0 => Ok(Proposal::Add {
                 leaf: r.get_u32()?,
                 leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
+                sig_public: decode_sig_public(r.get_bytes()?)?,
             }),
             1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
@@ -246,6 +266,20 @@ impl Proposal {
 }
 
 const MAX_TREE_ITEMS: u32 = 1 << 20;
+
+/// The encoded length of an ML-DSA-87 verifying key (category-5). A leaf sig key
+/// on the wire must be exactly this long.
+const SIG_VK_LEN: usize = 2592;
+
+/// Decode a leaf signature public key from wire bytes, rejecting a wrong-length
+/// key before it is stored or used to verify (SECURITY-AUDIT G1/G2 — a bogus key
+/// must never be admitted into the tree).
+fn decode_sig_public(bytes: &[u8]) -> Result<IdentityPublic> {
+    if bytes.len() != SIG_VK_LEN {
+        return Err(CryptoError::Malformed("treekem leaf sig key wrong length"));
+    }
+    Ok(IdentityPublic { sig_vk: bytes.to_vec() })
+}
 
 /// Group-message wire versions (leading byte). v1 is the legacy unsigned format
 /// (forgeable by any member — SECURITY-AUDIT G1); v2 adds a per-sender ML-DSA-87
@@ -378,6 +412,11 @@ impl Welcome {
         }
         w.put_u32(self.epoch);
         w.put_u32(self.your_leaf);
+        w.put_u32(self.sig_keys.len() as u32);
+        for (leaf, k) in &self.sig_keys {
+            w.put_u32(*leaf);
+            w.put_bytes(&k.sig_vk);
+        }
         w.put_bytes(&self.commit.encode());
         w.into_vec()
     }
@@ -405,6 +444,14 @@ impl Welcome {
         }
         let epoch = r.get_u32()?;
         let your_leaf = r.get_u32()?;
+        // Each sig_keys entry is leaf(4) + u32-prefixed vk(>=4). Bound the count.
+        let nsk = get_count(&mut r, 8)?;
+        let mut sig_keys = Vec::with_capacity(nsk as usize);
+        for _ in 0..nsk {
+            let leaf = r.get_u32()?;
+            let k = decode_sig_public(r.get_bytes()?)?;
+            sig_keys.push((leaf, k));
+        }
         let commit = Commit::decode(profile, r.get_bytes()?)?;
         r.finish()?;
         Ok(Welcome {
@@ -413,6 +460,7 @@ impl Welcome {
             occupied,
             epoch,
             your_leaf,
+            sig_keys,
             commit,
         })
     }
@@ -439,6 +487,14 @@ pub struct TreeKemGroup {
     send_chain: Secret,
     send_n: u32,
     recvs: HashMap<u32, RecvChain>,
+    /// leaf -> that member's ML-DSA-87 leaf signature public key. Populated as
+    /// members are added (via Add proposals / Welcome). Used to VERIFY per-sender
+    /// group-message signatures (SECURITY-AUDIT G1/G2).
+    leaf_sig_keys: HashMap<u32, IdentityPublic>,
+    /// This member's own leaf SIGNING key (the private half). `None` only in the
+    /// degenerate test-built group; `create`/`join` always set it. Used to SIGN our
+    /// outgoing group messages.
+    my_sig: Option<IdentityKeyPair>,
 }
 
 // Zero the group's secret material on drop: the ratchet-tree node secrets, the
@@ -482,6 +538,10 @@ impl TreeKemGroup {
         let mut leaf_secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
 
+        // The founder's per-membership leaf signature key (its group alias).
+        let my_sig = IdentityKeyPair::generate();
+        let mut leaf_sig_keys = HashMap::new();
+        leaf_sig_keys.insert(0u32, my_sig.public().clone());
         let mut g = TreeKemGroup {
             profile,
             capacity,
@@ -494,6 +554,8 @@ impl TreeKemGroup {
             send_chain: [0u8; 32],
             send_n: 0,
             recvs: HashMap::new(),
+            leaf_sig_keys,
+            my_sig: Some(my_sig),
         };
         g.occupied[0] = true;
         // Set the founder's whole path (leaf -> root) from a fresh secret chain.
@@ -586,6 +648,7 @@ impl TreeKemGroup {
         let proposals = vec![Proposal::Add {
             leaf,
             leaf_public: kp.leaf_public.clone(),
+            sig_public: kp.sig_public.clone(),
         }];
         self.apply_proposals(&proposals)?;
         let commit = self.rekey_path(proposals)?;
@@ -596,6 +659,9 @@ impl TreeKemGroup {
             occupied: self.occupied.clone(),
             epoch: self.epoch,
             your_leaf: leaf,
+            // Every member's leaf sig key, so the joiner can verify all senders
+            // (SECURITY-AUDIT G1/G2). Includes the joiner's own (just added).
+            sig_keys: self.leaf_sig_keys.iter().map(|(l, k)| (*l, k.clone())).collect(),
             commit: commit.clone(),
         };
         Ok((leaf, commit, welcome))
@@ -633,9 +699,12 @@ impl TreeKemGroup {
                 return Err(CryptoError::Malformed("treekem proposal leaf out of range"));
             }
             match p {
-                Proposal::Add { leaf, leaf_public } => {
+                Proposal::Add { leaf, leaf_public, sig_public } => {
                     self.occupied[*leaf as usize] = true;
                     self.public.insert(Node::leaf(*leaf), leaf_public.clone());
+                    // Bind the joiner's leaf signature key so we can verify their
+                    // group messages (SECURITY-AUDIT G1/G2).
+                    self.leaf_sig_keys.insert(*leaf, sig_public.clone());
                     // Blank the new leaf's ancestors so the committer re-keys.
                     self.blank_path_above(*leaf);
                 }
@@ -643,6 +712,7 @@ impl TreeKemGroup {
                     self.occupied[*leaf as usize] = false;
                     self.secrets.remove(&Node::leaf(*leaf));
                     self.public.remove(&Node::leaf(*leaf));
+                    self.leaf_sig_keys.remove(leaf);
                     self.blank_path_above(*leaf);
                 }
             }
@@ -721,8 +791,14 @@ impl TreeKemGroup {
 
     /// Join a group from a Welcome message using the matching leaf key.
     pub fn join_with_welcome(keypair: LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
+        // `LeafKeyPair` is a Drop type (zeroizes its secret), so we cannot move its
+        // fields out. Copy the KEM leaf secret and rebuild the leaf signing key
+        // from its seed; `keypair` then drops normally, zeroizing its copy.
+        let profile = keypair.profile;
+        let secret = keypair.secret;
+        let sig = IdentityKeyPair::from_secret_bytes(keypair.sig.export_secret());
         let mut g = TreeKemGroup {
-            profile: keypair.profile,
+            profile,
             capacity: welcome.capacity,
             public: welcome.public.iter().cloned().collect(),
             occupied: welcome.occupied.clone(),
@@ -733,10 +809,15 @@ impl TreeKemGroup {
             send_chain: [0u8; 32],
             send_n: 0,
             recvs: HashMap::new(),
+            // Learn every current member's leaf sig key from the Welcome, plus our
+            // own (belt-and-suspenders — the committer includes it).
+            leaf_sig_keys: welcome.sig_keys.iter().cloned().collect(),
+            my_sig: Some(sig),
         };
+        g.leaf_sig_keys
+            .insert(welcome.your_leaf, g.my_sig.as_ref().unwrap().public().clone());
         // We hold only our own leaf secret to start.
-        g.secrets
-            .insert(Node::leaf(welcome.your_leaf), keypair.secret);
+        g.secrets.insert(Node::leaf(welcome.your_leaf), secret);
         let secret = g.process_update_path(&welcome.commit)?;
         g.epoch_secret = secret;
         g.reset_epoch();
@@ -818,26 +899,27 @@ impl TreeKemGroup {
     }
 
     /// Encrypt a **signed** (v2) group message: the sender signs
-    /// `SIG_CONTEXT|epoch|leaf|n|ct` with its ML-DSA-87 identity key, so a receiver
-    /// ([`decrypt_verified`]) can bind the message to the sender's leaf and reject
-    /// impersonation or relay restamping (SECURITY-AUDIT G1/G2). `sign` is the
-    /// sender's `IdentityKeyPair::sign`, passed as a closure so this KEM module
-    /// need not depend on the identity layer.
+    /// `SIG_CONTEXT|epoch|leaf|n|ct` with its per-membership ML-DSA-87 **leaf
+    /// signature key**, so a receiver ([`decrypt_verified`]) can bind the message
+    /// to the sender's leaf (via the tree-bound leaf sig key) and reject
+    /// impersonation or relay restamping (SECURITY-AUDIT G1/G2). The leaf key is a
+    /// per-group alias — unlinkable to the device — so this authenticates the
+    /// message without revealing a long-term identity.
     ///
     /// [`decrypt_verified`]: TreeKemGroup::decrypt_verified
-    pub fn encrypt_signed(
-        &mut self,
-        plaintext: &[u8],
-        sign: impl FnOnce(&[u8]) -> Vec<u8>,
-    ) -> Result<Vec<u8>> {
+    pub fn encrypt_signed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let my_sig = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
         let (next, mk_seed) = kdf_ck(&self.send_chain); // both Zeroizing
         let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let n = self.send_n;
         let aad = msg_aad(self.epoch, self.me, n);
         let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
+        let sig = my_sig.sign(&sig_transcript(self.epoch, self.me, n, &ct));
         self.send_chain = *next;
         self.send_n += 1;
-        let sig = sign(&sig_transcript(self.epoch, self.me, n, &ct));
         let mut w = talkrypt_wire::Writer::new();
         w.put_u8(GROUP_MSG_V2);
         w.put_u32(self.epoch);
@@ -848,15 +930,13 @@ impl TreeKemGroup {
         Ok(w.into_vec())
     }
 
-    /// Decrypt a group message requiring a valid per-sender signature (v2).
-    /// `verify(leaf, transcript, sig)` must return true only if `sig` verifies
-    /// under the identity key bound to `leaf` via the roster. Runs BEFORE
-    /// decryption; rejects v1 (unsigned) frames (SECURITY-AUDIT G1/G2).
-    pub fn decrypt_verified(
-        &mut self,
-        message: &[u8],
-        verify: impl FnOnce(u32, &[u8], &[u8]) -> bool,
-    ) -> Result<Vec<u8>> {
+    /// Decrypt a group message, requiring a valid per-sender signature (v2). The
+    /// signature is verified against the sending leaf's tree-bound leaf signature
+    /// key BEFORE decryption; a v1 (unsigned) frame, an unknown leaf, or a bad
+    /// signature is rejected (SECURITY-AUDIT G1/G2). Because the verifying key
+    /// comes from group membership (Add/Welcome), a member or relay cannot forge or
+    /// restamp the sender.
+    pub fn decrypt_verified(&mut self, message: &[u8]) -> Result<Vec<u8>> {
         let mut r = talkrypt_wire::Reader::new(message);
         let version = r.get_u8()?;
         if version != GROUP_MSG_V2 {
@@ -868,7 +948,14 @@ impl TreeKemGroup {
         let ct = r.get_vec()?;
         let sig = r.get_vec()?;
         r.finish()?;
-        if !verify(leaf, &sig_transcript(epoch, leaf, n, &ct), &sig) {
+        let vk = self
+            .leaf_sig_keys
+            .get(&leaf)
+            .ok_or(CryptoError::BadSignature)?;
+        if vk
+            .verify(&sig_transcript(epoch, leaf, n, &ct), &sig)
+            .is_err()
+        {
             return Err(CryptoError::BadSignature);
         }
         if epoch != self.epoch {
@@ -1015,6 +1102,8 @@ mod tests {
             send_chain: [0xAA; 32],
             send_n: 0,
             recvs: HashMap::new(),
+            leaf_sig_keys: HashMap::new(),
+            my_sig: None,
         };
         unsafe {
             crate::assert_drop_zeroes(
@@ -1309,71 +1398,58 @@ mod tests {
         assert!(a.apply_commit(&commit).is_err());
     }
 
-    // Attacker forges a signature with its own (wrong) ML-DSA-87 key.
-    fn attacker_signature(ct: &[u8], epoch: u32, leaf: u32, n: u32) -> Vec<u8> {
-        let attacker = crate::identity::IdentityKeyPair::generate();
-        attacker.sign(&sig_transcript(epoch, leaf, n, ct))
-    }
-
-    /// SECURITY-AUDIT G1/G2 REGRESSION — the group-message sender forgery is now
-    /// closed. Attacker `b` can still reconstruct `a`'s sender chain from shared
-    /// group state, but a v2 receiver runs [`TreeKemGroup::decrypt_verified`],
-    /// which requires an ML-DSA-87 signature bound to the claimed leaf's identity
-    /// key — which `b` cannot produce without `a`'s secret. Forgery REJECTED.
+    /// SECURITY-AUDIT G1/G2 REGRESSION — group-message sender forgery is closed.
+    /// Attacker `b` can reconstruct `a`'s epoch sender chain from shared group
+    /// state and stamp the victim's leaf, but the receiver verifies against the
+    /// leaf SIGNATURE key bound in the tree for that leaf. `b` holds its own leaf
+    /// signing key, not `a`'s, so it cannot produce a signature that verifies under
+    /// `a`'s tree-bound key. Forgery REJECTED.
     #[test]
     fn member_cannot_forge_group_message_as_another_member() {
-        let a_id = crate::identity::IdentityKeyPair::generate();
-        let a_vk = a_id.public().clone();
         let mut a = TreeKemGroup::create();
         let mut b = add_member(&mut a, &mut []);
         let mut c = add_member(&mut a, &mut [&mut b]);
         let victim_leaf = a.my_leaf();
         assert_ne!(victim_leaf, b.my_leaf());
 
-        // The exact G1 forgery, now wrapped in a v2 envelope b must sign — but b
-        // can only sign with its OWN key, not a's.
+        // The G1 chain forgery: b derives a's sender chain and crafts the ct.
         let forged_chain = sender_chain(&b.group_secret(), victim_leaf);
         let (_next, mk_seed) = kdf_ck(&forged_chain);
         let (key, nonce) = kdf_mk(&mk_seed);
         let n = 0u32;
         let aad = msg_aad(b.epoch, victim_leaf, n);
         let ct = aead_seal(&key, &nonce, b"I never said this", &aad).unwrap();
-        let sig = attacker_signature(&ct, b.epoch, victim_leaf, n);
+        // b can only sign with ITS OWN leaf key (b.my_sig), not a's.
+        let b_sig = b.my_sig.as_ref().unwrap();
+        let sig = b_sig.sign(&sig_transcript(b.epoch, victim_leaf, n, &ct));
         let mut w = talkrypt_wire::Writer::new();
         w.put_u8(GROUP_MSG_V2);
         w.put_u32(b.epoch);
-        w.put_u32(victim_leaf);
+        w.put_u32(victim_leaf); // stamp the VICTIM's leaf
         w.put_u32(n);
         w.put_bytes(&ct);
         w.put_bytes(&sig);
         let forged = w.into_vec();
 
-        let res = c.decrypt_verified(&forged, |leaf, transcript, sig| {
-            assert_eq!(leaf, victim_leaf);
-            a_vk.verify(transcript, sig).is_ok()
-        });
+        // c verifies against the leaf sig key bound for victim_leaf (a's key) ->
+        // b's signature does not verify -> rejected.
+        let res = c.decrypt_verified(&forged);
         assert!(matches!(res, Err(CryptoError::BadSignature)));
     }
 
-    /// A genuine signed (v2) group message round-trips (G1/G2 happy path).
+    /// A genuine signed (v2) group message round-trips (G1/G2 happy path): a signs
+    /// with its leaf key; b verifies against a's tree-bound leaf sig key.
     #[test]
     fn signed_group_message_round_trips() {
-        let a_id = crate::identity::IdentityKeyPair::generate();
-        let a_vk = a_id.public().clone();
         let mut a = TreeKemGroup::create();
         let mut b = add_member(&mut a, &mut []);
         let a_leaf = a.my_leaf();
-
-        let msg = a.encrypt_signed(b"authentic hello", |t| a_id.sign(t)).unwrap();
+        let msg = a.encrypt_signed(b"authentic hello").unwrap();
         assert_eq!(TreeKemGroup::sender_leaf(&msg), Some(a_leaf));
-
-        let pt = b
-            .decrypt_verified(&msg, |leaf, transcript, sig| {
-                assert_eq!(leaf, a_leaf);
-                a_vk.verify(transcript, sig).is_ok()
-            })
-            .unwrap();
-        assert_eq!(pt, b"authentic hello");
+        assert_eq!(b.decrypt_verified(&msg).unwrap(), b"authentic hello");
+        // And the reverse direction (b -> a) also authenticates.
+        let msg2 = b.encrypt_signed(b"hi back").unwrap();
+        assert_eq!(a.decrypt_verified(&msg2).unwrap(), b"hi back");
     }
 
     /// A v2 receiver rejects a v1 (unsigned) message on the trust boundary.
@@ -1382,22 +1458,18 @@ mod tests {
         let mut a = TreeKemGroup::create();
         let mut b = add_member(&mut a, &mut []);
         let unsigned = a.encrypt(b"legacy").unwrap();
-        assert!(b.decrypt_verified(&unsigned, |_, _, _| true).is_err());
+        assert!(b.decrypt_verified(&unsigned).is_err());
     }
 
     /// Tampering the ciphertext after signing invalidates the signature (the
     /// transcript binds epoch/leaf/n/ct, so a relay cannot restamp).
     #[test]
     fn tampered_signed_message_rejected() {
-        let a_id = crate::identity::IdentityKeyPair::generate();
-        let a_vk = a_id.public().clone();
         let mut a = TreeKemGroup::create();
         let mut b = add_member(&mut a, &mut []);
-        let mut msg = a.encrypt_signed(b"do not tamper", |t| a_id.sign(t)).unwrap();
+        let mut msg = a.encrypt_signed(b"do not tamper").unwrap();
         msg[20] ^= 0x01;
-        assert!(b
-            .decrypt_verified(&msg, |_, transcript, sig| a_vk.verify(transcript, sig).is_ok())
-            .is_err());
+        assert!(b.decrypt_verified(&msg).is_err());
     }
 
     /// SECURITY-AUDIT G3/G4 — a Commit declaring a huge element count with no
