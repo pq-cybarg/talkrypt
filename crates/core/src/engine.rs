@@ -376,6 +376,12 @@ struct Inner {
     /// after an out-of-band safety-number check — TOFU friending without pasting
     /// a 2592-byte key. See [`Core::pin_seen_account`].
     seen_accounts: Mutex<HashMap<[u8; 48], IdentityPublic>>,
+    /// Device identity keys learned from the authenticated handshake, keyed by
+    /// device fingerprint. This is the map used to VERIFY per-sender group-message
+    /// signatures (SECURITY-AUDIT G1/G2): the roster binds a leaf to a device
+    /// fingerprint, and this resolves that fingerprint to the ML-DSA-87 verifying
+    /// key the peer authenticated with at handshake.
+    device_keys: Mutex<HashMap<[u8; 48], IdentityPublic>>,
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
@@ -552,6 +558,7 @@ impl Core {
             present_chain: Mutex::new(None),
             contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
+            device_keys: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
@@ -1130,6 +1137,14 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     let session = Arc::new(AsyncMutex::new(hs.session));
     let writer = Arc::new(AsyncMutex::new(writer));
 
+    // Remember the peer's authenticated device verifying key so we can check the
+    // signatures on its group messages (SECURITY-AUDIT G1/G2). The handshake has
+    // already proven the peer holds the matching secret.
+    inner
+        .device_keys
+        .lock()
+        .unwrap()
+        .insert(fingerprint, hs.peer_identity.clone());
     inner.peers.lock().unwrap().push(Peer {
         fingerprint,
         writer: writer.clone(),
@@ -1623,12 +1638,13 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
                     Some(fp) => fp,
                     None => return false, // unknown leaf -> reject
                 };
-                // Verifying key: our own identity (for a gossip echo of our own
-                // message) or a peer whose account we've seen. No key -> reject.
+                // Verifying key for this device fingerprint: our own identity (a
+                // gossip echo of our own message), or the peer's device key learned
+                // at handshake. No key -> reject (fail closed).
                 let vk = if fp == inner.identity.public().fingerprint() {
                     Some(inner.identity.public().clone())
                 } else {
-                    inner.seen_accounts.lock().unwrap().get(&fp).cloned()
+                    inner.device_keys.lock().unwrap().get(&fp).cloned()
                 };
                 match vk {
                     None => false,
