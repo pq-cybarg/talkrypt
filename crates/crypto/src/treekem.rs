@@ -240,6 +240,12 @@ pub struct Commit {
     path: Vec<Node>,                         // committer's path, leaf -> root
     ciphertexts: Vec<(Node, Node, Vec<u8>)>, // (path node, target resolution node, blob)
     new_capacity: u32,
+    /// Optional leaf-signature-key ROTATION by the committer (SECURITY-AUDIT T-2):
+    /// `(committer_leaf, new_sig_public, pop)`. Present when the committer rotates
+    /// its own leaf signing key (e.g. on `update()`), giving post-compromise
+    /// security for AUTHENTICATION: a leaked leaf signing key stops verifying once
+    /// the member updates. Receivers verify the PoP and rebind the leaf's key.
+    sig_update: Option<(u32, IdentityPublic, Vec<u8>)>,
 }
 
 /// Everything a joiner needs to enter the group at the post-commit epoch.
@@ -443,6 +449,15 @@ impl Commit {
             w.put_bytes(blob);
         }
         w.put_u32(self.new_capacity);
+        match &self.sig_update {
+            None => w.put_u8(0),
+            Some((leaf, sig_public, pop)) => {
+                w.put_u8(1);
+                w.put_u32(*leaf);
+                w.put_bytes(&sig_public.sig_vk);
+                w.put_bytes(pop);
+            }
+        }
         w.into_vec()
     }
 
@@ -488,12 +503,23 @@ impl Commit {
         if new_capacity > MAX_TREE_ITEMS {
             return Err(CryptoError::Malformed("treekem new_capacity too large"));
         }
+        let sig_update = match r.get_u8()? {
+            0 => None,
+            1 => {
+                let leaf = r.get_u32()?;
+                let sig_public = decode_sig_public(r.get_bytes()?)?;
+                let pop = r.get_vec()?;
+                Some((leaf, sig_public, pop))
+            }
+            _ => return Err(CryptoError::Malformed("bad sig_update tag")),
+        };
         Ok(Commit {
             proposals,
             pub_updates,
             path,
             ciphertexts,
             new_capacity,
+            sig_update,
         })
     }
 }
@@ -809,7 +835,18 @@ impl TreeKemGroup {
     /// proposals (roster unchanged). `rekey_path` already refreshes the caller's
     /// path secrets and advances `self.epoch`/`epoch_secret`.
     pub fn update(&mut self) -> Result<Commit> {
-        self.rekey_path(Vec::new())
+        let mut commit = self.rekey_path(Vec::new())?;
+        // Rotate our leaf SIGNING key too (SECURITY-AUDIT T-2): a compromised leaf
+        // signing key stops verifying after this update — post-compromise security
+        // for authentication, not just for the epoch (confidentiality) secret.
+        let new_sig = IdentityKeyPair::generate();
+        let new_pub = new_sig.public().clone();
+        let pop = new_sig.sign(&pop_transcript(&new_pub));
+        self.leaf_sig_keys.insert(self.me, new_pub.clone());
+        self.leaf_pops.insert(self.me, pop.clone());
+        self.my_sig = Some(new_sig);
+        commit.sig_update = Some((self.me, new_pub, pop));
+        Ok(commit)
     }
 
     fn apply_proposals(&mut self, proposals: &[Proposal]) -> Result<()> {
@@ -903,6 +940,7 @@ impl TreeKemGroup {
             path,
             ciphertexts,
             new_capacity: self.capacity,
+            sig_update: None,
         })
     }
 
@@ -913,6 +951,20 @@ impl TreeKemGroup {
             self.occupied.resize(self.capacity as usize, false);
         }
         self.apply_proposals(&commit.proposals)?;
+        // Apply an optional leaf-signature-key rotation (SECURITY-AUDIT T-2). The
+        // new key must carry a valid PoP; the committer may only rotate its OWN
+        // leaf (a committer cannot rotate another member's signing key). The leaf
+        // must be occupied. Rebinds the verifying key so the old key stops
+        // verifying from this epoch on.
+        if let Some((leaf, sig_public, pop)) = &commit.sig_update {
+            match self.occupied.get(*leaf as usize) {
+                Some(true) => {}
+                _ => return Err(CryptoError::Malformed("sig_update for empty leaf")),
+            }
+            verify_pop(sig_public, pop)?;
+            self.leaf_sig_keys.insert(*leaf, sig_public.clone());
+            self.leaf_pops.insert(*leaf, pop.clone());
+        }
         let secret = self.process_update_path(commit)?;
         self.epoch += 1;
         self.epoch_secret = secret;
@@ -1535,6 +1587,7 @@ mod tests {
         w.put_u32(0); // path
         w.put_u32(0); // ciphertexts
         w.put_u32(0); // new_capacity (within bound, so we reach apply_proposals)
+        w.put_u8(0); // sig_update: None (T-2 wire field)
         let commit = Commit::decode(a.profile(), &w.into_vec()).expect("decodes");
         assert!(a.apply_commit(&commit).is_err());
     }
@@ -1620,6 +1673,46 @@ mod tests {
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(1_000_000);
         assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// SECURITY-AUDIT T-2: `update()` rotates the caller's leaf SIGNING key, giving
+    /// post-compromise security for authentication. After A updates: (1) both
+    /// members converge and A's NEW key verifies A's messages; (2) a message forged
+    /// with A's OLD signing key (e.g. by an adversary who compromised it before the
+    /// update) no longer verifies — the old key is no longer bound to A's leaf.
+    #[test]
+    fn update_rotates_leaf_signing_key_for_pcs() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let a_leaf = a.my_leaf();
+
+        // Capture A's OLD signing key (simulating a pre-update compromise).
+        let old_sig_seed = a.my_sig.as_ref().unwrap().export_secret();
+        let old_sig = crate::identity::IdentityKeyPair::from_secret_bytes(old_sig_seed);
+
+        // A self-updates (rotates KEM path AND leaf signing key); B applies it.
+        let commit = a.update().unwrap();
+        b.apply_commit(&commit).unwrap();
+        assert_eq!(a.group_secret(), b.group_secret());
+
+        // A's NEW key authenticates a fresh message.
+        let msg = a.encrypt_signed(b"post-update").unwrap();
+        assert_eq!(b.decrypt_verified(&msg).unwrap(), b"post-update");
+
+        // A message forged with A's OLD signing key is now REJECTED by B: the old
+        // key is no longer the leaf's bound verifying key (PCS for auth).
+        let epoch = a.epoch;
+        let chain = sender_chain(&a.group_secret(), a_leaf);
+        let (_n, mk) = kdf_ck(&chain);
+        let (k, no) = kdf_mk(&mk);
+        let aad = msg_aad(epoch, a_leaf, 0);
+        let ct = aead_seal(&k, &no, b"forged with old key", &aad).unwrap();
+        let sig = old_sig.sign(&sig_transcript(epoch, a_leaf, 0, &ct));
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u8(GROUP_MSG_V2);
+        w.put_u32(epoch); w.put_u32(a_leaf); w.put_u32(0);
+        w.put_bytes(&ct); w.put_bytes(&sig);
+        assert!(matches!(b.decrypt_verified(&w.into_vec()), Err(CryptoError::BadSignature)));
     }
 
     /// SECURITY-AUDIT T-1: a KeyPackage whose proof-of-possession does not verify
