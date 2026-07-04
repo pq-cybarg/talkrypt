@@ -140,6 +140,21 @@ impl LinkReply {
 /// revocable, so we bound them. ~10 years.
 pub const LINK_CERT_TTL: u64 = 10 * 365 * 24 * 3600;
 
+/// How long the primary keeps a link offer open before it expires. The linking
+/// descriptor is one-time and shared in person; bounding the accept window means
+/// an invite token that later leaks (a photographed QR, a screenshot) cannot be
+/// redeemed for a rogue device an hour — or a day — later. Combined with the
+/// one-time accept policy (`run` stops after the first successful grant), an
+/// exposed token yields at most one link, inside a short window
+/// (SECURITY-AUDIT L1). Five minutes is comfortable for an in-person pairing.
+pub const LINK_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Operator approval hook: given the requested device label, decide whether to
+/// certify it. Set via [`LinkHost::with_approval`]. When unset, the host
+/// auto-approves (legacy behavior) — interactive hosts should set it so linking
+/// requires an explicit, per-device human decision, not just token possession.
+pub type ApprovalFn = dyn Fn(&str) -> bool + Send + Sync;
+
 /// The **primary** side of linking: holds the account key and certifies new
 /// devices that connect with the shared one-time descriptor.
 pub struct LinkHost {
@@ -152,6 +167,8 @@ pub struct LinkHost {
     root0: [u8; 32],
     username: Option<String>,
     now: u64,
+    /// Optional per-device approval gate (see [`ApprovalFn`]).
+    approve: Option<Arc<ApprovalFn>>,
 }
 
 impl LinkHost {
@@ -172,11 +189,27 @@ impl LinkHost {
             root0: descriptor.derive_root(),
             username,
             now,
+            approve: None,
         }
     }
 
-    /// Start accepting link requests (spawns a background accept loop). Each new
-    /// device that connects is certified under the account.
+    /// Require explicit operator approval before certifying each device. The
+    /// closure receives the requested device label and returns whether to issue a
+    /// certificate. Recommended for interactive hosts so linking needs a per-device
+    /// human decision, not merely possession of the invite token (SECURITY-AUDIT L1).
+    pub fn with_approval(mut self, approve: Arc<ApprovalFn>) -> Self {
+        self.approve = Some(approve);
+        self
+    }
+
+    /// Start accepting link requests (spawns a background accept loop).
+    ///
+    /// The offer is **one-time and time-bounded**: the loop stops after the first
+    /// device is successfully certified, and in any case after [`LINK_WINDOW`].
+    /// This is the enforcement behind the "one-time descriptor" documented above —
+    /// previously the loop certified a fresh 10-year account certificate to *every*
+    /// connection, indefinitely, so one exposure of the invite token minted
+    /// unlimited rogue devices (SECURITY-AUDIT L1).
     pub async fn run(&self) -> Result<Endpoint> {
         let listener = self.transport.listen().await?;
         let endpoint = listener.endpoint();
@@ -187,42 +220,67 @@ impl LinkHost {
         let acct_seed = self.account.export_secret();
         let username = self.username.clone();
         let now = self.now;
+        let approve = self.approve.clone();
 
         tokio::spawn(async move {
-            while let Ok(mut stream) = listener.accept().await {
-                let device_identity = IdentityKeyPair::from_secret_bytes(dev_seed);
-                let hs =
-                    handshake::respond(stream.as_mut(), &device_identity, suite.as_ref(), root0)
-                        .await;
-                let Ok(hs) = hs else { continue };
-                let account = IdentityKeyPair::from_secret_bytes(acct_seed);
-                tokio::spawn(grant_loop(stream, hs.session, account, username.clone(), now));
-            }
+            let _ = tokio::time::timeout(LINK_WINDOW, async move {
+                while let Ok(mut stream) = listener.accept().await {
+                    let device_identity = IdentityKeyPair::from_secret_bytes(dev_seed);
+                    let hs = handshake::respond(
+                        stream.as_mut(),
+                        &device_identity,
+                        suite.as_ref(),
+                        root0,
+                    )
+                    .await;
+                    let Ok(hs) = hs else { continue };
+                    let account = IdentityKeyPair::from_secret_bytes(acct_seed);
+                    // Handle inline (not detached) so we can enforce the one-time
+                    // policy: stop accepting once a device has been certified.
+                    if grant_once(
+                        stream,
+                        hs.session,
+                        account,
+                        username.clone(),
+                        now,
+                        approve.as_deref(),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
+            })
+            .await;
         });
         Ok(endpoint)
     }
 }
 
-/// Per-connection: receive one LinkRequest, certify the device, send the grant.
-async fn grant_loop(
+/// Per-connection: receive one LinkRequest, optionally gate on operator approval,
+/// certify the device, and send the grant. Returns `true` iff a certificate was
+/// actually issued, so the accept loop can enforce the one-time policy.
+async fn grant_once(
     stream: Box<dyn Stream>,
     session: Box<dyn SessionHandle>,
     account: IdentityKeyPair,
     username: Option<String>,
     now: u64,
-) {
+    approve: Option<&ApprovalFn>,
+) -> bool {
     let mut stream = stream;
     let mut session = session;
     let frame = match stream.recv_frame().await {
         Ok(f) => f,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let pt = match session.decrypt(&frame) {
         Ok(pt) => pt,
-        Err(_) => return,
+        Err(_) => return false,
     };
+    let mut granted = false;
     let reply = match LinkRequest::decode(&pt) {
-        Ok(req) => {
+        Ok(req) if approve.map(|a| a(&req.label)) != Some(false) => {
             // Certify the new device under the account: account → device.
             let chain = IdentityChain::device(
                 &account,
@@ -231,17 +289,20 @@ async fn grant_loop(
                 now,
                 now.saturating_add(LINK_CERT_TTL),
             );
+            granted = true;
             LinkReply::Grant {
                 chain,
                 account: account.public().clone(),
                 username,
             }
         }
+        Ok(_) => LinkReply::Denied("pairing not approved".into()),
         Err(_) => LinkReply::Denied("malformed link request".into()),
     };
     if let Ok(ct) = session.encrypt(&reply.encode()) {
         let _ = stream.send_frame(&ct).await;
     }
+    granted
 }
 
 /// The result of a successful link: the chain to present, plus the account it
@@ -417,5 +478,70 @@ mod tests {
         )
         .await;
         assert!(res.is_err(), "diverging linking roots must not yield a grant");
+    }
+
+    /// SECURITY-AUDIT L1: the offer is one-time. After one device links, a second
+    /// device presenting the SAME (now-exposed) invite token is refused — before
+    /// the fix it received its own fresh 10-year account certificate.
+    #[tokio::test]
+    async fn second_device_cannot_reuse_the_link_offer() {
+        let fabric = LoopbackFabric::new();
+        let desc = link_desc();
+        let account = IdentityKeyPair::generate();
+        let host = LinkHost::new(
+            account,
+            IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("primary3")),
+            &desc,
+            None,
+            NOW,
+        );
+        let host = Box::leak(Box::new(host));
+        host.run().await.unwrap();
+
+        // First device links successfully.
+        let dev1 = IdentityKeyPair::generate();
+        let first = LinkClient::request(
+            &dev1, suite(), Arc::new(fabric.transport("d1")), &desc, "primary3", "laptop", NOW,
+        )
+        .await;
+        assert!(first.is_ok(), "the first device should link");
+
+        // Second device, same token — the one-time offer is already spent.
+        let dev2 = IdentityKeyPair::generate();
+        let second = LinkClient::request(
+            &dev2, suite(), Arc::new(fabric.transport("d2")), &desc, "primary3", "rogue", NOW,
+        )
+        .await;
+        assert!(second.is_err(), "a spent link offer must not certify a second device");
+    }
+
+    /// SECURITY-AUDIT L1: an approval hook that denies blocks certification even
+    /// with a valid token and session.
+    #[tokio::test]
+    async fn approval_hook_can_refuse_a_device() {
+        let fabric = LoopbackFabric::new();
+        let desc = link_desc();
+        let account = IdentityKeyPair::generate();
+        let host = LinkHost::new(
+            account,
+            IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("primary4")),
+            &desc,
+            None,
+            NOW,
+        )
+        .with_approval(Arc::new(|_label: &str| false)); // operator rejects everything
+        let host = Box::leak(Box::new(host));
+        host.run().await.unwrap();
+
+        let dev = IdentityKeyPair::generate();
+        let res = LinkClient::request(
+            &dev, suite(), Arc::new(fabric.transport("d3")), &desc, "primary4", "laptop", NOW,
+        )
+        .await;
+        assert!(res.is_err(), "an unapproved device must not be certified");
     }
 }
