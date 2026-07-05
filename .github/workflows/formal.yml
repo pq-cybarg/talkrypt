@@ -1,0 +1,58 @@
+# Machine-checked formal verification (SECURITY-AUDIT G1/G2/G3/G4/T-1/T-2).
+#
+# Two independent proof engines:
+#   * Kani (bounded model checker) — proves the untrusted-input wire decoders are
+#     TOTAL and memory-safe on ALL inputs (no panic/over-read/over-allocate).
+#   * F* — machine-checks the group-message authentication theorems (no-forgery,
+#     PoP soundness, auth-PCS) by reduction to ML-DSA-87 EUF-CMA (FIPS 204).
+name: formal
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "crates/crypto/**"
+      - "crates/wire/**"
+      - "formal/**"
+      - ".github/workflows/formal.yml"
+  pull_request:
+    paths:
+      - "crates/crypto/**"
+      - "crates/wire/**"
+      - "formal/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kani:
+    name: Kani — decoder totality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      - name: Prove wire decoder (talkrypt-wire) is total
+        run: cargo kani -p talkrypt-wire
+      - name: Prove group-message + membership decoders are total
+        run: cargo kani -p talkrypt-crypto
+
+  fstar:
+    name: "F* — auth theorems"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install F* (via opam)
+        run: |
+          sudo apt-get update && sudo apt-get install -y opam
+          opam init --disable-sandboxing -y
+          opam install -y fstar
+      - name: Verify GroupAuth.fst
+        run: |
+          eval $(opam env)
+          make -C formal verify
