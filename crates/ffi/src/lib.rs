@@ -967,6 +967,14 @@ impl TalkryptClient {
             .map_err(FfiError::from)
     }
 
+    /// The account fingerprint (hex) cryptographically bound to a group `leaf`
+    /// (SECURITY-AUDIT T-3), or `None` if that leaf is an unverified pseudonym. A
+    /// `Some` value is unforgeable by the host, so the UI can show a "verified
+    /// account" badge vs. a pseudonymous sender.
+    pub fn group_leaf_account(&self, leaf: u32) -> Option<String> {
+        self.core.group_leaf_account(leaf).map(|fp| hex_fp(&fp))
+    }
+
     /// The shareable invite URI for this chat (carries the `.onion` for a Tor
     /// host).
     pub fn invite_uri(&self) -> String {
