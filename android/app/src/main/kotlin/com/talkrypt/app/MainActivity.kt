@@ -125,9 +125,21 @@ class MainActivity : Activity() {
         pollAll()
     }
 
+    // We keep font-scale/density in configChanges (so a system font-size change
+    // doesn't recreate the Activity and dump the user to the list), but the
+    // already-built views hold old sp sizes. Rebuild the open chat so its header
+    // and bubbles don't end up mixed old/new size. Other screens rebuild on nav.
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val id = activeId
+        if (id != null) { renderedCount = 0; setContentView(chatScreen(id)) }
+        else if (backState == Back.HOME) setContentView(chatListScreen())
+    }
+
     @Suppress("DEPRECATION", "MissingSuperCall")
     override fun onBackPressed() {
         when {
+            onConnecting -> { cancelJoin(); setContentView(chatListScreen()) } // abort the join
             activeId != null -> setContentView(chatListScreen())       // chat → list (stays live)
             backState == Back.LIST_CHILD -> setContentView(chatListScreen())  // subscreen → list
             else -> super.onBackPressed()                              // list → exit
@@ -348,6 +360,7 @@ class MainActivity : Activity() {
         sessions.setActive(null)
         messages = null; scroll = null; chatChip = null; chatDetail = null
         backState = Back.HOME
+        onConnecting = false
         setSecure(false)
         // Leaving a subscreen: stop what it started (BLE/Wi-Fi Direct scanning,
         // the APK share server) so system-back can't leak them.
@@ -470,13 +483,7 @@ class MainActivity : Activity() {
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
-                    "Show invite QR" -> lc.meta.inviteUri?.let { inv ->
-                        // The QR shown at hosting time is render-only and vanishes on
-                        // rebuild; this puts it back on demand.
-                        if (activeId != id) openChat(id)
-                        messages?.let { addQrInto(it, inv, 0.62f) }
-                        addBubble(inv, mine = false, sender = "invite")
-                    }
+                    "Show invite QR" -> lc.meta.inviteUri?.let { showInviteQr(it) }
                     "Safety number (verify)" -> {
                         android.app.AlertDialog.Builder(this)
                             .setTitle("Safety number")
@@ -492,7 +499,7 @@ class MainActivity : Activity() {
                     "Reconnect" -> reconnect(id)
                     "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
                     "Delete (erase)" -> confirm("Delete “${lc.meta.title}”?", "Erases this chat and its history from this device. This cannot be undone.", "Delete") {
-                        sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen())
+                        sessions.disconnect(id); sessions.remove(id); drafts.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen())
                     }
                 }
             }.show()
@@ -500,6 +507,7 @@ class MainActivity : Activity() {
 
     private fun openChat(id: String) {
         sessions.setActive(id)
+        onConnecting = false // entering a chat (incl. from a finished join)
         // Lazily reconnect a saved-but-disconnected persistent chat when opened.
         val lc = sessions.get(id)
         if (lc != null && lc.client == null && lc.meta.persistence != Persistence.EPHEMERAL &&
@@ -759,6 +767,7 @@ class MainActivity : Activity() {
     }
 
     private fun shareScreen(url: String): View {
+        backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Share talkrypt", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
@@ -820,19 +829,26 @@ class MainActivity : Activity() {
     // Held while a link offer is running so its accept loop stays alive.
     private var linkOffer: LinkOffer? = null
 
+    private var cachedDeviceKey: DeviceKey? = null
+
     /** This device's persistent linked-device key (generated + persisted once).
      *  Distinct from `account()`: a linked secondary device holds this key but
      *  NOT the account secret — it presents a certificate the primary issued.
-     *  The seed is sealed at rest by [SecretStore]. */
+     *  The seed is sealed at rest by [SecretStore]. Cached + synchronized so an
+     *  unreadable seed doesn't yield a DIFFERENT ephemeral key on every call
+     *  (which would break a link mid-flow). */
+    @Synchronized
     private fun deviceKey(): DeviceKey {
+        cachedDeviceKey?.let { return it }
         SecretStore.get(this, "device_seed")?.let { seed ->
-            runCatching { return DeviceKey.fromSeedHex(seed) }
+            runCatching { DeviceKey.fromSeedHex(seed) }.getOrNull()?.let { cachedDeviceKey = it; return it }
         }
         val d = DeviceKey.generate()
         // Never clobber an existing-but-unreadable seed (see ChatNet.account).
         if (!SecretStore.has(this, "device_seed")) {
             runCatching { SecretStore.put(this, "device_seed", d.seedHex()) }
         }
+        cachedDeviceKey = d
         return d
     }
 
@@ -931,6 +947,7 @@ class MainActivity : Activity() {
     }
 
     private fun linkOfferRunningScreen(uri: String, accountSn: String): View {
+        backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Link offer running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
@@ -950,6 +967,7 @@ class MainActivity : Activity() {
     }
 
     private fun acceptLinkConfirmScreen(uri: String): View {
+        backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Link this device?", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
@@ -1162,6 +1180,7 @@ class MainActivity : Activity() {
     }
 
     private fun findNearbyScreen(): View {
+        backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Nearby hosts", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
@@ -1744,6 +1763,7 @@ class MainActivity : Activity() {
      * A pseudonym fallback is always offered (won't pass a restricted gate).
      */
     private fun joinPreflightScreen(uri: String): View {
+        backState = Back.LIST_CHILD
         val acct = account()
         val anchors = boundAnchors()
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
@@ -1833,13 +1853,20 @@ class MainActivity : Activity() {
     }
 
     private var connecting = false
+    private var onConnecting = false // the connecting screen is on top
     // Bumped whenever a join starts or is cancelled; a finishing join thread
     // whose generation is stale must NOT hijack whatever screen the user is on.
     private var joinGen = 0
+
+    /** Invalidate the in-flight join so its thread's ui.post is dropped and the
+     *  bootstrap poll stops. Shared by the Cancel button and system-back. */
+    private fun cancelJoin() { connecting = false; onConnecting = false; joinGen++ }
     private var connectingLabel: TextView? = null
 
     /** A connecting screen with a live status line (Tor bootstrap % → handshake). */
     private fun connectingScreen(title: String, tor: Boolean): View {
+        backState = Back.LIST_CHILD
+        onConnecting = true
         val col = column(bg).apply { setPadding(dp(24), dp(64), dp(24), dp(24)) }
         col.addView(text("Connecting", 26f, fg, bold = true, center = true))
         col.addView(text(title, 16f, muted, center = true).also { it.setPadding(0, dp(8), 0, dp(28)) })
@@ -1851,8 +1878,7 @@ class MainActivity : Activity() {
                 .also { it.setPadding(0, dp(16), 0, 0) },
         )
         col.addView(pillButton("Cancel", panel, fg) {
-            connecting = false; joinGen++ // invalidate the in-flight join
-            setContentView(chatListScreen())
+            cancelJoin(); setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(36)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -1899,7 +1925,11 @@ class MainActivity : Activity() {
                     // A re-hosted LAN chat gets a fresh invite; keep the same chatId.
                     if (freshInvite != null) lc.meta = lc.meta.copy(inviteUri = freshInvite)
                     sysLine(id, "reconnected over $net")
-                    when (activeId) { id -> setContentView(chatScreen(id)); null -> setContentView(chatListScreen()); else -> {} }
+                    when {
+                        activeId == id -> setContentView(chatScreen(id))
+                        activeId == null && backState == Back.HOME -> setContentView(chatListScreen())
+                        else -> {} // user is on some other screen — don't yank it away
+                    }
                 }
             } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed ($net): ${ChatNet.friendlyError(e.message)}"); toast("reconnect failed") } }
         }
@@ -2102,6 +2132,25 @@ class MainActivity : Activity() {
         }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    /** Show an invite as a scannable QR in a dialog. A dialog (not injected
+     *  bubbles) survives the chat-screen rebuilds a reconnect triggers. */
+    private fun showInviteQr(invite: String) {
+        val bmp = Qr.bitmap(invite)
+        val box = column(Color.TRANSPARENT).apply { setPadding(dp(20), dp(20), dp(20), dp(8)); gravity = Gravity.CENTER_HORIZONTAL }
+        if (bmp != null) {
+            val side = (resources.displayMetrics.widthPixels * 0.6f).toInt()
+            box.addView(ImageView(this).apply { setImageBitmap(bmp); setBackgroundColor(Color.WHITE); setPadding(dp(10), dp(10), dp(10), dp(10)) },
+                LinearLayout.LayoutParams(side, side))
+        }
+        box.addView(text(invite, 12f, muted, center = true).also { it.setPadding(0, dp(14), 0, 0) })
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Invite QR")
+            .setView(box)
+            .setPositiveButton("Share") { _, _ -> shareText(invite) }
+            .setNegativeButton("Close", null)
+            .show()
+    }
 
     /** Confirmation gate for irreversible actions (delete/unlink). */
     private fun confirm(title: String, detail: String, verb: String, action: () -> Unit) {

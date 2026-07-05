@@ -82,6 +82,10 @@ object ChatNet {
     @Volatile
     private var cachedAccount: Account? = null
 
+    // @Synchronized so the get -> generate -> persist -> cache sequence is
+    // atomic: the TkApp prewarm thread and a UI caller racing on a fresh install
+    // must not each generate (and half-persist) a DIFFERENT identity.
+    @Synchronized
     fun account(ctx: Context): Account {
         cachedAccount?.let { return it }
         SecretStore.get(ctx, "account_seed")?.let { seed ->

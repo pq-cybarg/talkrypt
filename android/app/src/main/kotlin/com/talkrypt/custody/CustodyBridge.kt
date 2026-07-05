@@ -32,7 +32,11 @@ object CustodyBridge {
     @Volatile
     private var cachedTier: CustodyTier? = null
 
-    /** Detect the strongest custody tier available on this device. */
+    /** Detect the strongest custody tier available on this device. @Synchronized
+     *  so concurrent first-launch callers (TkApp prewarm, chat-list header,
+     *  Settings) don't run overlapping probes that collide on the single probe
+     *  alias and mis-report a lower tier. */
+    @Synchronized
     fun detectTier(): CustodyTier {
         cachedTier?.let { return it }
         return probeTier().also { cachedTier = it }

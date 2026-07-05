@@ -54,6 +54,7 @@ class QrScanActivity : Activity() {
     private var bgHandler: Handler? = null
     private var cameraId: String? = null
     private var previewSize: Size = TARGET
+    private var sensorOrientation = 90 // filled from CameraCharacteristics
     // Guards against re-entrant decode + double-finishing once we have a hit.
     private val decoding = AtomicBoolean(false)
     private val done = AtomicBoolean(false)
@@ -157,6 +158,7 @@ class QrScanActivity : Activity() {
             val id = pickBackCamera(mgr) ?: run { hint.text = "No camera found"; return }
             cameraId = id
             val chars = mgr.getCameraCharacteristics(id)
+            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             previewSize = chooseSize(map?.getOutputSizes(ImageReader::class.java))
             imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, android.graphics.ImageFormat.YUV_420_888, 2).apply {
@@ -282,21 +284,32 @@ class QrScanActivity : Activity() {
         return fit ?: sizes.minByOrNull { it.width.toLong() * it.height } ?: TARGET
     }
 
-    /** Restore the preview's aspect ratio (center-crop). TextureView stretches
-     *  the camera buffer to fill the view, so the 16:9 buffer looks squashed on
-     *  a taller portrait screen without this transform. */
+    /** Rotate the camera buffer upright for this portrait-locked activity and
+     *  center-crop it to fill the view. A plain TextureView draws the buffer with
+     *  NO rotation, stretched to the view rect, so on a typical sensorOrientation
+     *  90 back camera the preview is both sideways and squashed without this.
+     *  NOTE: preview framing only — decode reads the ImageReader Y-plane, so
+     *  scanning works regardless. Verify framing on-device across sensor 90/270. */
     private fun configureTransform(viewW: Int, viewH: Int) {
         if (viewW == 0 || viewH == 0) return
-        // Portrait-locked: after the pipeline's rotation the buffer presents as
-        // height x width, so its on-screen aspect is h/w.
-        val bufAspect = previewSize.height.toFloat() / previewSize.width
-        val viewAspect = viewW.toFloat() / viewH
-        val m = android.graphics.Matrix()
-        if (bufAspect > viewAspect) {
-            m.setScale(bufAspect / viewAspect, 1f, viewW / 2f, viewH / 2f)
-        } else {
-            m.setScale(1f, viewAspect / bufAspect, viewW / 2f, viewH / 2f)
+        @Suppress("DEPRECATION")
+        val displayDeg = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90; Surface.ROTATION_180 -> 180; Surface.ROTATION_270 -> 270; else -> 0
         }
+        // Degrees to rotate the buffer so it appears upright.
+        val rotation = ((sensorOrientation - displayDeg) + 360) % 360
+        // Canonical Camera2 transform (setRectToRect + cover-scale + rotate).
+        val viewRect = android.graphics.RectF(0f, 0f, viewW.toFloat(), viewH.toFloat())
+        val cx = viewRect.centerX(); val cy = viewRect.centerY()
+        val m = android.graphics.Matrix()
+        if (rotation == 90 || rotation == 270) {
+            val bufferRect = android.graphics.RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
+            bufferRect.offset(cx - bufferRect.centerX(), cy - bufferRect.centerY())
+            m.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
+            val scale = maxOf(viewH.toFloat() / previewSize.height, viewW.toFloat() / previewSize.width)
+            m.postScale(scale, scale, cx, cy)
+        }
+        m.postRotate(rotation.toFloat(), cx, cy)
         textureView.setTransform(m)
     }
 
