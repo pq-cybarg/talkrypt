@@ -1825,6 +1825,27 @@ mod tests {
             let _ = Welcome::decode(prof, &bytes);
             let _ = KeyPackage::decode(prof, &bytes);
         }
+
+        /// T-1 PROPERTY: for ANY substituted signature key, a KeyPackage that pairs
+        /// the original PoP with a DIFFERENT key is rejected — the PoP only verifies
+        /// under the key that produced it. (Proof-of-possession is unforgeable
+        /// without the ML-DSA-87 secret.)
+        #[test]
+        fn prop_substituted_sig_key_rejected(seed in any::<u64>()) {
+            let profile = KemProfile::pq_pure();
+            let kp = LeafKeyPair::generate_with(profile).key_package();
+            let attacker = crate::identity::IdentityKeyPair::generate();
+            // Keep the original PoP but swap in the attacker's verifying key.
+            let mut w = talkrypt_wire::Writer::new();
+            w.put_bytes(&kp.leaf_public.encode());
+            w.put_bytes(&attacker.public().sig_vk);
+            w.put_bytes(&kp.pop);
+            let _ = seed;
+            prop_assert!(matches!(
+                KeyPackage::decode(profile, &w.into_vec()),
+                Err(CryptoError::BadSignature)
+            ));
+        }
     }
 
 }
