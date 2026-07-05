@@ -736,6 +736,16 @@ impl TreeKemGroup {
         self.profile
     }
 
+    /// The leaf signature public key bound to `leaf`, if occupied. This is the key
+    /// a member's group messages are verified against; exposing it lets a higher
+    /// layer CROSS-CHECK it against an authenticated account credential
+    /// (SECURITY-AUDIT T-3 mitigation): a leaf that presents an account must have
+    /// its tree-bound sig key certified by that account (`belongs_to_account`), so a
+    /// malicious committer cannot bind a substituted key to a real account.
+    pub fn leaf_sig_public(&self, leaf: u32) -> Option<&IdentityPublic> {
+        self.leaf_sig_keys.get(&leaf)
+    }
+
     // ---- tree helpers ----
 
     fn path_to_root(&self, leaf: u32) -> Vec<Node> {
@@ -1749,6 +1759,44 @@ mod tests {
         w2.put_bytes(&attacker.public().sig_vk);
         w2.put_bytes(&forged_pop);
         assert!(KeyPackage::decode(profile, &w2.into_vec()).is_ok());
+    }
+
+    /// SECURITY-AUDIT T-3 (mitigation mechanism, proof-of-concept). Demonstrates
+    /// the leaf-key<->account binding that closes the malicious-committer residual:
+    /// a member's tree-bound leaf signature key, when certified by its account via
+    /// an IdentityChain segment, passes `belongs_to_account`; a SUBSTITUTED key
+    /// (what a hostile committer would bind) does NOT. This is the check the engine
+    /// performs in *linked* mode; pure pseudonyms (no account) skip it by design.
+    #[test]
+    fn leaf_sig_key_binds_to_account_and_rejects_substitution() {
+        use crate::account::{belongs_to_account, IdentityChain};
+        const NOW: u64 = 1_700_000_000;
+
+        // A member joins; read its tree-bound leaf signature public key.
+        let mut host = TreeKemGroup::create();
+        let member = add_member(&mut host, &mut []);
+        let leaf = member.my_leaf();
+        let leaf_sig_pub = host.leaf_sig_public(leaf).expect("bound leaf sig key").clone();
+
+        // The member's account certifies its device, and the device certifies the
+        // leaf signature key as a segment: account -> device -> leaf_sig_key.
+        let account = crate::identity::IdentityKeyPair::generate();
+        let device = crate::identity::IdentityKeyPair::generate();
+        let chain = IdentityChain::device(&account, device.public(), "device:app", NOW, NOW + 3600)
+            .extend(&device, &leaf_sig_pub, "segment:leaf", NOW, NOW + 3600);
+
+        // The binding check the engine runs in linked mode: the leaf's tree-bound
+        // sig key must belong to the presented account. It does.
+        assert!(belongs_to_account(account.public(), &chain, &leaf_sig_pub, NOW));
+
+        // A malicious committer would substitute a key IT controls. That key is not
+        // certified by the member's account, so the same check REJECTS it.
+        let substituted = crate::identity::IdentityKeyPair::generate();
+        assert!(!belongs_to_account(account.public(), &chain, substituted.public(), NOW));
+
+        // And a DIFFERENT account cannot claim the member's real leaf key.
+        let other_account = crate::identity::IdentityKeyPair::generate();
+        assert!(!belongs_to_account(other_account.public(), &chain, &leaf_sig_pub, NOW));
     }
 
     // ---- Property-based verification of the G1/G2 leaf-signature invariants.
