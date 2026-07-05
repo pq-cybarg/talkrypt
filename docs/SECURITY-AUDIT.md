@@ -220,6 +220,16 @@ who has read the disclaimers.
 | F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
 | F-14 | Medium | Remote-DoS panic in the ratchet-header decoder: a hybrid / padded-PQ-pure `RatchetPublic` whose length-prefixed X25519/pad field was shorter than 32 bytes triggered an out-of-range slice index (`hybrid.rs::to_32`), panicking the receiver on a single malformed inbound message. Found by the new `ratchet_header` fuzz target (R-6), in ~3.5k executions. | **Resolved** — decode path now uses a fallible `try_to_32` returning `Malformed`; regression test `short_x25519_or_pad_field_is_rejected_not_panic` + corpus seed `corpus/ratchet_header/regression-short-x25519-field` |
 | F-15 | Medium | RAM-capture exposure: long-lived secrets (notably the ML-DSA-87 identity seed) could be paged to swap or written to a core dump, and no process hardening blocked `ptrace`/`/proc/<pid>/mem` scraping. On a fully compromised (root/kernel) device this is unwinnable in software, but the disk-spill and same-uid vectors are mitigable. | **Resolved (mitigated)** — identity seed now in `mlock`'d, `MADV_DONTDUMP`, zeroize-on-drop page-locked memory (`mem::LockedBox`); startup `harden_process` disables core dumps + sets non-dumpable. Residual (hostile-device) folded into F-1. Hardware-backed *signing* of the PQ key is impossible on today's classical-only secure elements (StrongBox / Seeker SE / Secure Enclave / TPM lack ML-DSA); hardware-backed *at-rest sealing* is the available next step (R-8). See §3b |
+| G1 | **High** | Group-message sender forgery: messages were authenticated only by the shared `epoch_secret` with the sender `leaf` an unauthenticated plaintext header — any member could derive any other member's chain and post a message every receiver attributed to the victim. Demonstrated by an in-repo test. | **Resolved** — versioned v2 group-message format carries a per-sender ML-DSA-87 signature over a domain-separated transcript, signed with a **per-membership leaf signature key** (a per-group alias, preserving pseudonymity), verified against the sending leaf's tree-bound key before decrypt. `treekem.rs::decrypt_verified`; F\* `thm_authenticity`/`thm_no_cross_leaf_forgery`; proptest + unit |
+| G2 | **High** | Relay attribution forgery: `Frame::Roster` had no per-message signature, so a relaying host/peer could restamp the sender. | **Resolved** — same per-sender signature; the engine drops (never forwards) any group message that fails verification, so a forged frame cannot ride the gossip fan-out. `engine.rs::handle_group_msg` |
+| G3 | Medium | Unauthenticated commits could crash the receiver (out-of-range leaf/`span==0` panics). | **Resolved** — bounds-checked node/leaf decode (`get_node`, `apply_proposals`); Kani-proven parser totality + proptest |
+| G4 | Medium | Commit/Welcome decoders could be driven to a large speculative allocation (declared count × element size) before reading data — process-abort DoS. | **Resolved** — `get_count(min_elem_bytes)` bounds every declared count by `remaining_input / min_elem_bytes`; test `oversized_commit_count_rejected_before_alloc` |
+| L1 | **High** | Device link certs were 10-year, auto-issued on handshake with no user approval — one seen QR granted account access for a decade. | **Resolved** — TTL cut to 24h (`LINK_CERT_TTL`, configurable), **fail-closed approval** default (no hook ⇒ deny), one-time + time-bounded offer; FFI/CLI opt into `auto_approve` for operator-initiated pairing. Self-presentation certs bounded to 30 days. `linking.rs`; tests incl. `default_without_approval_denies_certification` |
+| T-1 | Medium | No proof-of-possession on a joiner's leaf signature key: a malicious committer/relay could bind a leaf sig key it did not control to a leaf. | **Resolved** — every KeyPackage carries a PoP (self-signature over `POP_CONTEXT‖sig_vk`), verified at decode, re-verified on the receive side in `apply_proposals`, and re-verified for every member in the Welcome. F\* `thm_pop_binds_key`/`thm_pop_not_transferable`/`thm_pop_msg_non_confusion` |
+| T-2 | Medium | No post-compromise security for authentication: the leaf *signing* key never rotated, so a leaked signing key stayed valid for the whole membership. | **Resolved + activated** — `update()` rotates the leaf signing key (signed `sig_update` in the commit; receivers verify PoP + rebind). Wired into the protocol via `Core::self_update()` + FFI `self_update()`. F\* `thm_auth_pcs`; tests `update_rotates_leaf_signing_key_for_pcs`, `host_self_update_rotates_and_group_still_works` |
+| T-3 | Medium | **Residual (open).** A malicious committer (hub host) can still (a) invent a *phantom* member whose leaf key it generated with a valid self-PoP, or (b) substitute its own leaf key for a member who joins as a **bare pseudonym** (no account presented). PoP stops substituting a key without its secret; it does not stop a committer minting a key it *does* control. Inherent to the hub-committer role. | **Open — mitigation designed (§4a).** Bind the leaf sig key to an authenticated account in *linked* mode: the joiner certifies its leaf sig key with its device/account identity (an `IdentityChain::extend` segment cert), and receivers cross-check the leaf's tree-bound sig key against the account the roster records for that leaf. Pure pseudonyms are unaffected by design (a pseudonym *is* its leaf key). |
+| A-1 | Medium | **Residual (open).** Reachability single-point-of-failure: a peer can only reach the group via a route the founding host advertised; if the host goes offline and no multi-homed member has gossiped an alternate route, the peer is partitioned. Availability/censorship-resistance, not confidentiality. | **Open — mitigation designed (§4a).** Gossip signed **route descriptors** (each member's multi-homed `[onion,nym,lan]` set) alongside the existing ciphertext flood, let any multi-homed *member* (not only the host) bridge transport islands, and extend reconnect to try all learned peer routes. Builds on the existing `MultiTransport` + gossip mesh. |
+| T-4 | Low | **Residual (open).** `self_update()` is host-driven only; a non-host member cannot yet rotate its own leaf key (no member→host→broadcast commit relay), so member-side authentication PCS is not self-service. | **Open — mitigation designed (§4a).** Add a member-initiated update path: member produces its `update()` commit, sends it to the host, host validates + re-broadcasts (mirrors how member KeyPackages flow to the host today). |
 
 ### Detail on the notable findings
 
@@ -310,6 +320,95 @@ window is the standard PKI not-before allowance. Because talkrypt's certificates
 are long-lived (device link TTL ~10 years), the symmetric grace past expiry is
 immaterial today; it would need re-evaluation if short-lived certificates are
 introduced. Bounded, documented, and unit-tested (`fresh_cert_tolerates_verifier_clock_behind`).
+
+**Note (L1 update):** the device-link TTL referenced above is now **24 h**, not
+10 years (see L1). The clock-skew grace is re-evaluated accordingly and remains
+bounded and acceptable.
+
+---
+
+## 4a. Residual group-layer risks — mitigation designs
+
+The G1/G2/T-1/T-2 fixes make group-message authentication sound *against ordinary
+members and relays*. Three residuals remain, each with a concrete, low-risk
+mitigation that reuses machinery already in the codebase. None is a confidentiality
+break; T-3 is the load-bearing one for a *malicious-host* threat model.
+
+### T-3 — bind the leaf signature key to an authenticated account (linked mode)
+
+**Problem.** In the hub topology the committer (host) chooses the leaf↔sig-key
+bindings. PoP (T-1) proves the holder controls the key, but a malicious host can
+still mint a key it *does* control and (a) attribute messages to a phantom leaf, or
+(b) substitute its key for a member who joined as a **bare pseudonym**. The host
+cannot forge as a member who is *cryptographically bound to a known account* — so
+the fix is to make that binding checkable.
+
+**Design (reuses `IdentityChain` / `belongs_to_account`).** The leaf signature key
+is, structurally, a **segment key** in the identity model. In *linked* mode the
+joiner extends its identity chain to certify its leaf sig key:
+
+```
+account ──cert──▶ device ──cert──▶ leaf_sig_key      (IdentityChain::extend)
+```
+
+- On join, a linked member presents this chain (the existing `Frame::Identity`
+  path already carries `account→device`; add one `extend` link for the leaf key).
+- The engine already records `roster: leaf → account_fingerprint`. It also holds
+  `leaf_sig_keys: leaf → sig_pk` (from TreeKEM). The cross-check is one call:
+  `belongs_to_account(account_pk, presented_chain, leaf_sig_pk, now)` must hold for
+  the account the roster binds to that leaf. If it fails, the member is flagged
+  **unverified** (attribution shown as pseudonymous, not as the account) or
+  rejected under a strict policy.
+- **Pseudonymity preserved:** a member with no account presents no chain; its leaf
+  key stands alone (a pseudonym *is* its leaf key), exactly as today. The binding is
+  strictly *additive* and opt-in per the identity model's linkage tiers.
+
+**Why this closes it.** A malicious host cannot produce a chain rooted at an account
+it does not control (that needs the account's ML-DSA-87 secret), so it cannot make a
+substituted/phantom leaf pass the `belongs_to_account` check for a real account.
+**Wiring:** primitives exist (`account.rs::IdentityChain::extend`,
+`belongs_to_account`); the work is (1) one extra `extend` link at join in
+`present_identity`, (2) the cross-check in `handle_identity`/`handle_group_msg`, and
+(3) an `Event`/UI signal for "verified account vs. pseudonym."
+
+### A-1 — reachability: gossip route descriptors + any-member bridging
+
+**Problem.** A peer reaches the group only via a route the founding host advertised;
+if the host drops and no multi-homed member has gossiped an alternate route, the
+peer partitions.
+
+**Design (extends the existing gossip mesh + `MultiTransport`).**
+
+1. **Gossip signed route descriptors.** Alongside the existing group-ciphertext
+   flood (`enable_gossip`), flood a small **signed** `RouteDescriptor` per member —
+   its multi-homed endpoint set `[onion, nym, lan]` signed by its leaf/identity key,
+   deduped by the same `SeenSet`. Every member thus learns every member's routes,
+   not just the host's.
+2. **Any multi-homed member bridges,** not only the host: a member with legs on two
+   fabrics re-floods across both (the gossip bridge already does this for
+   ciphertext; extend it to route descriptors).
+3. **Reconnect fan-out.** Extend `ReconnectPlan` to try *all* known peer routes
+   across *all* transports, not just the original host endpoint.
+
+**Why this closes it.** Losing the host no longer loses the routing map; the group
+stays connected as long as *any* multi-homed member remains, and single-homed peers
+on disjoint fabrics are bridged by any such member. Confidentiality is unchanged
+(descriptors are routing metadata; content stays E2E). **Wiring:** the seam is
+`crates/transport/src/multi.rs` (`select_endpoint`/`split_endpoints`) + the gossip
+path in `engine.rs`; add a `Frame::RouteDescriptor` and a learned-routes map.
+
+### T-4 — member-initiated self-update
+
+**Problem.** `Core::self_update()` is host-driven; a non-host member cannot rotate
+its own leaf key, so its authentication-PCS is not self-service.
+
+**Design (mirrors KeyPackage flow).** A member's `update()` produces a valid commit
+re-keying *its own* path; today only the host broadcasts commits. Add a
+member→host→broadcast relay: the member sends its update commit to the host
+(as members already send KeyPackages to the host), the host validates it
+(`apply_commit` semantics: PoP on the `sig_update`, committer owns the leaf) and
+re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
+`handle_keypackage`, then routed as the existing `Frame::Commit` broadcast.
 
 ---
 
