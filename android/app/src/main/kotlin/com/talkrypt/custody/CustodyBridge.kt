@@ -26,8 +26,19 @@ object CustodyBridge {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val PROBE_ALIAS = "talkrypt.custody.probe"
 
+    /** The tier can't change while the process lives, and each probe generates
+     *  (and deletes) a real Keystore key — hundreds of ms on StrongBox — so
+     *  detect once and cache. */
+    @Volatile
+    private var cachedTier: CustodyTier? = null
+
     /** Detect the strongest custody tier available on this device. */
     fun detectTier(): CustodyTier {
+        cachedTier?.let { return it }
+        return probeTier().also { cachedTier = it }
+    }
+
+    private fun probeTier(): CustodyTier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 generateProbeKey(strongBox = true)

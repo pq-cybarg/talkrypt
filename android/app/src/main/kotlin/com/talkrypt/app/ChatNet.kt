@@ -68,20 +68,33 @@ object ChatNet {
     fun sharedTorDir(ctx: Context): String = torDirPath(ctx, "shared")
 
     /** The saved NYM wallet mnemonic for paid Nym bandwidth, or "" for free
-     *  ephemeral mode. Entered manually in the new-chat screen and used for the
-     *  paid (credentials) connect. Empty unless the user opted into paid Nym. */
-    fun nymMnemonic(ctx: Context): String =
-        ctx.getSharedPreferences("talkrypt", Context.MODE_PRIVATE)
-            .getString("nym_mnemonic", "") ?: ""
+     *  ephemeral mode. Entered in Settings and used for the paid (credentials)
+     *  connect. Sealed at rest by [SecretStore] — it controls funds. */
+    fun nymMnemonic(ctx: Context): String = SecretStore.get(ctx, "nym_mnemonic") ?: ""
 
-    /** The persistent pseudonymous account (generated + saved on first use). */
+    /** The persistent pseudonymous account (generated + saved on first use).
+     *  The seed is sealed at rest by [SecretStore]. If a stored seed exists but
+     *  can't be unsealed/parsed right now, it is NOT overwritten — the session
+     *  runs on a temporary account and the next launch retries, so a transient
+     *  Keystore failure can't permanently destroy the identity. */
+    // Unsealing + ML-DSA-87 reconstruction is hundreds of ms — cache the live
+    // Account for the process (TkApp prewarms it off the main thread).
+    @Volatile
+    private var cachedAccount: Account? = null
+
     fun account(ctx: Context): Account {
-        val prefs = ctx.getSharedPreferences("talkrypt", Context.MODE_PRIVATE)
-        prefs.getString("account_seed", null)?.let { seed ->
-            runCatching { return Account.fromSeedHex(seed) }
+        cachedAccount?.let { return it }
+        SecretStore.get(ctx, "account_seed")?.let { seed ->
+            runCatching { Account.fromSeedHex(seed) }.getOrNull()?.let {
+                cachedAccount = it
+                return it
+            }
         }
         val a = Account.generate()
-        prefs.edit().putString("account_seed", a.seedHex()).apply()
+        if (!SecretStore.has(ctx, "account_seed")) {
+            runCatching { SecretStore.put(ctx, "account_seed", a.seedHex()) }
+        }
+        cachedAccount = a
         return a
     }
 
