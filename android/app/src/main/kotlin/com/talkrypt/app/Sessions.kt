@@ -49,12 +49,14 @@ class Sessions {
         if (id != null) chats[id]?.unread = 0
     }
 
-    /** Record an inbound message: append + bump recency; badge if not active. */
+    /** Record an inbound message: append + bump recency; badge if not active.
+     *  Only real messages count toward unread — connection flaps and system
+     *  chatter shouldn't produce a badge. */
     fun recordIncoming(id: String, msg: ChatMsg) {
         val lc = chats[id] ?: return
         lc.history.add(msg)
         lc.meta = lc.meta.copy(lastActivityAt = msg.ts)
-        if (active != id) lc.unread += 1
+        if (active != id && msg.kind == MsgKind.MESSAGE) lc.unread += 1
     }
 
     /** Disconnect a chat but keep its record/history (the Arc client drops). */
