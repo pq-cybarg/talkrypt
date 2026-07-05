@@ -746,6 +746,13 @@ impl TreeKemGroup {
         self.leaf_sig_keys.get(&leaf)
     }
 
+    /// This member's OWN leaf signature public key — the key its group messages are
+    /// signed with, and the subject a member's device certifies to bind its leaf to
+    /// an account (SECURITY-AUDIT T-3). `None` in a degenerate test-built group.
+    pub fn my_leaf_sig_public(&self) -> Option<IdentityPublic> {
+        self.my_sig.as_ref().map(|s| s.public().clone())
+    }
+
     // ---- tree helpers ----
 
     fn path_to_root(&self, leaf: u32) -> Vec<Node> {
@@ -1797,6 +1804,55 @@ mod tests {
         // And a DIFFERENT account cannot claim the member's real leaf key.
         let other_account = crate::identity::IdentityKeyPair::generate();
         assert!(!belongs_to_account(other_account.public(), &chain, &leaf_sig_pub, NOW));
+    }
+
+    /// SECURITY-AUDIT T-3 — full leaf-signature-CERTIFICATE flow (the exact objects
+    /// the engine exchanges). A member's DEVICE certifies its leaf signature key;
+    /// the cert round-trips on the wire; a receiver verifies the signature, checks
+    /// the cert's subject equals the member's tree-bound leaf sig key, and checks
+    /// the issuer is the device bound to that leaf. A cert from a DIFFERENT (hostile
+    /// committer's) device is rejected. This binds the leaf key to the authenticated
+    /// device (which the presentation binds to the account), closing T-3 for linked
+    /// members. The engine wiring is: emit this cert on join, verify on receipt.
+    #[test]
+    fn leaf_sig_certificate_binds_leaf_key_to_device() {
+        use crate::account::SignedCert;
+        const NOW: u64 = 1_700_000_000;
+
+        // Member joins; its tree-bound leaf sig key and its own view of it agree.
+        let mut host = TreeKemGroup::create();
+        let member = add_member(&mut host, &mut []);
+        let leaf = member.my_leaf();
+        let tree_key = host.leaf_sig_public(leaf).expect("tree leaf key").clone();
+        assert_eq!(member.my_leaf_sig_public().unwrap(), tree_key, "own == tree view");
+
+        // The member's DEVICE (its handshake identity) certifies its leaf sig key.
+        let device = crate::identity::IdentityKeyPair::generate();
+        let cert = SignedCert::issue(&device, &tree_key, "leaf-sig", NOW, NOW + 3600);
+
+        // Wire round-trip (this is Frame::LeafSigCert's payload).
+        let wire = cert.encode();
+        let got = SignedCert::decode(&wire).expect("decodes");
+
+        // Receiver checks: (1) signature valid, (2) in validity window, (3) subject
+        // is exactly the tree's leaf sig key, (4) issuer is the member's device.
+        assert!(got.verify_signature().is_ok());
+        assert!(got.valid_at(NOW));
+        assert_eq!(got.cert.subject, tree_key, "cert must certify the tree leaf key");
+        assert_eq!(got.issuer, *device.public(), "issuer is the member's device");
+
+        // A hostile committer certifying the leaf key with ITS OWN device does not
+        // match the member's authenticated device fp, so the receiver rejects it.
+        let hostile_device = crate::identity::IdentityKeyPair::generate();
+        let forged = SignedCert::issue(&hostile_device, &tree_key, "leaf-sig", NOW, NOW + 3600);
+        assert!(forged.verify_signature().is_ok(), "forged cert is self-consistent...");
+        assert_ne!(forged.issuer, *device.public(), "...but issuer != member's device -> rejected");
+
+        // A cert whose subject is NOT the tree key (substitution attempt) is caught
+        // by the subject check.
+        let wrong_subject = crate::identity::IdentityKeyPair::generate();
+        let bad = SignedCert::issue(&device, wrong_subject.public(), "leaf-sig", NOW, NOW + 3600);
+        assert_ne!(bad.cert.subject, tree_key, "subject != tree key -> rejected");
     }
 
     // ---- Property-based verification of the G1/G2 leaf-signature invariants.
