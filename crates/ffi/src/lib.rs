@@ -990,6 +990,13 @@ impl TalkryptClient {
         self.rt.block_on(self.core.advertise_routes(endpoints));
     }
 
+    /// Reconnect over learned alternate routes when partitioned (SECURITY-AUDIT
+    /// A-1). Returns the fingerprint (hex) reconnected to, or `None` if still
+    /// connected or no route worked. Safe to call on every disconnect / on a timer.
+    pub fn reconnect(&self) -> Option<String> {
+        self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+    }
+
     /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
     /// (device-fingerprint hex, endpoints). A reconnect flow tries these when the
     /// original host endpoint is dead, so a member is no longer partitioned by the

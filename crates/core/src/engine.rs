@@ -891,6 +891,36 @@ impl Core {
         route(&self.inner, Frame::RouteDescriptor(bytes), Route::Broadcast).await;
     }
 
+    /// Reconnect over learned alternate routes when partitioned (SECURITY-AUDIT
+    /// A-1): if we have NO connected peers, dial the endpoints we learned from
+    /// gossiped route descriptors until one handshake succeeds, returning the
+    /// fingerprint we reconnected to. A no-op while still connected (so it is safe
+    /// to call on every `Disconnected` event or on a timer). This is what turns the
+    /// learned-routes map into actual healing: losing the founding host no longer
+    /// strands a member that has heard any other reachable member's routes.
+    ///
+    /// A reconnecting group member re-runs the join handshake (rejoin, not resume);
+    /// seamless resume is a follow-up refinement.
+    pub async fn reconnect(&self) -> Option<[u8; 48]> {
+        if !self.inner.peers.lock().unwrap().is_empty() {
+            return None; // still connected — nothing to heal
+        }
+        // Candidate endpoints across every peer whose routes we have learned.
+        let mut endpoints: Vec<String> = self
+            .known_routes()
+            .into_iter()
+            .flat_map(|(_, eps)| eps)
+            .collect();
+        endpoints.sort();
+        endpoints.dedup();
+        for ep in endpoints {
+            if let Ok(fp) = self.connect(&ep).await {
+                return Some(fp);
+            }
+        }
+        None
+    }
+
     pub fn enable_gossip(&self) {
         self.inner
             .gossip
@@ -2246,6 +2276,44 @@ mod tests {
             !host.known_routes().iter().any(|(fp, _)| *fp == victim.public().fingerprint()),
             "a descriptor with a bad signature must not be stored"
         );
+    }
+
+    /// SECURITY-AUDIT A-1: reconnect over learned routes heals a partition. A member
+    /// learns the host's dialable route, is then partitioned (all peers lost), and
+    /// `reconnect()` re-establishes the connection via the learned route — so losing
+    /// the original link no longer strands the member. While still connected,
+    /// `reconnect()` is a safe no-op.
+    #[tokio::test]
+    async fn reconnect_heals_partition_via_learned_route() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1r",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Host advertises its actual dialable endpoint; m1 learns it.
+        host.advertise_routes(vec!["host".to_string()]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(m1.known_routes().iter().any(|(fp, _)| *fp == host.fingerprint()));
+
+        // While still connected, reconnect() does nothing (guard).
+        assert_eq!(m1.reconnect().await, None, "no-op while connected");
+
+        // Simulate a partition: m1 loses all peers (host link dropped).
+        m1.inner.peers.lock().unwrap().clear();
+        assert_eq!(m1.peer_count(), 0);
+
+        // reconnect() dials the learned route and re-establishes the link.
+        let healed = m1.reconnect().await;
+        assert_eq!(healed, Some(host.fingerprint()), "reconnect restores the link via the learned route");
     }
 
     /// The gossip dedup key: a bounded seen-set that reports first sightings as
