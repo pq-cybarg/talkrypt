@@ -903,6 +903,50 @@ impl Core {
         Ok(())
     }
 
+    /// **Self-update** — rotate our own leaf: fresh ML-KEM path secrets AND a fresh
+    /// ML-DSA-87 leaf signing key, then broadcast the resulting commit. This gives
+    /// **post-compromise security on demand** (SECURITY-AUDIT T-2 activation): an
+    /// adversary who compromised our prior path/signing keys can no longer derive
+    /// the new epoch secret (confidentiality PCS) NOR forge messages as us
+    /// (authentication PCS) once the group applies this commit. No membership
+    /// change — the roster is unchanged.
+    ///
+    /// Currently host-driven: the host (who relays commits) rotates its own leaf and
+    /// broadcasts. Member-initiated self-update needs the member→host→broadcast
+    /// relay path and is a follow-up; see `docs/`/the PR. A no-op off a group.
+    pub async fn self_update(&self) -> Result<()> {
+        // Only the committer (host) drives commits in the hub topology today.
+        if self.inner.role != GroupRole::Host {
+            return Ok(());
+        }
+        let tagged = {
+            let mut g = self.inner.group.lock().await;
+            match g.as_mut() {
+                Some(grp) => {
+                    let from_epoch = grp.epoch();
+                    grp.update().ok().map(|c| (from_epoch, c.encode()))
+                }
+                None => None,
+            }
+        };
+        let Some((from_epoch, commit_bytes)) = tagged else {
+            return Ok(());
+        };
+        // Roster (leaf -> account fingerprint) is unchanged by an update; only the
+        // per-leaf signing key rotates, and that rides INSIDE the commit
+        // (`sig_update`), which every member verifies + applies in `apply_commit`.
+        route(
+            &self.inner,
+            Frame::Commit {
+                from_epoch,
+                bytes: commit_bytes,
+            },
+            Route::Broadcast,
+        )
+        .await;
+        Ok(())
+    }
+
     /// Start accepting inbound connections (spawns a background accept loop).
     pub async fn host(&self) -> Result<Endpoint> {
         let listener = self.inner.transport.listen().await?;
@@ -1797,6 +1841,41 @@ mod tests {
         let (text2, from2) = next_message(&mut m2_rx).await;
         assert_eq!(text2, "from m1");
         assert_eq!(from2, m1.fingerprint(), "m2 must attribute to m1, not host");
+    }
+
+    /// SECURITY-AUDIT T-2 ACTIVATION: a host self-update rotates its leaf (KEM path
+    /// + signing key), the member applies the broadcast commit, the group stays
+    /// converged, and messaging keeps working across the rotation — post-compromise
+    /// security exercised end-to-end through the engine.
+    #[tokio::test]
+    async fn host_self_update_rotates_and_group_still_works() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#upd",
+        );
+        let (host, _host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Baseline: host -> m1 works before the update.
+        host.send("before update").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "before update");
+
+        // Host self-updates (rotates its leaf key); m1 applies the broadcast commit.
+        host.self_update().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Messaging still works after the rotation, and m1 still attributes to host.
+        host.send("after update").await.unwrap();
+        let (text, from) = next_message(&mut m1_rx).await;
+        assert_eq!(text, "after update");
+        assert_eq!(from, host.fingerprint(), "attribution survives key rotation");
     }
 
     /// The gossip dedup key: a bounded seen-set that reports first sightings as

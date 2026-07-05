@@ -954,6 +954,19 @@ impl TalkryptClient {
             .map_err(FfiError::from)
     }
 
+    /// Rotate this node's group leaf key for **post-compromise security**
+    /// (SECURITY-AUDIT T-2): fresh ML-KEM path secrets AND a fresh ML-DSA-87 leaf
+    /// signing key are generated and the resulting commit is broadcast, so a prior
+    /// key compromise no longer lets an adversary read new messages or forge as us
+    /// once the group applies it. Host-driven today; a no-op off a group or for a
+    /// non-host member (member-initiated update is a follow-up). Safe to call
+    /// periodically (e.g. on a timer or after suspected exposure).
+    pub fn self_update(&self) -> Result<(), FfiError> {
+        self.rt
+            .block_on(self.core.self_update())
+            .map_err(FfiError::from)
+    }
+
     /// The shareable invite URI for this chat (carries the `.onion` for a Tor
     /// host).
     pub fn invite_uri(&self) -> String {
