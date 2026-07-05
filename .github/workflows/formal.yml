@@ -44,9 +44,24 @@ jobs:
 
   fstar:
     name: "F* — auth theorems"
-    runs-on: ubuntu-latest
+    # Pin 22.04 (glibc 2.35) to match the prebuilt Z3 4.13.3 Linux asset.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+      # F* pins an exact Z3 version and looks for it on PATH as `z3-<version>`.
+      # opam's F* here wants 4.13.3, so install that release and expose it as both
+      # `z3-4.13.3` and `z3` before running F*.
+      - name: Install Z3 4.13.3 (the version F* pins)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o z3.zip \
+            https://github.com/Z3Prover/z3/releases/download/z3-4.13.3/z3-4.13.3-x64-glibc-2.35.zip
+          unzip -q z3.zip
+          z3bin="$(find . -type f -path '*/bin/z3' | head -1)"
+          test -n "$z3bin"
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3-4.13.3
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3
+          z3-4.13.3 --version
       - name: Install F* (via opam)
         run: |
           sudo apt-get update && sudo apt-get install -y opam
@@ -55,4 +70,5 @@ jobs:
       - name: Verify GroupAuth.fst
         run: |
           eval $(opam env)
+          z3-4.13.3 --version
           make -C formal verify
