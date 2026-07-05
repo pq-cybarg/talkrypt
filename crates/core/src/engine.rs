@@ -1021,7 +1021,11 @@ impl Core {
                 let frame = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
-                        Some(grp) => Frame::GroupMsg(grp.encrypt(&payload)?),
+                        // Sign every group message with our per-membership leaf
+                        // signature key so receivers can bind it to our leaf and
+                        // reject impersonation or relay restamping, without exposing
+                        // a long-term identity (SECURITY-AUDIT G1/G2).
+                        Some(grp) => Frame::GroupMsg(grp.encrypt_signed(&payload)?),
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
@@ -1602,24 +1606,33 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     if !inner.seen.lock().unwrap().insert(gossip_id(&gct)) {
         return;
     }
+    // Require a valid per-sender ML-DSA-87 signature before we decrypt, display,
+    // OR forward (SECURITY-AUDIT G1/G2). Resolve the claimed leaf -> roster
+    // fingerprint -> device identity key; a message that does not verify under
+    // that key is dropped (fail closed), so neither a member nor a relaying peer
+    // can forge or restamp the sender.
     let opened = {
         let mut g = inner.group.lock().await;
-        g.as_mut().and_then(|grp| grp.decrypt(&gct).ok())
+        g.as_mut().and_then(|grp| grp.decrypt_verified(&gct).ok())
     };
-    if let Some(pt) = opened {
-        if let Some((marking, text)) = marking::decode_payload(&pt) {
-            // Attribute to the original sender via the roster (the `from` peer
-            // may just be the relaying host), falling back to the relay peer.
-            let sender = TreeKemGroup::sender_leaf(&gct)
-                .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
-                .unwrap_or(from);
-            let _ = inner.events_tx.send(Event::Message {
-                from: sender,
-                channel: inner.descriptor.channel.clone(),
-                text,
-                marking,
-            });
-        }
+    let Some(pt) = opened else {
+        // Unauthenticated or undecryptable: drop it and do NOT forward — refusing
+        // to relay a message we could not verify stops a forged frame from riding
+        // our gossip fan-out to other members (SECURITY-AUDIT G2).
+        return;
+    };
+    if let Some((marking, text)) = marking::decode_payload(&pt) {
+        // The signature has been verified against the sending leaf's tree-bound
+        // key, so leaf attribution is trustworthy; map it to a fingerprint.
+        let sender = TreeKemGroup::sender_leaf(&gct)
+            .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+            .unwrap_or(from);
+        let _ = inner.events_tx.send(Event::Message {
+            from: sender,
+            channel: inner.descriptor.channel.clone(),
+            text,
+            marking,
+        });
     }
     // Fan out to other members. In host-coordinated mode the host relays; a
     // gossip bridge re-floods regardless of role (that's what bridges transport

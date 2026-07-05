@@ -47,3 +47,8 @@ fuzzing = []
 
 [dev-dependencies]
 proptest.workspace = true
+
+# `cfg(kani)` is set by the Kani bounded model checker; declare it so normal
+# builds don't warn on the #[cfg(kani)] proof harnesses in src/treekem.rs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

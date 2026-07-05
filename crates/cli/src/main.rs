@@ -1221,6 +1221,10 @@ async fn run_link_offer(
         println!("advertising endpoint: {ep} (bound on {listen})");
     }
     let transport = Arc::new(TcpTransport::new(&listen));
+    // The operator explicitly initiated this one-time, time-bounded offer by
+    // running `link-offer` with their account, so the next device to present the
+    // token inside the window is authorized (SECURITY-AUDIT L1: the human decision
+    // is running this command; the cert is short-lived — 24h — and single-use).
     let host = LinkHost::new(
         account_kp,
         IdentityKeyPair::generate(),
@@ -1229,7 +1233,8 @@ async fn run_link_offer(
         &desc,
         username.clone(),
         now_secs(),
-    );
+    )
+    .auto_approve();
     host.run().await?;
 
     println!("linking offer for account {account_sn}");
