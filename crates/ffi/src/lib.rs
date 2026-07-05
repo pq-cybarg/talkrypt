@@ -390,6 +390,14 @@ pub struct ContactRecord {
     pub friend: bool,
 }
 
+/// A learned alternate route to a peer (SECURITY-AUDIT A-1): the peer's device
+/// fingerprint (hex) and its advertised reachable endpoints.
+#[derive(uniffi::Record)]
+pub struct FfiRoute {
+    pub fingerprint: String,
+    pub endpoints: Vec<String>,
+}
+
 /// The result of a successful device link (the new-device side). Persist
 /// `chain_hex` (with this device's seed) and pass both to `join_linked` /
 /// `host_linked` to chat as this account on this device.
@@ -973,6 +981,25 @@ impl TalkryptClient {
     /// account" badge vs. a pseudonymous sender.
     pub fn group_leaf_account(&self, leaf: u32) -> Option<String> {
         self.core.group_leaf_account(leaf).map(|fp| hex_fp(&fp))
+    }
+
+    /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1) —
+    /// its multi-homed endpoint set (e.g. `[onion, nym, lan]`), signed and gossiped
+    /// so peers can reach it directly and reconnect via it if the host drops.
+    pub fn advertise_routes(&self, endpoints: Vec<String>) {
+        self.rt.block_on(self.core.advertise_routes(endpoints));
+    }
+
+    /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
+    /// (device-fingerprint hex, endpoints). A reconnect flow tries these when the
+    /// original host endpoint is dead, so a member is no longer partitioned by the
+    /// founding host going offline.
+    pub fn known_routes(&self) -> Vec<FfiRoute> {
+        self.core
+            .known_routes()
+            .into_iter()
+            .map(|(fp, endpoints)| FfiRoute { fingerprint: hex_fp(&fp), endpoints })
+            .collect()
     }
 
     /// The shareable invite URI for this chat (carries the `.onion` for a Tor

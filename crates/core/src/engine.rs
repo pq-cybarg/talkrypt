@@ -107,6 +107,14 @@ enum Frame {
     /// member. Advisory: a bad/absent cert just leaves the leaf "unverified"
     /// (pseudonymous), it does not drop messages.
     LeafSigCert(Vec<u8>),
+    /// A signed **route descriptor** (SECURITY-AUDIT A-1): a node's own reachable
+    /// endpoints (its multi-homed `[onion, nym, lan]` set), signed by its identity
+    /// key, gossiped so every member learns every member's routes — not only the
+    /// founding host's. Ends the host-as-single-point-of-reachability partition: if
+    /// the host drops, members still hold alternate routes (and any multi-homed
+    /// member can bridge). Routes are dial *hints* — the authenticated handshake
+    /// remains the security boundary — so a bogus route only wastes a dial attempt.
+    RouteDescriptor(Vec<u8>),
 }
 
 impl Frame {
@@ -164,6 +172,10 @@ impl Frame {
                 w.put_u8(9);
                 w.put_bytes(b);
             }
+            Frame::RouteDescriptor(b) => {
+                w.put_u8(10);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -205,6 +217,7 @@ impl Frame {
             7 => Frame::AccessDenied(String::from_utf8(r.get_vec().ok()?).ok()?),
             8 => Frame::Revocation(r.get_vec().ok()?),
             9 => Frame::LeafSigCert(r.get_vec().ok()?),
+            10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -396,6 +409,12 @@ struct Inner {
     /// so a present entry means the leaf is genuinely that account's; its absence
     /// just means "unverified / pseudonymous", never a message drop.
     verified_leaf_accounts: Mutex<HashMap<u32, [u8; 48]>>,
+    /// Learned reachable routes per peer (SECURITY-AUDIT A-1): device fingerprint ->
+    /// its advertised endpoint set. Populated from gossiped, identity-signed route
+    /// descriptors so a member can reach the group via ANY member, not only the
+    /// founding host. Bounded to keep a hostile relay from bloating it. Routes are
+    /// hints; the handshake authenticates whoever answers.
+    known_routes: Mutex<HashMap<[u8; 48], Vec<String>>>,
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
@@ -573,6 +592,7 @@ impl Core {
             contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
             verified_leaf_accounts: Mutex::new(HashMap::new()),
+            known_routes: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
@@ -846,6 +866,31 @@ impl Core {
     /// transport islands into one chat. Dedup (a bounded seen-set of ciphertext
     /// fingerprints) keeps multi-path flooding from duplicating or looping.
     /// Idempotent; off by default.
+    /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1):
+    /// sign our multi-homed endpoint set (`[onion, nym, lan]`) with our identity key
+    /// and gossip it, so every member learns how to reach us directly. Call after
+    /// `host()` with the address(es) at which others can dial us. Peers store these
+    /// as alternate routes; if the founding host drops, a member can reconnect via
+    /// any advertised member. A no-op with no endpoints.
+    pub async fn advertise_routes(&self, endpoints: Vec<String>) {
+        if endpoints.is_empty() {
+            return;
+        }
+        let signer = self.inner.identity.public().clone();
+        let sig = self
+            .inner
+            .identity
+            .sign(&route_transcript(&signer, &endpoints));
+        let bytes = encode_route_descriptor(&signer, &endpoints, &sig);
+        // Record our own (so `known_routes` is complete) and flood to peers.
+        self.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .insert(signer.fingerprint(), endpoints);
+        route(&self.inner, Frame::RouteDescriptor(bytes), Route::Broadcast).await;
+    }
+
     pub fn enable_gossip(&self) {
         self.inner
             .gossip
@@ -855,6 +900,21 @@ impl Core {
     /// The chat descriptor (shareable invite).
     pub fn descriptor(&self) -> &ChatDescriptor {
         &self.inner.descriptor
+    }
+
+    /// Learned reachable routes for every peer we have heard a route descriptor
+    /// from (SECURITY-AUDIT A-1): `(device_fingerprint, endpoints)`. A reconnect
+    /// layer tries these across all transports when the original endpoint is dead,
+    /// so losing the founding host no longer partitions a member that has heard any
+    /// other member's routes.
+    pub fn known_routes(&self) -> Vec<([u8; 48], Vec<String>)> {
+        self.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(fp, eps)| (*fp, eps.clone()))
+            .collect()
     }
 
     /// The account fingerprint cryptographically bound to a group `leaf` (T-3), or
@@ -1440,7 +1500,94 @@ async fn reader_loop(
             Some(Frame::LeafSigCert(b)) if inner.role != GroupRole::None => {
                 handle_leaf_sig_cert(&inner, from, b).await;
             }
+            Some(Frame::RouteDescriptor(b)) => {
+                handle_route_descriptor(&inner, from, b).await;
+            }
             _ => { /* frame not valid for this role; ignore */ }
+        }
+    }
+}
+
+/// Domain-separation prefix for a route descriptor's signature (A-1).
+const ROUTE_CONTEXT: &[u8] = b"talkrypt-route-descriptor-v1";
+/// Bounds so a hostile relay cannot bloat `known_routes`.
+const MAX_ROUTE_ENDPOINTS: u32 = 8;
+const MAX_ROUTE_EP_LEN: usize = 512;
+
+/// The bytes a node signs over its route descriptor: `ROUTE_CONTEXT | signer | eps`.
+fn route_transcript(signer: &IdentityPublic, endpoints: &[String]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(ROUTE_CONTEXT);
+    w.put_bytes(&signer.sig_vk);
+    w.put_u32(endpoints.len() as u32);
+    for e in endpoints {
+        w.put_bytes(e.as_bytes());
+    }
+    w.into_vec()
+}
+
+fn encode_route_descriptor(signer: &IdentityPublic, endpoints: &[String], sig: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(&signer.sig_vk);
+    w.put_u32(endpoints.len() as u32);
+    for e in endpoints {
+        w.put_bytes(e.as_bytes());
+    }
+    w.put_bytes(sig);
+    w.into_vec()
+}
+
+/// Handle a gossiped route descriptor (SECURITY-AUDIT A-1): verify the identity
+/// signature over the advertised endpoints, store them keyed by the signer's
+/// fingerprint, and (host/bridge) re-flood so the routes reach the whole mesh. The
+/// signature makes routes attributable + tamper-evident; because dialing is
+/// authenticated by the handshake, a bogus route can at worst waste a dial.
+async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    // Dedup on the descriptor bytes so a re-flooded copy does not loop.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&bytes)) {
+        return;
+    }
+    let mut r = talkrypt_wire::Reader::new(&bytes);
+    let Some(parsed) = (|| {
+        let sig_vk = r.get_bytes().ok()?.to_vec();
+        let n = r.get_u32().ok()?;
+        if n > MAX_ROUTE_ENDPOINTS {
+            return None;
+        }
+        let mut endpoints = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let e = r.get_bytes().ok()?;
+            if e.len() > MAX_ROUTE_EP_LEN {
+                return None;
+            }
+            endpoints.push(String::from_utf8(e.to_vec()).ok()?);
+        }
+        let sig = r.get_bytes().ok()?.to_vec();
+        r.finish().ok()?;
+        Some((IdentityPublic { sig_vk }, endpoints, sig))
+    })() else {
+        return;
+    };
+    let (signer, endpoints, sig) = parsed;
+    // Verify the signer actually authored these endpoints (tamper-evidence).
+    if signer
+        .verify(&route_transcript(&signer, &endpoints), &sig)
+        .is_err()
+    {
+        return;
+    }
+    inner
+        .known_routes
+        .lock()
+        .unwrap()
+        .insert(signer.fingerprint(), endpoints);
+    // Re-flood (host coordinates; a gossip bridge spans transport islands).
+    let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
+        for (s, w, fp) in collect_peers(inner) {
+            if fp != from {
+                let _ = send_payload(&s, &w, &Frame::RouteDescriptor(bytes.clone()).encode()).await;
+            }
         }
     }
 }
@@ -2047,6 +2194,57 @@ mod tests {
             host.group_leaf_account(m2_leaf),
             None,
             "a pseudonym leaf must not be bound to any account"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1: route-descriptor gossip. A host advertises its
+    /// multi-homed routes; a connected member learns them (so it holds an alternate
+    /// route if the host later drops). A member also advertising its routes reaches
+    /// the whole group via the host's re-flood. A descriptor with a bad signature is
+    /// rejected.
+    #[tokio::test]
+    async fn route_descriptors_gossip_and_reject_bad_signatures() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Host advertises its multi-homed routes; m1 learns them.
+        let host_routes = vec!["abc.onion".to_string(), "nym:xyz".to_string()];
+        host.advertise_routes(host_routes.clone()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let learned = m1.known_routes();
+        let host_fp = host.fingerprint();
+        let got = learned.iter().find(|(fp, _)| *fp == host_fp).map(|(_, e)| e.clone());
+        assert_eq!(got, Some(host_routes), "m1 must learn the host's advertised routes");
+
+        // The host itself records its own routes too (complete map).
+        assert!(host.known_routes().iter().any(|(fp, _)| *fp == host_fp));
+
+        // A forged descriptor (valid structure, wrong signature) is dropped: a peer
+        // signs endpoints with the WRONG key, so verification fails and nothing is
+        // stored for that signer.
+        let attacker = IdentityKeyPair::generate();
+        let victim = IdentityKeyPair::generate();
+        let eps = vec!["evil.onion".to_string()];
+        // Sign with attacker but claim to be victim: encode victim's key + attacker's sig.
+        let bad_sig = attacker.sign(&route_transcript(victim.public(), &eps));
+        let forged = encode_route_descriptor(victim.public(), &eps, &bad_sig);
+        // Feed it straight to the handler as if received.
+        handle_route_descriptor(&host.inner, [9u8; 48], forged).await;
+        assert!(
+            !host.known_routes().iter().any(|(fp, _)| *fp == victim.public().fingerprint()),
+            "a descriptor with a bad signature must not be stored"
         );
     }
 
