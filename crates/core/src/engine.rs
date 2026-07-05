@@ -107,6 +107,11 @@ enum Frame {
     /// member. Advisory: a bad/absent cert just leaves the leaf "unverified"
     /// (pseudonymous), it does not drop messages.
     LeafSigCert(Vec<u8>),
+    /// A member's self-rekey **Update proposal** (SECURITY-AUDIT T-4), sent to the
+    /// host, which commits it for the group (single committer -> no fork). Gives a
+    /// member post-compromise security for its own KEM + signing keys without
+    /// advancing its epoch optimistically.
+    UpdateProposal(Vec<u8>),
     /// A signed **route descriptor** (SECURITY-AUDIT A-1): a node's own reachable
     /// endpoints (its multi-homed `[onion, nym, lan]` set), signed by its identity
     /// key, gossiped so every member learns every member's routes — not only the
@@ -176,6 +181,10 @@ impl Frame {
                 w.put_u8(10);
                 w.put_bytes(b);
             }
+            Frame::UpdateProposal(b) => {
+                w.put_u8(11);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -218,6 +227,7 @@ impl Frame {
             8 => Frame::Revocation(r.get_vec().ok()?),
             9 => Frame::LeafSigCert(r.get_vec().ok()?),
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
+            11 => Frame::UpdateProposal(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -2168,6 +2178,45 @@ mod tests {
         let (text, from) = next_message(&mut m1_rx).await;
         assert_eq!(text, "after update");
         assert_eq!(from, host.fingerprint(), "attribution survives key rotation");
+    }
+
+    /// SECURITY-AUDIT T-4 end-to-end: a MEMBER self-rekeys via the host. The member
+    /// calls self_update() (which proposes, not commits); the host commits the
+    /// proposal and broadcasts it; the group keeps working across the member's
+    /// rekey, with no fork — the member's post-compromise security is self-service.
+    #[tokio::test]
+    async fn member_self_update_is_committed_by_host() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t4",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Baseline both directions.
+        host.send("hello m1").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "hello m1");
+        m1.send("hello host").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hello host");
+
+        // The MEMBER self-rekeys: proposes, host commits, group heals.
+        m1.self_update().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Messaging still works both ways after the member's rekey (no fork).
+        host.send("after m1 rekey").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "after m1 rekey");
+        m1.send("m1 rekeyed").await.unwrap();
+        let (text, from) = next_message(&mut host_rx).await;
+        assert_eq!(text, "m1 rekeyed");
+        assert_eq!(from, m1.fingerprint(), "m1 still attributed correctly post-rekey");
     }
 
     /// SECURITY-AUDIT T-3 end-to-end: a **linked** member (presents an account)

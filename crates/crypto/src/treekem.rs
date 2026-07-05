@@ -229,6 +229,16 @@ enum Proposal {
     Remove {
         leaf: u32,
     },
+    /// A member's self-rekey PROPOSAL (SECURITY-AUDIT T-4): replace an existing
+    /// leaf's KEM and signature keys. Unlike `update()`, this is committed by the
+    /// HOST (single committer), so a member gets post-compromise security WITHOUT
+    /// advancing its own epoch — no concurrent-commit fork.
+    Update {
+        leaf: u32,
+        leaf_public: RatchetPublic,
+        sig_public: IdentityPublic,
+        pop: Vec<u8>,
+    },
 }
 
 /// The result of a commit: structural proposals, the committer's re-keyed path
@@ -328,6 +338,13 @@ impl Proposal {
                 w.put_u8(1);
                 w.put_u32(*leaf);
             }
+            Proposal::Update { leaf, leaf_public, sig_public, pop } => {
+                w.put_u8(2);
+                w.put_u32(*leaf);
+                w.put_bytes(&leaf_public.encode());
+                w.put_bytes(&sig_public.sig_vk);
+                w.put_bytes(pop);
+            }
         }
     }
     fn get(profile: KemProfile, r: &mut talkrypt_wire::Reader) -> Result<Proposal> {
@@ -339,6 +356,12 @@ impl Proposal {
                 pop: r.get_vec()?,
             }),
             1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
+            2 => Ok(Proposal::Update {
+                leaf: r.get_u32()?,
+                leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
+                sig_public: decode_sig_public(r.get_bytes()?)?,
+                pop: r.get_vec()?,
+            }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
         }
     }
@@ -631,6 +654,10 @@ pub struct TreeKemGroup {
     /// degenerate test-built group; `create`/`join` always set it. Used to SIGN our
     /// outgoing group messages.
     my_sig: Option<IdentityKeyPair>,
+    /// A staged new leaf keypair from `propose_update()` (SECURITY-AUDIT T-4),
+    /// installed when the host's commit carrying our Update proposal is applied. We
+    /// do NOT advance our epoch on proposing, so there is no concurrent-commit fork.
+    pending_update: Option<LeafKeyPair>,
 }
 
 // Zero the group's secret material on drop: the ratchet-tree node secrets, the
@@ -694,6 +721,7 @@ impl TreeKemGroup {
             leaf_sig_keys,
             leaf_pops: HashMap::new(),
             my_sig: Some(my_sig),
+            pending_update: None,
         };
         g.occupied[0] = true;
         // Set the founder's whole path (leaf -> root) from a fresh secret chain.
@@ -851,6 +879,47 @@ impl TreeKemGroup {
     /// roster changes. Mechanically identical to add/remove's re-key, with no
     /// proposals (roster unchanged). `rekey_path` already refreshes the caller's
     /// path secrets and advances `self.epoch`/`epoch_secret`.
+    /// **Propose** a self-rekey without advancing our epoch (SECURITY-AUDIT T-4):
+    /// generate a fresh leaf keypair (KEM + ML-DSA-87 signing key), stage it, and
+    /// return the encoded `Update` proposal to hand to the HOST. The host commits it
+    /// ([`commit_update`]); we install the staged keys only when that commit is
+    /// applied — so, unlike [`update`], a member never advances optimistically and
+    /// cannot fork against a concurrent host commit. Gives a member post-compromise
+    /// security (KEM + signing key) through the single-committer path.
+    ///
+    /// [`commit_update`]: TreeKemGroup::commit_update
+    /// [`update`]: TreeKemGroup::update
+    pub fn propose_update(&mut self) -> Result<Vec<u8>> {
+        let kp = LeafKeyPair::generate_with(self.profile);
+        let package = kp.key_package();
+        let prop = Proposal::Update {
+            leaf: self.me,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+        };
+        self.pending_update = Some(kp);
+        let mut w = talkrypt_wire::Writer::new();
+        prop.put(&mut w);
+        Ok(w.into_vec())
+    }
+
+    /// HOST: commit a member's `Update` proposal (SECURITY-AUDIT T-4). Applies the
+    /// proposal (replacing that leaf's keys) and re-keys our path, producing a
+    /// `Commit` that every member — including the proposer — applies. Single
+    /// committer, so no fork. Rejects anything that is not an `Update` proposal.
+    pub fn commit_update(&mut self, proposal_bytes: &[u8]) -> Result<Commit> {
+        let mut r = talkrypt_wire::Reader::new(proposal_bytes);
+        let prop = Proposal::get(self.profile, &mut r)?;
+        r.finish()?;
+        if !matches!(prop, Proposal::Update { .. }) {
+            return Err(CryptoError::Malformed("expected an Update proposal"));
+        }
+        let proposals = vec![prop];
+        self.apply_proposals(&proposals)?;
+        self.rekey_path(proposals)
+    }
+
     pub fn update(&mut self) -> Result<Commit> {
         let mut commit = self.rekey_path(Vec::new())?;
         // Rotate our leaf SIGNING key too (SECURITY-AUDIT T-2): a compromised leaf
@@ -873,7 +942,9 @@ impl TreeKemGroup {
             // `occupied` vector before indexing, so a crafted Commit can no longer
             // panic the receiver with an out-of-range leaf.
             let leaf = match p {
-                Proposal::Add { leaf, .. } | Proposal::Remove { leaf } => *leaf,
+                Proposal::Add { leaf, .. }
+                | Proposal::Remove { leaf }
+                | Proposal::Update { leaf, .. } => *leaf,
             };
             if leaf as usize >= self.occupied.len() {
                 return Err(CryptoError::Malformed("treekem proposal leaf out of range"));
@@ -898,6 +969,28 @@ impl TreeKemGroup {
                     self.public.remove(&Node::leaf(*leaf));
                     self.leaf_sig_keys.remove(leaf);
                     self.leaf_pops.remove(leaf);
+                    self.blank_path_above(*leaf);
+                }
+                Proposal::Update { leaf, leaf_public, sig_public, pop } => {
+                    // Re-verify PoP (T-1) then replace the leaf's KEM + signing keys
+                    // (T-4 member rekey; T-2 auth-PCS for a member). The leaf must
+                    // already be occupied — Update never adds a member.
+                    verify_pop(sig_public, pop)?;
+                    if !self.occupied.get(*leaf as usize).copied().unwrap_or(false) {
+                        return Err(CryptoError::Malformed("treekem update for empty leaf"));
+                    }
+                    self.public.insert(Node::leaf(*leaf), leaf_public.clone());
+                    self.leaf_sig_keys.insert(*leaf, sig_public.clone());
+                    self.leaf_pops.insert(*leaf, pop.clone());
+                    // If this is OUR proposed update, install the staged new leaf
+                    // secret + signing key so we can process the committer's path.
+                    if *leaf == self.me {
+                        if let Some(kp) = self.pending_update.take() {
+                            self.secrets.insert(Node::leaf(self.me), kp.secret);
+                            self.my_sig =
+                                Some(IdentityKeyPair::from_secret_bytes(kp.sig.export_secret()));
+                        }
+                    }
                     self.blank_path_above(*leaf);
                 }
             }
@@ -1022,6 +1115,7 @@ impl TreeKemGroup {
             leaf_sig_keys,
             leaf_pops,
             my_sig: Some(sig),
+            pending_update: None,
         };
         g.leaf_sig_keys
             .insert(welcome.your_leaf, g.my_sig.as_ref().unwrap().public().clone());
@@ -1314,6 +1408,7 @@ mod tests {
             leaf_sig_keys: HashMap::new(),
             leaf_pops: HashMap::new(),
             my_sig: None,
+            pending_update: None,
         };
         unsafe {
             crate::assert_drop_zeroes(
@@ -1690,6 +1785,62 @@ mod tests {
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(1_000_000);
         assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// SECURITY-AUDIT T-4: a member self-rekeys via a host-committed Update PROPOSAL
+    /// (fork-free). The member proposes (without advancing its epoch); the host
+    /// commits; ALL members — proposer, host, and a third member — converge on the
+    /// same new group secret. The member's KEM and signing keys rotate, so a message
+    /// forged with its OLD signing key is rejected afterward (member auth-PCS).
+    #[test]
+    fn member_proposed_update_is_committed_by_host_without_fork() {
+        // Three members: a (host/committer), b (proposer), c (third member).
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_eq!(a.group_secret(), c.group_secret());
+        let before = a.group_secret();
+        let b_leaf = b.my_leaf();
+
+        // Capture b's OLD signing key (a pre-rekey compromise).
+        let old_seed = b.my_sig.as_ref().unwrap().export_secret();
+        let old_sig = crate::identity::IdentityKeyPair::from_secret_bytes(old_seed);
+
+        // b proposes a self-rekey; it does NOT advance its own epoch yet.
+        let epoch_before = b.epoch;
+        let proposal = b.propose_update().unwrap();
+        assert_eq!(b.epoch, epoch_before, "proposing must not advance the proposer");
+
+        // The host commits it; everyone (incl. b) applies the SAME commit.
+        let commit = a.commit_update(&proposal).unwrap();
+        b.apply_commit(&commit).unwrap();
+        c.apply_commit(&commit).unwrap();
+
+        // No fork: all three converge on a NEW group secret.
+        assert_eq!(a.group_secret(), b.group_secret(), "host and proposer converge");
+        assert_eq!(a.group_secret(), c.group_secret(), "third member converges too");
+        assert_ne!(a.group_secret(), before, "rekey injected fresh entropy");
+        assert_eq!(a.member_count(), 3, "update changes no membership");
+
+        // Messaging still works, and b signs with its NEW key.
+        let m = b.encrypt_signed(b"after member rekey").unwrap();
+        assert_eq!(a.decrypt_verified(&m).unwrap(), b"after member rekey");
+        assert_eq!(c.decrypt_verified(&m).unwrap(), b"after member rekey");
+
+        // Member auth-PCS: a message forged with b's OLD signing key is rejected.
+        let epoch = b.epoch;
+        let chain = sender_chain(&b.group_secret(), b_leaf);
+        let (_n, mk) = kdf_ck(&chain);
+        let (k, no) = kdf_mk(&mk);
+        let aad = msg_aad(epoch, b_leaf, 0);
+        let ct = aead_seal(&k, &no, b"forged old key", &aad).unwrap();
+        let sig = old_sig.sign(&sig_transcript(epoch, b_leaf, 0, &ct));
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u8(GROUP_MSG_V2);
+        w.put_u32(epoch); w.put_u32(b_leaf); w.put_u32(0);
+        w.put_bytes(&ct); w.put_bytes(&sig);
+        assert!(matches!(a.decrypt_verified(&w.into_vec()), Err(CryptoError::BadSignature)));
     }
 
     /// SECURITY-AUDIT T-2: `update()` rotates the caller's leaf SIGNING key, giving
