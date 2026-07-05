@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- talkrypt's deep-dark base (matches the app background). -->
-    <color name="ic_launcher_background">#0B0E13</color>
+    <color name="ic_launcher_background">#060A0F</color>
+    <!-- Theme copies of the Tk tokens (Theme.kt is the Kotlin source of truth;
+         these exist because the manifest theme can't reference code). -->
+    <color name="tk_bg">#060A0F</color>
+    <color name="tk_fg">#E3F1F4</color>
+    <color name="tk_accent">#22E4FF</color>
 </resources>
