@@ -88,8 +88,10 @@ class QrScanActivity : Activity() {
         )
         val cancel = TextView(this).apply {
             text = "✕"
+            contentDescription = "Cancel scan"
             setTextColor(Color.WHITE)
             textSize = 22f
+            minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(20), dp(20), dp(20), dp(20))
             setOnClickListener { cancel() }
         }
@@ -127,8 +129,8 @@ class QrScanActivity : Activity() {
         // Register the surface listener once; every open path funnels through the
         // single-flight maybeOpenCamera(), so duplicate triggers are harmless.
         textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) { maybeOpenCamera() }
-            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
+            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) { configureTransform(w, h); maybeOpenCamera() }
+            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) { configureTransform(w, h) }
             override fun onSurfaceTextureDestroyed(s: SurfaceTexture) = true
             override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
         }
@@ -183,6 +185,7 @@ class QrScanActivity : Activity() {
         val texture = textureView.surfaceTexture ?: return
         try {
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            runOnUiThread { configureTransform(textureView.width, textureView.height) }
             val previewSurface = Surface(texture)
             val readerSurface = imageReader!!.surface
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -277,6 +280,24 @@ class QrScanActivity : Activity() {
         val fit = sizes.filter { it.width <= TARGET.width && it.height <= TARGET.height }
             .maxByOrNull { it.width.toLong() * it.height }
         return fit ?: sizes.minByOrNull { it.width.toLong() * it.height } ?: TARGET
+    }
+
+    /** Restore the preview's aspect ratio (center-crop). TextureView stretches
+     *  the camera buffer to fill the view, so the 16:9 buffer looks squashed on
+     *  a taller portrait screen without this transform. */
+    private fun configureTransform(viewW: Int, viewH: Int) {
+        if (viewW == 0 || viewH == 0) return
+        // Portrait-locked: after the pipeline's rotation the buffer presents as
+        // height x width, so its on-screen aspect is h/w.
+        val bufAspect = previewSize.height.toFloat() / previewSize.width
+        val viewAspect = viewW.toFloat() / viewH
+        val m = android.graphics.Matrix()
+        if (bufAspect > viewAspect) {
+            m.setScale(bufAspect / viewAspect, 1f, viewW / 2f, viewH / 2f)
+        } else {
+            m.setScale(1f, viewAspect / bufAspect, viewW / 2f, viewH / 2f)
+        }
+        textureView.setTransform(m)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()

@@ -172,6 +172,9 @@ class MainActivity : Activity() {
                 setContentView(acceptLinkConfirmScreen(uri))
             } else {
                 toast("opening invite…")
+                // Explicit default — a deep-linked join must not silently inherit
+                // whatever tier the last manual join happened to pick.
+                pendingTier = Persistence.PERSISTENT_LOCAL
                 startJoin(uri)
             }
         }
@@ -240,7 +243,7 @@ class MainActivity : Activity() {
     // ---------- setup screen ----------
     private fun newChatScreen(): View {
         backState = Back.LIST_CHILD
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
 
         col.addView(text("New chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
 
@@ -346,6 +349,10 @@ class MainActivity : Activity() {
         messages = null; scroll = null; chatChip = null; chatDetail = null
         backState = Back.HOME
         setSecure(false)
+        // Leaving a subscreen: stop what it started (BLE/Wi-Fi Direct scanning,
+        // the APK share server) so system-back can't leak them.
+        stopNearby()
+        shareServer?.stop(); shareServer = null
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
 
         val headRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -452,6 +459,8 @@ class MainActivity : Activity() {
         val connected = lc.client != null
         val items = buildList {
             add("Re-share invite")
+            if (lc.meta.inviteUri != null) add("Show invite QR")
+            add("Safety number (verify)")
             if (!connected) add("Reconnect")
             add("Leave (disconnect, keep history)")
             add("Delete (erase)")
@@ -461,6 +470,25 @@ class MainActivity : Activity() {
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
+                    "Show invite QR" -> lc.meta.inviteUri?.let { inv ->
+                        // The QR shown at hosting time is render-only and vanishes on
+                        // rebuild; this puts it back on demand.
+                        if (activeId != id) openChat(id)
+                        messages?.let { addQrInto(it, inv, 0.62f) }
+                        addBubble(inv, mine = false, sender = "invite")
+                    }
+                    "Safety number (verify)" -> {
+                        android.app.AlertDialog.Builder(this)
+                            .setTitle("Safety number")
+                            .setMessage("${lc.meta.safety}\n\nCompare this with your peer out-of-band; a mismatch means the channel is not talking to who you think.")
+                            .setPositiveButton("Copy") { _, _ ->
+                                val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("talkrypt safety number", lc.meta.safety))
+                                toast("copied")
+                            }
+                            .setNegativeButton("Close", null)
+                            .show()
+                    }
                     "Reconnect" -> reconnect(id)
                     "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
                     "Delete (erase)" -> confirm("Delete “${lc.meta.title}”?", "Erases this chat and its history from this device. This cannot be undone.", "Delete") {
@@ -507,7 +535,7 @@ class MainActivity : Activity() {
     private fun utilitiesScreen(): View {
         backState = Back.LIST_CHILD
         setSecure(false) // leaving Settings
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("More", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
         col.addView(pillButton("Anchors (username directory)", panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
         col.addView(pillButton("Contacts", panel, fg) { setContentView(contactsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
@@ -568,7 +596,7 @@ class MainActivity : Activity() {
     private fun settingsScreen(): View {
         backState = Back.LIST_CHILD
         setSecure(true) // the mnemonic lives here; cleared on the exits below
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Settings", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
 
         // -- identity --
@@ -685,7 +713,7 @@ class MainActivity : Activity() {
 
     // ---------- contacts screen ----------
     private fun contactsScreen(): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Contacts", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("Accounts you recognize. Recognition only — being a contact (or friend) doesn't grant channel access; that's set per chat.", 13f, muted),
@@ -731,7 +759,7 @@ class MainActivity : Activity() {
     }
 
     private fun shareScreen(url: String): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Share talkrypt", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
@@ -742,7 +770,24 @@ class MainActivity : Activity() {
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(20)),
         )
         addQrInto(col, url, 0.72f)
-        col.addView(text(url, 13f, accent, center = true).also { it.setPadding(0, dp(18), 0, dp(24)) })
+        col.addView(text(url, 13f, accent, center = true).also { it.setPadding(0, dp(18), 0, dp(8)) })
+        // The transfer is plain HTTP on the local network — give the receiver a
+        // fingerprint to compare so a hostile LAN can't swap the APK silently.
+        val fpLine = text("APK SHA-256: computing…", 12f, muted, center = true)
+        col.addView(fpLine, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
+        thread {
+            val fp = runCatching {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                java.io.File(ApkShareServer.apkPath(this)).inputStream().use { ins ->
+                    val buf = ByteArray(65536)
+                    while (true) { val n = ins.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+                }
+                md.digest().joinToString("") { "%02x".format(it) }.take(16).chunked(4).joinToString(" ")
+            }.getOrNull()
+            ui.post {
+                fpLine.text = if (fp != null) "APK SHA-256 (first 16): $fp — verify on the receiving phone" else "couldn't compute APK fingerprint"
+            }
+        }
         col.addView(pillButton("Done", panel, fg) {
             shareServer?.stop(); shareServer = null
             setContentView(chatListScreen())
@@ -812,7 +857,7 @@ class MainActivity : Activity() {
     }
 
     private fun linkedDevicesScreen(): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Linked devices", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
@@ -886,7 +931,7 @@ class MainActivity : Activity() {
     }
 
     private fun linkOfferRunningScreen(uri: String, accountSn: String): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Link offer running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("On the NEW device, scan this (or paste the URI into Linked devices → Accept link). The account key stays on this device.", 13f, muted),
@@ -905,7 +950,7 @@ class MainActivity : Activity() {
     }
 
     private fun acceptLinkConfirmScreen(uri: String): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Link this device?", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("This certifies THIS device under the account offering the link. Afterward, verify the account safety number shown matches the other device, out of band.", 13f, muted),
@@ -947,7 +992,7 @@ class MainActivity : Activity() {
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
                     val now = System.currentTimeMillis()
-                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn.take(11), now, now)
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn, now, now)
                     enterSession(meta, c, "joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
                 }
             } catch (e: Exception) {
@@ -1001,7 +1046,7 @@ class MainActivity : Activity() {
     }
 
     private fun segmentsScreen(): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Segments", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
@@ -1079,7 +1124,7 @@ class MainActivity : Activity() {
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
                     val now = System.currentTimeMillis()
-                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn.take(11), now, now)
+                    val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn, now, now)
                     enterSession(meta, c, "joined as segment “$name”")
                 }
             } catch (e: Exception) {
@@ -1117,7 +1162,7 @@ class MainActivity : Activity() {
     }
 
     private fun findNearbyScreen(): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Nearby hosts", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("Scanning over Bluetooth LE and Wi-Fi Direct. Tap a host to join.", 13f, muted),
@@ -1194,6 +1239,10 @@ class MainActivity : Activity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIF) {
+            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            if (!granted) toast("notifications blocked — always-on chats still run, but without a status notification")
+        }
         if (requestCode == REQ_NEARBY) {
             val granted = grantResults.isNotEmpty() &&
                 grantResults.all { it == PackageManager.PERMISSION_GRANTED }
@@ -1259,7 +1308,7 @@ class MainActivity : Activity() {
 
     private fun anchorsScreen(): View {
         val acct = account()
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Anchors", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("A username directory you spawn or point at by location. Names map to account keys; verify safety numbers out of band.", 13f, muted),
@@ -1326,7 +1375,7 @@ class MainActivity : Activity() {
     }
 
     private fun anchorRunningScreen(uri: String): View {
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Anchor running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("Others register/resolve usernames here. Share this location (scan or copy). It runs while the app is open.", 13f, muted),
@@ -1377,7 +1426,7 @@ class MainActivity : Activity() {
     private fun restrictedHostScreen(channel: String, posture: String): View {
         val acct = account()
         val anchors = boundAnchors()
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Registry-restricted chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("Only members of the chosen registry can join $channel. You can pick only registries you're bound at; unreachable ones (or ones missing your record) are greyed out.", 13f, muted),
@@ -1458,7 +1507,7 @@ class MainActivity : Activity() {
                 val invite = c.inviteUri(); val sn = c.safetyNumber()
                 ui.post {
                     val now = System.currentTimeMillis()
-                    val meta = ChatMeta(chatId(invite), channel, Role.HOST, false, posture, "restricted", invite, if (useTor) invite else null, pendingTier, sn.take(11), now, now)
+                    val meta = ChatMeta(chatId(invite), channel, Role.HOST, false, posture, "restricted", invite, if (useTor) invite else null, pendingTier, sn, now, now)
                     enterSession(meta, c, "registry-restricted — only the $members anchor member(s) can join")
                     messages?.let { addQrInto(it, invite, 0.62f) }
                     addBubble(invite, mine = false, sender = "invite")
@@ -1480,7 +1529,7 @@ class MainActivity : Activity() {
         val (cs, cc) = connInfo(lc)
         chatChip?.apply { text = "● $cs"; setTextColor(cc) }
         val memberStr = if (lc.roster.isNotEmpty()) "${lc.roster.size} members · " else ""
-        chatDetail?.text = "  ·  ${memberStr}safety ${lc.meta.safety} · ${tierLabel(lc.meta.persistence)}"
+        chatDetail?.text = "  ·  ${memberStr}safety ${lc.meta.safety.take(11)} · ${tierLabel(lc.meta.persistence)}"
     }
 
     /** Render history entries not yet on screen (the initial replay, live events,
@@ -1604,13 +1653,13 @@ class MainActivity : Activity() {
         })
         wrap.addView(bubble, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         list.addView(wrap, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+        autoscroll()
     }
 
     private fun system(s: String) {
         val list = messages ?: return
         list.addView(text(s, 12f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10), bottom = dp(2)))
-        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+        autoscroll()
     }
 
     /** A tappable action row inside the message list (e.g. "Add as contact"). */
@@ -1618,7 +1667,17 @@ class MainActivity : Activity() {
         val list = messages ?: return
         val btn = pillButton(label, panel, accent, onClick).apply { minimumHeight = dp(44) }
         list.addView(btn, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6), bottom = dp(2)))
-        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+        autoscroll()
+    }
+
+    /** Scroll to the newest entry only if the view is already at (near) the
+     *  bottom — never yank the screen away from someone reading history. */
+    private fun autoscroll() {
+        val sv = scroll ?: return
+        val list = messages ?: return
+        if (sv.scrollY + sv.height >= list.height - dp(80)) {
+            sv.post { sv.fullScroll(View.FOCUS_DOWN) }
+        }
     }
 
     private fun bubbleBg(mine: Boolean) = GradientDrawable().apply {
@@ -1657,7 +1716,7 @@ class MainActivity : Activity() {
                         id = chatId(invite), title = channel, role = Role.HOST, group = false,
                         posture = posture, access = access, inviteUri = invite,
                         onion = if (useTor || useNym) invite else null, persistence = tier,
-                        safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
+                        safety = sn, createdAt = now, lastActivityAt = now, torDir = torSub,
                         mixnet = useNym,
                     )
                     val lc = sessions.open(meta, c)
@@ -1687,7 +1746,7 @@ class MainActivity : Activity() {
     private fun joinPreflightScreen(uri: String): View {
         val acct = account()
         val anchors = boundAnchors()
-        val col = column(bg).apply { setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
         col.addView(text("Join chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text("If this chat is registry-restricted, you're admitted only as a member. Present a live membership, or join as a pseudonym (open chats only).", 13f, muted),
@@ -1737,6 +1796,7 @@ class MainActivity : Activity() {
         // the first Tor/mixnet connect is slow and was previously opaque.
         setContentView(connectingScreen(title, tor || nym))
         startConnectingPoll(tor || nym)
+        val gen = ++joinGen
         thread {
             try {
                 val c = if (nym) TalkryptClient.joinNym(uri, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this))
@@ -1746,13 +1806,14 @@ class MainActivity : Activity() {
                 if (presentAccount) runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
                 ui.post {
+                    if (gen != joinGen) return@post // cancelled — drop the client quietly
                     connecting = false
                     val now = System.currentTimeMillis()
                     val meta = ChatMeta(
                         id = chatId(uri), title = title, role = Role.JOIN, group = false,
                         posture = "", access = "open", inviteUri = uri,
                         onion = if (isOnion || nym) uri else null, persistence = tier,
-                        safety = sn.take(11), createdAt = now, lastActivityAt = now, torDir = torSub,
+                        safety = sn, createdAt = now, lastActivityAt = now, torDir = torSub,
                         mixnet = nym,
                     )
                     val lc = sessions.open(meta, c)
@@ -1762,6 +1823,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 ui.post {
+                    if (gen != joinGen) return@post // cancelled — nothing to report
                     connecting = false
                     connectingLabel?.apply { text = "failed: ${ChatNet.friendlyError(e.message)}"; setTextColor(Tk.danger) }
                     toast("join failed")
@@ -1771,6 +1833,9 @@ class MainActivity : Activity() {
     }
 
     private var connecting = false
+    // Bumped whenever a join starts or is cancelled; a finishing join thread
+    // whose generation is stale must NOT hijack whatever screen the user is on.
+    private var joinGen = 0
     private var connectingLabel: TextView? = null
 
     /** A connecting screen with a live status line (Tor bootstrap % → handshake). */
@@ -1786,7 +1851,8 @@ class MainActivity : Activity() {
                 .also { it.setPadding(0, dp(16), 0, 0) },
         )
         col.addView(pillButton("Cancel", panel, fg) {
-            connecting = false; setContentView(chatListScreen())
+            connecting = false; joinGen++ // invalidate the in-flight join
+            setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(36)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -1917,8 +1983,19 @@ class MainActivity : Activity() {
         }, 1500)
     }
 
-    /** Redraw the chat list if it's the visible screen (to refresh unread/preview). */
-    private fun refreshListRowIfVisible() { if (activeId == null) ui.post { setContentView(chatListScreen()) } }
+    /** Redraw the chat list if it's the visible screen (to refresh unread/preview).
+     *  Guarded so it never replaces a subscreen the user is on, and debounced so
+     *  an event burst rebuilds once, not once per event. */
+    private var listRefreshQueued = false
+    private fun refreshListRowIfVisible() {
+        if (activeId != null || backState != Back.HOME) return
+        if (listRefreshQueued) return
+        listRefreshQueued = true
+        ui.postDelayed({
+            listRefreshQueued = false
+            if (activeId == null && backState == Back.HOME) setContentView(chatListScreen())
+        }, 300)
+    }
 
     // ---------- view helpers ----------
     // The pre-30 inset getters are deprecated; suppressed at function level so
