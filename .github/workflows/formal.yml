@@ -64,9 +64,12 @@ jobs:
           z3-4.13.3 --version
       - name: Install F* (via opam)
         run: |
-          sudo apt-get update && sudo apt-get install -y opam
+          # F*'s opam package requires a system depext (python2.7). Non-interactive
+          # opam defaults the depext prompt to 'n' and aborts (exit 10), so pre-install
+          # it AND let opam confirm any others via --confirm-level=unsafe-yes.
+          sudo apt-get update && sudo apt-get install -y opam python2.7
           opam init --disable-sandboxing -y
-          opam install -y fstar
+          opam install --confirm-level=unsafe-yes fstar
       - name: Verify GroupAuth.fst
         run: |
           eval $(opam env)
@@ -93,9 +96,11 @@ jobs:
           z3 --version
       - name: Install EasyCrypt (via opam)
         run: |
+          # Let opam install EasyCrypt's system depexts (why3 provers, gmp, etc.)
+          # non-interactively — the default 'n' on the depext prompt aborts (exit 10).
           sudo apt-get update && sudo apt-get install -y opam
           opam init --disable-sandboxing -y
-          opam install -y easycrypt
+          opam install --confirm-level=unsafe-yes easycrypt
       - name: Configure provers and verify the QROM reductions
         run: |
           eval $(opam env)
