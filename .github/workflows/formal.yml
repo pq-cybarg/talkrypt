@@ -71,4 +71,33 @@ jobs:
         run: |
           eval $(opam env)
           z3-4.13.3 --version
-          make -C formal verify
+          make -C formal fstar
+
+  easycrypt:
+    name: "EasyCrypt — QROM reductions"
+    # Pin 22.04 (glibc 2.35) to match the prebuilt Z3 4.13.3 Linux asset.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      # EasyCrypt's why3 supports Z3 in the ^4.13 range; install 4.13.3 and expose it.
+      - name: Install Z3 4.13.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o z3.zip \
+            https://github.com/Z3Prover/z3/releases/download/z3-4.13.3/z3-4.13.3-x64-glibc-2.35.zip
+          unzip -q z3.zip
+          z3bin="$(find . -type f -path '*/bin/z3' | head -1)"
+          test -n "$z3bin"
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3-4.13.3
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3
+          z3 --version
+      - name: Install EasyCrypt (via opam)
+        run: |
+          sudo apt-get update && sudo apt-get install -y opam
+          opam init --disable-sandboxing -y
+          opam install -y easycrypt
+      - name: Configure provers and verify the QROM reductions
+        run: |
+          eval $(opam env)
+          easycrypt why3config
+          make -C formal easycrypt

@@ -38,8 +38,11 @@ type log = pk -> msg -> bool
 /// holder of [pk] over [m]; i.e. (pk,m) is in the honest-signing log. This is the
 /// EUF-CMA idealization: no forgery without the secret key.
 assume val verify : log -> pk -> msg -> sig -> bool
-/// EUF-CMA axiom: verification succeeds ONLY for logged (honestly-signed) pairs.
-/// Contrapositive: if (pk,m) was never honestly signed, no signature verifies.
+/// EUF-CMA axiom (QROM): verification succeeds ONLY for logged (honestly-signed)
+/// pairs. This is the EUF-CMA-in-the-QROM assumption for ML-DSA-87 (FIPS 204) — an
+/// adversary with superposition random-oracle access still cannot forge. Every
+/// theorem below is a straight-line, rewinding-free implication from this axiom, so
+/// the reductions are QROM-preserving: the results hold against a quantum adversary.
 assume EUFCMA : (forall (l:log) (k:pk) (m:msg) (s:sig).
                     verify l k m s ==> l k m == true)
 

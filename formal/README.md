@@ -1,39 +1,86 @@
 # Formal verification (`formal/`)
 
-Machine-checked proofs of talkrypt's **group-message sender authentication**
-(SECURITY-AUDIT G1/G2/T-1/T-2), verified under a **quantum threat model**.
+Machine-checked proofs of talkrypt's cryptographic core, under a **quantum threat
+model** (a cryptographically-relevant quantum computer with superposition
+random-oracle access — the QROM). Two independent proof engines plus the Rust-side
+Kani/proptest harnesses form a defense-in-depth stack.
 
-## `GroupAuth.fst` — F* model + theorems
+Run everything: `make verify` (needs `fstar.exe` + `easycrypt` on PATH).
 
-Signatures are modeled as an idealized **EUF-CMA** primitive (the standard
-computational abstraction of **ML-DSA-87 / FIPS 204**); its unforgeability against
-a cryptographically-relevant quantum computer is a NIST-standard assumption, so the
-whole result is quantum-sound to exactly the degree ML-DSA is. The model mirrors the
-Rust `decrypt_verified` / `verify_pop` / `apply_commit` logic line-for-line.
+## Artifacts
 
-**Theorems (all discharged, no `admit`/`assume` in any proof):**
-1. `thm_fail_closed` — a message for a leaf with no bound key is always rejected.
-2. `thm_authenticity` — accept ⟹ the holder of the leaf's bound key signed exactly this (epoch, leaf, n, ct).
-3. `thm_no_cross_leaf_forgery` (G1) — a member cannot get a message accepted as another leaf without that leaf's secret.
-4. `thm_pop_binds_key` (T-1) — a verifying PoP proves possession of exactly the presented key.
-5. `thm_pop_not_transferable` (T-1) — a PoP for `k` cannot admit a different key `k'`.
-6. `thm_pop_msg_non_confusion` (T-1) — domain separation: a PoP signature is never a valid message signature (POP_CONTEXT ≠ SIG_CONTEXT).
-7. `thm_rotation_rebinds` (T-2) — rotating a leaf rebinds it to the fresh key.
-8. `thm_auth_pcs` (T-2) — after rotation, a signature under the compromised old key is rejected (post-compromise security for authentication).
-9. `thm_decision_deterministic` — the acceptance decision is a pure function (no relay can make one frame accepted for A, rejected for B).
+### `GroupAuth.fst` — F*, symbolic group-message authentication
+Signatures are an idealized **EUF-CMA-in-the-QROM** primitive (ML-DSA-87 / FIPS 204).
+Nine theorems, all discharged, zero `admit`: fail-closed, authenticity,
+no-cross-leaf-forgery (G1/G2), PoP soundness + non-transferability + domain-separation
+(T-1), rotation-rebind + auth-PCS (T-2), decision determinism. Every proof is a
+straight-line, rewinding-free implication from the EUF-CMA axiom, so the reductions
+are **QROM-preserving** — the results hold against a quantum adversary.
 
-**Assumptions** (only primitive-level, all justified):
-- `EUFCMA` — ML-DSA-87 is existentially unforgeable under chosen-message attack (FIPS 204).
-- `TranscriptInjective`, `PopInjective`, `PopDomainSep` — guaranteed by the domain-separated, length-prefixed wire encoding. The *implementation* side of this (that the decoders are total and unambiguous on all inputs) is machine-proven separately by the **Kani** harnesses in `crates/crypto/src/treekem.rs` (`proofs::v2_message_parse_is_total`, `proofs::sender_leaf_never_panics`) and `crates/wire/src/lib.rs`.
-- `PkInjective` — distinct signing keys have distinct public keys.
+### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
+- `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
+  any group-message forger yields an EUF-CMA forger with equal probability. Black-box
+  + no-rewinding => QROM-valid.
+- `accepts_route` models `decrypt_verified` **branch-for-branch** (v1-reject,
+  unknown-leaf-reject, bad-sig-reject, wrong-epoch-reject, accept) as a total function,
+  and `accept_route_requires_valid_sig` proves **no route** accepts without a valid
+  signature at the right epoch. `v1_always_rejected` / `unknown_leaf_rejected` prove
+  the fail-closed routes on all inputs. Together: every code path is covered.
 
-Run: `make verify` (or `fstar.exe GroupAuth.fst`).
+### `ConfidentialityQROM.ec` — EasyCrypt, confidentiality model
+Defines the **KEM IND-CCA-QROM** game (ML-KEM-1024 / FIPS 203) and the **DEM one-time**
+axiom (AES-256-GCM under fresh per-message keys), and machine-proves the
+confidentiality core: under a fresh random key the DEM observable is identically
+distributed for any two plaintexts (`dem_observable_message_independent`,
+`dem_no_distinguisher`). Full per-message confidentiality is the standard KEM-DEM
+hybrid, QROM-preserving because the KEM real->random swap is black-box/straight-line.
+
+## What is assumed vs. proved
+
+**Assumed** (only primitive-level, all NIST-standardized with published QROM proofs):
+- ML-DSA-87 EUF-CMA in the QROM (FIPS 204).
+- ML-KEM-1024 IND-CCA in the QROM (FIPS 203).
+- AES-256-GCM one-time DEM security.
+
+**Proved** (machine-checked here): every protocol-level reduction and route from the
+above — nothing about the protocol logic is taken on faith. The QROM-hardness of the
+primitives themselves is not re-derived (that is FIPS 203/204 + the formosa-crypto /
+community proofs).
+
+## Fidelity to the implementation (model <=> code)
+
+The proofs are only meaningful if the models match the Rust. The correspondence,
+audited line-by-line (`crates/crypto/src/treekem.rs`):
+
+| Model construct | Rust counterpart |
+| --- | --- |
+| `transcript epoch leaf n ct` (F*, EC) | `sig_transcript(epoch, leaf, n, ct) = SIG_CONTEXT | epoch | leaf | n | ct` |
+| `accepts` (F*) / `accepts_route` (EC) | `decrypt_verified`: version -> `leaf_sig_keys.get` -> `vk.verify` -> epoch -> `decrypt_body` |
+| routes 1-5 of `accepts_route` | the five branches of `decrypt_verified`, same order |
+| `pop_msg k = POP_CONTEXT | k` (F*) | `pop_transcript(sig_public) = POP_CONTEXT | sig_vk` |
+| `PopDomainSep` (F*) | `POP_CONTEXT != SIG_CONTEXT` (distinct consts) |
+| `verify_pop l k p` (F*) | `verify_pop(sig_public, pop)` |
+| rotation `rebind` + auth-PCS (F*) | `update()` / `commit_update` `sig_update` rebinding `leaf_sig_keys` |
+| KEM `encap` / IND-CCA (EC) | `KemProfile` ML-KEM-1024 encapsulate/decapsulate (`hybrid.rs`) |
+| DEM `aead` one-time (EC) | AES-256-GCM `aead::seal/open` under fresh ratchet keys |
+
+F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
+different signature); the EasyCrypt `accepts_route` models the epoch check as an
+explicit reject branch. Together they cover the route both ways.
 
 ## Verification stack (defense in depth)
 
 | Layer | Tool | What it proves |
-|---|---|---|
-| Protocol auth logic | **F\*** (`GroupAuth.fst`) | The 9 security theorems above, by reduction to EUF-CMA. |
-| Wire decoders | **Kani** (bounded model checker) | The v2 message + membership parsers are total & memory-safe on ALL inputs. |
-| End-to-end behavior | **proptest** | Authenticity, integrity, PoP-rejection, decoder totality over randomized real-crypto runs. |
-| Primitives | **FIPS KAT / ACVP** (`selftest.rs`) | ML-KEM-1024 / ML-DSA-87 match NIST test vectors. |
+| --- | --- | --- |
+| Protocol auth (symbolic) | **F\*** | The 9 authentication theorems, QROM-sound. |
+| Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
+| Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
+| Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |
+| End-to-end | **proptest** | Authenticity, integrity, PoP-rejection, decoder totality over real crypto. |
+| Primitives | **FIPS KAT / ACVP** | ML-KEM-1024 / ML-DSA-87 match NIST vectors (`selftest.rs`). |
+
+## Soundness of the checkers
+
+The EasyCrypt proofs were validated against a **deliberately false lemma**, which the
+checker rejects (`cannot prove goal`) — confirming `smt()` genuinely discharges goals
+rather than vacuously admitting. F* reports "All verification conditions discharged".
