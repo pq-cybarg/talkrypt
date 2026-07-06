@@ -48,32 +48,21 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-      # F* pins an exact Z3 version and looks for it on PATH as `z3-<version>`.
-      # opam's F* here wants 4.13.3, so install that release and expose it as both
-      # `z3-4.13.3` and `z3` before running F*.
-      - name: Install Z3 4.13.3 (the version F* pins)
+      # F*'s official prebuilt binary is self-contained: it bundles its own Z3 and
+      # runs on python3 — so no opam, no ancient F* (2022.01.15), no python2.7 depext,
+      # and no separate Z3 install. Pin an exact release for reproducibility.
+      - name: Install F* (official self-contained binary)
         run: |
           set -euo pipefail
-          curl -fsSL -o z3.zip \
-            https://github.com/Z3Prover/z3/releases/download/z3-4.13.3/z3-4.13.3-x64-glibc-2.35.zip
-          unzip -q z3.zip
-          z3bin="$(find . -type f -path '*/bin/z3' | head -1)"
-          test -n "$z3bin"
-          sudo install -m 0755 "$z3bin" /usr/local/bin/z3-4.13.3
-          sudo install -m 0755 "$z3bin" /usr/local/bin/z3
-          z3-4.13.3 --version
-      - name: Install F* (via opam)
-        run: |
-          # F*'s opam package requires a system depext (python2.7). Non-interactive
-          # opam defaults the depext prompt to 'n' and aborts (exit 10), so pre-install
-          # it AND let opam confirm any others via --confirm-level=unsafe-yes.
-          sudo apt-get update && sudo apt-get install -y opam python2.7
-          opam init --disable-sandboxing -y
-          opam install --confirm-level=unsafe-yes fstar
+          curl -fsSL -o fstar.tar.gz \
+            https://github.com/FStarLang/FStar/releases/download/v2026.07.05/fstar-v2026.07.05-Linux-x86_64.tar.gz
+          tar xzf fstar.tar.gz
+          fstarbin="$(find "$PWD" -type f -name fstar.exe | head -1)"
+          test -n "$fstarbin"
+          echo "$(dirname "$fstarbin")" >> "$GITHUB_PATH"
       - name: Verify GroupAuth.fst
         run: |
-          eval $(opam env)
-          z3-4.13.3 --version
+          fstar.exe --version
           make -C formal fstar
 
   easycrypt:
@@ -94,13 +83,14 @@ jobs:
           sudo install -m 0755 "$z3bin" /usr/local/bin/z3-4.13.3
           sudo install -m 0755 "$z3bin" /usr/local/bin/z3
           z3 --version
-      - name: Install EasyCrypt (via opam)
+      - name: Install EasyCrypt + Alt-Ergo (via opam)
         run: |
-          # Let opam install EasyCrypt's system depexts (why3 provers, gmp, etc.)
-          # non-interactively — the default 'n' on the depext prompt aborts (exit 10).
+          # --confirm-level=unsafe-yes lets opam install any system depexts itself
+          # (the default 'n' on the depext prompt aborts with exit 10). Alt-Ergo is
+          # EasyCrypt's primary SMT prover, driven via why3 alongside Z3.
           sudo apt-get update && sudo apt-get install -y opam
           opam init --disable-sandboxing -y
-          opam install --confirm-level=unsafe-yes easycrypt
+          opam install --confirm-level=unsafe-yes easycrypt alt-ergo
       - name: Configure provers and verify the QROM reductions
         run: |
           eval $(opam env)
