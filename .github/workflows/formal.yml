@@ -85,11 +85,13 @@ jobs:
           z3 --version
       - name: Install EasyCrypt + Alt-Ergo (via opam)
         run: |
-          # --confirm-level=unsafe-yes lets opam install any system depexts itself
-          # (the default 'n' on the depext prompt aborts with exit 10). Alt-Ergo is
-          # EasyCrypt's primary SMT prover, driven via why3 alongside Z3.
+          # EasyCrypt is NOT in the default opam repo ("No package named easycrypt"),
+          # so pin it from its release tag first, then install. --confirm-level=unsafe-yes
+          # lets opam install system depexts itself. Alt-Ergo is EasyCrypt's primary SMT
+          # prover (driven via why3, alongside the Z3 installed above).
           sudo apt-get update && sudo apt-get install -y opam
           opam init --disable-sandboxing -y
+          opam pin add -yn easycrypt https://github.com/EasyCrypt/easycrypt.git#r2026.06
           opam install --confirm-level=unsafe-yes easycrypt alt-ergo
       - name: Configure provers and verify the QROM reductions
         run: |
