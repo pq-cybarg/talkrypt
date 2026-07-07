@@ -363,6 +363,9 @@ fn read_fp(r: &mut Reader) -> Option<[u8; 48]> {
 
 type SharedSession = Arc<AsyncMutex<Box<dyn SessionHandle>>>;
 type SharedWriter = Arc<AsyncMutex<Box<dyn FrameWriter>>>;
+/// A learned peer route (SECURITY-AUDIT A-1): the signer's monotonic `issued`
+/// stamp and the endpoint set it advertised at that time.
+type RouteEntry = (u64, Vec<String>);
 
 struct Peer {
     fingerprint: [u8; 48],
@@ -420,11 +423,14 @@ struct Inner {
     /// just means "unverified / pseudonymous", never a message drop.
     verified_leaf_accounts: Mutex<HashMap<u32, [u8; 48]>>,
     /// Learned reachable routes per peer (SECURITY-AUDIT A-1): device fingerprint ->
-    /// its advertised endpoint set. Populated from gossiped, identity-signed route
-    /// descriptors so a member can reach the group via ANY member, not only the
-    /// founding host. Bounded to keep a hostile relay from bloating it. Routes are
-    /// hints; the handshake authenticates whoever answers.
-    known_routes: Mutex<HashMap<[u8; 48], Vec<String>>>,
+    /// `(issued, endpoints)` — the signer's monotonic timestamp and its advertised
+    /// endpoint set. Populated from gossiped, identity-signed route descriptors so a
+    /// member can reach the group via ANY member, not only the founding host. Entry
+    /// count is bounded ([`MAX_KNOWN_ROUTES`]) and storage is roster-gated so a hostile
+    /// node cannot bloat it with keys it forges from throwaway identities; the `issued`
+    /// stamp rejects replay/rollback to a stale route set. Routes are hints; the
+    /// handshake authenticates whoever answers.
+    known_routes: Mutex<HashMap<[u8; 48], RouteEntry>>,
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
@@ -887,17 +893,23 @@ impl Core {
             return;
         }
         let signer = self.inner.identity.public().clone();
+        // Monotonic per-signer stamp so peers can reject a replayed older descriptor.
+        // Wall-clock seconds; route changes within the same second collapse (an exact
+        // re-advertise is deduped anyway) — routes change far slower than that.
+        let issued = now_secs();
         let sig = self
             .inner
             .identity
-            .sign(&route_transcript(&signer, &endpoints));
-        let bytes = encode_route_descriptor(&signer, &endpoints, &sig);
-        // Record our own (so `known_routes` is complete) and flood to peers.
+            .sign(&route_transcript(&signer, issued, &endpoints));
+        let bytes = encode_route_descriptor(&signer, issued, &endpoints, &sig);
+        // Record our own (so `known_routes` is complete) and flood to peers. This is a
+        // deliberate local action, so it overwrites our own prior entry unconditionally
+        // (freshness only gates untrusted *incoming* descriptors in the handler).
         self.inner
             .known_routes
             .lock()
             .unwrap()
-            .insert(signer.fingerprint(), endpoints);
+            .insert(signer.fingerprint(), (issued, endpoints));
         route(&self.inner, Frame::RouteDescriptor(bytes), Route::Broadcast).await;
     }
 
@@ -915,7 +927,8 @@ impl Core {
         if !self.inner.peers.lock().unwrap().is_empty() {
             return None; // still connected — nothing to heal
         }
-        // Candidate endpoints across every peer whose routes we have learned.
+        // Candidate endpoints across every peer whose routes we have learned. Route
+        // storage is roster-gated, so these all belong to actual group members.
         let mut endpoints: Vec<String> = self
             .known_routes()
             .into_iter()
@@ -923,9 +936,28 @@ impl Core {
             .collect();
         endpoints.sort();
         endpoints.dedup();
+        // Identities we expect to reconnect to: current roster members plus any peer
+        // we hold a route for. The join handshake already gates on `root0` (only
+        // invited parties complete it); pinning to this set (SECURITY-AUDIT A-1)
+        // additionally keeps a reconnect from binding to an invited-but-non-member
+        // identity that merely answered at a learned address — an eclipse attempt
+        // lands on a stranger we immediately drop, never on a trusted peer slot.
+        let expected: std::collections::HashSet<[u8; 48]> = {
+            let roster = self.inner.roster.lock().unwrap();
+            let routes = self.inner.known_routes.lock().unwrap();
+            roster.values().copied().chain(routes.keys().copied()).collect()
+        };
         for ep in endpoints {
             if let Ok(fp) = self.connect(&ep).await {
-                return Some(fp);
+                if expected.contains(&fp) {
+                    return Some(fp);
+                }
+                // Answered, but not an expected member — drop it and keep trying.
+                self.inner
+                    .peers
+                    .lock()
+                    .unwrap()
+                    .retain(|p| p.fingerprint != fp);
             }
         }
         None
@@ -953,7 +985,7 @@ impl Core {
             .lock()
             .unwrap()
             .iter()
-            .map(|(fp, eps)| (*fp, eps.clone()))
+            .map(|(fp, (_, eps))| (*fp, eps.clone()))
             .collect()
     }
 
@@ -1032,47 +1064,60 @@ impl Core {
     }
 
     /// **Self-update** — rotate our own leaf: fresh ML-KEM path secrets AND a fresh
-    /// ML-DSA-87 leaf signing key, then broadcast the resulting commit. This gives
-    /// **post-compromise security on demand** (SECURITY-AUDIT T-2 activation): an
-    /// adversary who compromised our prior path/signing keys can no longer derive
-    /// the new epoch secret (confidentiality PCS) NOR forge messages as us
-    /// (authentication PCS) once the group applies this commit. No membership
-    /// change — the roster is unchanged.
+    /// ML-DSA-87 leaf signing key. This gives **post-compromise security on demand**
+    /// (SECURITY-AUDIT T-2/T-4): an adversary who compromised our prior path/signing
+    /// keys can no longer derive the new epoch secret (confidentiality PCS) NOR forge
+    /// messages as us (authentication PCS) once the group applies the resulting
+    /// commit. No membership change — the roster is unchanged.
     ///
-    /// Currently host-driven: the host (who relays commits) rotates its own leaf and
-    /// broadcasts. Member-initiated self-update needs the member→host→broadcast
-    /// relay path and is a follow-up; see `docs/`/the PR. A no-op off a group.
+    /// The committer (host) rotates its own leaf and broadcasts the commit directly. A
+    /// **member** cannot commit, so it PROPOSES a self-rekey and sends it to the host,
+    /// which commits + broadcasts (T-4); the proposer stages its new keys and installs
+    /// them when that broadcast commit — which carries this Update — comes back to it.
+    /// A no-op off a group.
     pub async fn self_update(&self) -> Result<()> {
-        // Only the committer (host) drives commits in the hub topology today.
-        if self.inner.role != GroupRole::Host {
-            return Ok(());
-        }
-        let tagged = {
-            let mut g = self.inner.group.lock().await;
-            match g.as_mut() {
-                Some(grp) => {
-                    let from_epoch = grp.epoch();
-                    grp.update().ok().map(|c| (from_epoch, c.encode()))
-                }
-                None => None,
+        match self.inner.role {
+            GroupRole::Host => {
+                let tagged = {
+                    let mut g = self.inner.group.lock().await;
+                    match g.as_mut() {
+                        Some(grp) => {
+                            let from_epoch = grp.epoch();
+                            grp.update().ok().map(|c| (from_epoch, c.encode()))
+                        }
+                        None => None,
+                    }
+                };
+                let Some((from_epoch, commit_bytes)) = tagged else {
+                    return Ok(());
+                };
+                // Roster (leaf -> account fingerprint) is unchanged by an update; only
+                // the per-leaf signing key rotates, and that rides INSIDE the commit
+                // (`sig_update`), which every member verifies + applies in apply_commit.
+                route(
+                    &self.inner,
+                    Frame::Commit {
+                        from_epoch,
+                        bytes: commit_bytes,
+                    },
+                    Route::Broadcast,
+                )
+                .await;
+                Ok(())
             }
-        };
-        let Some((from_epoch, commit_bytes)) = tagged else {
-            return Ok(());
-        };
-        // Roster (leaf -> account fingerprint) is unchanged by an update; only the
-        // per-leaf signing key rotates, and that rides INSIDE the commit
-        // (`sig_update`), which every member verifies + applies in `apply_commit`.
-        route(
-            &self.inner,
-            Frame::Commit {
-                from_epoch,
-                bytes: commit_bytes,
-            },
-            Route::Broadcast,
-        )
-        .await;
-        Ok(())
+            GroupRole::Member => {
+                // Stage a fresh leaf keypair and emit an Update proposal (does NOT
+                // advance our epoch); the host authenticates us and commits it.
+                let proposal = {
+                    let mut g = self.inner.group.lock().await;
+                    g.as_mut().and_then(|grp| grp.propose_update().ok())
+                };
+                let Some(bytes) = proposal else { return Ok(()) };
+                route(&self.inner, Frame::UpdateProposal(bytes), Route::Committer).await;
+                Ok(())
+            }
+            GroupRole::None => Ok(()),
+        }
     }
 
     /// Start accepting inbound connections (spawns a background accept loop).
@@ -1483,6 +1528,9 @@ async fn reader_loop(
             Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
                 handle_commit(&inner, from_epoch, bytes).await;
             }
+            Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
+                handle_update_proposal(&inner, from, b).await;
+            }
             Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
                 let mut roster = inner.roster.lock().unwrap();
                 *roster = entries.into_iter().collect();
@@ -1548,17 +1596,27 @@ async fn reader_loop(
     }
 }
 
-/// Domain-separation prefix for a route descriptor's signature (A-1).
-const ROUTE_CONTEXT: &[u8] = b"talkrypt-route-descriptor-v1";
-/// Bounds so a hostile relay cannot bloat `known_routes`.
+/// Domain-separation prefix for a route descriptor's signature (A-1). The `-v2`
+/// bump reflects the added `issued` freshness stamp: a v1 signature (no timestamp)
+/// can never validate under the v2 transcript, so old descriptors cannot be replayed
+/// across the format change.
+const ROUTE_CONTEXT: &[u8] = b"talkrypt-route-descriptor-v2";
+/// Bounds so a hostile node cannot bloat `known_routes`.
 const MAX_ROUTE_ENDPOINTS: u32 = 8;
 const MAX_ROUTE_EP_LEN: usize = 512;
+/// Cap on the number of distinct signers whose routes we retain. Route storage is
+/// also roster-gated (only current members), so this is a belt-and-suspenders bound
+/// against unbounded growth even if the roster itself is large.
+const MAX_KNOWN_ROUTES: usize = 256;
 
-/// The bytes a node signs over its route descriptor: `ROUTE_CONTEXT | signer | eps`.
-fn route_transcript(signer: &IdentityPublic, endpoints: &[String]) -> Vec<u8> {
+/// The bytes a node signs over its route descriptor:
+/// `ROUTE_CONTEXT | signer | issued | eps`. Binding `issued` makes the timestamp
+/// tamper-evident, so a replayed old descriptor cannot masquerade as fresh.
+fn route_transcript(signer: &IdentityPublic, issued: u64, endpoints: &[String]) -> Vec<u8> {
     let mut w = talkrypt_wire::Writer::new();
     w.put_bytes(ROUTE_CONTEXT);
     w.put_bytes(&signer.sig_vk);
+    w.put_bytes(&issued.to_be_bytes());
     w.put_u32(endpoints.len() as u32);
     for e in endpoints {
         w.put_bytes(e.as_bytes());
@@ -1566,9 +1624,15 @@ fn route_transcript(signer: &IdentityPublic, endpoints: &[String]) -> Vec<u8> {
     w.into_vec()
 }
 
-fn encode_route_descriptor(signer: &IdentityPublic, endpoints: &[String], sig: &[u8]) -> Vec<u8> {
+fn encode_route_descriptor(
+    signer: &IdentityPublic,
+    issued: u64,
+    endpoints: &[String],
+    sig: &[u8],
+) -> Vec<u8> {
     let mut w = talkrypt_wire::Writer::new();
     w.put_bytes(&signer.sig_vk);
+    w.put_bytes(&issued.to_be_bytes());
     w.put_u32(endpoints.len() as u32);
     for e in endpoints {
         w.put_bytes(e.as_bytes());
@@ -1590,6 +1654,11 @@ async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<
     let mut r = talkrypt_wire::Reader::new(&bytes);
     let Some(parsed) = (|| {
         let sig_vk = r.get_bytes().ok()?.to_vec();
+        let issued_be = r.get_bytes().ok()?;
+        if issued_be.len() != 8 {
+            return None;
+        }
+        let issued = u64::from_be_bytes(issued_be.try_into().ok()?);
         let n = r.get_u32().ok()?;
         if n > MAX_ROUTE_ENDPOINTS {
             return None;
@@ -1604,23 +1673,45 @@ async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<
         }
         let sig = r.get_bytes().ok()?.to_vec();
         r.finish().ok()?;
-        Some((IdentityPublic { sig_vk }, endpoints, sig))
+        Some((IdentityPublic { sig_vk }, issued, endpoints, sig))
     })() else {
         return;
     };
-    let (signer, endpoints, sig) = parsed;
-    // Verify the signer actually authored these endpoints (tamper-evidence).
+    let (signer, issued, endpoints, sig) = parsed;
+    // Verify the signer actually authored these endpoints at this `issued` time.
     if signer
-        .verify(&route_transcript(&signer, &endpoints), &sig)
+        .verify(&route_transcript(&signer, issued, &endpoints), &sig)
         .is_err()
     {
         return;
     }
-    inner
-        .known_routes
-        .lock()
-        .unwrap()
-        .insert(signer.fingerprint(), endpoints);
+    let signer_fp = signer.fingerprint();
+    // Roster-gate storage (SECURITY-AUDIT A-1): only retain routes for a node that is
+    // actually a group member. Route descriptors are a group feature — every honest
+    // advertiser is in the roster — so this caps `known_routes` at the group size and
+    // stops a node from bloating the map with keys it forges from throwaway identities
+    // it never joins under. A node always knows its own route (it is in its own
+    // roster; the host seeds leaf 0 with itself).
+    if !inner.roster.lock().unwrap().values().any(|fp| *fp == signer_fp) {
+        return;
+    }
+    {
+        let mut routes = inner.known_routes.lock().unwrap();
+        // Freshness / anti-rollback (SECURITY-AUDIT A-1): reject a descriptor that is
+        // not strictly newer than the last one we hold for this signer, so a replayed
+        // older descriptor cannot roll a peer's routes back to a stale (attacker-
+        // chosen, now-unreachable) set. An exact replay is already dropped by the
+        // seen-set above; this additionally defeats a *different* stale descriptor.
+        if let Some((last, _)) = routes.get(&signer_fp) {
+            if issued <= *last {
+                return;
+            }
+        } else if routes.len() >= MAX_KNOWN_ROUTES {
+            // At capacity and this is a new signer: refuse rather than grow unbounded.
+            return;
+        }
+        routes.insert(signer_fp, (issued, endpoints));
+    }
     // Re-flood (host coordinates; a gossip bridge spans transport islands).
     let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
     if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
@@ -1638,6 +1729,12 @@ async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<
 /// account. A host re-broadcasts it so every member can verify independently — and
 /// because the chain is account-signed, the host can only relay it, never forge it.
 async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    // Dedup on the certificate bytes (SECURITY-AUDIT T-3 hardening): a member that
+    // re-sends the same cert must not make the host re-broadcast it to the whole
+    // group on every copy (amplification). Mirrors the route-descriptor gossip guard.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&bytes)) {
+        return;
+    }
     let Ok(chain) = IdentityChain::decode(&bytes) else { return };
     // The claimed account is the chain's root issuer; the leaf is its end key.
     let Some(account) = chain.links.first().map(|l| l.issuer.clone()) else { return };
@@ -1647,6 +1744,20 @@ async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>
     // cannot forge this (no account secret), so a pass is trustworthy.
     if chain.verify(&account, &leaf_key, now).is_err() {
         return;
+    }
+    // Reject a chain any of whose links the account has revoked (SECURITY-AUDIT T-3
+    // hardening): a leaked-but-revoked device/leaf key must not still bind its leaf to
+    // the account. Mirrors the revocation gate in `handle_identity`.
+    {
+        let account_fp = account.fingerprint();
+        let revs = inner.revocations.lock().unwrap();
+        if chain
+            .links
+            .iter()
+            .any(|l| revs.contains(&(account_fp, l.cert.subject.fingerprint())))
+        {
+            return;
+        }
     }
     // Bind to the group leaf whose tree signing key IS this chain's leaf key. If the
     // host substituted a different key into the tree, no leaf matches -> unverified.
@@ -1661,6 +1772,22 @@ async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>
         })
     };
     if let Some(leaf) = matched_leaf {
+        // SECURITY-AUDIT T-3 (device→leaf binding): the chain proves `account`
+        // vouches for `leaf_key`, but `leaf_key` is a PUBLIC tree signing key that
+        // every member reads from the ratchet tree. Binding the leaf to the account
+        // on key-match alone lets ANY peer certify a victim's public leaf key under
+        // an attacker-controlled account and overwrite the verified badge
+        // (attribution hijack). Require the device that vouches for the leaf key —
+        // the issuer of the chain's final link — to be the SAME device we
+        // authenticated into this leaf at the join handshake (`roster[leaf]`).
+        // Forging that final link needs the roster device's ML-DSA SECRET, which
+        // only the legitimate leaf operator holds, so this closes the hijack while
+        // still admitting the honest `account → device → leaf_sig_key` chain.
+        let leaf_device = inner.roster.lock().unwrap().get(&leaf).copied();
+        let cert_device = chain.links.last().map(|l| l.issuer.fingerprint());
+        if leaf_device.is_none() || leaf_device != cert_device {
+            return;
+        }
         inner
             .verified_leaf_accounts
             .lock()
@@ -1942,6 +2069,45 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
     }
 }
 
+/// HOST: a member proposed a self-rekey (SECURITY-AUDIT T-4). Authenticate the
+/// proposer by mapping its session fingerprint to the leaf it occupies, then commit
+/// the Update against THAT leaf — `commit_update` refuses a proposal targeting any
+/// other leaf, so a member can only rotate its OWN keys (no leaf-hijack) — and
+/// broadcast the resulting commit to the whole group. A proposal from a fingerprint
+/// not seated in the roster is dropped.
+async fn handle_update_proposal(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    let proposer_leaf = inner
+        .roster
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, fp)| **fp == from)
+        .map(|(l, _)| *l);
+    let Some(proposer_leaf) = proposer_leaf else { return };
+    let tagged = {
+        let mut g = inner.group.lock().await;
+        match g.as_mut() {
+            Some(grp) => {
+                let from_epoch = grp.epoch();
+                grp.commit_update(proposer_leaf, &bytes)
+                    .ok()
+                    .map(|c| (from_epoch, c.encode()))
+            }
+            None => None,
+        }
+    };
+    let Some((from_epoch, commit_bytes)) = tagged else { return };
+    route(
+        inner,
+        Frame::Commit {
+            from_epoch,
+            bytes: commit_bytes,
+        },
+        Route::Broadcast,
+    )
+    .await;
+}
+
 /// Decrypt a group message; the host also relays it to the other members.
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
@@ -2206,9 +2372,33 @@ mod tests {
         m1.send("hello host").await.unwrap();
         assert_eq!(next_message(&mut host_rx).await.0, "hello host");
 
+        // Capture m1's leaf signing key (as the host's tree holds it) before the rekey.
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        let sig_before = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+
         // The MEMBER self-rekeys: proposes, host commits, group heals.
         m1.self_update().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The rekey actually rotated m1's leaf signing key (post-compromise security);
+        // the host's tree now holds the NEW key, not the old one.
+        let sig_after = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+        assert!(sig_before.is_some() && sig_after.is_some());
+        assert_ne!(
+            sig_before, sig_after,
+            "the member's leaf signing key must rotate on a self-rekey"
+        );
 
         // Messaging still works both ways after the member's rekey (no fork).
         host.send("after m1 rekey").await.unwrap();
@@ -2276,6 +2466,76 @@ mod tests {
         );
     }
 
+    /// SECURITY-AUDIT T-3 (device→leaf binding): a leaf's tree signing key is PUBLIC,
+    /// so a hostile member/relay can certify a *victim's* leaf key under its OWN
+    /// account and, on key-match alone, overwrite the victim's verified badge
+    /// (attribution hijack). The handler must reject any leaf-sig cert whose final
+    /// certifying device is not the device authenticated into that leaf, leaving the
+    /// honest binding intact.
+    #[tokio::test]
+    async fn leaf_sig_cert_forgery_cannot_hijack_verified_account() {
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t3f",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // Honest linked member: its account certifies its device; it joins and binds.
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let acct_fp = account.public().fingerprint();
+        m1.present_identity(
+            IdentityChain::device(&account, m1.identity_public(), "device:m1", 0, 0),
+            Some("m1".into()),
+        );
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        // Precondition: the honest binding is in place.
+        assert_eq!(host.group_leaf_account(m1_leaf), Some(acct_fp));
+
+        // Attacker reads m1's PUBLIC leaf signing key straight from the ratchet tree
+        // and certifies it under the attacker's OWN account+device — no victim secret
+        // is needed. (Reading it from the host's tree models exactly that exposure.)
+        let victim_leaf_key = {
+            let g = host.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+                .expect("m1 leaf sig key in host tree")
+        };
+        let atk_acct = IdentityKeyPair::generate();
+        let atk_dev = IdentityKeyPair::generate();
+        let forged = IdentityChain::device(&atk_acct, atk_dev.public(), "device:atk", 0, 0)
+            .extend(&atk_dev, &victim_leaf_key, "leaf-sig", 0, 0);
+
+        // Feed the forgery straight to the host's handler as if relayed.
+        handle_leaf_sig_cert(&host.inner, [7u8; 48], forged.encode()).await;
+
+        // The honest binding must survive; the hijack to the attacker account is refused.
+        assert_eq!(
+            host.group_leaf_account(m1_leaf),
+            Some(acct_fp),
+            "a forged leaf-sig cert must not overwrite the verified account badge"
+        );
+        assert_ne!(
+            host.group_leaf_account(m1_leaf),
+            Some(atk_acct.public().fingerprint()),
+            "attacker account must never bind to the victim's leaf"
+        );
+    }
+
     /// SECURITY-AUDIT A-1: route-descriptor gossip. A host advertises its
     /// multi-homed routes; a connected member learns them (so it holds an alternate
     /// route if the host later drops). A member also advertising its routes reaches
@@ -2317,8 +2577,8 @@ mod tests {
         let victim = IdentityKeyPair::generate();
         let eps = vec!["evil.onion".to_string()];
         // Sign with attacker but claim to be victim: encode victim's key + attacker's sig.
-        let bad_sig = attacker.sign(&route_transcript(victim.public(), &eps));
-        let forged = encode_route_descriptor(victim.public(), &eps, &bad_sig);
+        let bad_sig = attacker.sign(&route_transcript(victim.public(), 1, &eps));
+        let forged = encode_route_descriptor(victim.public(), 1, &eps, &bad_sig);
         // Feed it straight to the handler as if received.
         handle_route_descriptor(&host.inner, [9u8; 48], forged).await;
         assert!(
@@ -2363,6 +2623,129 @@ mod tests {
         // reconnect() dials the learned route and re-establishes the link.
         let healed = m1.reconnect().await;
         assert_eq!(healed, Some(host.fingerprint()), "reconnect restores the link via the learned route");
+    }
+
+    /// SECURITY-AUDIT A-1 (roster gate): a route descriptor with a perfectly VALID
+    /// signature but from a signer that is not a current group member must not be
+    /// stored. Route storage is a group feature; accepting non-members lets anyone
+    /// bloat `known_routes` with keys minted from throwaway identities.
+    #[tokio::test]
+    async fn route_descriptor_from_non_member_is_rejected() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1g",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // A stranger signs its OWN valid descriptor but never joined the group.
+        let stranger = IdentityKeyPair::generate();
+        let eps = vec!["stranger.onion".to_string()];
+        let sig = stranger.sign(&route_transcript(stranger.public(), 100, &eps));
+        let good = encode_route_descriptor(stranger.public(), 100, &eps, &sig);
+        handle_route_descriptor(&host.inner, [3u8; 48], good).await;
+
+        assert!(
+            !host
+                .known_routes()
+                .iter()
+                .any(|(fp, _)| *fp == stranger.public().fingerprint()),
+            "a validly-signed route from a non-member must be rejected (roster gate)"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1 (freshness / anti-rollback): a replayed OLDER descriptor
+    /// from a member — even with a valid signature — must not roll that member's
+    /// stored routes back to a stale (attacker-chosen, now-unreachable) set.
+    #[tokio::test]
+    async fn stale_route_descriptor_cannot_roll_back_routes() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1f",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // m1 is now a roster member on the host, so its (signed) descriptors pass the gate.
+        let m1_pub = m1.identity_public().clone();
+
+        // Fresher descriptor first (issued = 200).
+        let fresh_eps = vec!["fresh.onion".to_string()];
+        let fresh_sig = m1.inner.identity.sign(&route_transcript(&m1_pub, 200, &fresh_eps));
+        let fresh = encode_route_descriptor(&m1_pub, 200, &fresh_eps, &fresh_sig);
+        handle_route_descriptor(&host.inner, [4u8; 48], fresh).await;
+
+        // Then a replayed, validly-signed OLDER descriptor (issued = 100).
+        let stale_eps = vec!["stale.onion".to_string()];
+        let stale_sig = m1.inner.identity.sign(&route_transcript(&m1_pub, 100, &stale_eps));
+        let stale = encode_route_descriptor(&m1_pub, 100, &stale_eps, &stale_sig);
+        handle_route_descriptor(&host.inner, [4u8; 48], stale).await;
+
+        let got = host
+            .known_routes()
+            .into_iter()
+            .find(|(fp, _)| *fp == m1_pub.fingerprint())
+            .map(|(_, e)| e);
+        assert_eq!(
+            got,
+            Some(fresh_eps),
+            "a replayed older descriptor must not override the fresher routes"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1 (eclipse resistance): if a learned address is answered by
+    /// an identity we do not expect (not a current roster member, nor the peer we
+    /// learned the route from), `reconnect()` must NOT report it as a heal. The join
+    /// handshake already gates on `root0`; this pins the reconnected identity too, so
+    /// an invited-but-non-member that merely answers cannot capture the peer slot.
+    #[tokio::test]
+    async fn reconnect_refuses_unexpected_identity_at_learned_address() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1e",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // A stranger that shares the chat's `root0` (same descriptor → the handshake
+        // will succeed) but is NOT a member of the group's roster.
+        let (evil, _erx) = group_core(&fabric, "evil", &desc, true);
+        evil.host().await.unwrap();
+
+        // m1 holds a learned route to "evil" attributed to some ghost fp it will never
+        // actually meet there (models a stale / poisoned learned address).
+        let ghost = IdentityKeyPair::generate();
+        m1.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .insert(ghost.public().fingerprint(), (1, vec!["evil".to_string()]));
+
+        // Partition m1, then reconnect: it dials "evil", completes the handshake, but
+        // evil's fp is neither a roster member nor the ghost route-owner → refused.
+        m1.inner.peers.lock().unwrap().clear();
+        let healed = m1.reconnect().await;
+        assert_eq!(
+            healed, None,
+            "reconnect must refuse an unexpected identity answering a learned address"
+        );
     }
 
     /// The gossip dedup key: a bounded seen-set that reports first sightings as

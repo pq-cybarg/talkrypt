@@ -904,16 +904,26 @@ impl TreeKemGroup {
         Ok(w.into_vec())
     }
 
-    /// HOST: commit a member's `Update` proposal (SECURITY-AUDIT T-4). Applies the
-    /// proposal (replacing that leaf's keys) and re-keys our path, producing a
-    /// `Commit` that every member — including the proposer — applies. Single
-    /// committer, so no fork. Rejects anything that is not an `Update` proposal.
-    pub fn commit_update(&mut self, proposal_bytes: &[u8]) -> Result<Commit> {
+    /// HOST: commit a member's `Update` proposal (SECURITY-AUDIT T-4). `proposer_leaf`
+    /// is the leaf the caller **authenticated** the proposal as coming from (e.g. the
+    /// transport session → roster leaf). The proposal is rejected unless it updates
+    /// exactly that leaf, so a member can only rotate ITS OWN keys — a malicious
+    /// member cannot craft an `Update { leaf: victim }` to seize another member's leaf
+    /// (leaf-hijack). Applies the proposal (replacing that leaf's KEM + signing keys),
+    /// re-keys our path, and returns a `Commit` every member — including the proposer —
+    /// applies. Single committer, so no fork. Rejects anything that is not an `Update`.
+    pub fn commit_update(&mut self, proposer_leaf: u32, proposal_bytes: &[u8]) -> Result<Commit> {
         let mut r = talkrypt_wire::Reader::new(proposal_bytes);
         let prop = Proposal::get(self.profile, &mut r)?;
         r.finish()?;
-        if !matches!(prop, Proposal::Update { .. }) {
-            return Err(CryptoError::Malformed("expected an Update proposal"));
+        match &prop {
+            Proposal::Update { leaf, .. } if *leaf == proposer_leaf => {}
+            Proposal::Update { .. } => {
+                return Err(CryptoError::Malformed(
+                    "update proposal leaf does not match its authenticated proposer",
+                ));
+            }
+            _ => return Err(CryptoError::Malformed("expected an Update proposal")),
         }
         let proposals = vec![prop];
         self.apply_proposals(&proposals)?;
@@ -1812,8 +1822,9 @@ mod tests {
         let proposal = b.propose_update().unwrap();
         assert_eq!(b.epoch, epoch_before, "proposing must not advance the proposer");
 
-        // The host commits it; everyone (incl. b) applies the SAME commit.
-        let commit = a.commit_update(&proposal).unwrap();
+        // The host commits it (authenticating the proposer as b's leaf); everyone
+        // (incl. b) applies the SAME commit.
+        let commit = a.commit_update(b_leaf, &proposal).unwrap();
         b.apply_commit(&commit).unwrap();
         c.apply_commit(&commit).unwrap();
 
@@ -1841,6 +1852,47 @@ mod tests {
         w.put_u32(epoch); w.put_u32(b_leaf); w.put_u32(0);
         w.put_bytes(&ct); w.put_bytes(&sig);
         assert!(matches!(a.decrypt_verified(&w.into_vec()), Err(CryptoError::BadSignature)));
+    }
+
+    /// SECURITY-AUDIT T-4 (leaf-hijack defense): `commit_update` binds the proposal to
+    /// the authenticated proposer's leaf. A member cannot make the host apply an
+    /// `Update` that rewrites ANOTHER member's leaf keys — even with a valid PoP on the
+    /// substituted key — so it can never seize a victim's leaf.
+    #[test]
+    fn commit_update_rejects_leaf_hijack() {
+        let mut a = TreeKemGroup::create(); // host / committer
+        let mut b = add_member(&mut a, &mut []); // victim
+        let c = add_member(&mut a, &mut [&mut b]); // attacker (a real member)
+        let b_leaf = b.my_leaf();
+        let c_leaf = c.my_leaf();
+        assert_ne!(b_leaf, c_leaf);
+
+        // Attacker c forges an Update targeting b's leaf, with keys c controls and a
+        // VALID proof-of-possession (so only the leaf binding can reject it).
+        let kp = LeafKeyPair::generate_with(a.profile);
+        let package = kp.key_package();
+        let forged = Proposal::Update {
+            leaf: b_leaf,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+        };
+        let mut w = talkrypt_wire::Writer::new();
+        forged.put(&mut w);
+        let bytes = w.into_vec();
+
+        // The host authenticated the proposal as c's session (c_leaf); it claims
+        // b_leaf → refused, and b's signing key is untouched.
+        let b_sig_before = a.leaf_sig_public(b_leaf).cloned();
+        assert!(matches!(
+            a.commit_update(c_leaf, &bytes),
+            Err(CryptoError::Malformed(_))
+        ));
+        assert_eq!(
+            a.leaf_sig_public(b_leaf).cloned(),
+            b_sig_before,
+            "victim leaf signing key must be untouched by a rejected hijack"
+        );
     }
 
     /// SECURITY-AUDIT T-2: `update()` rotates the caller's leaf SIGNING key, giving
