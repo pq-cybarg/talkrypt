@@ -1638,6 +1638,12 @@ async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<
 /// account. A host re-broadcasts it so every member can verify independently — and
 /// because the chain is account-signed, the host can only relay it, never forge it.
 async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    // Dedup on the certificate bytes (SECURITY-AUDIT T-3 hardening): a member that
+    // re-sends the same cert must not make the host re-broadcast it to the whole
+    // group on every copy (amplification). Mirrors the route-descriptor gossip guard.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&bytes)) {
+        return;
+    }
     let Ok(chain) = IdentityChain::decode(&bytes) else { return };
     // The claimed account is the chain's root issuer; the leaf is its end key.
     let Some(account) = chain.links.first().map(|l| l.issuer.clone()) else { return };
@@ -1647,6 +1653,20 @@ async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>
     // cannot forge this (no account secret), so a pass is trustworthy.
     if chain.verify(&account, &leaf_key, now).is_err() {
         return;
+    }
+    // Reject a chain any of whose links the account has revoked (SECURITY-AUDIT T-3
+    // hardening): a leaked-but-revoked device/leaf key must not still bind its leaf to
+    // the account. Mirrors the revocation gate in `handle_identity`.
+    {
+        let account_fp = account.fingerprint();
+        let revs = inner.revocations.lock().unwrap();
+        if chain
+            .links
+            .iter()
+            .any(|l| revs.contains(&(account_fp, l.cert.subject.fingerprint())))
+        {
+            return;
+        }
     }
     // Bind to the group leaf whose tree signing key IS this chain's leaf key. If the
     // host substituted a different key into the tree, no leaf matches -> unverified.
@@ -1661,6 +1681,22 @@ async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>
         })
     };
     if let Some(leaf) = matched_leaf {
+        // SECURITY-AUDIT T-3 (device→leaf binding): the chain proves `account`
+        // vouches for `leaf_key`, but `leaf_key` is a PUBLIC tree signing key that
+        // every member reads from the ratchet tree. Binding the leaf to the account
+        // on key-match alone lets ANY peer certify a victim's public leaf key under
+        // an attacker-controlled account and overwrite the verified badge
+        // (attribution hijack). Require the device that vouches for the leaf key —
+        // the issuer of the chain's final link — to be the SAME device we
+        // authenticated into this leaf at the join handshake (`roster[leaf]`).
+        // Forging that final link needs the roster device's ML-DSA SECRET, which
+        // only the legitimate leaf operator holds, so this closes the hijack while
+        // still admitting the honest `account → device → leaf_sig_key` chain.
+        let leaf_device = inner.roster.lock().unwrap().get(&leaf).copied();
+        let cert_device = chain.links.last().map(|l| l.issuer.fingerprint());
+        if leaf_device.is_none() || leaf_device != cert_device {
+            return;
+        }
         inner
             .verified_leaf_accounts
             .lock()
@@ -2273,6 +2309,76 @@ mod tests {
             host.group_leaf_account(m2_leaf),
             None,
             "a pseudonym leaf must not be bound to any account"
+        );
+    }
+
+    /// SECURITY-AUDIT T-3 (device→leaf binding): a leaf's tree signing key is PUBLIC,
+    /// so a hostile member/relay can certify a *victim's* leaf key under its OWN
+    /// account and, on key-match alone, overwrite the victim's verified badge
+    /// (attribution hijack). The handler must reject any leaf-sig cert whose final
+    /// certifying device is not the device authenticated into that leaf, leaving the
+    /// honest binding intact.
+    #[tokio::test]
+    async fn leaf_sig_cert_forgery_cannot_hijack_verified_account() {
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t3f",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // Honest linked member: its account certifies its device; it joins and binds.
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let acct_fp = account.public().fingerprint();
+        m1.present_identity(
+            IdentityChain::device(&account, m1.identity_public(), "device:m1", 0, 0),
+            Some("m1".into()),
+        );
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        // Precondition: the honest binding is in place.
+        assert_eq!(host.group_leaf_account(m1_leaf), Some(acct_fp));
+
+        // Attacker reads m1's PUBLIC leaf signing key straight from the ratchet tree
+        // and certifies it under the attacker's OWN account+device — no victim secret
+        // is needed. (Reading it from the host's tree models exactly that exposure.)
+        let victim_leaf_key = {
+            let g = host.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+                .expect("m1 leaf sig key in host tree")
+        };
+        let atk_acct = IdentityKeyPair::generate();
+        let atk_dev = IdentityKeyPair::generate();
+        let forged = IdentityChain::device(&atk_acct, atk_dev.public(), "device:atk", 0, 0)
+            .extend(&atk_dev, &victim_leaf_key, "leaf-sig", 0, 0);
+
+        // Feed the forgery straight to the host's handler as if relayed.
+        handle_leaf_sig_cert(&host.inner, [7u8; 48], forged.encode()).await;
+
+        // The honest binding must survive; the hijack to the attacker account is refused.
+        assert_eq!(
+            host.group_leaf_account(m1_leaf),
+            Some(acct_fp),
+            "a forged leaf-sig cert must not overwrite the verified account badge"
+        );
+        assert_ne!(
+            host.group_leaf_account(m1_leaf),
+            Some(atk_acct.public().fingerprint()),
+            "attacker account must never bind to the victim's leaf"
         );
     }
 
