@@ -1064,47 +1064,60 @@ impl Core {
     }
 
     /// **Self-update** — rotate our own leaf: fresh ML-KEM path secrets AND a fresh
-    /// ML-DSA-87 leaf signing key, then broadcast the resulting commit. This gives
-    /// **post-compromise security on demand** (SECURITY-AUDIT T-2 activation): an
-    /// adversary who compromised our prior path/signing keys can no longer derive
-    /// the new epoch secret (confidentiality PCS) NOR forge messages as us
-    /// (authentication PCS) once the group applies this commit. No membership
-    /// change — the roster is unchanged.
+    /// ML-DSA-87 leaf signing key. This gives **post-compromise security on demand**
+    /// (SECURITY-AUDIT T-2/T-4): an adversary who compromised our prior path/signing
+    /// keys can no longer derive the new epoch secret (confidentiality PCS) NOR forge
+    /// messages as us (authentication PCS) once the group applies the resulting
+    /// commit. No membership change — the roster is unchanged.
     ///
-    /// Currently host-driven: the host (who relays commits) rotates its own leaf and
-    /// broadcasts. Member-initiated self-update needs the member→host→broadcast
-    /// relay path and is a follow-up; see `docs/`/the PR. A no-op off a group.
+    /// The committer (host) rotates its own leaf and broadcasts the commit directly. A
+    /// **member** cannot commit, so it PROPOSES a self-rekey and sends it to the host,
+    /// which commits + broadcasts (T-4); the proposer stages its new keys and installs
+    /// them when that broadcast commit — which carries this Update — comes back to it.
+    /// A no-op off a group.
     pub async fn self_update(&self) -> Result<()> {
-        // Only the committer (host) drives commits in the hub topology today.
-        if self.inner.role != GroupRole::Host {
-            return Ok(());
-        }
-        let tagged = {
-            let mut g = self.inner.group.lock().await;
-            match g.as_mut() {
-                Some(grp) => {
-                    let from_epoch = grp.epoch();
-                    grp.update().ok().map(|c| (from_epoch, c.encode()))
-                }
-                None => None,
+        match self.inner.role {
+            GroupRole::Host => {
+                let tagged = {
+                    let mut g = self.inner.group.lock().await;
+                    match g.as_mut() {
+                        Some(grp) => {
+                            let from_epoch = grp.epoch();
+                            grp.update().ok().map(|c| (from_epoch, c.encode()))
+                        }
+                        None => None,
+                    }
+                };
+                let Some((from_epoch, commit_bytes)) = tagged else {
+                    return Ok(());
+                };
+                // Roster (leaf -> account fingerprint) is unchanged by an update; only
+                // the per-leaf signing key rotates, and that rides INSIDE the commit
+                // (`sig_update`), which every member verifies + applies in apply_commit.
+                route(
+                    &self.inner,
+                    Frame::Commit {
+                        from_epoch,
+                        bytes: commit_bytes,
+                    },
+                    Route::Broadcast,
+                )
+                .await;
+                Ok(())
             }
-        };
-        let Some((from_epoch, commit_bytes)) = tagged else {
-            return Ok(());
-        };
-        // Roster (leaf -> account fingerprint) is unchanged by an update; only the
-        // per-leaf signing key rotates, and that rides INSIDE the commit
-        // (`sig_update`), which every member verifies + applies in `apply_commit`.
-        route(
-            &self.inner,
-            Frame::Commit {
-                from_epoch,
-                bytes: commit_bytes,
-            },
-            Route::Broadcast,
-        )
-        .await;
-        Ok(())
+            GroupRole::Member => {
+                // Stage a fresh leaf keypair and emit an Update proposal (does NOT
+                // advance our epoch); the host authenticates us and commits it.
+                let proposal = {
+                    let mut g = self.inner.group.lock().await;
+                    g.as_mut().and_then(|grp| grp.propose_update().ok())
+                };
+                let Some(bytes) = proposal else { return Ok(()) };
+                route(&self.inner, Frame::UpdateProposal(bytes), Route::Committer).await;
+                Ok(())
+            }
+            GroupRole::None => Ok(()),
+        }
     }
 
     /// Start accepting inbound connections (spawns a background accept loop).
@@ -1514,6 +1527,9 @@ async fn reader_loop(
             }
             Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
                 handle_commit(&inner, from_epoch, bytes).await;
+            }
+            Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
+                handle_update_proposal(&inner, from, b).await;
             }
             Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
                 let mut roster = inner.roster.lock().unwrap();
@@ -2053,6 +2069,45 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
     }
 }
 
+/// HOST: a member proposed a self-rekey (SECURITY-AUDIT T-4). Authenticate the
+/// proposer by mapping its session fingerprint to the leaf it occupies, then commit
+/// the Update against THAT leaf — `commit_update` refuses a proposal targeting any
+/// other leaf, so a member can only rotate its OWN keys (no leaf-hijack) — and
+/// broadcast the resulting commit to the whole group. A proposal from a fingerprint
+/// not seated in the roster is dropped.
+async fn handle_update_proposal(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    let proposer_leaf = inner
+        .roster
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, fp)| **fp == from)
+        .map(|(l, _)| *l);
+    let Some(proposer_leaf) = proposer_leaf else { return };
+    let tagged = {
+        let mut g = inner.group.lock().await;
+        match g.as_mut() {
+            Some(grp) => {
+                let from_epoch = grp.epoch();
+                grp.commit_update(proposer_leaf, &bytes)
+                    .ok()
+                    .map(|c| (from_epoch, c.encode()))
+            }
+            None => None,
+        }
+    };
+    let Some((from_epoch, commit_bytes)) = tagged else { return };
+    route(
+        inner,
+        Frame::Commit {
+            from_epoch,
+            bytes: commit_bytes,
+        },
+        Route::Broadcast,
+    )
+    .await;
+}
+
 /// Decrypt a group message; the host also relays it to the other members.
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
@@ -2317,9 +2372,33 @@ mod tests {
         m1.send("hello host").await.unwrap();
         assert_eq!(next_message(&mut host_rx).await.0, "hello host");
 
+        // Capture m1's leaf signing key (as the host's tree holds it) before the rekey.
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        let sig_before = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+
         // The MEMBER self-rekeys: proposes, host commits, group heals.
         m1.self_update().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The rekey actually rotated m1's leaf signing key (post-compromise security);
+        // the host's tree now holds the NEW key, not the old one.
+        let sig_after = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+        assert!(sig_before.is_some() && sig_after.is_some());
+        assert_ne!(
+            sig_before, sig_after,
+            "the member's leaf signing key must rotate on a self-rekey"
+        );
 
         // Messaging still works both ways after the member's rekey (no fork).
         host.send("after m1 rekey").await.unwrap();
