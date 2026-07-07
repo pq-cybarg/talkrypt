@@ -52,3 +52,6 @@ Thumbs.db
 
 # Desktop packaging output (scripts/package.sh)
 dist/
+
+# EasyCrypt compiled artifacts
+formal/*.eco

@@ -390,6 +390,14 @@ pub struct ContactRecord {
     pub friend: bool,
 }
 
+/// A learned alternate route to a peer (SECURITY-AUDIT A-1): the peer's device
+/// fingerprint (hex) and its advertised reachable endpoints.
+#[derive(uniffi::Record)]
+pub struct FfiRoute {
+    pub fingerprint: String,
+    pub endpoints: Vec<String>,
+}
+
 /// The result of a successful device link (the new-device side). Persist
 /// `chain_hex` (with this device's seed) and pass both to `join_linked` /
 /// `host_linked` to chat as this account on this device.
@@ -952,6 +960,53 @@ impl TalkryptClient {
         self.rt
             .block_on(self.core.send(&text))
             .map_err(FfiError::from)
+    }
+
+    /// Rotate this node's group leaf key for **post-compromise security**
+    /// (SECURITY-AUDIT T-2): fresh ML-KEM path secrets AND a fresh ML-DSA-87 leaf
+    /// signing key are generated and the resulting commit is broadcast, so a prior
+    /// key compromise no longer lets an adversary read new messages or forge as us
+    /// once the group applies it. Host-driven today; a no-op off a group or for a
+    /// non-host member (member-initiated update is a follow-up). Safe to call
+    /// periodically (e.g. on a timer or after suspected exposure).
+    pub fn self_update(&self) -> Result<(), FfiError> {
+        self.rt
+            .block_on(self.core.self_update())
+            .map_err(FfiError::from)
+    }
+
+    /// The account fingerprint (hex) cryptographically bound to a group `leaf`
+    /// (SECURITY-AUDIT T-3), or `None` if that leaf is an unverified pseudonym. A
+    /// `Some` value is unforgeable by the host, so the UI can show a "verified
+    /// account" badge vs. a pseudonymous sender.
+    pub fn group_leaf_account(&self, leaf: u32) -> Option<String> {
+        self.core.group_leaf_account(leaf).map(|fp| hex_fp(&fp))
+    }
+
+    /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1) —
+    /// its multi-homed endpoint set (e.g. `[onion, nym, lan]`), signed and gossiped
+    /// so peers can reach it directly and reconnect via it if the host drops.
+    pub fn advertise_routes(&self, endpoints: Vec<String>) {
+        self.rt.block_on(self.core.advertise_routes(endpoints));
+    }
+
+    /// Reconnect over learned alternate routes when partitioned (SECURITY-AUDIT
+    /// A-1). Returns the fingerprint (hex) reconnected to, or `None` if still
+    /// connected or no route worked. Safe to call on every disconnect / on a timer.
+    pub fn reconnect(&self) -> Option<String> {
+        self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+    }
+
+    /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
+    /// (device-fingerprint hex, endpoints). A reconnect flow tries these when the
+    /// original host endpoint is dead, so a member is no longer partitioned by the
+    /// founding host going offline.
+    pub fn known_routes(&self) -> Vec<FfiRoute> {
+        self.core
+            .known_routes()
+            .into_iter()
+            .map(|(fp, endpoints)| FfiRoute { fingerprint: hex_fp(&fp), endpoints })
+            .collect()
     }
 
     /// The shareable invite URI for this chat (carries the `.onion` for a Tor

@@ -138,6 +138,23 @@ impl SignedCert {
         self.issuer.verify(&self.cert.encode(), &self.sig)
     }
 
+    /// Decode a `SignedCert` from wire bytes (rejects trailing garbage). Used to
+    /// carry a device->leaf-signature-key certificate over the wire (SECURITY-AUDIT
+    /// T-3): the caller MUST still `verify_signature()` and check the subject/issuer
+    /// bind as expected before trusting it.
+    pub fn decode(bytes: &[u8]) -> Result<SignedCert> {
+        let mut r = talkrypt_wire::Reader::new(bytes);
+        let c = Self::read(&mut r)?;
+        r.finish()?;
+        Ok(c)
+    }
+
+    /// Whether the cert is within its validity window at `now` (with the standard
+    /// clock-skew grace). Public so a group layer can reject stale leaf-key certs.
+    pub fn valid_at(&self, now: u64) -> bool {
+        self.cert.valid_at(now)
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut w = talkrypt_wire::Writer::new();
         put_pub(&mut w, &self.issuer);
