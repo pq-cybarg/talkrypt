@@ -90,7 +90,9 @@ jobs:
           # lets opam install system depexts itself. Alt-Ergo is EasyCrypt's primary SMT
           # prover (driven via why3, alongside the Z3 installed above).
           sudo apt-get update && sudo apt-get install -y opam
-          opam init --disable-sandboxing -y
+          # EasyCrypt's build uses Sys.ocaml_release, which needs OCaml >= 4.14; the
+          # system OCaml on ubuntu-22.04 is 4.13.1, so create the switch with 4.14.
+          opam init --disable-sandboxing -y --compiler=4.14.2
           opam pin add -yn easycrypt https://github.com/EasyCrypt/easycrypt.git#r2026.06
           opam install --confirm-level=unsafe-yes easycrypt alt-ergo
       - name: Configure provers and verify the QROM reductions
