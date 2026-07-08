@@ -193,11 +193,30 @@ impl LeafKeyPair {
     }
 
     /// Generate a fresh leaf key for a specific KEM profile (must match the
-    /// group being joined).
+    /// group being joined). The signature key is EPHEMERAL (fresh per join) —
+    /// maximal unlinkability, no cross-rejoin continuity. See
+    /// [`generate_derived`](LeafKeyPair::generate_derived) for the stable default.
     pub fn generate_with(profile: KemProfile) -> LeafKeyPair {
         let mut secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut secret);
         LeafKeyPair { profile, secret, sig: IdentityKeyPair::generate() }
+    }
+
+    /// Generate a leaf key whose SIGNATURE key is deterministically derived from
+    /// the member's identity root secret and a stable per-group id (the invite
+    /// token) — see [`derive_leaf_sig_seed`]. The same `(identity, group)` yields
+    /// the same leaf signing key across rejoins (recognizable + recoverable), while
+    /// different groups yield mutually unlinkable keys. The KEM secret stays random
+    /// (it rotates on every commit regardless, so it need not be derived).
+    pub fn generate_derived(
+        profile: KemProfile,
+        identity_root: &[u8; 32],
+        group_id: &[u8],
+    ) -> LeafKeyPair {
+        let mut secret = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut secret);
+        let sig = IdentityKeyPair::from_secret_bytes(derive_leaf_sig_seed(identity_root, group_id));
+        LeafKeyPair { profile, secret, sig }
     }
 
     /// The KEM profile this leaf key is bound to.
@@ -727,13 +746,35 @@ impl TreeKemGroup {
     }
 
     /// Create a new group with a specific KEM profile (posture + wire padding).
+    /// The founder's leaf signature key is EPHEMERAL; see
+    /// [`create_derived`](TreeKemGroup::create_derived) for the stable default.
     pub fn create_with(profile: KemProfile) -> TreeKemGroup {
+        TreeKemGroup::create_with_sig(profile, IdentityKeyPair::generate())
+    }
+
+    /// Create a new group whose founder leaf signature key is deterministically
+    /// derived from the founder's identity root and a stable per-group id (the
+    /// invite token) — stable across re-founds, unlinkable across groups. See
+    /// [`derive_leaf_sig_seed`].
+    pub fn create_derived(
+        profile: KemProfile,
+        identity_root: &[u8; 32],
+        group_id: &[u8],
+    ) -> TreeKemGroup {
+        TreeKemGroup::create_with_sig(
+            profile,
+            IdentityKeyPair::from_secret_bytes(derive_leaf_sig_seed(identity_root, group_id)),
+        )
+    }
+
+    /// Create a new group with a caller-supplied founder leaf signature key
+    /// `my_sig` (ephemeral or derived). All other founding state is fresh.
+    pub fn create_with_sig(profile: KemProfile, my_sig: IdentityKeyPair) -> TreeKemGroup {
         let capacity = 2;
         let mut leaf_secret = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
 
         // The founder's per-membership leaf signature key (its group alias).
-        let my_sig = IdentityKeyPair::generate();
         let mut leaf_sig_keys = HashMap::new();
         leaf_sig_keys.insert(0u32, my_sig.public().clone());
 
@@ -1416,6 +1457,19 @@ impl TreeKemGroup {
 fn derive_parent_secret(child: &Secret) -> Secret {
     expand(child, b"talkrypt-treekem-parent")
 }
+
+/// Derive a STABLE per-membership leaf signature seed from a member's identity
+/// root secret (`key`) and a stable per-group id (`salt`, e.g. the invite token).
+/// Deterministic: the same `(identity, group)` yields the same leaf signing key
+/// across rejoins (recognizable + recoverable); a different group yields an
+/// unlinkable key (the KDF output reveals nothing about the root or other groups).
+/// Feeding a private root through the KDF means the derived public keys of one
+/// member across different groups cannot be correlated.
+pub fn derive_leaf_sig_seed(identity_root: &[u8; 32], group_id: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    crate::kdf::mac_kdf(identity_root, group_id, b"talkrypt-leaf-sig-derive-v1", &mut out);
+    out
+}
 fn derive_commit_secret(root: &Secret) -> Secret {
     expand(root, b"talkrypt-treekem-commit")
 }
@@ -2042,6 +2096,67 @@ mod tests {
             c.leaf_sig_public(b_leaf).cloned(),
             b_key_before,
             "an Update not authorized by the leaf's current key must not rewrite it"
+        );
+    }
+
+    /// LeafSigMode: a DERIVED leaf signature key is deterministic per (identity,
+    /// group) — recognizable + recoverable across rejoins — and unlinkable across
+    /// groups; an EPHEMERAL leaf key differs every generation. Only the signature
+    /// key is derived; the KEM leaf key stays fresh (it rotates every commit).
+    #[test]
+    fn derived_leaf_sig_key_is_stable_per_group_and_unlinkable_across_groups() {
+        let profile = KemProfile::pq_pure();
+        let identity = crate::identity::IdentityKeyPair::generate();
+        let root = identity.export_secret();
+        let group_a: &[u8] = b"invite-token-A";
+        let group_b: &[u8] = b"invite-token-B";
+
+        // Same (identity, group) -> same signing key across independent joins.
+        let k1 = LeafKeyPair::generate_derived(profile, &root, group_a);
+        let k2 = LeafKeyPair::generate_derived(profile, &root, group_a);
+        assert_eq!(
+            k1.key_package().sig_public.sig_vk,
+            k2.key_package().sig_public.sig_vk,
+            "derived leaf sig key must be stable across rejoins of the same group"
+        );
+
+        // Different group -> unlinkable key; different identity -> different key.
+        let k3 = LeafKeyPair::generate_derived(profile, &root, group_b);
+        assert_ne!(
+            k1.key_package().sig_public.sig_vk,
+            k3.key_package().sig_public.sig_vk,
+            "derived leaf sig key must differ across groups (unlinkable)"
+        );
+        let other = crate::identity::IdentityKeyPair::generate();
+        let k4 = LeafKeyPair::generate_derived(profile, &other.export_secret(), group_a);
+        assert_ne!(
+            k1.key_package().sig_public.sig_vk,
+            k4.key_package().sig_public.sig_vk
+        );
+
+        // Only the SIGNATURE key is derived; the KEM leaf key stays fresh.
+        assert_ne!(
+            k1.key_package().leaf_public.encode(),
+            k2.key_package().leaf_public.encode(),
+            "the KEM leaf key must stay random even when the sig key is derived"
+        );
+
+        // Ephemeral leaf keys differ every generation.
+        let e1 = LeafKeyPair::generate_with(profile);
+        let e2 = LeafKeyPair::generate_with(profile);
+        assert_ne!(
+            e1.key_package().sig_public.sig_vk,
+            e2.key_package().sig_public.sig_vk,
+            "ephemeral leaf sig keys must differ every generation"
+        );
+
+        // The founder path (create_derived) is stable per (identity, group) too.
+        let g1 = TreeKemGroup::create_derived(profile, &root, group_a);
+        let g2 = TreeKemGroup::create_derived(profile, &root, group_a);
+        assert_eq!(
+            g1.leaf_sig_public(0).map(|k| k.sig_vk.clone()),
+            g2.leaf_sig_public(0).map(|k| k.sig_vk.clone()),
+            "a derived founder leaf sig key must be stable per (identity, group)"
         );
     }
 
