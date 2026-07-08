@@ -20,6 +20,26 @@ glue. The T-2 forgery bug found this cycle (a committer could rewrite any member
 signing key) is precisely the *class* of bug that a correct, audited MLS state machine
 does not have.
 
+> **Empirically verified (spike #81 — [`docs/openmls-pq-spike`](./openmls-pq-spike/)):** a
+> standalone crate pinned to OpenMLS git-main runs the **full lifecycle under
+> `MLS_256_MLKEM1024_AES256GCM_SHA384_MLDSA87`** — create → add → Welcome/join → encrypted
+> application messages both ways → **member self-update (on-demand PCS)** → remove — all
+> passing, on the same RustCrypto `ml-dsa`/`ml-kem` crates talkrypt uses. The pure-PQ suite
+> is not just *defined*, it is *functionally complete* end-to-end. (Integration gotcha the
+> spike caught: the `draft-ietf-mls-pq-ciphersuites` feature must also be enabled on
+> `openmls_basic_credential`, or ML-DSA signature-key generation fails at runtime even
+> though `supports()` returns Ok.)
+
+> **Hash-family caveat (SHA-3 vs SHA-2):** talkrypt's *default* KDF is KMAC/Keccak (SHA-3
+> family), with SHA-2 available under the `cnsa-sha2` feature. **No MLS ciphersuite uses
+> SHA-3** — RFC 9420 and the PQ draft define suites over SHA-256/384/512 only (the ML-KEM /
+> ML-DSA primitives use SHAKE/Keccak *internally*, but the MLS transcript/KDF hash is
+> SHA-2). Adopting MLS therefore moves talkrypt's group-protocol hash to **SHA-384**. Note
+> this is not a downgrade for CNSA 2.0: CNSA 2.0's specified hashes are SHA-384/SHA-512
+> (SHA-2), so `…SHA384_MLDSA87` is the CNSA-compliant choice — talkrypt's SHA-3/KMAC default
+> is the deviation from CNSA's *named* hash. If talkrypt has a hard SHA-3 requirement beyond
+> CNSA, MLS cannot meet it today (would need a new, unregistered ciphersuite). See §7.
+
 The one genuine caveat is the **maturity of the PQ ciphersuite path**: it is gated behind
 `#[cfg(feature = "draft-ietf-mls-pq-ciphersuites")]`, ships **only on OpenMLS's git `main`,
 not in the crates.io release** (0.8.1 lists only classical suites) so adopting today means
@@ -50,7 +70,7 @@ mapping/re-integration (feasible, scoped) · = same limitation as talkrypt.
 
 | talkrypt requirement | In OpenMLS / MLS? | Notes |
 |---|---|---|
-| **ML-KEM-1024 + ML-DSA-87 pure-PQ ciphersuite** | ✓ (draft-gated, **git main only**) | `MLS_256_MLKEM1024_AES256GCM_SHA384_MLDSA87`; `supports() => Ok(())` in `openmls_rust_crypto`; HPKE `MlKem1024` wired; ML-DSA via RustCrypto `ml_dsa`. **Not in the crates.io release** (0.8.1, 2026-02-13, lists only classical suites) — the PQ suites are on the GitHub `main` branch behind the feature flag, so adopting today means pinning a **git revision**. **Verify functional completeness end-to-end in a spike** (create→add→commit→app-msg). |
+| **ML-KEM-1024 + ML-DSA-87 pure-PQ ciphersuite** | ✓ (draft-gated, **git main only**) | `MLS_256_MLKEM1024_AES256GCM_SHA384_MLDSA87`; `supports() => Ok(())` in `openmls_rust_crypto`; HPKE `MlKem1024` wired; ML-DSA via RustCrypto `ml_dsa`. **Not in the crates.io release** (0.8.1, 2026-02-13, lists only classical suites) — the PQ suites are on the GitHub `main` branch behind the feature flag, so adopting today means pinning a **git revision**. **Spike-verified end-to-end (#81):** create→add→join→app-msg→member-self-update→remove all pass under this suite. |
 | Group create / add / remove members | ✓ | Native Commit with Add/Remove proposals (RFC 9420). |
 | Member self-rekey / on-demand PCS (talkrypt T-4) | ✓+ | Native Update proposal — a core MLS operation, not a bolt-on. |
 | Forward secrecy | ✓ | Native (per-epoch secret tree, ratcheting). |
@@ -147,8 +167,9 @@ prototype the credential mapping + one transport as the DS. The spike output is 
 1. **Interim: ship the hardened in-house TreeKEM** for any zRonin deadline that lands before
    the spike + PQ audit complete — it is posture-pure and already integrated. This is a
    bridge, not the destination.
-2. **Start the OpenMLS spike now** (§4) to confirm functional completeness of the PQ suite
-   and produce real migration numbers.
+2. **OpenMLS functional spike — DONE (#81, [`docs/openmls-pq-spike`](./openmls-pq-spike/)):**
+   the PQ suite runs the full lifecycle. Remaining spike work: dependency footprint on
+   Android/FFI/desktop, the credential mapping, and one transport wired as the DS.
 3. **Commission the external audit scoped to OpenMLS's PQ ciphersuite path** (§3) — and stop
    spending audit budget re-validating the hand-rolled TreeKEM.
 4. **Migrate to OpenMLS** once the spike is green and the PQ-path audit is satisfactory, gated
