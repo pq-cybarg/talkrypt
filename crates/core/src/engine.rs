@@ -300,6 +300,24 @@ pub enum GroupRole {
     Member,
 }
 
+/// How a member's per-membership leaf **signature** key is generated (its group
+/// alias). A local, per-member choice — it only affects one's own leaf key (seen
+/// by others via the KeyPackage), so it is NOT carried in the shared descriptor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LeafSigMode {
+    /// DEFAULT — deterministically derive the leaf signing key from the member's
+    /// identity root and the chat's invite token (`KDF(identity, invite_token)`).
+    /// Stable across rejoins of the SAME chat (a recognizable, recoverable alias)
+    /// and mutually unlinkable across DIFFERENT chats. In-session post-compromise
+    /// security still comes from `self_update()` (leaf-key rotation); a fresh join
+    /// re-derives the same key, so continuity is the trade for per-join PCS.
+    #[default]
+    Derived,
+    /// Fresh, random leaf signing key on every join — maximal unlinkability (even
+    /// across rejoins of the same chat), no continuity, not recoverable.
+    Ephemeral,
+}
+
 /// Where a routed frame should go, in **relayed** group mode (where a
 /// non-member relay forwards between participants). The relay never reads the
 /// inner group plaintext — it only routes the (still-encrypted) inner frame.
@@ -521,6 +539,7 @@ impl Core {
             descriptor,
             GroupRole::None,
             false,
+            LeafSigMode::default(),
         )
     }
 
@@ -539,7 +558,26 @@ impl Core {
         } else {
             GroupRole::Member
         };
-        Self::build(identity, suite, transport, descriptor, role, false)
+        Self::build(identity, suite, transport, descriptor, role, false, LeafSigMode::default())
+    }
+
+    /// Like [`new_group`](Core::new_group) but with an explicit [`LeafSigMode`] for
+    /// this node's leaf signature key (default is [`LeafSigMode::Derived`]). Pass
+    /// [`LeafSigMode::Ephemeral`] for a fresh, unlinkable-across-rejoins leaf key.
+    pub fn new_group_with_leaf_mode(
+        identity: IdentityKeyPair,
+        suite: Arc<dyn CryptoSuite>,
+        transport: Arc<dyn Transport>,
+        descriptor: ChatDescriptor,
+        is_host: bool,
+        leaf_sig_mode: LeafSigMode,
+    ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let role = if is_host {
+            GroupRole::Host
+        } else {
+            GroupRole::Member
+        };
+        Self::build(identity, suite, transport, descriptor, role, false, leaf_sig_mode)
     }
 
     /// Build a TreeKEM group chat that runs over a **non-member relay**
@@ -559,7 +597,7 @@ impl Core {
         } else {
             GroupRole::Member
         };
-        Self::build(identity, suite, transport, descriptor, role, true)
+        Self::build(identity, suite, transport, descriptor, role, true, LeafSigMode::default())
     }
 
     fn build(
@@ -569,6 +607,7 @@ impl Core {
         descriptor: ChatDescriptor,
         role: GroupRole,
         relayed: bool,
+        leaf_sig_mode: LeafSigMode,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
         let root0 = descriptor.derive_root();
         let default_marking = descriptor.channel_marking.clone();
@@ -576,12 +615,29 @@ impl Core {
         // Group state uses the same KEM profile as the suite's pairwise
         // sessions, so TreeKEM node keys and ratchet keys agree posture + wire.
         let kem_profile = suite.kem_profile();
-        let group = match role {
-            GroupRole::Host => Some(TreeKemGroup::create_with(kem_profile)),
+        // Leaf SIGNATURE key generation (LeafSigMode). Derived (default) binds a
+        // stable per-chat alias to KDF(identity_root, invite_token); Ephemeral mints
+        // a fresh key per join. The invite token is the stable per-chat id.
+        let group = match (role, leaf_sig_mode) {
+            (GroupRole::Host, LeafSigMode::Derived) => Some(TreeKemGroup::create_derived(
+                kem_profile,
+                &identity.export_secret(),
+                &descriptor.invite_token,
+            )),
+            (GroupRole::Host, LeafSigMode::Ephemeral) => {
+                Some(TreeKemGroup::create_with(kem_profile))
+            }
             _ => None,
         };
-        let leaf_keypair = match role {
-            GroupRole::Member => Some(LeafKeyPair::generate_with(kem_profile)),
+        let leaf_keypair = match (role, leaf_sig_mode) {
+            (GroupRole::Member, LeafSigMode::Derived) => Some(LeafKeyPair::generate_derived(
+                kem_profile,
+                &identity.export_secret(),
+                &descriptor.invite_token,
+            )),
+            (GroupRole::Member, LeafSigMode::Ephemeral) => {
+                Some(LeafKeyPair::generate_with(kem_profile))
+            }
             _ => None,
         };
         // The host founds the group at leaf 0; seed the roster with itself.
@@ -2232,6 +2288,60 @@ mod tests {
             desc.clone(),
             is_host,
         )
+    }
+
+    /// LeafSigMode end-to-end: the DEFAULT (Derived) leaf signing key is stable for a
+    /// given (identity, chat) — a recognizable alias across rejoins — and unlinkable
+    /// across chats; the Ephemeral toggle mints a fresh key per construction. Also
+    /// asserts the whole existing group suite runs under the new default (Derived).
+    #[tokio::test]
+    async fn leaf_sig_mode_derived_is_stable_ephemeral_is_fresh() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#leafmode",
+        );
+        let desc2 = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#leafmode2",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        // A stable identity we can reconstruct (IdentityKeyPair is not Clone).
+        let seed = IdentityKeyPair::generate().export_secret();
+        let dup = || IdentityKeyPair::from_secret_bytes(seed);
+        let tp = |n: &str| Arc::new(fabric.transport(n));
+        let leaf_vk = |c: &Core| {
+            c.inner
+                .leaf_keypair
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|k| k.key_package().sig_public.sig_vk.clone())
+        };
+
+        // Same identity + chat, Derived (default): identical leaf signing key.
+        let (m1, _r1) = Core::new_group(dup(), suite.clone(), tp("m1"), desc.clone(), false);
+        let (m2, _r2) = Core::new_group(dup(), suite.clone(), tp("m2"), desc.clone(), false);
+        assert!(leaf_vk(&m1).is_some());
+        assert_eq!(leaf_vk(&m1), leaf_vk(&m2), "derived leaf key stable per (identity, chat)");
+
+        // Different chat -> unlinkable leaf key.
+        let (m3, _r3) = Core::new_group(dup(), suite.clone(), tp("m3"), desc2, false);
+        assert_ne!(leaf_vk(&m1), leaf_vk(&m3), "different chat -> unlinkable leaf key");
+
+        // Ephemeral toggle -> fresh key per construction, differing from Derived.
+        let (e1, _e1) =
+            Core::new_group_with_leaf_mode(dup(), suite.clone(), tp("e1"), desc.clone(), false, LeafSigMode::Ephemeral);
+        let (e2, _e2) =
+            Core::new_group_with_leaf_mode(dup(), suite.clone(), tp("e2"), desc.clone(), false, LeafSigMode::Ephemeral);
+        assert_ne!(leaf_vk(&e1), leaf_vk(&e2), "ephemeral leaf keys differ per construction");
+        assert_ne!(leaf_vk(&m1), leaf_vk(&e1), "ephemeral differs from the derived key");
     }
 
     /// The host (responder) cannot encrypt before it has received the joiner's
