@@ -30,16 +30,18 @@ does not have.
 > `openmls_basic_credential`, or ML-DSA signature-key generation fails at runtime even
 > though `supports()` returns Ok.)
 
-> **Hash-family caveat (SHA-3 vs SHA-2):** talkrypt's *default* KDF is KMAC/Keccak (SHA-3
-> family), with SHA-2 available under the `cnsa-sha2` feature. **No MLS ciphersuite uses
-> SHA-3** — RFC 9420 and the PQ draft define suites over SHA-256/384/512 only (the ML-KEM /
-> ML-DSA primitives use SHAKE/Keccak *internally*, but the MLS transcript/KDF hash is
-> SHA-2). Adopting MLS therefore moves talkrypt's group-protocol hash to **SHA-384**. Note
-> this is not a downgrade for CNSA 2.0: CNSA 2.0's specified hashes are SHA-384/SHA-512
-> (SHA-2), so `…SHA384_MLDSA87` is the CNSA-compliant choice — talkrypt's SHA-3/KMAC default
-> is the deviation from CNSA's *named* hash. If talkrypt has a hard SHA-3 requirement beyond
-> CNSA, MLS cannot meet it today (would need a new, unregistered ciphersuite) — see §8 for a
-> FIPS-only plan to add one.
+> **Hash family (SHA-3/SHAKE vs SHA-2) — the standard draft already uses SHAKE256:**
+> `draft-ietf-mls-pq-ciphersuites-05` specifies **SHAKE256 (FIPS 202) as the KDF** for all its
+> PQ ciphersuites (assigning a new HPKE KDF id `0x0011`, distinct from RFC 9180's HKDF-SHA2
+> ids `0x0001–0x0003`); the **transcript hash** stays the SHA in the suite name (SHA-384 for
+> `…MLDSA87`). So the *standardized* PQ suite is already SHA-3 in the KDF role — talkrypt's
+> SHA-3/SHAKE requirement is met by **following the draft**, not by a private fork. Two
+> nuances: (a) the standard uses **SHAKE256, not KMAC** — align on SHAKE256 rather than
+> talkrypt's bespoke KMAC; (b) OpenMLS git-main **does not yet implement** the SHAKE256 KDF —
+> it currently maps these suites to `HkdfSha384` (`0x0002`), so its PQ path is not yet
+> draft-05-conformant on the KDF. Adopting the draft's KDF is on OpenMLS's committed roadmap;
+> talkrypt should track/contribute it. SHA-384 transcript hashing is CNSA-2.0-compliant. See
+> §8 for the follow-the-draft plan.
 
 The one genuine caveat is the **maturity of the PQ ciphersuite path**: it is gated behind
 `#[cfg(feature = "draft-ietf-mls-pq-ciphersuites")]`, ships **only on OpenMLS's git `main`,
@@ -180,69 +182,54 @@ prototype the credential mapping + one transport as the DS. The spike output is 
 5. Track `draft-ietf-mls-pq-ciphersuites` to IANA assignment for interop, and OpenMLS's PQ
    suite toward "not experimental."
 
-## 8. Adding a SHA-3 / SHAKE / KMAC ciphersuite to OpenMLS (FIPS-only)
+## 8. SHA-3 / SHAKE: follow the draft (SHAKE256 KDF), don't fork
 
-talkrypt's default KDF is KMAC/Keccak (SHA-3 family). OpenMLS has no SHA-3 option, and we
-require one — added, per the mandate, using **FIPS/NIST-validated primitives only**.
+**This supersedes an earlier private-fork plan.** The SHA-3/SHAKE requirement is already met
+by the *standard* the OpenMLS project committed to: `draft-ietf-mls-pq-ciphersuites` specifies
+**SHAKE256 (FIPS 202) as the KDF** for its PQ ciphersuites. The right path is to **follow the
+draft**, not fork a private ciphersuite.
 
-### 8.1 Why it's a fork, not a provider swap
-OpenMLS's `Ciphersuite` is a **closed `#[repr(u16)]` enum**, and its `HashType` enum has
-**only SHA-2** (`Sha2_256/384/512`); `hash_algorithm()` is a fixed compile-time match. A
-crypto provider implements ops for the *existing* variants — it cannot introduce a new
-ciphersuite or a new hash. So SHA-3 support requires a **fork of `openmls_traits`** (plus
-`openmls` + a provider):
-1. add `HashType::Sha3_384` (and/or a SHAKE256 XOF);
-2. add a **private-use** `Ciphersuite` variant, e.g. `MLS_256_MLKEM1024_AES256GCM_SHA3-384_MLDSA87`, at an unregistered u16 code point;
-3. point its KDF, transcript hash, and membership MAC at the new hash;
-4. propagate the new `HashType` through every match site (KDF extract/expand, transcript hashes, secret-tree/PSK derivations).
+### 8.1 What the draft mandates
+- **KDF = SHAKE256** for all its ciphersuites — "we use SHAKE256 (Section 3.2 of [FIPS202]) as
+  the Key Derivation Function" — via a new HPKE KDF id `0x0011`, distinct from RFC 9180's
+  HKDF-SHA-2 ids `0x0001-0x0003`.
+- **Transcript hash = the SHA in the suite name** — SHA-384 for
+  `MLS_256_MLKEM1024_AES256GCM_SHA384_MLDSA87` (CNSA-2.0-compliant).
+- **KMAC is not used.** The standard's Keccak-family choice is **SHAKE256** — align on that
+  rather than talkrypt's bespoke KMAC KDF (same Keccak family, but standardized + interoperable).
+- The draft is still in WG flux ("Revised I-D Needed"), the KDF role has documented ambiguity
+  (HPKE vs key-schedule scope), and IANA points are TBD — so the exact SHAKE256 wiring may
+  still move; track it.
 
-### 8.2 FIPS/NIST-validated primitive sources
-- **OpenSSL 3.x FIPS provider — recommended, covers everything.** A single FIPS 140-3
-  validated module providing **SHA-3, SHAKE, and KMAC (SP 800-185)**, AES-256-GCM, and — as
-  of OpenSSL 3.5 (2026) — **ML-KEM-1024 and ML-DSA-87**. This is the only source that cleanly
-  covers **KMAC** *and* the PQ primitives in one validated boundary. (Confirm the FIPS
-  validation certificate version covers 3.5's PQ module, since CMVP validation lags releases;
-  SHA-3/SHAKE/KMAC/AES-GCM are validated in the shipped 3.0.x FIPS provider.) Reachable from
-  Rust via `rust-openssl` bound to a FIPS-configured OpenSSL.
-- **aws-lc-rs** (AWS-LC FIPS 3.0, already a talkrypt dep for `fips`): FIPS-validated SHA-3 +
-  SHAKE + ML-KEM/ML-DSA, but **KMAC FIPS coverage is unconfirmed** — so aws-lc-rs suffices for
-  an HKDF-SHA3 KDF, not necessarily for KMAC.
-- **NOT usable under the FIPS-only rule:** RustCrypto `sha3` and `tiny-keccak` — which is
-  talkrypt's *current* default KMAC KDF. NB this means talkrypt's own default KDF is **not on
-  a FIPS path today**; a FIPS SHA-3/KMAC story already requires routing through OpenSSL-FIPS or
-  aws-lc-rs regardless of the OpenMLS question.
+### 8.2 The conformance gap in OpenMLS today
+OpenMLS git-main **has not yet implemented the SHAKE256 KDF**: `hpke_kdf_type()` for the PQ
+suites returns `HkdfSha384` (`0x0002`), and `HpkeKdfType` carries only HKDF-SHA-2 variants — no
+SHAKE256. So spike #81 (which passed) exercised the suite with an **HKDF-SHA384 KDF, not the
+draft's SHAKE256**. Closing this is on OpenMLS's committed roadmap (they adopted the draft);
+"following the procedure" means tracking / contributing that SHAKE256-KDF work, not
+re-inventing it.
 
-**Clean overall FIPS story:** author one OpenMLS crypto provider (`OpenMlsCrypto`) backed by
-the **OpenSSL 3.5 FIPS provider** — it supplies FIPS-validated KEM (ML-KEM-1024), signature
-(ML-DSA-87), AEAD (AES-256-GCM), and hash/KDF (SHA-2 *and* SHA-3/SHAKE/KMAC) for the whole
-MLS stack, including the forked SHA-3 ciphersuite. That makes the FIPS boundary one audited
-module rather than a patchwork.
+### 8.3 talkrypt's action — align with the committed procedure
+1. **Adopt the standard draft suite** (`MLS_256_MLKEM1024_AES256GCM_SHA384_MLDSA87`) — no
+   private/unregistered ciphersuite, so interop and the shared-analysis benefit are preserved.
+2. **Track OpenMLS's SHAKE256-KDF work** to draft conformance; if a gap remains when we
+   migrate, **contribute the SHAKE256 HPKE KDF upstream** (add the KDF id + a SHAKE256 KDF
+   backed by a FIPS-validated implementation) rather than forking a private ciphersuite.
+3. **Back the crypto with FIPS-validated SHAKE256.** SHAKE256 is FIPS 202; validated
+   implementations: **aws-lc-rs** (AWS-LC FIPS 3.0 — SHA-3/SHAKE validated; already a talkrypt
+   dep for `fips`) and the **OpenSSL 3.x FIPS provider** (also covers KMAC and, in 3.5,
+   ML-KEM/ML-DSA — the single-module option). A talkrypt `OpenMlsCrypto` provider backed by one
+   of these keeps the whole stack in a FIPS boundary. **Not usable:** RustCrypto `sha3` /
+   `tiny-keccak` (talkrypt's *current* KMAC KDF) — not FIPS-validated, so the default KDF is not
+   on a FIPS path today regardless of the OpenMLS decision.
+4. **Re-run spike #81 once OpenMLS's SHAKE256 KDF lands** (or against a contributed branch) to
+   confirm the full lifecycle under the *draft-conformant* SHAKE256 KDF, not HKDF-SHA384.
 
-### 8.3 KDF choice — HKDF-SHA3-384 vs KMAC
-- **HKDF-SHA3-384** (HMAC-SHA3-384): stays inside MLS's HKDF key schedule (RFC 9420 defines
-  the KDF as HKDF over the ciphersuite hash) — the new ciphersuite just points MLS's existing
-  HKDF at SHA-3-384. Smallest, cleanest fork; available FIPS via aws-lc-rs *or* OpenSSL.
-- **KMAC-as-KDF** (talkrypt's Keccak-native preference): a larger deviation — MLS's key
-  schedule assumes HKDF, so KMAC replaces the *construction*, not just the hash. Worth it only
-  if KMAC specifically (not merely "SHA-3 family") is the hard requirement; needs OpenSSL-FIPS
-  for a validated KMAC.
-
-### 8.4 Tension to weigh before committing
-A **private** ciphersuite forfeits two adoption benefits: (a) **interop** — an unregistered
-code point talks only to other talkrypt nodes (fine for a closed zRonin ecosystem, but then
-"standard protocol" is a code-reuse benefit, not an interop one); and (b) it re-introduces
-**custom MLS-integration glue** (the `HashType`/ciphersuite fork + KDF wiring) that we own and
-must audit — smaller than owning the whole TreeKEM, but not zero. And **SHA-384 is already
-CNSA 2.0's specified hash**, so the stock `…SHA384_MLDSA87` suite is standards-compliant with
-*no* fork. Confirm SHA-3 is a hard requirement (not a preference CNSA already meets with
-SHA-384) before taking on the fork and its audit.
-
-### 8.5 If we proceed
-Fork `openmls`/`openmls_traits`; add `HashType::Sha3_384` + the private ciphersuite; back it
-with an **OpenSSL-3.5-FIPS-provider** `OpenMlsCrypto` implementation (KMAC or HKDF-SHA3-384 per
-§8.3); extend spike #81 to run the full lifecycle under it; scope the external audit to the
-added hash/KDF wiring + the provider. Keep the fork rebased on upstream and offer the
-`HashType::Sha3` addition to the WG.
+### 8.4 Net
+SHA-3/SHAKE is a **standard** feature of the PQ draft (SHAKE256 KDF) — no private fork needed,
+just adoption of the draft plus tracking/contributing OpenMLS's SHAKE256-KDF conformance,
+backed by FIPS-validated SHAKE256 (aws-lc-rs or OpenSSL-FIPS). Prefer SHAKE256 over KMAC to
+stay interoperable; the SHA-384 transcript hash is CNSA-2.0-compliant.
 
 ## Sources
 
