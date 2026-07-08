@@ -238,6 +238,12 @@ enum Proposal {
         leaf_public: RatchetPublic,
         sig_public: IdentityPublic,
         pop: Vec<u8>,
+        /// Signature by the leaf's **current** signing key authorizing this rotation
+        /// (`update_auth_transcript`). Verified against the pre-update
+        /// `leaf_sig_keys[leaf]` BEFORE the new key is installed, so a malicious
+        /// committer/relay cannot forge an `Update` that rewrites another member's
+        /// leaf key and impersonate them (only the current occupant can sign it).
+        auth: Vec<u8>,
     },
 }
 
@@ -338,12 +344,13 @@ impl Proposal {
                 w.put_u8(1);
                 w.put_u32(*leaf);
             }
-            Proposal::Update { leaf, leaf_public, sig_public, pop } => {
+            Proposal::Update { leaf, leaf_public, sig_public, pop, auth } => {
                 w.put_u8(2);
                 w.put_u32(*leaf);
                 w.put_bytes(&leaf_public.encode());
                 w.put_bytes(&sig_public.sig_vk);
                 w.put_bytes(pop);
+                w.put_bytes(auth);
             }
         }
     }
@@ -361,6 +368,7 @@ impl Proposal {
                 leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
                 sig_public: decode_sig_public(r.get_bytes()?)?,
                 pop: r.get_vec()?,
+                auth: r.get_vec()?,
             }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
         }
@@ -418,6 +426,29 @@ fn verify_pop(sig_public: &IdentityPublic, pop: &[u8]) -> Result<()> {
     sig_public
         .verify(&pop_transcript(sig_public), pop)
         .map_err(|_| CryptoError::BadSignature)
+}
+
+/// Domain-separation prefix for a leaf-update AUTHORIZATION signature. Distinct from
+/// POP/SIG/message contexts so an update authorization can never be replayed as a
+/// PoP or a group-message signature (or vice versa).
+const UPDATE_AUTH_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-update-v2";
+
+/// The bytes a member signs with its **current** leaf signing key to AUTHORIZE
+/// rotating its leaf to a new `(leaf_public, sig_public)`:
+/// `UPDATE_AUTH_CONTEXT | leaf | new_leaf_public | new_sig_vk`. Verified against the
+/// leaf's CURRENT signing key before the new key is installed, so a committer/relay
+/// cannot fabricate an `Update` that rewrites a leaf whose secret it does not hold.
+fn update_auth_transcript(
+    leaf: u32,
+    leaf_public: &RatchetPublic,
+    sig_public: &IdentityPublic,
+) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(UPDATE_AUTH_CONTEXT);
+    w.put_u32(leaf);
+    w.put_bytes(&leaf_public.encode());
+    w.put_bytes(&sig_public.sig_vk);
+    w.into_vec()
 }
 
 /// The bytes a sender signs (and a receiver verifies) for a v2 group message:
@@ -892,11 +923,27 @@ impl TreeKemGroup {
     pub fn propose_update(&mut self) -> Result<Vec<u8>> {
         let kp = LeafKeyPair::generate_with(self.profile);
         let package = kp.key_package();
+        // Authorize the rotation with our CURRENT leaf signing key, so a committer
+        // cannot fabricate an Update that rewrites our (or anyone's) leaf key — only
+        // the current occupant can produce this signature (verified on the receive
+        // side against the pre-update leaf key).
+        let auth = {
+            let current = self
+                .my_sig
+                .as_ref()
+                .ok_or(CryptoError::Malformed("no current leaf signing key"))?;
+            current.sign(&update_auth_transcript(
+                self.me,
+                &package.leaf_public,
+                &package.sig_public,
+            ))
+        };
         let prop = Proposal::Update {
             leaf: self.me,
             leaf_public: package.leaf_public,
             sig_public: package.sig_public,
             pop: package.pop,
+            auth,
         };
         self.pending_update = Some(kp);
         let mut w = talkrypt_wire::Writer::new();
@@ -981,13 +1028,29 @@ impl TreeKemGroup {
                     self.leaf_pops.remove(leaf);
                     self.blank_path_above(*leaf);
                 }
-                Proposal::Update { leaf, leaf_public, sig_public, pop } => {
+                Proposal::Update { leaf, leaf_public, sig_public, pop, auth } => {
                     // Re-verify PoP (T-1) then replace the leaf's KEM + signing keys
                     // (T-4 member rekey; T-2 auth-PCS for a member). The leaf must
                     // already be occupied — Update never adds a member.
                     verify_pop(sig_public, pop)?;
                     if !self.occupied.get(*leaf as usize).copied().unwrap_or(false) {
                         return Err(CryptoError::Malformed("treekem update for empty leaf"));
+                    }
+                    // AUTHORIZE the rotation with the leaf's CURRENT signing key BEFORE
+                    // overwriting it (SECURITY-AUDIT): a committer/relay must not be
+                    // able to forge an Update that rewrites another member's leaf
+                    // signing key and thereby impersonate them. Only the current
+                    // occupant holds the secret that signs `update_auth_transcript`.
+                    {
+                        let current = self.leaf_sig_keys.get(leaf).ok_or(
+                            CryptoError::Malformed("update for a leaf with no current signing key"),
+                        )?;
+                        current
+                            .verify(
+                                &update_auth_transcript(*leaf, leaf_public, sig_public),
+                                auth,
+                            )
+                            .map_err(|_| CryptoError::BadSignature)?;
                     }
                     self.public.insert(Node::leaf(*leaf), leaf_public.clone());
                     self.leaf_sig_keys.insert(*leaf, sig_public.clone());
@@ -1072,11 +1135,23 @@ impl TreeKemGroup {
         }
         self.apply_proposals(&commit.proposals)?;
         // Apply an optional leaf-signature-key rotation (SECURITY-AUDIT T-2). The
-        // new key must carry a valid PoP; the committer may only rotate its OWN
-        // leaf (a committer cannot rotate another member's signing key). The leaf
-        // must be occupied. Rebinds the verifying key so the old key stops
-        // verifying from this epoch on.
+        // new key must carry a valid PoP; the committer may only rotate its OWN leaf.
+        // A commit's path starts at the committer's own leaf, so bind sig_update to
+        // it: WITHOUT this check a malicious committer could set sig_update to a
+        // victim's leaf (with a key + valid PoP it controls), overwrite the victim's
+        // signing key, and forge messages as the victim (a G1 regression) while
+        // locking the victim out. The leaf must be occupied. Rebinds the verifying
+        // key so the old key stops verifying from this epoch on.
         if let Some((leaf, sig_public, pop)) = &commit.sig_update {
+            let committer_leaf = match commit.path.first() {
+                Some(n) if n.span == 1 => n.lo,
+                _ => return Err(CryptoError::Malformed("commit path does not start at a leaf")),
+            };
+            if *leaf != committer_leaf {
+                return Err(CryptoError::Malformed(
+                    "sig_update may only rotate the committer's own leaf",
+                ));
+            }
             match self.occupied.get(*leaf as usize) {
                 Some(true) => {}
                 _ => return Err(CryptoError::Malformed("sig_update for empty leaf")),
@@ -1876,6 +1951,9 @@ mod tests {
             leaf_public: package.leaf_public,
             sig_public: package.sig_public,
             pop: package.pop,
+            // Auth is irrelevant here: commit_update rejects on the proposer↔leaf
+            // mismatch BEFORE the proposal is ever applied/authorized.
+            auth: Vec::new(),
         };
         let mut w = talkrypt_wire::Writer::new();
         forged.put(&mut w);
@@ -1892,6 +1970,78 @@ mod tests {
             a.leaf_sig_public(b_leaf).cloned(),
             b_sig_before,
             "victim leaf signing key must be untouched by a rejected hijack"
+        );
+    }
+
+    /// SECURITY-AUDIT (T-2 leaf-hijack via sig_update): a commit's `sig_update` may
+    /// rotate ONLY the committer's own leaf. A malicious committer that tampers a
+    /// commit's sig_update to target a victim's leaf — with a key + valid PoP it
+    /// controls — must be rejected; otherwise it overwrites the victim's signing key
+    /// and can forge messages as the victim. This bypasses `commit_update` entirely
+    /// (raw crafted commit bytes applied via `apply_commit`).
+    #[test]
+    fn sig_update_cannot_rotate_another_members_leaf() {
+        let mut a = TreeKemGroup::create(); // committer
+        let mut b = add_member(&mut a, &mut []); // victim
+        let b_leaf = b.my_leaf();
+        let b_key_before = b.leaf_sig_public(b_leaf).cloned();
+
+        // a produces a legit self-update commit, then tampers sig_update to point at
+        // b's leaf with a fresh key a controls + a valid PoP for it.
+        let mut commit = a.update().unwrap();
+        let attacker = crate::identity::IdentityKeyPair::generate();
+        let attacker_pub = attacker.public().clone();
+        let pop = attacker.sign(&pop_transcript(&attacker_pub));
+        commit.sig_update = Some((b_leaf, attacker_pub, pop));
+
+        // b must refuse the tampered commit (committer leaf = a's leaf != b_leaf).
+        assert!(matches!(b.apply_commit(&commit), Err(CryptoError::Malformed(_))));
+        assert_eq!(
+            b.leaf_sig_public(b_leaf).cloned(),
+            b_key_before,
+            "a sig_update targeting another leaf must not rewrite it"
+        );
+    }
+
+    /// SECURITY-AUDIT (Update authorization): an `Update` that rewrites a leaf's
+    /// signing key must be authorized by that leaf's CURRENT key. A fabricated Update
+    /// for a victim's leaf — attacker key + valid PoP but signed by the WRONG current
+    /// key — must be rejected at apply time, even in a raw commit that never went
+    /// through `commit_update`.
+    #[test]
+    fn update_without_current_key_authorization_is_rejected() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []); // victim
+        let mut c = add_member(&mut a, &mut [&mut b]); // a member that will apply it
+        let b_leaf = b.my_leaf();
+        let b_key_before = c.leaf_sig_public(b_leaf).cloned();
+
+        // Forge an Update for b's leaf: a key the attacker controls, a valid PoP, but
+        // an auth signed by a key that is NOT b's current leaf key.
+        let kp = LeafKeyPair::generate_with(a.profile);
+        let package = kp.key_package();
+        let wrong = crate::identity::IdentityKeyPair::generate();
+        let bad_auth = wrong.sign(&update_auth_transcript(
+            b_leaf,
+            &package.leaf_public,
+            &package.sig_public,
+        ));
+        let forged = Proposal::Update {
+            leaf: b_leaf,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+            auth: bad_auth,
+        };
+
+        assert!(matches!(
+            c.apply_proposals(&[forged]),
+            Err(CryptoError::BadSignature)
+        ));
+        assert_eq!(
+            c.leaf_sig_public(b_leaf).cloned(),
+            b_key_before,
+            "an Update not authorized by the leaf's current key must not rewrite it"
         );
     }
 
