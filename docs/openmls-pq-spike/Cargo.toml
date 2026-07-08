@@ -1,0 +1,10 @@
+[package]
+name = "mls-pq-spike"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+openmls = { git = "https://github.com/openmls/openmls", branch = "main", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", branch = "main", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = { git = "https://github.com/openmls/openmls", branch = "main" }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", branch = "main", features = ["clonable", "draft-ietf-mls-pq-ciphersuites"] }
