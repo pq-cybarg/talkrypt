@@ -55,6 +55,15 @@ class ChatEventsTest {
         assertFalse(m.friend)
     }
 
+    @Test fun name_updates_roster_display_and_notes() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("Whiskey"))
+        assertEquals("Whiskey", a.roster["peerfp123456"]!!.display)
+    }
+
     @Test fun identity_line_variants() {
         assertEquals("✓ friend bob", identityLine(true, true, "bob"))
         assertEquals("• contact bob", identityLine(true, false, "bob"))
