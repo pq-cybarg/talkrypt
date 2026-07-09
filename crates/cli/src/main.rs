@@ -1415,6 +1415,12 @@ async fn repl(
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
                 }
+                Event::Name { from, label, caveat, .. } => {
+                    if let Some(label) = label {
+                        let cav = caveat.map(|c| format!(" ({c})")).unwrap_or_default();
+                        println!("\r* {} is calling as \"{label}\"{cav}", short_fp(&from));
+                    }
+                }
                 Event::Error(e) => eprintln!("\r! {e}"),
             }
         }

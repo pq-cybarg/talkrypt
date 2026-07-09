@@ -545,6 +545,10 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let who = username.unwrap_or_else(|| short(&account_fingerprint));
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
                 }
+                Event::Name { from, label: Some(label), .. } => {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("{} is calling as \"{label}\"", short(&from)) });
+                }
+                Event::Name { .. } => {}
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();

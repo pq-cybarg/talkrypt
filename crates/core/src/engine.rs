@@ -65,6 +65,17 @@ pub enum Event {
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
+    /// A peer's resolved self-declared name changed. `account_fingerprint` is set
+    /// only for account-linked/registry tiers; `label` is `None` when suppressed by
+    /// the chat's trust policy.
+    Name {
+        from: [u8; 48],
+        account_fingerprint: Option<[u8; 48]>,
+        label: Option<String>,
+        tier: crate::nametrust::NameTier,
+        seq: u64,
+        caveat: Option<String>,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -120,6 +131,11 @@ enum Frame {
     /// member can bridge). Routes are dial *hints* — the authenticated handshake
     /// remains the security boundary — so a bogus route only wastes a dial attempt.
     RouteDescriptor(Vec<u8>),
+    /// An encoded [`crate::presence::NamePresence`] — a self-declared name, sent
+    /// directly in pairwise chats (in groups it rides a sentinel-tagged group
+    /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
+    /// RouteDescriptor / UpdateProposal from the group-security hardening).
+    Presence(Vec<u8>),
 }
 
 impl Frame {
@@ -185,6 +201,10 @@ impl Frame {
                 w.put_u8(11);
                 w.put_bytes(b);
             }
+            Frame::Presence(b) => {
+                w.put_u8(12);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -228,6 +248,7 @@ impl Frame {
             9 => Frame::LeafSigCert(r.get_vec().ok()?),
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
+            12 => Frame::Presence(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -455,6 +476,15 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
+    /// fingerprint (transport peer, or the signed device for a Linked presence).
+    names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
+    /// Our own leading name to announce (if any), and a monotonic presence sequence
+    /// number so peers can drop stale/replayed announcements.
+    leading_name: Mutex<Option<crate::presence::NameEntry>>,
+    presence_seq: std::sync::atomic::AtomicU64,
+    /// How often/when we re-announce our name (manual, on-join, periodic).
+    cadence: Mutex<crate::presence::PresenceCadence>,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -614,6 +644,10 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            names: Mutex::new(std::collections::HashMap::new()),
+            leading_name: Mutex::new(None),
+            presence_seq: std::sync::atomic::AtomicU64::new(0),
+            cadence: Mutex::new(crate::presence::PresenceCadence::default()),
         });
         (Core { inner }, events_rx)
     }
@@ -1289,6 +1323,95 @@ impl Core {
         }
         Ok(())
     }
+
+    /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
+    /// Does not send; call [`announce_presence`](Core::announce_presence) to broadcast.
+    pub fn set_leading_name(&self, entry: Option<crate::presence::NameEntry>) {
+        *self.inner.leading_name.lock().unwrap() = entry;
+    }
+
+    /// Set how/when this node re-announces its leading name (SUB-SPEC A). Manual
+    /// [`announce_presence`](Core::announce_presence) always works; the periodic-timer
+    /// driver for `PresenceCadence::Periodic` is a follow-up (plan Task 12).
+    pub fn set_presence_cadence(&self, cadence: crate::presence::PresenceCadence) {
+        *self.inner.cadence.lock().unwrap() = cadence;
+    }
+
+    /// The current presence cadence.
+    pub fn presence_cadence(&self) -> crate::presence::PresenceCadence {
+        self.inner.cadence.lock().unwrap().clone()
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat. No-op if no
+    /// leading name is set. Bumps the per-sender seq so it supersedes prior ones.
+    pub async fn announce_presence(&self) -> Result<()> {
+        let Some(bytes) = build_my_presence(&self.inner) else {
+            return Ok(());
+        };
+        match self.inner.role {
+            GroupRole::None => {
+                let payload = Frame::Presence(bytes).encode();
+                for (session, writer, fp) in collect_peers(&self.inner) {
+                    let ready = { session.lock().await.can_send() };
+                    if ready {
+                        let _ = send_payload(&session, &writer, &payload).await;
+                    } else if let Some(pending) = pending_for(&self.inner, fp) {
+                        pending.lock().unwrap().push(payload.clone());
+                    }
+                }
+            }
+            GroupRole::Host | GroupRole::Member => {
+                // Ride the SAME signed group path as chat (SECURITY-AUDIT G1/G2): the
+                // presence payload is leaf-signed, so a member/relay cannot forge or
+                // restamp a name onto another leaf.
+                let frame = {
+                    let mut g = self.inner.group.lock().await;
+                    match g.as_mut() {
+                        Some(grp) => {
+                            Frame::GroupMsg(grp.encrypt_signed(&encode_group_presence(&bytes))?)
+                        }
+                        None => return Ok(()), // group not ready yet
+                    }
+                };
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
+/// Chat payload (whose first byte is an opt-marking flag 0x00/0x01). A legacy
+/// client's `marking::decode_payload` returns `None` on this, dropping it gracefully.
+pub(crate) const PRESENCE_SENTINEL: u8 = 0xF5;
+
+fn encode_group_presence(np_bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(np_bytes.len() + 1);
+    v.push(PRESENCE_SENTINEL);
+    v.extend_from_slice(np_bytes);
+    v
+}
+
+/// Encode this node's current leading name as a `NamePresence`, or `None` if none is
+/// set. Bumps `presence_seq` so each announcement supersedes the last.
+fn build_my_presence(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::presence::{NameBacking, NamePresence};
+    let entry = inner.leading_name.lock().unwrap().clone()?;
+    let seq = inner
+        .presence_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let np = match entry.backing {
+        NameBacking::Bare => NamePresence::Bare { seq, label: entry.label.clone() },
+        NameBacking::Account { chain } => {
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            NamePresence::linked(seq, chain, &entry.label, ctx, &inner.identity)
+        }
+    };
+    Some(np.encode())
 }
 
 fn collect_peers(inner: &Arc<Inner>) -> Vec<(SharedSession, SharedWriter, [u8; 48])> {
@@ -1537,6 +1660,10 @@ async fn reader_loop(
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
+            }
+            Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
+                // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
+                handle_presence(&inner, fingerprint, bytes);
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
                 match handle_identity(&inner, fingerprint, bytes) {
@@ -1826,6 +1953,81 @@ fn now_secs() -> u64 {
 /// A presentation that fails to decode, doesn't bind to this peer, or carries a
 /// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
 /// never be mistaken for a verified friend.
+/// A peer announced a self-declared name (pairwise `Frame::Presence`, or a group
+/// sentinel payload). Verify (Linked only), enforce seq monotonicity, cache the
+/// record, and emit `Event::Name` with the policy-resolved label/caveat/tier.
+///
+/// `attributed_fp` is the message-attribution fingerprint (pairwise transport peer,
+/// or `roster[sender_leaf]` in a group). For a `Linked` presence the device
+/// signature — not `attributed_fp` — is the authority; the signed device becomes the
+/// cache/render key so the name shows over that peer's messages.
+fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) {
+    use crate::nametrust::{resolve_render, NameTier};
+    use crate::presence::{NamePresence, NameRecord};
+    let Ok(np) = NamePresence::decode(&bytes) else { return };
+    let now = now_secs();
+    let (rec, key) = match &np {
+        NamePresence::Bare { seq, label } => (
+            NameRecord { label: label.clone(), tier: NameTier::Bare, seq: *seq, account_fp: None },
+            attributed_fp,
+        ),
+        NamePresence::Linked { .. } => {
+            let Some(v) = np.verify_linked(now) else { return };
+            // The Linked presence must be scoped to THIS chat (anti-replay across chats).
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            if !matches!(&np, NamePresence::Linked { context, .. } if *context == ctx) {
+                return;
+            }
+            // Reject a revoked device.
+            let revoked = {
+                let revs = inner.revocations.lock().unwrap();
+                revs.contains(&(v.account_fp, v.device_fp))
+            };
+            if revoked {
+                return;
+            }
+            (
+                NameRecord {
+                    label: v.label.clone(),
+                    tier: NameTier::Linked,
+                    seq: v.seq,
+                    account_fp: Some(v.account_fp),
+                },
+                v.device_fp,
+            )
+        }
+    };
+    // seq monotonicity per cache key.
+    {
+        let mut names = inner.names.lock().unwrap();
+        if let Some(existing) = names.get(&key) {
+            if rec.seq <= existing.seq {
+                return;
+            }
+        }
+        names.insert(key, rec.clone());
+    }
+    // Resolve the render against the rest of the cache under the chat's trust policy.
+    let (label, caveat, tier, account_fp) = {
+        let names = inner.names.lock().unwrap();
+        let policy = inner.descriptor.name_trust_policy;
+        let sn = short_hex6(&key);
+        let r = resolve_render(key, &rec, &names, policy, sn);
+        (r.label, r.caveat, r.tier, rec.account_fp)
+    };
+    let _ = inner.events_tx.send(Event::Name {
+        from: key,
+        account_fingerprint: account_fp,
+        label,
+        tier,
+        seq: rec.seq,
+        caveat,
+    });
+}
+
 fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> IdentityOutcome {
     let presentation = match Presentation::decode(&bytes) {
         Ok(p) => p,
@@ -2133,12 +2335,15 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         // our gossip fan-out to other members (SECURITY-AUDIT G2).
         return;
     };
-    if let Some((marking, text)) = marking::decode_payload(&pt) {
-        // The signature has been verified against the sending leaf's tree-bound
-        // key, so leaf attribution is trustworthy; map it to a fingerprint.
-        let sender = TreeKemGroup::sender_leaf(&gct)
-            .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
-            .unwrap_or(from);
+    // The signature has been verified against the sending leaf's tree-bound key, so
+    // leaf attribution is trustworthy; map it to a fingerprint for either payload type.
+    let sender = TreeKemGroup::sender_leaf(&gct)
+        .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+        .unwrap_or(from);
+    if pt.first() == Some(&PRESENCE_SENTINEL) {
+        // A self-declared name riding the signed group path (SUB-SPEC A).
+        handle_presence(&inner, sender, pt[1..].to_vec());
+    } else if let Some((marking, text)) = marking::decode_payload(&pt) {
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
             channel: inner.descriptor.channel.clone(),
@@ -2232,6 +2437,131 @@ mod tests {
             desc.clone(),
             is_host,
         )
+    }
+
+    fn test_inner_pairwise() -> std::sync::Arc<Inner> {
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#t",
+        );
+        let (core, _rx) = Core::new(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("a")),
+            desc,
+        );
+        core.inner.clone()
+    }
+
+    #[test]
+    fn frame_presence_roundtrips() {
+        let f = Frame::Presence(vec![1, 2, 3, 4]);
+        let bytes = f.encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::Presence(b)) => assert_eq!(b, vec![1, 2, 3, 4]),
+            _ => panic!("expected Presence frame"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pairwise_bare_name_emits_name_event() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NamePresence, NameRecord};
+        let inner = test_inner_pairwise();
+        let np = NamePresence::Bare { seq: 5, label: "Whiskey".into() };
+        handle_presence(&inner, [7u8; 48], np.encode());
+        let rec = inner.names.lock().unwrap().get(&[7u8; 48]).cloned().unwrap();
+        assert_eq!(
+            rec,
+            NameRecord { label: "Whiskey".into(), tier: NameTier::Bare, seq: 5, account_fp: None }
+        );
+        // A stale seq is ignored (monotonic per cache key).
+        let older = NamePresence::Bare { seq: 4, label: "Nope".into() };
+        handle_presence(&inner, [7u8; 48], older.encode());
+        assert_eq!(inner.names.lock().unwrap().get(&[7u8; 48]).unwrap().label, "Whiskey");
+    }
+
+    async fn wait_for_name(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &str,
+    ) -> bool {
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(Event::Name { label: Some(l), .. })) if l == want => return true,
+                Ok(Some(_)) => continue,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// End-to-end (SUB-SPEC A): a group MEMBER sets a leading name and announces it;
+    /// the name rides the signed group path and the host emits `Event::Name` for it,
+    /// attributed to the member's roster fingerprint.
+    #[tokio::test]
+    async fn group_member_presence_reaches_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#names",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Whiskey".into(),
+            backing: NameBacking::Bare,
+        }));
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.announce_presence().await.unwrap();
+        assert!(
+            wait_for_name(&mut host_rx, "Whiskey").await,
+            "host must receive m1's announced name"
+        );
+    }
+
+    /// SUB-SPEC A security: a `Linked` presence scoped to a DIFFERENT chat context
+    /// must be dropped (anti-replay across chats).
+    #[test]
+    fn linked_presence_rejects_wrong_chat_context() {
+        use talkrypt_crypto::IdentityChain;
+        let inner = test_inner_pairwise();
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let chain = IdentityChain::device(&account, device.public(), "dev", now, now + 10_000);
+        let wrong_ctx = crate::presence::chat_context(b"other-token", "#other");
+        let np = crate::presence::NamePresence::linked(1, chain, "Alice", wrong_ctx, &device);
+        handle_presence(&inner, device.public().fingerprint(), np.encode());
+        assert!(inner.names.lock().unwrap().is_empty());
+    }
+
+    /// SUB-SPEC A security: an insider who holds the epoch secret still cannot forge a
+    /// `Linked` name for an account whose device key it does not hold — signing the
+    /// real chain with the wrong key fails `verify_linked`.
+    #[test]
+    fn insider_cannot_forge_linked_name() {
+        use talkrypt_crypto::IdentityChain;
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let real_device = IdentityKeyPair::generate();
+        let attacker = IdentityKeyPair::generate();
+        let chain =
+            IdentityChain::device(&account, real_device.public(), "dev", now, now + 10_000);
+        let ctx = crate::presence::chat_context(b"tok", "#c");
+        let forged = crate::presence::NamePresence::linked(1, chain, "Alice", ctx, &attacker);
+        assert!(forged.verify_linked(now).is_none());
     }
 
     /// The host (responder) cannot encrypt before it has received the joiner's

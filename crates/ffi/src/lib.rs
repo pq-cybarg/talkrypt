@@ -373,6 +373,17 @@ pub enum FfiEvent {
     Disconnected {
         fingerprint: String,
     },
+    /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
+    /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
+    /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
+    Name {
+        from: String,
+        account_fingerprint: String,
+        label: String,
+        tier: String,
+        seq: u64,
+        caveat: String,
+    },
     Error {
         message: String,
     },
@@ -446,6 +457,21 @@ fn map_event(e: Event) -> FfiEvent {
         },
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
             fingerprint: hex_fp(&fingerprint),
+        },
+        Event::Name {
+            from,
+            account_fingerprint,
+            label,
+            tier,
+            seq,
+            caveat,
+        } => FfiEvent::Name {
+            from: hex_fp(&from),
+            account_fingerprint: account_fingerprint.map(|f| hex_fp(&f)).unwrap_or_default(),
+            label: label.unwrap_or_default(),
+            tier: format!("{tier:?}"),
+            seq,
+            caveat: caveat.unwrap_or_default(),
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
