@@ -1554,6 +1554,17 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
                 let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
             });
         }
+        // SUB-SPEC A: also announce our leading self-declared name on connect, so a
+        // pairwise peer resolves us without us acting (the CQ beacon's on-join
+        // trigger for a pairwise dialer). Sending this first frame also makes the
+        // peer (ratchet responder) send-ready, so it can announce back.
+        if let Some(bytes) = build_my_presence(inner) {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+            });
+        }
     }
     // The responder presents reactively (see reader_loop): once it has decrypted
     // the initiator's first frame, its ratchet is send-ready.
@@ -1611,6 +1622,13 @@ async fn reader_loop(
             if let Some(bytes) = pending {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC A: now send-ready, announce our leading self-declared name too
+            // (the CQ beacon's on-join trigger for a pairwise responder/host).
+            if let Some(bytes) = build_my_presence(&inner) {
+                if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                    let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
                 }
             }
         }
@@ -2683,6 +2701,46 @@ mod tests {
             next_message(&mut joiner_rx).await.0,
             "welcome",
             "the host's pre-ratchet message must be delivered, not dropped"
+        );
+    }
+
+    /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each
+    /// auto-announces its leading name — the dialer eagerly (it sends first), the
+    /// host reactively once the dialer's first frame makes it send-ready — so both
+    /// resolve each other's names with NO explicit announce.
+    #[tokio::test]
+    async fn pairwise_on_join_auto_announce_both_directions() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#pj",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "j".into(),
+            label: "Bravo".into(),
+            backing: NameBacking::Bare,
+        }));
+        joiner.connect("host").await.unwrap();
+        // No explicit announce — the on-join triggers fire both ways.
+        assert!(
+            wait_for_name(&mut host_rx, "Bravo").await,
+            "host must hear the dialer's name on connect"
+        );
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "dialer must hear the host's name once the host is send-ready"
         );
     }
 
