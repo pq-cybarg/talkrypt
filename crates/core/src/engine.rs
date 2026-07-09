@@ -1330,11 +1330,30 @@ impl Core {
         *self.inner.leading_name.lock().unwrap() = entry;
     }
 
-    /// Set how/when this node re-announces its leading name (SUB-SPEC A). Manual
-    /// [`announce_presence`](Core::announce_presence) always works; the periodic-timer
-    /// driver for `PresenceCadence::Periodic` is a follow-up (plan Task 12).
+    /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
+    /// periodic re-beacon (clamped to a floor) plus the on-message-id mode. Manual
+    /// [`announce_presence`](Core::announce_presence) always works too. (Re)starts the
+    /// periodic task when enabled; a later cadence change stops the old task.
     pub fn set_presence_cadence(&self, cadence: crate::presence::PresenceCadence) {
         *self.inner.cadence.lock().unwrap() = cadence;
+        if let Some(secs) = cadence.effective_periodic() {
+            let inner = self.inner.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(secs));
+                ticker.tick().await; // consume the immediate first tick
+                loop {
+                    ticker.tick().await;
+                    // Stop if the cadence was disabled or changed to a different period.
+                    let still = inner.cadence.lock().unwrap().effective_periodic() == Some(secs);
+                    if !still {
+                        break;
+                    }
+                    if let Some(bytes) = build_my_presence(&inner) {
+                        send_presence_now(&inner, bytes).await;
+                    }
+                }
+            });
+        }
     }
 
     /// The current presence cadence.
@@ -1345,38 +1364,44 @@ impl Core {
     /// Broadcast a fresh CQ of the current leading name to the chat. No-op if no
     /// leading name is set. Bumps the per-sender seq so it supersedes prior ones.
     pub async fn announce_presence(&self) -> Result<()> {
-        let Some(bytes) = build_my_presence(&self.inner) else {
-            return Ok(());
-        };
-        match self.inner.role {
-            GroupRole::None => {
-                let payload = Frame::Presence(bytes).encode();
-                for (session, writer, fp) in collect_peers(&self.inner) {
-                    let ready = { session.lock().await.can_send() };
-                    if ready {
-                        let _ = send_payload(&session, &writer, &payload).await;
-                    } else if let Some(pending) = pending_for(&self.inner, fp) {
-                        pending.lock().unwrap().push(payload.clone());
-                    }
-                }
-            }
-            GroupRole::Host | GroupRole::Member => {
-                // Ride the SAME signed group path as chat (SECURITY-AUDIT G1/G2): the
-                // presence payload is leaf-signed, so a member/relay cannot forge or
-                // restamp a name onto another leaf.
-                let frame = {
-                    let mut g = self.inner.group.lock().await;
-                    match g.as_mut() {
-                        Some(grp) => {
-                            Frame::GroupMsg(grp.encrypt_signed(&encode_group_presence(&bytes))?)
-                        }
-                        None => return Ok(()), // group not ready yet
-                    }
-                };
-                route(&self.inner, frame, Route::Broadcast).await;
-            }
+        if let Some(bytes) = build_my_presence(&self.inner) {
+            send_presence_now(&self.inner, bytes).await;
         }
         Ok(())
+    }
+}
+
+/// Send `bytes` (an encoded `NamePresence`) via the role-appropriate path: a pairwise
+/// `Frame::Presence` to each peer, or a signed group message behind the presence
+/// sentinel (SECURITY-AUDIT G1/G2 — leaf-signed, so a member/relay cannot forge or
+/// restamp a name onto another leaf). Shared by `announce_presence`, the periodic CQ
+/// timer, and the roster-grow re-announce hooks.
+async fn send_presence_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let payload = Frame::Presence(bytes).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_presence(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return, // group not ready yet
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
     }
 }
 
@@ -1655,8 +1680,23 @@ async fn reader_loop(
                 handle_update_proposal(&inner, from, b).await;
             }
             Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
-                let mut roster = inner.roster.lock().unwrap();
-                *roster = entries.into_iter().collect();
+                let grew = {
+                    let mut roster = inner.roster.lock().unwrap();
+                    let before = roster.len();
+                    *roster = entries.into_iter().collect();
+                    roster.len() > before
+                };
+                // A new member appeared — re-announce our leading name so they
+                // resolve us without us acting (SUB-SPEC A CQ beacon).
+                if grew && inner.leading_name.lock().unwrap().is_some() {
+                    let inner2 = inner.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        if let Some(bytes) = build_my_presence(&inner2) {
+                            send_presence_now(&inner2, bytes).await;
+                        }
+                    });
+                }
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
@@ -2214,6 +2254,18 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     )
     .await;
     route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
+
+    // The roster just grew (a member joined) — re-announce our leading name so the
+    // new member resolves us without us acting (SUB-SPEC A CQ beacon).
+    if inner.leading_name.lock().unwrap().is_some() {
+        let inner2 = inner.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Some(bytes) = build_my_presence(&inner2) {
+                send_presence_now(&inner2, bytes).await;
+            }
+        });
+    }
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -2494,7 +2546,8 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
                 Ok(Some(Event::Name { label: Some(l), .. })) if l == want => return true,
                 Ok(Some(_)) => continue,
-                _ => return false,
+                Ok(None) => return false, // channel closed
+                Err(_) => continue,       // idle tick — keep waiting
             }
         }
         false
@@ -2530,6 +2583,38 @@ mod tests {
             "host must receive m1's announced name"
         );
     }
+
+    /// SUB-SPEC A CQ beacon (roster-grow re-announce): when a new member joins, the
+    /// host re-announces its leading name automatically — the joiner resolves the host
+    /// WITHOUT the host acting.
+    #[tokio::test]
+    async fn new_member_triggers_host_reannounce() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#cq",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Host-CQ".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        // No explicit announce — the host's roster-grow hook re-announces for us.
+        assert!(
+            wait_for_name(&mut m1rx, "Host-CQ").await,
+            "a joining member must hear the host's auto-re-announced name"
+        );
+    }
+
+
 
     /// SUB-SPEC A security: a `Linked` presence scoped to a DIFFERENT chat context
     /// must be dropped (anti-replay across chats).
