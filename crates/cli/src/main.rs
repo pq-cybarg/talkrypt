@@ -1345,6 +1345,12 @@ commands:
   /access open|contacts|friends  set who may join this channel
   /allow <fp>                    admit one specific account
   /deny <fp>                     revoke an account's access
+  names + CQ beacon (self-declared display names):
+  /name <callsign>               set a bare self-declared name and announce it
+  /name link <callsign>          set an account-linked (verified) name (needs /account)
+  /name off                      clear your leading name
+  /cq                            re-announce your name to the chat now
+  /cq periodic <mins>|off        auto re-beacon your name on a timer
   registry (username discovery):
   /register <registry-uri>       publish username->account to a registry
   /resolve <name> <uri>[ <uri>…] [add]
@@ -1519,8 +1525,81 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
         "register" => cmd_register(core, state, arg).await,
         "revoke" => cmd_revoke(core, state, arg).await,
         "resolve" => cmd_resolve(core, arg).await,
+        "name" => cmd_name(core, state, arg).await,
+        "cq" => {
+            let a = arg.trim();
+            if a.is_empty() {
+                core.announce_presence().await.ok();
+                println!("CQ — announced your name to the chat");
+            } else if let Some(rest) = a.strip_prefix("periodic") {
+                let rest = rest.trim();
+                let secs = if rest == "off" || rest.is_empty() {
+                    None
+                } else {
+                    rest.parse::<u64>().ok().map(|m| m * 60)
+                };
+                core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                    periodic_secs: secs,
+                    on_message_id: false,
+                });
+                match secs {
+                    Some(s) => println!("CQ cadence: every {} min", s / 60),
+                    None => println!("CQ cadence: off (manual /cq only)"),
+                }
+            } else {
+                println!("usage: /cq   |   /cq periodic <minutes>|off");
+            }
+        }
         other => println!("unknown command: /{other} (try /help)"),
     }
+}
+
+/// `/name <callsign>` (bare) | `/name link <callsign>` (account-linked) | `/name off`.
+/// Sets the leading self-declared name for this chat and announces it (SUB-SPEC A).
+async fn cmd_name(core: &Core, state: &ReplState, arg: &str) {
+    use talkrypt_core::presence::{NameBacking, NameEntry};
+    let arg = arg.trim();
+    if arg.is_empty() {
+        println!("usage: /name <callsign>   |   /name link <callsign>   |   /name off");
+        return;
+    }
+    if arg == "off" {
+        core.set_leading_name(None);
+        println!("leading name cleared");
+        return;
+    }
+    let (label, backing) = if let Some(label) = arg.strip_prefix("link ") {
+        let label = label.trim().to_string();
+        match &state.account {
+            Some(acct) => {
+                let chain = IdentityChain::device(
+                    acct,
+                    core.identity_public(),
+                    "device:cli",
+                    now_secs(),
+                    0,
+                );
+                (label, NameBacking::Account { chain })
+            }
+            None => {
+                println!("! /name link needs an account (/account new|load) — using a bare name");
+                (label, NameBacking::Bare)
+            }
+        }
+    } else {
+        (arg.to_string(), NameBacking::Bare)
+    };
+    let linked = matches!(backing, NameBacking::Account { .. });
+    core.set_leading_name(Some(NameEntry {
+        id: label.clone(),
+        label: label.clone(),
+        backing,
+    }));
+    core.announce_presence().await.ok();
+    println!(
+        "name set to \"{label}\" ({}) and announced",
+        if linked { "account-linked" } else { "bare" }
+    );
 }
 
 /// `/account new|load|save`.
