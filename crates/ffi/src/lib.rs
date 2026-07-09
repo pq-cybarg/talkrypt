@@ -1023,6 +1023,45 @@ impl TalkryptClient {
         self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
     }
 
+    /// Set (or clear) this node's leading self-declared **name** for the chat
+    /// (SUB-SPEC A). An empty `label` clears it. This is a *bare* (unverified) name;
+    /// peers see it over your messages, tinted per the chat's trust policy. Call
+    /// [`announce_presence`](Self::announce_presence) (or set a cadence) to broadcast.
+    pub fn set_leading_name(&self, label: String) {
+        if label.is_empty() {
+            self.core.set_leading_name(None);
+        } else {
+            self.core
+                .set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                    id: label.clone(),
+                    label,
+                    backing: talkrypt_core::presence::NameBacking::Bare,
+                }));
+        }
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat now.
+    pub fn announce_presence(&self) {
+        self.rt.block_on(async {
+            let _ = self.core.announce_presence().await;
+        });
+    }
+
+    /// Configure the CQ auto re-beacon (SUB-SPEC A): `periodic_secs == 0` disables the
+    /// periodic timer (manual/on-join announcements still fire). Clamped to a floor.
+    pub fn set_presence_cadence(&self, periodic_secs: u64, on_message_id: bool) {
+        let periodic = if periodic_secs == 0 {
+            None
+        } else {
+            Some(periodic_secs)
+        };
+        self.core
+            .set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                periodic_secs: periodic,
+                on_message_id,
+            });
+    }
+
     /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
     /// (device-fingerprint hex, endpoints). A reconnect flow tries these when the
     /// original host endpoint is dead, so a member is no longer partitioned by the
