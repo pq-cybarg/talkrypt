@@ -54,6 +54,7 @@ class QrScanActivity : Activity() {
     private var bgHandler: Handler? = null
     private var cameraId: String? = null
     private var previewSize: Size = TARGET
+    private var sensorOrientation = 90 // filled from CameraCharacteristics
     // Guards against re-entrant decode + double-finishing once we have a hit.
     private val decoding = AtomicBoolean(false)
     private val done = AtomicBoolean(false)
@@ -88,8 +89,10 @@ class QrScanActivity : Activity() {
         )
         val cancel = TextView(this).apply {
             text = "✕"
+            contentDescription = "Cancel scan"
             setTextColor(Color.WHITE)
             textSize = 22f
+            minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(20), dp(20), dp(20), dp(20))
             setOnClickListener { cancel() }
         }
@@ -127,8 +130,8 @@ class QrScanActivity : Activity() {
         // Register the surface listener once; every open path funnels through the
         // single-flight maybeOpenCamera(), so duplicate triggers are harmless.
         textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) { maybeOpenCamera() }
-            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
+            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) { configureTransform(w, h); maybeOpenCamera() }
+            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) { configureTransform(w, h) }
             override fun onSurfaceTextureDestroyed(s: SurfaceTexture) = true
             override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
         }
@@ -155,6 +158,7 @@ class QrScanActivity : Activity() {
             val id = pickBackCamera(mgr) ?: run { hint.text = "No camera found"; return }
             cameraId = id
             val chars = mgr.getCameraCharacteristics(id)
+            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             previewSize = chooseSize(map?.getOutputSizes(ImageReader::class.java))
             imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, android.graphics.ImageFormat.YUV_420_888, 2).apply {
@@ -183,6 +187,7 @@ class QrScanActivity : Activity() {
         val texture = textureView.surfaceTexture ?: return
         try {
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            runOnUiThread { configureTransform(textureView.width, textureView.height) }
             val previewSurface = Surface(texture)
             val readerSurface = imageReader!!.surface
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -277,6 +282,35 @@ class QrScanActivity : Activity() {
         val fit = sizes.filter { it.width <= TARGET.width && it.height <= TARGET.height }
             .maxByOrNull { it.width.toLong() * it.height }
         return fit ?: sizes.minByOrNull { it.width.toLong() * it.height } ?: TARGET
+    }
+
+    /** Rotate the camera buffer upright for this portrait-locked activity and
+     *  center-crop it to fill the view. A plain TextureView draws the buffer with
+     *  NO rotation, stretched to the view rect, so on a typical sensorOrientation
+     *  90 back camera the preview is both sideways and squashed without this.
+     *  NOTE: preview framing only — decode reads the ImageReader Y-plane, so
+     *  scanning works regardless. Verify framing on-device across sensor 90/270. */
+    private fun configureTransform(viewW: Int, viewH: Int) {
+        if (viewW == 0 || viewH == 0) return
+        @Suppress("DEPRECATION")
+        val displayDeg = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90; Surface.ROTATION_180 -> 180; Surface.ROTATION_270 -> 270; else -> 0
+        }
+        // Degrees to rotate the buffer so it appears upright.
+        val rotation = ((sensorOrientation - displayDeg) + 360) % 360
+        // Canonical Camera2 transform (setRectToRect + cover-scale + rotate).
+        val viewRect = android.graphics.RectF(0f, 0f, viewW.toFloat(), viewH.toFloat())
+        val cx = viewRect.centerX(); val cy = viewRect.centerY()
+        val m = android.graphics.Matrix()
+        if (rotation == 90 || rotation == 270) {
+            val bufferRect = android.graphics.RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
+            bufferRect.offset(cx - bufferRect.centerX(), cy - bufferRect.centerY())
+            m.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
+            val scale = maxOf(viewH.toFloat() / previewSize.height, viewW.toFloat() / previewSize.width)
+            m.postScale(scale, scale, cx, cy)
+        }
+        m.postRotate(rotation.toFloat(), cx, cy)
+        textureView.setTransform(m)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()

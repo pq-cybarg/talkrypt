@@ -12,5 +12,12 @@ class TkApp : Application() {
     override fun onCreate() {
         super.onCreate()
         runCatching { NymNative.initTlsVerifier(this) }
+        // Prewarm the expensive singletons (Keystore unseal + ML-DSA account
+        // reconstruction, StrongBox custody probe) off the main thread, so the
+        // first screen that needs them doesn't pay the cost during layout.
+        Thread {
+            runCatching { ChatNet.account(this) }
+            runCatching { com.talkrypt.custody.CustodyBridge.detectTier() }
+        }.start()
     }
 }
