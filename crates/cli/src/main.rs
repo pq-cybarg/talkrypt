@@ -151,6 +151,12 @@ enum Cmd {
         /// emulator advertise the host alias 10.0.2.2). Ignored with --tor.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Self-declared leading callsign for this chat (SUB-SPEC A). Set before
+        /// any peer connects so the on-join CQ auto-announce carries it — the
+        /// non-interactive equivalent of `/name <callsign>`. Bare (not
+        /// account-linked); use `/name link` in-session for a linked name.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -179,6 +185,12 @@ enum Cmd {
         /// Requires a `--features tor` build.
         #[arg(long)]
         tor: bool,
+        /// Self-declared leading callsign for this chat (SUB-SPEC A). Set before
+        /// dialing so the on-join CQ auto-announce carries it — the
+        /// non-interactive equivalent of `/name <callsign>`. Bare (not
+        /// account-linked); use `/name link` in-session for a linked name.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -381,6 +393,7 @@ async fn main() {
             require_registry,
             tor,
             endpoint,
+            name,
         } => {
             run_host(HostArgs {
                 listen,
@@ -401,6 +414,7 @@ async fn main() {
                 require_registry,
                 tor,
                 endpoint,
+                name,
             })
             .await
         }
@@ -413,7 +427,8 @@ async fn main() {
             chain,
             password,
             tor,
-        } => run_join(&uri, group, account, username, device, chain, password, tor).await,
+            name,
+        } => run_join(&uri, group, account, username, device, chain, password, tor, name).await,
         Cmd::Registry { listen, channel, tor } => run_registry(listen, channel, tor).await,
         Cmd::LinkOffer {
             listen,
@@ -559,6 +574,7 @@ struct HostArgs {
     require_registry: Option<String>,
     tor: bool,
     endpoint: Option<String>,
+    name: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -952,6 +968,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         require_registry,
         tor,
         endpoint,
+        name,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -1077,6 +1094,10 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
     load_contacts(&core); // restore recognized accounts from previous sessions
+    // SUB-SPEC A: arm the leading name before any peer connects, so the host's
+    // on-join CQ auto-announce (fired in reader_loop when a joiner registers)
+    // carries it hands-free.
+    set_bare_leading_name(&core, &name);
     println!("\nwaiting for peers — type a message + enter to send. /help for commands.\n");
 
     repl(core, rx, ReplState::new(account_kp, username)).await
@@ -1091,6 +1112,7 @@ async fn run_join(
     chain: Option<String>,
     password: Option<String>,
     tor: bool,
+    name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let mut desc = ChatDescriptor::from_uri(uri)?;
@@ -1135,6 +1157,9 @@ async fn run_join(
         core.identity_public().safety_number()
     );
 
+    // SUB-SPEC A: arm the leading name BEFORE dialing, so the joiner's on-join
+    // CQ auto-announce (fired inside establish/register) carries it hands-free.
+    set_bare_leading_name(&core, &name);
     let strategy = for_kind(desc.topology);
     strategy.establish(&core, &desc.endpoints).await?;
     println!(
@@ -1551,6 +1576,26 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
             }
         }
         other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// Set a bare (non-account-linked) leading name from a `--name` flag, BEFORE the
+/// session connects, so the on-join CQ auto-announce (SUB-SPEC A) carries it. No
+/// explicit announce here — `register()`/`establish` emit the presence frame as
+/// part of the join handshake.
+fn set_bare_leading_name(core: &Core, name: &Option<String>) {
+    use talkrypt_core::presence::{NameBacking, NameEntry};
+    if let Some(label) = name {
+        let label = label.trim();
+        if label.is_empty() {
+            return;
+        }
+        core.set_leading_name(Some(NameEntry {
+            id: label.to_string(),
+            label: label.to_string(),
+            backing: NameBacking::Bare,
+        }));
+        println!("leading name \"{label}\" (bare) — will auto-announce on join");
     }
 }
 
