@@ -1546,8 +1546,13 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     // group/relayed pairwise channels carry coordination/`Routed` envelopes.
     let present_pairwise = inner.role == GroupRole::None && !inner.relayed;
     if present_pairwise && is_initiator {
+        let ident = inner.present_chain.lock().unwrap().clone();
+        let presence = build_my_presence(inner);
+        // Whether we send anything self-describing as our opening frame. A
+        // pseudonym with no leading name sends neither — see the keying frame below.
+        let sends_opening = ident.is_some() || presence.is_some();
         // Initiator sends first, so it can present right away.
-        if let Some(bytes) = inner.present_chain.lock().unwrap().clone() {
+        if let Some(bytes) = ident {
             let s = session.clone();
             let w = writer.clone();
             tokio::spawn(async move {
@@ -1558,11 +1563,25 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
         // pairwise peer resolves us without us acting (the CQ beacon's on-join
         // trigger for a pairwise dialer). Sending this first frame also makes the
         // peer (ratchet responder) send-ready, so it can announce back.
-        if let Some(bytes) = build_my_presence(inner) {
+        if let Some(bytes) = presence {
             let s = session.clone();
             let w = writer.clone();
             tokio::spawn(async move {
                 let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+            });
+        }
+        // A pseudonym initiator with no leading name would otherwise send NOTHING
+        // as its opening frame — leaving the responder's Double Ratchet unkeyed, so
+        // the responder could never present its identity or announce its CQ name
+        // back (the most common case: an anonymous joiner dialing a named host).
+        // Send an empty keying Presence: it decodes to nothing (pure no-op in
+        // `handle_presence`), but decrypting it makes the responder send-ready and
+        // fires its reactive on-join announce.
+        if !sends_opening {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(Vec::new()).encode()).await;
             });
         }
     }
@@ -2741,6 +2760,40 @@ mod tests {
         assert!(
             wait_for_name(&mut joiner_rx, "Alpha").await,
             "dialer must hear the host's name once the host is send-ready"
+        );
+    }
+
+    /// SUB-SPEC A regression (the "anonymous joiner never hears the host" bug): a
+    /// pseudonym dialer with NO leading name and NO account presents nothing on
+    /// connect. Without an opening keying frame the host's (responder's) ratchet
+    /// never becomes send-ready, so its reactive on-join CQ announce never fires
+    /// and the joiner never resolves the host's name — the most common real case
+    /// (an anonymous joiner dialing a named host). The empty keying Presence sent
+    /// by a silent initiator must key the host so its name still arrives.
+    #[tokio::test]
+    async fn nameless_pseudonym_joiner_still_hears_named_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#anon",
+        );
+        let (host, _host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        // Joiner: no leading name, no presented account — a bare pseudonym.
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "a nameless pseudonym joiner must still hear the host's CQ name on join"
         );
     }
 
