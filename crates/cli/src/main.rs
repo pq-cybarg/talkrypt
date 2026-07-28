@@ -157,6 +157,13 @@ enum Cmd {
         /// account-linked); use `/name link` in-session for a linked name.
         #[arg(long)]
         name: Option<String>,
+        /// How joiners resolve self-declared name collisions (SUB-SPEC A). Travels
+        /// in the invite so every joiner honors the host's choice: `signal`
+        /// (default — never trust a name for identity; show it verbatim and rely
+        /// on the safety number), `warn` (flag colliding names with a caveat), or
+        /// `suppress` (hide a later collider's label, show its fingerprint).
+        #[arg(long)]
+        name_policy: Option<String>,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -394,6 +401,7 @@ async fn main() {
             tor,
             endpoint,
             name,
+            name_policy,
         } => {
             run_host(HostArgs {
                 listen,
@@ -415,6 +423,7 @@ async fn main() {
                 tor,
                 endpoint,
                 name,
+                name_policy,
             })
             .await
         }
@@ -575,6 +584,7 @@ struct HostArgs {
     tor: bool,
     endpoint: Option<String>,
     name: Option<String>,
+    name_policy: Option<String>,
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -969,6 +979,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         tor,
         endpoint,
         name,
+        name_policy,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -1018,6 +1029,10 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     desc.group = group;
     desc.channel_marking = channel_marking;
+    if let Some(p) = &name_policy {
+        desc.name_trust_policy = parse_name_policy(p)?;
+        println!("name-collision policy: {p}");
+    }
     if let Some(pw) = &password {
         desc.password = Some(ChannelPassword::new(pw.clone()));
         println!("channel password: set (Argon2id-gated; not carried in the invite)");
@@ -1446,10 +1461,18 @@ async fn repl(
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
                 }
-                Event::Name { from, label, caveat, .. } => {
+                Event::Name { from, label, tier, caveat, .. } => {
                     if let Some(label) = label {
+                        // Badge the trust tier so a verified (account-linked /
+                        // registry-confirmed) name is visually distinct from a bare
+                        // one; the caveat carries any collision warning (SUB-SPEC A).
+                        let badge = match tier {
+                            talkrypt_core::nametrust::NameTier::Linked => "🔗 ",
+                            talkrypt_core::nametrust::NameTier::RegistryConfirmed => "✓ ",
+                            talkrypt_core::nametrust::NameTier::Bare => "",
+                        };
                         let cav = caveat.map(|c| format!(" ({c})")).unwrap_or_default();
-                        println!("\r* {} is calling as \"{label}\"{cav}", short_fp(&from));
+                        println!("\r* {} is calling as {badge}\"{label}\"{cav}", short_fp(&from));
                     }
                 }
                 Event::Error(e) => eprintln!("\r! {e}"),
@@ -1596,6 +1619,21 @@ fn set_bare_leading_name(core: &Core, name: &Option<String>) {
             backing: NameBacking::Bare,
         }));
         println!("leading name \"{label}\" (bare) — will auto-announce on join");
+    }
+}
+
+/// Map a `--name-policy` string to a [`NameTrustPolicy`] (SUB-SPEC A). The policy
+/// is baked into the invite descriptor so every joiner resolves name collisions
+/// the same way the host chose.
+fn parse_name_policy(s: &str) -> Result<talkrypt_core::nametrust::NameTrustPolicy, String> {
+    use talkrypt_core::nametrust::NameTrustPolicy;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "signal" | "signal-style" | "signalstyle" => Ok(NameTrustPolicy::SignalStyle),
+        "warn" | "warn-on-collision" => Ok(NameTrustPolicy::WarnOnCollision),
+        "suppress" | "suppress-colliding" => Ok(NameTrustPolicy::SuppressColliding),
+        other => Err(format!(
+            "unknown --name-policy {other:?} (use signal | warn | suppress)"
+        )),
     }
 }
 
@@ -1911,5 +1949,27 @@ async fn cmd_resolve(core: &Core, arg: &str) {
             "'{name}' did NOT resolve consistently — registries disagreed or none answered \
              (do not trust this name)"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use talkrypt_core::nametrust::NameTrustPolicy;
+
+    #[test]
+    fn name_policy_parses_all_forms() {
+        assert_eq!(parse_name_policy("signal").unwrap(), NameTrustPolicy::SignalStyle);
+        assert_eq!(parse_name_policy("SignalStyle").unwrap(), NameTrustPolicy::SignalStyle);
+        assert_eq!(parse_name_policy(" WARN ").unwrap(), NameTrustPolicy::WarnOnCollision);
+        assert_eq!(parse_name_policy("warn-on-collision").unwrap(), NameTrustPolicy::WarnOnCollision);
+        assert_eq!(parse_name_policy("suppress").unwrap(), NameTrustPolicy::SuppressColliding);
+        assert_eq!(parse_name_policy("suppress-colliding").unwrap(), NameTrustPolicy::SuppressColliding);
+    }
+
+    #[test]
+    fn name_policy_rejects_unknown() {
+        let e = parse_name_policy("trustme").unwrap_err();
+        assert!(e.contains("signal | warn | suppress"), "message guides the user: {e}");
     }
 }
