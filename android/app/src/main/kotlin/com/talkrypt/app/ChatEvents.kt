@@ -14,8 +14,14 @@ import uniffi.talkrypt_ffi.FfiEvent
 fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatMsg {
     val now = System.currentTimeMillis()
     val msg = when (e) {
-        is FfiEvent.Message ->
-            ChatMsg(MsgKind.MESSAGE, e.from, e.from.take(8), false, e.text, e.marking.ifEmpty { null }, now)
+        is FfiEvent.Message -> {
+            // SUB-SPEC A: label the bubble with the sender's resolved self-declared
+            // name (set on the roster by a prior Name/Identity event) when we've
+            // heard it, else fall back to the fingerprint prefix. This is what makes
+            // a CQ callsign actually appear over the peer's messages.
+            val who = lc.roster[e.from]?.display ?: e.from.take(8)
+            ChatMsg(MsgKind.MESSAGE, e.from, who, false, e.text, e.marking.ifEmpty { null }, now)
+        }
         is FfiEvent.Connected -> {
             lc.roster.getOrPut(e.fingerprint) { Member(e.fingerprint) }.connected = true
             sysMsg("● ${e.fingerprint.take(8)} connected", now)
