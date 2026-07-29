@@ -4434,4 +4434,85 @@ mod tests {
             "a non-member relay must not be able to inject a forged Chat message"
         );
     }
+
+    /// SUB-SPEC A + G2 (relay attribution of NAMES): a non-member relay must not be
+    /// able to inject a forged self-declared **name** to impersonate a trusted
+    /// callsign. A genuine group name rides the per-sender-signed group path
+    /// (`GroupMsg` behind the presence sentinel); a relay can only craft a raw
+    /// `Frame::Presence` in its `Routed` envelope, which a group member ignores
+    /// (the pairwise presence arm requires `role == None`). So no `Event::Name`
+    /// for the forged label may ever surface. This is the zRonin side-channel worry:
+    /// a relay dressing itself (or a stranger) as a trusted participant.
+    #[tokio::test]
+    async fn malicious_relay_cannot_inject_forged_name_into_relayed_group() {
+        use crate::presence::NamePresence;
+        use talkrypt_transport::Transport;
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["relay".into()],
+            "#g2name",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let root0 = desc.derive_root();
+
+        let relay_suite = suite.clone();
+        let relay_transport = Arc::new(fabric.transport("relay"));
+        let mut listener = relay_transport.listen().await.unwrap();
+        tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let identity = IdentityKeyPair::generate();
+            let hs = crate::handshake::respond(stream.as_mut(), &identity, relay_suite.as_ref(), root0)
+                .await
+                .unwrap();
+            let mut session = hs.session;
+            let (mut writer, mut reader) = stream.into_split();
+            // Consume the member's first (KeyPackage) frame to key our sending chain.
+            if let Ok(frame) = reader.recv_frame().await {
+                let _ = session.decrypt(&frame);
+            }
+            // Inject a raw name presence claiming a trusted callsign, spoofing `from`.
+            let forged = Routed {
+                to: Route::Broadcast,
+                from: [0x22; 48],
+                inner: Frame::Presence(
+                    NamePresence::Bare { seq: 1, label: "Trusted-Actual".into() }.encode(),
+                )
+                .encode(),
+            }
+            .encode();
+            if let Ok(ct) = session.encrypt(&forged) {
+                let _ = writer.send_frame(&ct).await;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let (member, mut member_rx) = Core::new_relayed_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("member")),
+            desc,
+            false,
+        );
+        member.connect("relay").await.unwrap();
+
+        // No Event::Name for the relay's forged callsign may ever surface.
+        let mut saw_forged_name = false;
+        for _ in 0..4 {
+            if let Ok(Some(ev)) = timeout(Duration::from_millis(250), member_rx.recv()).await {
+                if let Event::Name { label: Some(l), .. } = ev {
+                    if l == "Trusted-Actual" {
+                        saw_forged_name = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            !saw_forged_name,
+            "a non-member relay must not be able to inject a forged self-declared name"
+        );
+    }
 }
