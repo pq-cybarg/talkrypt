@@ -2642,9 +2642,25 @@ mod tests {
         m1.connect("host").await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         m1.announce_presence().await.unwrap();
-        assert!(
-            wait_for_name(&mut host_rx, "Whiskey").await,
-            "host must receive m1's announced name"
+        // The name must arrive AND be attributed to m1's verified leaf fingerprint —
+        // the group presence rides the per-sender-signed path (G1/G2), so attribution
+        // follows the signing leaf and cannot be restamped to another member/the host.
+        let attributed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { from, label: Some(l), .. }) if l == "Whiskey" => break Some(from),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        assert_eq!(
+            attributed,
+            Some(m1.fingerprint()),
+            "the group name must be attributed to m1's verified leaf, not the relaying host"
         );
     }
 
