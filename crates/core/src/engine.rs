@@ -2882,6 +2882,202 @@ mod tests {
         );
     }
 
+    /// Resilience guard: the consecutive-failure bound must reset on any success, so
+    /// a HEALTHY session that sees the odd undecryptable frame (transient corruption)
+    /// is never dropped. Interleaving garbage with a real message keeps the run below
+    /// MAX_CONSECUTIVE_DECRYPT_FAILURES, so the peer survives and traffic still flows.
+    #[tokio::test]
+    async fn transient_decrypt_failures_do_not_drop_healthy_peer() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#transient",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        // A burst below the threshold, then a real (decryptable) message that resets
+        // the counter, then another sub-threshold burst — never 8 in a row.
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-a-{i}").as_bytes()).await.unwrap();
+        }
+        dialer.send("still here").await.unwrap();
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-b-{i}").as_bytes()).await.unwrap();
+        }
+        // The real message is delivered and the peer is NOT dropped.
+        assert_eq!(next_message(&mut host_rx).await.0, "still here");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "a healthy peer with only transient decrypt failures must not be dropped"
+        );
+    }
+
+    /// SUB-SPEC A (Linked tier, end-to-end through the engine): a peer that presents
+    /// an account-linked name announces a `Linked` presence; the receiver verifies the
+    /// account→device chain and the chat-context binding, then emits `Event::Name` at
+    /// the `Linked` tier attributed to the ACCOUNT fingerprint — not the bare device.
+    #[tokio::test]
+    async fn pairwise_linked_name_resolves_as_linked_tier() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NameBacking, NameEntry};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#linked",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jrx) = core_on(&fabric, "joiner", &desc);
+        // The joiner's account certifies its own device key; the leading name is
+        // backed by that chain (an account-linked CQ name).
+        let account = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain =
+            IdentityChain::device(&account, joiner.identity_public(), "dev", now, now + 100_000);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "acct".into(),
+            label: "Victor".into(),
+            backing: NameBacking::Account { chain },
+        }));
+        joiner.connect("host").await.unwrap();
+        // The host resolves the joiner's name at the verified Linked tier, attributed
+        // to the account (not the device) fingerprint.
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { label: Some(l), tier, account_fingerprint, .. })
+                        if l == "Victor" =>
+                    {
+                        break Some((tier, account_fingerprint))
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tier, acct_fp) = got.expect("host must resolve the joiner's linked name");
+        assert_eq!(tier, NameTier::Linked, "an account-backed name resolves at the Linked tier");
+        assert_eq!(
+            acct_fp,
+            Some(account.public().fingerprint()),
+            "a linked name is attributed to the account, not the device"
+        );
+    }
+
+    /// SUB-SPEC A security (homoglyph spoof, end-to-end): a bare name that CONFUSABLE-
+    /// folds onto a verified (Linked) name must be flagged under the chat's trust
+    /// policy. This exercises the descriptor.name_trust_policy → resolve_render wiring
+    /// that the `--name-policy` flag configures: a bare "Аlice" (Cyrillic А) mimicking
+    /// a linked "Alice" resolves WITH a collision caveat under WarnOnCollision.
+    #[tokio::test]
+    async fn engine_flags_bare_homoglyph_collision_under_policy() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#spoof",
+        );
+        desc.name_trust_policy = NameTrustPolicy::WarnOnCollision;
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        // A genuine account-linked "Alice" (the verified name being impersonated).
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain = IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+        let ctx = chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+        handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+        // A DIFFERENT peer presents a bare "Аlice" whose first letter is Cyrillic А —
+        // it confusable-folds onto "alice", colliding with the verified name.
+        let impostor_fp = [9u8; 48];
+        let bare = NamePresence::Bare { seq: 1, label: "Аlice".into() };
+        handle_presence(&core.inner, impostor_fp, bare.encode());
+        // Drain: the impostor's Event::Name must carry a collision caveat; the genuine
+        // verified name must NOT.
+        let mut impostor_caveat: Option<Option<String>> = None;
+        let mut linked_caveat: Option<Option<String>> = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { from, caveat, tier, .. } = ev {
+                if from == impostor_fp {
+                    impostor_caveat = Some(caveat);
+                } else if tier == crate::nametrust::NameTier::Linked {
+                    linked_caveat = Some(caveat);
+                }
+            }
+        }
+        assert_eq!(
+            linked_caveat,
+            Some(None),
+            "the genuine verified name is not caveated by an impostor"
+        );
+        assert!(
+            matches!(impostor_caveat, Some(Some(_))),
+            "a bare homoglyph of a verified name must be flagged with a caveat under WarnOnCollision"
+        );
+    }
+
+    /// SUB-SPEC A security (anti-replay): a name presence with a seq at or below the
+    /// last one seen for that peer must be ignored, so a relay/attacker replaying an
+    /// old presence cannot roll a peer's displayed name back to a stale value. Only a
+    /// strictly-higher seq updates the cache.
+    #[tokio::test]
+    async fn stale_presence_replay_is_ignored() {
+        use crate::presence::NamePresence;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#replay",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let fp = [7u8; 48];
+        let bare = |seq: u64, label: &str| NamePresence::Bare { seq, label: label.into() }.encode();
+        handle_presence(&core.inner, fp, bare(5, "Foxtrot")); // current
+        handle_presence(&core.inner, fp, bare(3, "Golf")); // stale replay — must be dropped
+        handle_presence(&core.inner, fp, bare(5, "Golf")); // equal seq — also dropped
+        handle_presence(&core.inner, fp, bare(6, "Hotel")); // newer — accepted
+        // The cache ends on the newest name, never the replayed one.
+        assert_eq!(
+            core.inner.names.lock().unwrap().get(&fp).map(|r| r.label.clone()),
+            Some("Hotel".into()),
+            "only a strictly-higher seq updates the displayed name"
+        );
+        // No Event::Name ever surfaced the replayed "Golf".
+        let mut labels = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { label: Some(l), .. } = ev {
+                labels.push(l);
+            }
+        }
+        assert!(
+            !labels.iter().any(|l| l == "Golf"),
+            "a replayed stale presence must never surface: saw {labels:?}"
+        );
+        assert_eq!(labels, vec!["Foxtrot".to_string(), "Hotel".to_string()]);
+    }
+
     /// Full TreeKEM group chat through the engine over loopback: a host and two
     /// members that join via Welcome, then everyone exchanges group messages
     /// (the host relays). Members join sequentially (the documented model).
