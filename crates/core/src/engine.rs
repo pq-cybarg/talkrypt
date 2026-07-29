@@ -1598,6 +1598,17 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     ));
 }
 
+/// How many *consecutive* undecryptable frames a stream may deliver before we give
+/// up on its ratchet, drop the peer, and close the reader — so the reconnect layer
+/// (which only fires when `peers` is empty) can re-establish a fresh session. A
+/// healthy session decrypts virtually every frame and resets the counter, so this
+/// only trips on a genuinely desynced/mismatched stream (a peer that restarted and
+/// re-handshaked on a new session, ratchet corruption, or a cross-wired socket) that
+/// would otherwise spin forever on "frame failed to decrypt" with no recovery. The
+/// Double Ratchet already tolerates reordering via skipped-message keys, so a small
+/// bound does not fire on ordinary out-of-order delivery.
+const MAX_CONSECUTIVE_DECRYPT_FAILURES: u32 = 8;
+
 async fn reader_loop(
     inner: Arc<Inner>,
     mut reader: Box<dyn FrameReader>,
@@ -1608,6 +1619,10 @@ async fn reader_loop(
     // The responder presents its identity once, after the first inbound frame
     // makes its ratchet send-ready (see `register`).
     let mut presented = false;
+    // Consecutive frames this stream failed to decrypt; reset on any success. A
+    // run of failures means the ratchet is desynced beyond recovery — drop the
+    // peer so a fresh handshake can heal it (see MAX_CONSECUTIVE_DECRYPT_FAILURES).
+    let mut decrypt_failures: u32 = 0;
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
     let mut approved = inner.access.lock().unwrap().is_open();
@@ -1624,11 +1639,23 @@ async fn reader_loop(
             s.decrypt(&frame)
         };
         let pt = match opened {
-            Ok(pt) => pt,
+            Ok(pt) => {
+                decrypt_failures = 0;
+                pt
+            }
             Err(_) => {
                 let _ = inner
                     .events_tx
                     .send(Event::Error("frame failed to decrypt".into()));
+                decrypt_failures += 1;
+                if decrypt_failures >= MAX_CONSECUTIVE_DECRYPT_FAILURES {
+                    // The ratchet is desynced beyond recovery on this stream. Drop
+                    // the peer and close the reader so the reconnect layer can dial
+                    // a fresh handshake, instead of spinning on a dead session.
+                    inner.peers.lock().unwrap().retain(|p| p.fingerprint != fingerprint);
+                    let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
+                    break;
+                }
                 continue;
             }
         };
@@ -2794,6 +2821,64 @@ mod tests {
         assert!(
             wait_for_name(&mut joiner_rx, "Alpha").await,
             "a nameless pseudonym joiner must still hear the host's CQ name on join"
+        );
+    }
+
+    /// Resilience: a desynced/mismatched stream (a peer that restarted onto a new
+    /// session, ratchet corruption, or a cross-wired socket) delivers frames the
+    /// receiver can never decrypt. The reader must not spin forever on "frame failed
+    /// to decrypt" — after MAX_CONSECUTIVE_DECRYPT_FAILURES it drops the peer and
+    /// closes the stream so the reconnect layer (which only fires when `peers` is
+    /// empty) can heal with a fresh handshake instead of looping on a dead ratchet.
+    #[tokio::test]
+    async fn persistent_decrypt_failures_drop_peer_for_reconnect() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#desync",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        // Let the handshake + any on-connect frames settle; those decrypt fine, so
+        // the host's consecutive-failure counter is back to 0.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "host holds the dialer as a peer after the handshake"
+        );
+        // Inject raw garbage straight onto the dialer→host stream: send_frame is
+        // unencrypted, so the host cannot decrypt any of it — simulating a stream
+        // whose ratchet is desynced beyond recovery.
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        for i in 0..MAX_CONSECUTIVE_DECRYPT_FAILURES {
+            w.lock()
+                .await
+                .send_frame(format!("garbage-{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+        // The host drops the dead peer and emits Disconnected — not an endless
+        // error spin — so `peers` empties and reconnect can re-establish.
+        let dropped = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Disconnected { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(dropped, "host must drop a peer whose stream never decrypts");
+        assert!(
+            host.inner.peers.lock().unwrap().is_empty(),
+            "the dead peer is removed so the reconnect layer can heal the link"
         );
     }
 
