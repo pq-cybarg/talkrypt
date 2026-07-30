@@ -237,8 +237,14 @@ impl ChatDescriptor {
         w.put_u8(self.group as u8);
         crate::marking::put_opt(&mut w, &self.channel_marking);
         // v2+: per-chat name trust policy (advisory display). Appended last so a
-        // v1 reader that stops after channel_marking is unaffected.
-        w.put_u8(self.name_trust_policy.tag());
+        // v1 reader that stops after channel_marking is unaffected — and ONLY when
+        // this descriptor is itself v2+. Writing it for a parsed v1 descriptor would
+        // append a trailing byte that the v1 decode path (which never reads it) then
+        // rejects in `r.finish()`, breaking re-encode->re-parse round-trip. A v1
+        // descriptor predates this field, so its policy is always the default.
+        if self.version >= 2 {
+            w.put_u8(self.name_trust_policy.tag());
+        }
         w.into_vec()
     }
 
@@ -491,5 +497,13 @@ mod kat {
         .unwrap();
         assert_eq!(v1.name_trust_policy, NameTrustPolicy::SignalStyle);
         assert_eq!(v1.version, 1);
+        // Regression (fuzzer descriptor_parser round-trip panic): re-encoding a
+        // PARSED v1 descriptor must produce a URI that parses back to an equal
+        // value. encode must NOT append the v2 policy byte for a v1 descriptor,
+        // else the v1 decode path rejects the trailing byte in `finish()`.
+        let v1_reparsed = ChatDescriptor::from_uri(&v1.to_uri())
+            .expect("a re-encoded v1 descriptor must still parse");
+        assert_eq!(v1, v1_reparsed, "v1 descriptor must round-trip through re-encode");
+        assert_eq!(v1_reparsed.version, 1, "re-encode preserves the v1 version");
     }
 }
