@@ -14,7 +14,7 @@ use crate::b32;
 use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
-const DESCRIPTOR_VERSION: u16 = 1;
+const DESCRIPTOR_VERSION: u16 = 2;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
 
@@ -125,6 +125,10 @@ pub struct ChatDescriptor {
     /// Optional channel classification marking/policy (advisory). Present only
     /// for marked channels; consumer builds leave it `None`.
     pub channel_marking: Option<crate::marking::Marking>,
+    /// Per-chat policy (advisory display) for how a lower-tier self-declared name
+    /// that collides with a verified one is shown. v2+; a v1 invite decodes with
+    /// the default (`SignalStyle`). See [`crate::nametrust::NameTrustPolicy`].
+    pub name_trust_policy: crate::nametrust::NameTrustPolicy,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -154,6 +158,7 @@ impl ChatDescriptor {
             channel: channel.into(),
             group: false,
             channel_marking: None,
+            name_trust_policy: crate::nametrust::NameTrustPolicy::default(),
             password: None,
         }
     }
@@ -231,13 +236,24 @@ impl ChatDescriptor {
         w.put_bytes(self.channel.as_bytes());
         w.put_u8(self.group as u8);
         crate::marking::put_opt(&mut w, &self.channel_marking);
+        // v2+: per-chat name trust policy (advisory display). Appended last so a
+        // v1 reader that stops after channel_marking is unaffected — and ONLY when
+        // this descriptor is itself v2+. Writing it for a parsed v1 descriptor would
+        // append a trailing byte that the v1 decode path (which never reads it) then
+        // rejects in `r.finish()`, breaking re-encode->re-parse round-trip. A v1
+        // descriptor predates this field, so its policy is always the default.
+        if self.version >= 2 {
+            w.put_u8(self.name_trust_policy.tag());
+        }
         w.into_vec()
     }
 
     fn decode_bytes(bytes: &[u8]) -> Result<Self> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let version = r.get_u32()? as u16;
-        if version != DESCRIPTOR_VERSION {
+        // Accept every version up to the current one; new fields are appended and
+        // read only when `version` is high enough (v1 invites still parse).
+        if version == 0 || version > DESCRIPTOR_VERSION {
             return Err(CoreError::UnsupportedVersion(version));
         }
         let topology = TopologyKind::from_tag(r.get_u8()?)?;
@@ -256,6 +272,13 @@ impl ChatDescriptor {
         let channel = string(r.get_bytes()?)?;
         let group = r.get_u8()? != 0;
         let channel_marking = crate::marking::get_opt(&mut r)?;
+        // v2+ appends the name trust policy; a v1 invite ends here and defaults it.
+        let name_trust_policy = if version >= 2 {
+            crate::nametrust::NameTrustPolicy::from_tag(r.get_u8()?)
+                .ok_or(CoreError::Malformed("name trust policy tag"))?
+        } else {
+            crate::nametrust::NameTrustPolicy::default()
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -269,6 +292,7 @@ impl ChatDescriptor {
             channel,
             group,
             channel_marking,
+            name_trust_policy,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -418,13 +442,13 @@ mod kat {
     use super::*;
 
     /// Known-answer vector locking the descriptor wire format (talkrypt-mlspq
-    /// wire v1). A canonical descriptor with fixed fields must always produce
+    /// wire v2). A canonical descriptor with fixed fields must always produce
     /// this exact `talkrypt://` URI; any change to the field order, tags, or
     /// base32 encoding breaks it.
     #[test]
     fn descriptor_uri_kat() {
         let d = ChatDescriptor {
-            version: 1,
+            version: 2,
             topology: TopologyKind::P2P,
             persistence: Persistence::Ephemeral,
             suite_id: "tk.dr.kat".to_string(),
@@ -434,13 +458,52 @@ mod kat {
             channel: "#kat".to_string(),
             group: false,
             channel_marking: None,
+            name_trust_policy: crate::nametrust::NameTrustPolicy::SignalStyle,
             password: None,
         };
         assert_eq!(
             d.to_uri(),
-            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa"
+            "talkrypt://aaaaaaqaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaaaa"
         );
         // And it must round-trip back to the same descriptor.
         assert_eq!(ChatDescriptor::from_uri(&d.to_uri()).unwrap(), d);
+    }
+
+    /// v2 carries the per-chat name trust policy; a v1 invite (the frozen v1 KAT
+    /// string) still decodes and defaults the policy to `SignalStyle`.
+    #[test]
+    fn v2_policy_roundtrips_and_v1_defaults() {
+        use crate::nametrust::NameTrustPolicy;
+        let d = ChatDescriptor {
+            version: 2,
+            topology: TopologyKind::P2P,
+            persistence: Persistence::Ephemeral,
+            suite_id: "tk.dr.kat".to_string(),
+            suite_params: vec![],
+            endpoints: vec![],
+            invite_token: vec![0u8; 32],
+            channel: "#kat".to_string(),
+            group: false,
+            channel_marking: None,
+            name_trust_policy: NameTrustPolicy::WarnOnCollision,
+            password: None,
+        };
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.name_trust_policy, NameTrustPolicy::WarnOnCollision);
+        // The frozen v1 URI still decodes, defaulting to SignalStyle.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert_eq!(v1.name_trust_policy, NameTrustPolicy::SignalStyle);
+        assert_eq!(v1.version, 1);
+        // Regression (fuzzer descriptor_parser round-trip panic): re-encoding a
+        // PARSED v1 descriptor must produce a URI that parses back to an equal
+        // value. encode must NOT append the v2 policy byte for a v1 descriptor,
+        // else the v1 decode path rejects the trailing byte in `finish()`.
+        let v1_reparsed = ChatDescriptor::from_uri(&v1.to_uri())
+            .expect("a re-encoded v1 descriptor must still parse");
+        assert_eq!(v1, v1_reparsed, "v1 descriptor must round-trip through re-encode");
+        assert_eq!(v1_reparsed.version, 1, "re-encode preserves the v1 version");
     }
 }

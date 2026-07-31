@@ -55,6 +55,27 @@ class ChatEventsTest {
         assertFalse(m.friend)
     }
 
+    @Test fun name_updates_roster_display_and_notes() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("Whiskey"))
+        assertEquals("Whiskey", a.roster["peerfp123456"]!!.display)
+    }
+
+    @Test fun message_bubble_shows_resolved_cq_name_when_known() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        // Before hearing the peer's CQ name, a message is labeled by fingerprint.
+        val bare = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "one", ""))
+        assertEquals("peerfp12", bare.display)
+        // After the peer announces its name, later messages carry the resolved name.
+        applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        val named = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "two", ""))
+        assertEquals("Whiskey", named.display)
+    }
+
     @Test fun identity_line_variants() {
         assertEquals("✓ friend bob", identityLine(true, true, "bob"))
         assertEquals("• contact bob", identityLine(true, false, "bob"))

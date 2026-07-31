@@ -65,6 +65,17 @@ pub enum Event {
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
+    /// A peer's resolved self-declared name changed. `account_fingerprint` is set
+    /// only for account-linked/registry tiers; `label` is `None` when suppressed by
+    /// the chat's trust policy.
+    Name {
+        from: [u8; 48],
+        account_fingerprint: Option<[u8; 48]>,
+        label: Option<String>,
+        tier: crate::nametrust::NameTier,
+        seq: u64,
+        caveat: Option<String>,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -120,6 +131,11 @@ enum Frame {
     /// member can bridge). Routes are dial *hints* — the authenticated handshake
     /// remains the security boundary — so a bogus route only wastes a dial attempt.
     RouteDescriptor(Vec<u8>),
+    /// An encoded [`crate::presence::NamePresence`] — a self-declared name, sent
+    /// directly in pairwise chats (in groups it rides a sentinel-tagged group
+    /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
+    /// RouteDescriptor / UpdateProposal from the group-security hardening).
+    Presence(Vec<u8>),
 }
 
 impl Frame {
@@ -185,6 +201,10 @@ impl Frame {
                 w.put_u8(11);
                 w.put_bytes(b);
             }
+            Frame::Presence(b) => {
+                w.put_u8(12);
+                w.put_bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -228,6 +248,7 @@ impl Frame {
             9 => Frame::LeafSigCert(r.get_vec().ok()?),
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
+            12 => Frame::Presence(r.get_vec().ok()?),
             _ => return None,
         };
         Some(frame)
@@ -455,6 +476,15 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
+    /// fingerprint (transport peer, or the signed device for a Linked presence).
+    names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
+    /// Our own leading name to announce (if any), and a monotonic presence sequence
+    /// number so peers can drop stale/replayed announcements.
+    leading_name: Mutex<Option<crate::presence::NameEntry>>,
+    presence_seq: std::sync::atomic::AtomicU64,
+    /// How often/when we re-announce our name (manual, on-join, periodic).
+    cadence: Mutex<crate::presence::PresenceCadence>,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -614,6 +644,10 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            names: Mutex::new(std::collections::HashMap::new()),
+            leading_name: Mutex::new(None),
+            presence_seq: std::sync::atomic::AtomicU64::new(0),
+            cadence: Mutex::new(crate::presence::PresenceCadence::default()),
         });
         (Core { inner }, events_rx)
     }
@@ -1289,6 +1323,120 @@ impl Core {
         }
         Ok(())
     }
+
+    /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
+    /// Does not send; call [`announce_presence`](Core::announce_presence) to broadcast.
+    pub fn set_leading_name(&self, entry: Option<crate::presence::NameEntry>) {
+        *self.inner.leading_name.lock().unwrap() = entry;
+    }
+
+    /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
+    /// periodic re-beacon (clamped to a floor) plus the on-message-id mode. Manual
+    /// [`announce_presence`](Core::announce_presence) always works too. (Re)starts the
+    /// periodic task when enabled; a later cadence change stops the old task.
+    pub fn set_presence_cadence(&self, cadence: crate::presence::PresenceCadence) {
+        *self.inner.cadence.lock().unwrap() = cadence;
+        if let Some(secs) = cadence.effective_periodic() {
+            let inner = self.inner.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(secs));
+                ticker.tick().await; // consume the immediate first tick
+                loop {
+                    ticker.tick().await;
+                    // Stop if the cadence was disabled or changed to a different period.
+                    let still = inner.cadence.lock().unwrap().effective_periodic() == Some(secs);
+                    if !still {
+                        break;
+                    }
+                    if let Some(bytes) = build_my_presence(&inner) {
+                        send_presence_now(&inner, bytes).await;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The current presence cadence.
+    pub fn presence_cadence(&self) -> crate::presence::PresenceCadence {
+        self.inner.cadence.lock().unwrap().clone()
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat. No-op if no
+    /// leading name is set. Bumps the per-sender seq so it supersedes prior ones.
+    pub async fn announce_presence(&self) -> Result<()> {
+        if let Some(bytes) = build_my_presence(&self.inner) {
+            send_presence_now(&self.inner, bytes).await;
+        }
+        Ok(())
+    }
+}
+
+/// Send `bytes` (an encoded `NamePresence`) via the role-appropriate path: a pairwise
+/// `Frame::Presence` to each peer, or a signed group message behind the presence
+/// sentinel (SECURITY-AUDIT G1/G2 — leaf-signed, so a member/relay cannot forge or
+/// restamp a name onto another leaf). Shared by `announce_presence`, the periodic CQ
+/// timer, and the roster-grow re-announce hooks.
+async fn send_presence_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let payload = Frame::Presence(bytes).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_presence(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return, // group not ready yet
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
+/// Chat payload (whose first byte is an opt-marking flag 0x00/0x01). A legacy
+/// client's `marking::decode_payload` returns `None` on this, dropping it gracefully.
+pub(crate) const PRESENCE_SENTINEL: u8 = 0xF5;
+
+fn encode_group_presence(np_bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(np_bytes.len() + 1);
+    v.push(PRESENCE_SENTINEL);
+    v.extend_from_slice(np_bytes);
+    v
+}
+
+/// Encode this node's current leading name as a `NamePresence`, or `None` if none is
+/// set. Bumps `presence_seq` so each announcement supersedes the last.
+fn build_my_presence(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::presence::{NameBacking, NamePresence};
+    let entry = inner.leading_name.lock().unwrap().clone()?;
+    let seq = inner
+        .presence_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let np = match entry.backing {
+        NameBacking::Bare => NamePresence::Bare { seq, label: entry.label.clone() },
+        NameBacking::Account { chain } => {
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            NamePresence::linked(seq, chain, &entry.label, ctx, &inner.identity)
+        }
+    };
+    Some(np.encode())
 }
 
 fn collect_peers(inner: &Arc<Inner>) -> Vec<(SharedSession, SharedWriter, [u8; 48])> {
@@ -1398,12 +1546,42 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     // group/relayed pairwise channels carry coordination/`Routed` envelopes.
     let present_pairwise = inner.role == GroupRole::None && !inner.relayed;
     if present_pairwise && is_initiator {
+        let ident = inner.present_chain.lock().unwrap().clone();
+        let presence = build_my_presence(inner);
+        // Whether we send anything self-describing as our opening frame. A
+        // pseudonym with no leading name sends neither — see the keying frame below.
+        let sends_opening = ident.is_some() || presence.is_some();
         // Initiator sends first, so it can present right away.
-        if let Some(bytes) = inner.present_chain.lock().unwrap().clone() {
+        if let Some(bytes) = ident {
             let s = session.clone();
             let w = writer.clone();
             tokio::spawn(async move {
                 let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+            });
+        }
+        // SUB-SPEC A: also announce our leading self-declared name on connect, so a
+        // pairwise peer resolves us without us acting (the CQ beacon's on-join
+        // trigger for a pairwise dialer). Sending this first frame also makes the
+        // peer (ratchet responder) send-ready, so it can announce back.
+        if let Some(bytes) = presence {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+            });
+        }
+        // A pseudonym initiator with no leading name would otherwise send NOTHING
+        // as its opening frame — leaving the responder's Double Ratchet unkeyed, so
+        // the responder could never present its identity or announce its CQ name
+        // back (the most common case: an anonymous joiner dialing a named host).
+        // Send an empty keying Presence: it decodes to nothing (pure no-op in
+        // `handle_presence`), but decrypting it makes the responder send-ready and
+        // fires its reactive on-join announce.
+        if !sends_opening {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(Vec::new()).encode()).await;
             });
         }
     }
@@ -1420,6 +1598,17 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     ));
 }
 
+/// How many *consecutive* undecryptable frames a stream may deliver before we give
+/// up on its ratchet, drop the peer, and close the reader — so the reconnect layer
+/// (which only fires when `peers` is empty) can re-establish a fresh session. A
+/// healthy session decrypts virtually every frame and resets the counter, so this
+/// only trips on a genuinely desynced/mismatched stream (a peer that restarted and
+/// re-handshaked on a new session, ratchet corruption, or a cross-wired socket) that
+/// would otherwise spin forever on "frame failed to decrypt" with no recovery. The
+/// Double Ratchet already tolerates reordering via skipped-message keys, so a small
+/// bound does not fire on ordinary out-of-order delivery.
+const MAX_CONSECUTIVE_DECRYPT_FAILURES: u32 = 8;
+
 async fn reader_loop(
     inner: Arc<Inner>,
     mut reader: Box<dyn FrameReader>,
@@ -1430,6 +1619,10 @@ async fn reader_loop(
     // The responder presents its identity once, after the first inbound frame
     // makes its ratchet send-ready (see `register`).
     let mut presented = false;
+    // Consecutive frames this stream failed to decrypt; reset on any success. A
+    // run of failures means the ratchet is desynced beyond recovery — drop the
+    // peer so a fresh handshake can heal it (see MAX_CONSECUTIVE_DECRYPT_FAILURES).
+    let mut decrypt_failures: u32 = 0;
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
     let mut approved = inner.access.lock().unwrap().is_open();
@@ -1446,11 +1639,23 @@ async fn reader_loop(
             s.decrypt(&frame)
         };
         let pt = match opened {
-            Ok(pt) => pt,
+            Ok(pt) => {
+                decrypt_failures = 0;
+                pt
+            }
             Err(_) => {
                 let _ = inner
                     .events_tx
                     .send(Event::Error("frame failed to decrypt".into()));
+                decrypt_failures += 1;
+                if decrypt_failures >= MAX_CONSECUTIVE_DECRYPT_FAILURES {
+                    // The ratchet is desynced beyond recovery on this stream. Drop
+                    // the peer and close the reader so the reconnect layer can dial
+                    // a fresh handshake, instead of spinning on a dead session.
+                    inner.peers.lock().unwrap().retain(|p| p.fingerprint != fingerprint);
+                    let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
+                    break;
+                }
                 continue;
             }
         };
@@ -1463,6 +1668,13 @@ async fn reader_loop(
             if let Some(bytes) = pending {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC A: now send-ready, announce our leading self-declared name too
+            // (the CQ beacon's on-join trigger for a pairwise responder/host).
+            if let Some(bytes) = build_my_presence(&inner) {
+                if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                    let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
                 }
             }
         }
@@ -1532,11 +1744,30 @@ async fn reader_loop(
                 handle_update_proposal(&inner, from, b).await;
             }
             Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
-                let mut roster = inner.roster.lock().unwrap();
-                *roster = entries.into_iter().collect();
+                let grew = {
+                    let mut roster = inner.roster.lock().unwrap();
+                    let before = roster.len();
+                    *roster = entries.into_iter().collect();
+                    roster.len() > before
+                };
+                // A new member appeared — re-announce our leading name so they
+                // resolve us without us acting (SUB-SPEC A CQ beacon).
+                if grew && inner.leading_name.lock().unwrap().is_some() {
+                    let inner2 = inner.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        if let Some(bytes) = build_my_presence(&inner2) {
+                            send_presence_now(&inner2, bytes).await;
+                        }
+                    });
+                }
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
+            }
+            Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
+                // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
+                handle_presence(&inner, fingerprint, bytes);
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
                 match handle_identity(&inner, fingerprint, bytes) {
@@ -1826,6 +2057,81 @@ fn now_secs() -> u64 {
 /// A presentation that fails to decode, doesn't bind to this peer, or carries a
 /// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
 /// never be mistaken for a verified friend.
+/// A peer announced a self-declared name (pairwise `Frame::Presence`, or a group
+/// sentinel payload). Verify (Linked only), enforce seq monotonicity, cache the
+/// record, and emit `Event::Name` with the policy-resolved label/caveat/tier.
+///
+/// `attributed_fp` is the message-attribution fingerprint (pairwise transport peer,
+/// or `roster[sender_leaf]` in a group). For a `Linked` presence the device
+/// signature — not `attributed_fp` — is the authority; the signed device becomes the
+/// cache/render key so the name shows over that peer's messages.
+fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) {
+    use crate::nametrust::{resolve_render, NameTier};
+    use crate::presence::{NamePresence, NameRecord};
+    let Ok(np) = NamePresence::decode(&bytes) else { return };
+    let now = now_secs();
+    let (rec, key) = match &np {
+        NamePresence::Bare { seq, label } => (
+            NameRecord { label: label.clone(), tier: NameTier::Bare, seq: *seq, account_fp: None },
+            attributed_fp,
+        ),
+        NamePresence::Linked { .. } => {
+            let Some(v) = np.verify_linked(now) else { return };
+            // The Linked presence must be scoped to THIS chat (anti-replay across chats).
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            if !matches!(&np, NamePresence::Linked { context, .. } if *context == ctx) {
+                return;
+            }
+            // Reject a revoked device.
+            let revoked = {
+                let revs = inner.revocations.lock().unwrap();
+                revs.contains(&(v.account_fp, v.device_fp))
+            };
+            if revoked {
+                return;
+            }
+            (
+                NameRecord {
+                    label: v.label.clone(),
+                    tier: NameTier::Linked,
+                    seq: v.seq,
+                    account_fp: Some(v.account_fp),
+                },
+                v.device_fp,
+            )
+        }
+    };
+    // seq monotonicity per cache key.
+    {
+        let mut names = inner.names.lock().unwrap();
+        if let Some(existing) = names.get(&key) {
+            if rec.seq <= existing.seq {
+                return;
+            }
+        }
+        names.insert(key, rec.clone());
+    }
+    // Resolve the render against the rest of the cache under the chat's trust policy.
+    let (label, caveat, tier, account_fp) = {
+        let names = inner.names.lock().unwrap();
+        let policy = inner.descriptor.name_trust_policy;
+        let sn = short_hex6(&key);
+        let r = resolve_render(key, &rec, &names, policy, sn);
+        (r.label, r.caveat, r.tier, rec.account_fp)
+    };
+    let _ = inner.events_tx.send(Event::Name {
+        from: key,
+        account_fingerprint: account_fp,
+        label,
+        tier,
+        seq: rec.seq,
+        caveat,
+    });
+}
+
 fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> IdentityOutcome {
     let presentation = match Presentation::decode(&bytes) {
         Ok(p) => p,
@@ -2012,6 +2318,18 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     )
     .await;
     route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
+
+    // The roster just grew (a member joined) — re-announce our leading name so the
+    // new member resolves us without us acting (SUB-SPEC A CQ beacon).
+    if inner.leading_name.lock().unwrap().is_some() {
+        let inner2 = inner.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Some(bytes) = build_my_presence(&inner2) {
+                send_presence_now(&inner2, bytes).await;
+            }
+        });
+    }
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -2133,12 +2451,15 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         // our gossip fan-out to other members (SECURITY-AUDIT G2).
         return;
     };
-    if let Some((marking, text)) = marking::decode_payload(&pt) {
-        // The signature has been verified against the sending leaf's tree-bound
-        // key, so leaf attribution is trustworthy; map it to a fingerprint.
-        let sender = TreeKemGroup::sender_leaf(&gct)
-            .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
-            .unwrap_or(from);
+    // The signature has been verified against the sending leaf's tree-bound key, so
+    // leaf attribution is trustworthy; map it to a fingerprint for either payload type.
+    let sender = TreeKemGroup::sender_leaf(&gct)
+        .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+        .unwrap_or(from);
+    if pt.first() == Some(&PRESENCE_SENTINEL) {
+        // A self-declared name riding the signed group path (SUB-SPEC A).
+        handle_presence(&inner, sender, pt[1..].to_vec());
+    } else if let Some((marking, text)) = marking::decode_payload(&pt) {
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
             channel: inner.descriptor.channel.clone(),
@@ -2234,6 +2555,180 @@ mod tests {
         )
     }
 
+    fn test_inner_pairwise() -> std::sync::Arc<Inner> {
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#t",
+        );
+        let (core, _rx) = Core::new(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("a")),
+            desc,
+        );
+        core.inner.clone()
+    }
+
+    #[test]
+    fn frame_presence_roundtrips() {
+        let f = Frame::Presence(vec![1, 2, 3, 4]);
+        let bytes = f.encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::Presence(b)) => assert_eq!(b, vec![1, 2, 3, 4]),
+            _ => panic!("expected Presence frame"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pairwise_bare_name_emits_name_event() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NamePresence, NameRecord};
+        let inner = test_inner_pairwise();
+        let np = NamePresence::Bare { seq: 5, label: "Whiskey".into() };
+        handle_presence(&inner, [7u8; 48], np.encode());
+        let rec = inner.names.lock().unwrap().get(&[7u8; 48]).cloned().unwrap();
+        assert_eq!(
+            rec,
+            NameRecord { label: "Whiskey".into(), tier: NameTier::Bare, seq: 5, account_fp: None }
+        );
+        // A stale seq is ignored (monotonic per cache key).
+        let older = NamePresence::Bare { seq: 4, label: "Nope".into() };
+        handle_presence(&inner, [7u8; 48], older.encode());
+        assert_eq!(inner.names.lock().unwrap().get(&[7u8; 48]).unwrap().label, "Whiskey");
+    }
+
+    async fn wait_for_name(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &str,
+    ) -> bool {
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(Event::Name { label: Some(l), .. })) if l == want => return true,
+                Ok(Some(_)) => continue,
+                Ok(None) => return false, // channel closed
+                Err(_) => continue,       // idle tick — keep waiting
+            }
+        }
+        false
+    }
+
+    /// End-to-end (SUB-SPEC A): a group MEMBER sets a leading name and announces it;
+    /// the name rides the signed group path and the host emits `Event::Name` for it,
+    /// attributed to the member's roster fingerprint.
+    #[tokio::test]
+    async fn group_member_presence_reaches_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#names",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Whiskey".into(),
+            backing: NameBacking::Bare,
+        }));
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.announce_presence().await.unwrap();
+        // The name must arrive AND be attributed to m1's verified leaf fingerprint —
+        // the group presence rides the per-sender-signed path (G1/G2), so attribution
+        // follows the signing leaf and cannot be restamped to another member/the host.
+        let attributed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { from, label: Some(l), .. }) if l == "Whiskey" => break Some(from),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        assert_eq!(
+            attributed,
+            Some(m1.fingerprint()),
+            "the group name must be attributed to m1's verified leaf, not the relaying host"
+        );
+    }
+
+    /// SUB-SPEC A CQ beacon (roster-grow re-announce): when a new member joins, the
+    /// host re-announces its leading name automatically — the joiner resolves the host
+    /// WITHOUT the host acting.
+    #[tokio::test]
+    async fn new_member_triggers_host_reannounce() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#cq",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Host-CQ".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        // No explicit announce — the host's roster-grow hook re-announces for us.
+        assert!(
+            wait_for_name(&mut m1rx, "Host-CQ").await,
+            "a joining member must hear the host's auto-re-announced name"
+        );
+    }
+
+
+
+    /// SUB-SPEC A security: a `Linked` presence scoped to a DIFFERENT chat context
+    /// must be dropped (anti-replay across chats).
+    #[test]
+    fn linked_presence_rejects_wrong_chat_context() {
+        use talkrypt_crypto::IdentityChain;
+        let inner = test_inner_pairwise();
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let chain = IdentityChain::device(&account, device.public(), "dev", now, now + 10_000);
+        let wrong_ctx = crate::presence::chat_context(b"other-token", "#other");
+        let np = crate::presence::NamePresence::linked(1, chain, "Alice", wrong_ctx, &device);
+        handle_presence(&inner, device.public().fingerprint(), np.encode());
+        assert!(inner.names.lock().unwrap().is_empty());
+    }
+
+    /// SUB-SPEC A security: an insider who holds the epoch secret still cannot forge a
+    /// `Linked` name for an account whose device key it does not hold — signing the
+    /// real chain with the wrong key fails `verify_linked`.
+    #[test]
+    fn insider_cannot_forge_linked_name() {
+        use talkrypt_crypto::IdentityChain;
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let real_device = IdentityKeyPair::generate();
+        let attacker = IdentityKeyPair::generate();
+        let chain =
+            IdentityChain::device(&account, real_device.public(), "dev", now, now + 10_000);
+        let ctx = crate::presence::chat_context(b"tok", "#c");
+        let forged = crate::presence::NamePresence::linked(1, chain, "Alice", ctx, &attacker);
+        assert!(forged.verify_linked(now).is_none());
+    }
+
     /// The host (responder) cannot encrypt before it has received the joiner's
     /// first frame. A message sent in that window must be QUEUED and delivered
     /// once the session is keyed — not silently dropped (the "host's opening
@@ -2269,6 +2764,334 @@ mod tests {
             "welcome",
             "the host's pre-ratchet message must be delivered, not dropped"
         );
+    }
+
+    /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each
+    /// auto-announces its leading name — the dialer eagerly (it sends first), the
+    /// host reactively once the dialer's first frame makes it send-ready — so both
+    /// resolve each other's names with NO explicit announce.
+    #[tokio::test]
+    async fn pairwise_on_join_auto_announce_both_directions() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#pj",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "j".into(),
+            label: "Bravo".into(),
+            backing: NameBacking::Bare,
+        }));
+        joiner.connect("host").await.unwrap();
+        // No explicit announce — the on-join triggers fire both ways.
+        assert!(
+            wait_for_name(&mut host_rx, "Bravo").await,
+            "host must hear the dialer's name on connect"
+        );
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "dialer must hear the host's name once the host is send-ready"
+        );
+    }
+
+    /// SUB-SPEC A regression (the "anonymous joiner never hears the host" bug): a
+    /// pseudonym dialer with NO leading name and NO account presents nothing on
+    /// connect. Without an opening keying frame the host's (responder's) ratchet
+    /// never becomes send-ready, so its reactive on-join CQ announce never fires
+    /// and the joiner never resolves the host's name — the most common real case
+    /// (an anonymous joiner dialing a named host). The empty keying Presence sent
+    /// by a silent initiator must key the host so its name still arrives.
+    #[tokio::test]
+    async fn nameless_pseudonym_joiner_still_hears_named_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#anon",
+        );
+        let (host, _host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        // Joiner: no leading name, no presented account — a bare pseudonym.
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "a nameless pseudonym joiner must still hear the host's CQ name on join"
+        );
+    }
+
+    /// Resilience: a desynced/mismatched stream (a peer that restarted onto a new
+    /// session, ratchet corruption, or a cross-wired socket) delivers frames the
+    /// receiver can never decrypt. The reader must not spin forever on "frame failed
+    /// to decrypt" — after MAX_CONSECUTIVE_DECRYPT_FAILURES it drops the peer and
+    /// closes the stream so the reconnect layer (which only fires when `peers` is
+    /// empty) can heal with a fresh handshake instead of looping on a dead ratchet.
+    #[tokio::test]
+    async fn persistent_decrypt_failures_drop_peer_for_reconnect() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#desync",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        // Let the handshake + any on-connect frames settle; those decrypt fine, so
+        // the host's consecutive-failure counter is back to 0.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "host holds the dialer as a peer after the handshake"
+        );
+        // Inject raw garbage straight onto the dialer→host stream: send_frame is
+        // unencrypted, so the host cannot decrypt any of it — simulating a stream
+        // whose ratchet is desynced beyond recovery.
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        for i in 0..MAX_CONSECUTIVE_DECRYPT_FAILURES {
+            w.lock()
+                .await
+                .send_frame(format!("garbage-{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+        // The host drops the dead peer and emits Disconnected — not an endless
+        // error spin — so `peers` empties and reconnect can re-establish.
+        let dropped = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Disconnected { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(dropped, "host must drop a peer whose stream never decrypts");
+        assert!(
+            host.inner.peers.lock().unwrap().is_empty(),
+            "the dead peer is removed so the reconnect layer can heal the link"
+        );
+    }
+
+    /// Resilience guard: the consecutive-failure bound must reset on any success, so
+    /// a HEALTHY session that sees the odd undecryptable frame (transient corruption)
+    /// is never dropped. Interleaving garbage with a real message keeps the run below
+    /// MAX_CONSECUTIVE_DECRYPT_FAILURES, so the peer survives and traffic still flows.
+    #[tokio::test]
+    async fn transient_decrypt_failures_do_not_drop_healthy_peer() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#transient",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        // A burst below the threshold, then a real (decryptable) message that resets
+        // the counter, then another sub-threshold burst — never 8 in a row.
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-a-{i}").as_bytes()).await.unwrap();
+        }
+        dialer.send("still here").await.unwrap();
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-b-{i}").as_bytes()).await.unwrap();
+        }
+        // The real message is delivered and the peer is NOT dropped.
+        assert_eq!(next_message(&mut host_rx).await.0, "still here");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "a healthy peer with only transient decrypt failures must not be dropped"
+        );
+    }
+
+    /// SUB-SPEC A (Linked tier, end-to-end through the engine): a peer that presents
+    /// an account-linked name announces a `Linked` presence; the receiver verifies the
+    /// account→device chain and the chat-context binding, then emits `Event::Name` at
+    /// the `Linked` tier attributed to the ACCOUNT fingerprint — not the bare device.
+    #[tokio::test]
+    async fn pairwise_linked_name_resolves_as_linked_tier() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NameBacking, NameEntry};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#linked",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jrx) = core_on(&fabric, "joiner", &desc);
+        // The joiner's account certifies its own device key; the leading name is
+        // backed by that chain (an account-linked CQ name).
+        let account = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain =
+            IdentityChain::device(&account, joiner.identity_public(), "dev", now, now + 100_000);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "acct".into(),
+            label: "Victor".into(),
+            backing: NameBacking::Account { chain },
+        }));
+        joiner.connect("host").await.unwrap();
+        // The host resolves the joiner's name at the verified Linked tier, attributed
+        // to the account (not the device) fingerprint.
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { label: Some(l), tier, account_fingerprint, .. })
+                        if l == "Victor" =>
+                    {
+                        break Some((tier, account_fingerprint))
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tier, acct_fp) = got.expect("host must resolve the joiner's linked name");
+        assert_eq!(tier, NameTier::Linked, "an account-backed name resolves at the Linked tier");
+        assert_eq!(
+            acct_fp,
+            Some(account.public().fingerprint()),
+            "a linked name is attributed to the account, not the device"
+        );
+    }
+
+    /// SUB-SPEC A security (homoglyph spoof, end-to-end): a bare name that CONFUSABLE-
+    /// folds onto a verified (Linked) name must be flagged under the chat's trust
+    /// policy. This exercises the descriptor.name_trust_policy → resolve_render wiring
+    /// that the `--name-policy` flag configures: a bare "Аlice" (Cyrillic А) mimicking
+    /// a linked "Alice" resolves WITH a collision caveat under WarnOnCollision.
+    #[tokio::test]
+    async fn engine_flags_bare_homoglyph_collision_under_policy() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#spoof",
+        );
+        desc.name_trust_policy = NameTrustPolicy::WarnOnCollision;
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        // A genuine account-linked "Alice" (the verified name being impersonated).
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain = IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+        let ctx = chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+        handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+        // A DIFFERENT peer presents a bare "Аlice" whose first letter is Cyrillic А —
+        // it confusable-folds onto "alice", colliding with the verified name.
+        let impostor_fp = [9u8; 48];
+        let bare = NamePresence::Bare { seq: 1, label: "Аlice".into() };
+        handle_presence(&core.inner, impostor_fp, bare.encode());
+        // Drain: the impostor's Event::Name must carry a collision caveat; the genuine
+        // verified name must NOT.
+        let mut impostor_caveat: Option<Option<String>> = None;
+        let mut linked_caveat: Option<Option<String>> = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { from, caveat, tier, .. } = ev {
+                if from == impostor_fp {
+                    impostor_caveat = Some(caveat);
+                } else if tier == crate::nametrust::NameTier::Linked {
+                    linked_caveat = Some(caveat);
+                }
+            }
+        }
+        assert_eq!(
+            linked_caveat,
+            Some(None),
+            "the genuine verified name is not caveated by an impostor"
+        );
+        assert!(
+            matches!(impostor_caveat, Some(Some(_))),
+            "a bare homoglyph of a verified name must be flagged with a caveat under WarnOnCollision"
+        );
+    }
+
+    /// SUB-SPEC A security (anti-replay): a name presence with a seq at or below the
+    /// last one seen for that peer must be ignored, so a relay/attacker replaying an
+    /// old presence cannot roll a peer's displayed name back to a stale value. Only a
+    /// strictly-higher seq updates the cache.
+    #[tokio::test]
+    async fn stale_presence_replay_is_ignored() {
+        use crate::presence::NamePresence;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#replay",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let fp = [7u8; 48];
+        let bare = |seq: u64, label: &str| NamePresence::Bare { seq, label: label.into() }.encode();
+        handle_presence(&core.inner, fp, bare(5, "Foxtrot")); // current
+        handle_presence(&core.inner, fp, bare(3, "Golf")); // stale replay — must be dropped
+        handle_presence(&core.inner, fp, bare(5, "Golf")); // equal seq — also dropped
+        handle_presence(&core.inner, fp, bare(6, "Hotel")); // newer — accepted
+        // The cache ends on the newest name, never the replayed one.
+        assert_eq!(
+            core.inner.names.lock().unwrap().get(&fp).map(|r| r.label.clone()),
+            Some("Hotel".into()),
+            "only a strictly-higher seq updates the displayed name"
+        );
+        // No Event::Name ever surfaced the replayed "Golf".
+        let mut labels = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { label: Some(l), .. } = ev {
+                labels.push(l);
+            }
+        }
+        assert!(
+            !labels.iter().any(|l| l == "Golf"),
+            "a replayed stale presence must never surface: saw {labels:?}"
+        );
+        assert_eq!(labels, vec!["Foxtrot".to_string(), "Hotel".to_string()]);
     }
 
     /// Full TreeKEM group chat through the engine over loopback: a host and two
@@ -3609,6 +4432,87 @@ mod tests {
         assert!(
             !saw_forged,
             "a non-member relay must not be able to inject a forged Chat message"
+        );
+    }
+
+    /// SUB-SPEC A + G2 (relay attribution of NAMES): a non-member relay must not be
+    /// able to inject a forged self-declared **name** to impersonate a trusted
+    /// callsign. A genuine group name rides the per-sender-signed group path
+    /// (`GroupMsg` behind the presence sentinel); a relay can only craft a raw
+    /// `Frame::Presence` in its `Routed` envelope, which a group member ignores
+    /// (the pairwise presence arm requires `role == None`). So no `Event::Name`
+    /// for the forged label may ever surface. This is the zRonin side-channel worry:
+    /// a relay dressing itself (or a stranger) as a trusted participant.
+    #[tokio::test]
+    async fn malicious_relay_cannot_inject_forged_name_into_relayed_group() {
+        use crate::presence::NamePresence;
+        use talkrypt_transport::Transport;
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["relay".into()],
+            "#g2name",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let root0 = desc.derive_root();
+
+        let relay_suite = suite.clone();
+        let relay_transport = Arc::new(fabric.transport("relay"));
+        let mut listener = relay_transport.listen().await.unwrap();
+        tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let identity = IdentityKeyPair::generate();
+            let hs = crate::handshake::respond(stream.as_mut(), &identity, relay_suite.as_ref(), root0)
+                .await
+                .unwrap();
+            let mut session = hs.session;
+            let (mut writer, mut reader) = stream.into_split();
+            // Consume the member's first (KeyPackage) frame to key our sending chain.
+            if let Ok(frame) = reader.recv_frame().await {
+                let _ = session.decrypt(&frame);
+            }
+            // Inject a raw name presence claiming a trusted callsign, spoofing `from`.
+            let forged = Routed {
+                to: Route::Broadcast,
+                from: [0x22; 48],
+                inner: Frame::Presence(
+                    NamePresence::Bare { seq: 1, label: "Trusted-Actual".into() }.encode(),
+                )
+                .encode(),
+            }
+            .encode();
+            if let Ok(ct) = session.encrypt(&forged) {
+                let _ = writer.send_frame(&ct).await;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let (member, mut member_rx) = Core::new_relayed_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("member")),
+            desc,
+            false,
+        );
+        member.connect("relay").await.unwrap();
+
+        // No Event::Name for the relay's forged callsign may ever surface.
+        let mut saw_forged_name = false;
+        for _ in 0..4 {
+            if let Ok(Some(ev)) = timeout(Duration::from_millis(250), member_rx.recv()).await {
+                if let Event::Name { label: Some(l), .. } = ev {
+                    if l == "Trusted-Actual" {
+                        saw_forged_name = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            !saw_forged_name,
+            "a non-member relay must not be able to inject a forged self-declared name"
         );
     }
 }

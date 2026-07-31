@@ -373,6 +373,17 @@ pub enum FfiEvent {
     Disconnected {
         fingerprint: String,
     },
+    /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
+    /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
+    /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
+    Name {
+        from: String,
+        account_fingerprint: String,
+        label: String,
+        tier: String,
+        seq: u64,
+        caveat: String,
+    },
     Error {
         message: String,
     },
@@ -446,6 +457,21 @@ fn map_event(e: Event) -> FfiEvent {
         },
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
             fingerprint: hex_fp(&fingerprint),
+        },
+        Event::Name {
+            from,
+            account_fingerprint,
+            label,
+            tier,
+            seq,
+            caveat,
+        } => FfiEvent::Name {
+            from: hex_fp(&from),
+            account_fingerprint: account_fingerprint.map(|f| hex_fp(&f)).unwrap_or_default(),
+            label: label.unwrap_or_default(),
+            tier: format!("{tier:?}"),
+            seq,
+            caveat: caveat.unwrap_or_default(),
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
@@ -995,6 +1021,45 @@ impl TalkryptClient {
     /// connected or no route worked. Safe to call on every disconnect / on a timer.
     pub fn reconnect(&self) -> Option<String> {
         self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+    }
+
+    /// Set (or clear) this node's leading self-declared **name** for the chat
+    /// (SUB-SPEC A). An empty `label` clears it. This is a *bare* (unverified) name;
+    /// peers see it over your messages, tinted per the chat's trust policy. Call
+    /// [`announce_presence`](Self::announce_presence) (or set a cadence) to broadcast.
+    pub fn set_leading_name(&self, label: String) {
+        if label.is_empty() {
+            self.core.set_leading_name(None);
+        } else {
+            self.core
+                .set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                    id: label.clone(),
+                    label,
+                    backing: talkrypt_core::presence::NameBacking::Bare,
+                }));
+        }
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat now.
+    pub fn announce_presence(&self) {
+        self.rt.block_on(async {
+            let _ = self.core.announce_presence().await;
+        });
+    }
+
+    /// Configure the CQ auto re-beacon (SUB-SPEC A): `periodic_secs == 0` disables the
+    /// periodic timer (manual/on-join announcements still fire). Clamped to a floor.
+    pub fn set_presence_cadence(&self, periodic_secs: u64, on_message_id: bool) {
+        let periodic = if periodic_secs == 0 {
+            None
+        } else {
+            Some(periodic_secs)
+        };
+        self.core
+            .set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                periodic_secs: periodic,
+                on_message_id,
+            });
     }
 
     /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of

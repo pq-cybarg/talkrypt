@@ -14,8 +14,14 @@ import uniffi.talkrypt_ffi.FfiEvent
 fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatMsg {
     val now = System.currentTimeMillis()
     val msg = when (e) {
-        is FfiEvent.Message ->
-            ChatMsg(MsgKind.MESSAGE, e.from, e.from.take(8), false, e.text, e.marking.ifEmpty { null }, now)
+        is FfiEvent.Message -> {
+            // SUB-SPEC A: label the bubble with the sender's resolved self-declared
+            // name (set on the roster by a prior Name/Identity event) when we've
+            // heard it, else fall back to the fingerprint prefix. This is what makes
+            // a CQ callsign actually appear over the peer's messages.
+            val who = lc.roster[e.from]?.display ?: e.from.take(8)
+            ChatMsg(MsgKind.MESSAGE, e.from, who, false, e.text, e.marking.ifEmpty { null }, now)
+        }
         is FfiEvent.Connected -> {
             lc.roster.getOrPut(e.fingerprint) { Member(e.fingerprint) }.connected = true
             sysMsg("● ${e.fingerprint.take(8)} connected", now)
@@ -30,6 +36,17 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
             mem.contact = e.contact
             mem.friend = e.friend
             sysMsg(identityLine(e.contact, e.friend, mem.display!!), now)
+        }
+        is FfiEvent.Name -> {
+            // SUB-SPEC A: a peer's resolved self-declared name. Update its roster
+            // display and note the change; `tier` badges verified (account-linked)
+            // names, `caveat` carries a collision warning.
+            val mem = lc.roster.getOrPut(e.from) { Member(e.from) }
+            if (e.label.isNotEmpty()) mem.display = e.label
+            val badge = when (e.tier) { "Linked" -> "🔗 "; "RegistryConfirmed" -> "✓ "; else -> "" }
+            val cav = if (e.caveat.isNotEmpty()) " ⚠ ${e.caveat}" else ""
+            val shown = e.label.ifEmpty { e.from.take(8) }
+            sysMsg("$badge${e.from.take(8)} is “$shown”$cav", now)
         }
         is FfiEvent.Error -> sysMsg("! ${e.message}", now)
     }
