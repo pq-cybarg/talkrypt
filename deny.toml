@@ -37,6 +37,11 @@ ignore = [
   "RUSTSEC-2026-0124", # libcrux-chacha20poly1305 0.0.7 — panic on overlong ciphertext (nym crypto)
   "RUSTSEC-2026-0125", # libcrux-ml-dsa 0.0.8 — AVX2 sig-verify edge case (nym's PQ, not ours)
   "RUSTSEC-2026-0126", # libcrux-ml-dsa 0.0.8 — related unsoundness (nym's PQ, not ours)
+  "RUSTSEC-2026-0207", # libcrux-sha3 0.0.8 — incremental SHAKE multi-squeeze output bug (nym crypto; fix 0.0.10 blocked by nym's =/^0.0.x pins)
+  "RUSTSEC-2026-0208", # libcrux-sha3 0.0.8 — AVX2 SHAKE-256 panic (nym crypto; fix 0.0.10 blocked by nym's pin)
+  "RUSTSEC-2026-0209", # libcrux-aesgcm 0.0.7 — AAD length not enforced (nym's AEAD, not talkrypt's; no upstream fix)
+  "RUSTSEC-2026-0211", # libcrux-aesgcm 0.0.7 — non-constant-time AES-GCM tag check — NB in nym's AEAD ONLY; talkrypt's content AEAD is RustCrypto `aes-gcm`, unaffected; no upstream fix
+  "RUSTSEC-2026-0212", # libcrux-secrets 0.0.5 — aarch64 constant-time swap/select (nym crypto; fix 0.0.6 blocked by nym's pin)
   "RUSTSEC-2026-0194", # quick-xml 0.39.4 — quadratic attribute parsing (nym XML/cosmos stack)
   "RUSTSEC-2026-0195", # quick-xml 0.39.4 — related DoS (nym XML/cosmos stack)
   "RUSTSEC-2026-0098", # rustls-webpki 0.101.7 — via nym's reqwest/rustls 0.21 (NOT Arti's rustls)
