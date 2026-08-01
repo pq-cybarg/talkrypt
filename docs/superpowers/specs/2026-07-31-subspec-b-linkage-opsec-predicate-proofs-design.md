@@ -116,25 +116,35 @@ A. `hide-transparency` = present the linkage *without* a "transparency mode" fla
 such flag to hide because linkage is just co-presented `Linked` proofs — the meta-choice is unobservable
 by construction).
 
-### 3b. Grouping key — account-hidden selective linkage (new, ML-DSA)
-For opsec-selective, disclose within-grouping linkage **without** revealing the account:
+### 3b. Grouping key — account-hidden, **per-chat-unlinkable** selective linkage (new, ML-DSA)
+For opsec-selective, disclose within-grouping linkage **without** revealing the account **and without the
+grouping itself becoming a cross-chat linkage vector**:
 
-- A **grouping keypair** `G` (fresh ML-DSA-87, unlinkable to the account — a sibling of a segment key, not
-  certified upward to the account).
-- For each identity `L_i` the user places in the grouping, `G` issues a cert `SignedCert(G → L_i, "group",
-  iat, exp)` — reusing `crates/crypto/src/account.rs::SignedCert::issue` verbatim.
-- In a chat, a member presents, per grouping identity, `(L_i, cert_i, context, sig_i)` where `sig_i` is
-  `L_i` signing `(seq ‖ context)` (as A's `Linked` presence does). A viewer verifies every `cert_i` under
-  the **same** `grouping_pub` → learns "these N leaves are one grouping (one person)" and **nothing about
-  the account**. `context`-binding prevents cross-chat replay.
-- **Sybil-count payoff:** distinct people present ≥ `count(distinct account_fp) + count(distinct
-  grouping_pub) + count(isolated leaves as worst-case-1-each)`. The group can display this honestly.
+- A long-term **grouping root secret** `g_root` (32-byte seed), unlinkable to the account (a sibling of a
+  segment seed, never certified upward to the account).
+- **Per-chat derivation (the fix for cross-chat linkability):** the presented grouping keypair is
+  `G_c = ML-DSA-keygen( KDF(g_root, chat_context) )` — deterministic, fresh **per chat**. The same grouping
+  therefore presents a **different `G_c.pub` in every chat**, so an observer in two chats cannot link
+  "grouping X is in both" from the grouping key. (ML-DSA-87 keygen is seedable; `KDF` = the existing
+  `mac_kdf` used for A's derived leaf seeds.)
+- Per chat, `G_c` issues `SignedCert(G_c → L_i, "group", iat, exp)` for each grouping identity `L_i`
+  (reusing `account.rs::SignedCert::issue`). A member presents `(L_i, cert_i, context, sig_i)` with `sig_i =
+  L_i.sign(seq ‖ context)` (as A's `Linked` presence). A viewer verifies every `cert_i` under the **same
+  `G_c.pub`** → learns "these N leaves are one grouping (one person) **in this chat**" and nothing about the
+  account or the grouping's presence elsewhere. `context`-binding also blocks cross-chat *replay*.
+- **Residual linkage is the leaf, not the grouping** (documented, not hidden): if the user reuses the same
+  leaf `L_i` (same leading name) across chats, *that leaf* links them — a pre-existing choice, orthogonal to
+  B. Full cross-chat unlinkability = per-chat grouping key **and** per-chat (rotating) leaves, the identity
+  model's existing "rotating per-conversation" option. B removes the grouping key as a *new* linkage vector.
+- **Sybil-count payoff:** distinct people present ≥ `count(distinct account_fp) + count(distinct G_c.pub) +
+  count(isolated leaves as worst-case-1-each)`, computed within the chat. The group can display this honestly.
 
-**Why a fresh key, not the account:** the account root is the linkable secret. A grouping key discloses
-*multiplicity* ("one person holds these") while hiding *which* person — exactly opsec-selective.
-Limitation (documented, not hidden): grouping membership is *asserted by the holder*, so it proves "these
-leaves are co-controlled by whoever holds `G`," not tied to any external attribute. That's the correct
-semantics for "these are my alts, grouped."
+**Why a fresh per-chat key, not the account:** the account root is the linkable secret. A per-chat grouping
+key discloses *multiplicity* ("one person holds these, here") while hiding *which* person **and** not
+leaking the grouping across chats — exactly opsec-selective. Limitation: grouping membership is *asserted by
+the holder* (proves "co-controlled by whoever holds `g_root`"), not tied to an external attribute — the
+correct semantics for "these are my alts, grouped." A grouping *tied to* an external predicate is a Backend-1
+`Attribute` claim, not a grouping key.
 
 ### 3c. Derived-from-named
 "I descend from `ancestor_fp`" = present the `IdentityChain` segment path ending at a leaf whose ancestor
@@ -196,13 +206,29 @@ This is the novel layer. It is designed here concretely; it does **not** ship en
     rather than trusting an audit. **Plan: integrate WHIR (fallback STIR) as the proximity layer;** stock
     Winterfell's FRI is the reference/fallback if WHIR integration slips, at the cost of the regressed bound.
 - **All three claim archetypes reduce to one circuit family: Merkle / cert-chain membership.**
-  - `MemberOfKnownSet` ("you know me"): prove a Merkle authentication path from the prover's committed leaf
-    to a `set_commitment` (the verifier's known-set Merkle root), revealing neither the leaf nor the index.
+  - `MemberOfKnownSet` ("you know me") — **ZK in both directions**, done via verifier-issued witnesses:
+    - *Prover hides which element:* the circuit proves a Merkle authentication path from the prover's
+      committed leaf to the published `set_commitment` root, revealing neither the leaf nor the index (ZK
+      masking, §4b.1).
+    - *Verifier hides the set from the prover:* the verifier does **not** hand the prover the tree. At the
+      moment the verifier "gets to know" a party, it privately issues that party a **membership witness**
+      (its authentication path in the current epoch tree — sibling hashes only, which leak no set contents).
+      The prover later proves membership against the **published root** (a hiding commitment) using its
+      privately-held witness. Neither side learns the other's private data; the verifier learns only
+      pass/fail. This is the VC/anonymous-credential-via-Merkle pattern the research flagged as the *only*
+      PQ-practical route (full "private set membership where neither party is pre-provisioned" is research-
+      only PQ and explicitly out of scope).
+    - *Set churn:* add/remove rotates the root → an **epoch** counter is bound into `context`; witnesses are
+      re-issued per epoch (or via a hash/Merkle **accumulator** with an update path). Revocation = drop from
+      the next epoch tree. Epoch monotonicity prevents proving membership against a stale root.
   - `DerivedFromKnownSet` ("derived from someone you know"): prove a valid cert-chain from the prover's key
-    up to *some* member of a whitelisted ancestor set (Merkle root), revealing neither the ancestor nor the
-    prover's key. **Direct prior art: zk-X509 "CA-anonymous chain membership."**
-  - `Attribute` (SCI level / arbitrary): prove possession of a credential whose attributes satisfy a policy
-    circuit, revealing only pass/fail.
+    up to *some* member of a whitelisted ancestor set (epoch Merkle root, issued as above), revealing
+    neither the ancestor nor the prover's key. **Direct prior art: zk-X509 "CA-anonymous chain membership."**
+    Reuses the same witness-issuance + epoching as `MemberOfKnownSet`.
+  - `Attribute` (SCI level / arbitrary): prove possession of an issuer-signed credential whose attributes
+    satisfy a policy circuit, revealing only pass/fail. The credential is a §4c attestation (issuer =
+    whoever certifies the attribute, e.g. an SCI authority key); the circuit checks issuer-sig validity +
+    the attribute predicate, hiding the credential itself.
 
 ### 4b. Three sharp risks written into the design (non-negotiable review items)
 1. **STARKs are not zero-knowledge by default.** Succinct ≠ ZK. ZK requires witness-polynomial + quotient
@@ -232,12 +258,28 @@ This is the novel layer. It is designed here concretely; it does **not** ship en
 ### 4d. Predicate-gated delivery ("SCI messages don't arrive until you prove status")
 - **Do NOT use attribute-based encryption.** PQ ABE / predicate encryption is research-only, no audited
   Rust, MB-scale keys — excluded.
-- **prove-then-KEM.** A message may carry a **required-predicate tag**. The sender encrypts the payload to
-  an ephemeral **ML-KEM-1024** key; the key (or a share) is released/derivable only to members who present
-  a passing proof or a valid quorum attestation for that predicate. Members who don't satisfy it never
-  obtain the key; **wire padding (already in talkrypt's posture) + pass/fail-only disclosure** hide the
-  requirement from non-satisfiers — untagged traffic in the same chat flows normally. This layers over the
-  existing TreeKEM epoch keying (gated sub-key per predicate epoch), not a new transport.
+- **Predicate epoch key `K_P` (group-managed sub-key), not per-recipient KEM.** The decentralized mechanism
+  reuses TreeKEM's existing per-member key distribution — there is **no trusted party**:
+  1. **Bootstrap.** The first member to gate on predicate `P` generates a fresh symmetric `K_{P,0}` and
+     sends it, **encrypted per-recipient to each already-qualified member's device key (ML-KEM-1024)**, to
+     every member who holds a valid quorum attestation for `P` (§4c) — exactly how TreeKEM hands a new
+     member the epoch secret. (`K_{P,0}` itself is derived from the group epoch secret so it inherits the
+     group's forward secrecy.)
+  2. **Send.** A gated message is AEAD-encrypted under the current `K_{P,e}` and broadcast on the normal
+     group path. Satisfiers decrypt; non-satisfiers hold no `K_{P,e}` and see a **padded, unopenable frame,
+     indistinguishable from ordinary padding** under talkrypt's frame-indistinguishability posture — they
+     learn a gated frame *exists*, not its predicate or content. Untagged traffic flows normally.
+  3. **Admit.** When a member newly proves `P` (earns a quorum attestation), any current `K_{P,e}` holder
+     ML-KEM-encrypts `K_{P,e}` to them — a one-frame add, TreeKEM-style.
+  4. **Revoke + FS.** When a member loses `P` (attestation revoked / expired), rotate to `K_{P,e+1}` (KDF
+     ratchet from `K_{P,e}` ‖ new-epoch) and redistribute only to remaining holders — a predicate-scoped
+     epoch bump, so a removed member cannot read future gated traffic (post-compromise security for the
+     gate). The epoch counter binds into the message AAD to stop cross-epoch replay.
+- **prove-then-KEM is the entry gate to `K_P`, not the message cipher:** you present a passing ZK proof or
+  quorum attestation for `P` → a holder KEM-wraps `K_{P,e}` to you. This keeps the hot path (sending a gated
+  message) a single symmetric AEAD, and confines the expensive ZK/KEM work to the rare admit event.
+- **Honest limit:** this hides *content + predicate* from non-satisfiers, not the *existence* of gated
+  traffic (padding-indistinguishable) — matching the current posture, not perfect metadata-hiding.
 - Honest limit: a non-satisfying member still observes that *a* gated message exists (a padded frame it
   can't open), just not its predicate or content — matching talkrypt's existing frame-indistinguishability
   posture, not perfect metadata-hiding.
