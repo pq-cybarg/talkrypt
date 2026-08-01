@@ -150,19 +150,51 @@ hook). Group display policy may amplify it.
 
 ---
 
-## 4. Backend 1 — PQ zero-knowledge predicate proofs (feature `zk`, REVIEW-GATED)
+## 4. Backend 1 — PQ zero-knowledge predicate proofs (feature `zk`, VERIFICATION-GATED)
 
-This is the novel layer. It is designed here concretely; it does **not** ship enabled until it clears an
-external cryptographer review (§9). Grounded in the 2024–2026 PQ-ZK survey (`docs/research/pq-zk-survey.md`,
-committed alongside).
+This is the novel layer. It is designed here concretely; it does **not** ship enabled until it clears
+**formal verification by the author** (§9). Grounded in the 2024–2026 PQ-ZK survey
+(`docs/research/pq-zk-survey.md`, committed alongside).
 
-### 4a. Primitive selection
+### 4a. Primitive selection — Winterfell (FRI STARK), chosen on a properties basis
 - **Commitment scheme decides PQ-ness.** Only **hash/FRI** commitments are post-quantum; all pairing/EC
   (Groth16, PLONK-KZG, Halo2-IPA, Nova-folding, BBS+, BLS) are Shor-broken and **excluded**.
-- **Chosen base: a hash-based STARK, targeting `Plonky3` (FRI).** Rationale: it is the only PQ-pure prover
-  with a *public* audit (Least Authority, 2024) and a maintained pure-Rust crate (`p3-*`). SP1 / RISC Zero
-  are alternatives (more audits) **only if consuming the un-wrapped STARK receipt** — their default
-  Groth16-over-BN254 wrap is quantum-broken and is a hard exclusion here.
+- **Chosen base: `Winterfell` (hash-based FRI STARK).** Because the author will **formally verify** this
+  layer, the selection is driven by *provable properties*, not third-party audit coverage — and on
+  properties Winterfell is the right baseline for these three predicates:
+  - **Exact knowledge soundness (negligible error).** A predicate like "my key descends from an identity in
+    this set" is used for access control; a *relaxed* extractor (as in standard lattice Σ-protocols, which
+    only witness a relaxed relation R̄ with γ≈√dim slack — eprint 2022/141, 2019/747) is a **genuine
+    semantic hazard**: R̄ need not correspond to a real ancestor. Winterfell proves the relation you wrote.
+  - **One conservative, falsifiable assumption (CRHF only).** No structured MSIS/MLWE, and — critically —
+    no *non-falsifiable knowledge assumption*. Succinct arbitrary-NP arguments are barred from falsifiable
+    assumptions in the plain model (Gentry–Wichs); lattice systems that match STARK succinctness must take
+    knowledge k-R-ISIS (eprint 2022/941) or new q-type ROM assumptions (vanishing-SIS, eprint 2023/1405).
+    FRI sidesteps this — it is a ROM/hash construction from the start.
+  - **Arbitrary-NP / Turing-complete AIR** — all three claims are *general computation over hashes +
+    signature checks*, exactly where lattice ZK is weakest (must arithmetize foreign ops, paying slack or
+    exotic assumptions) and where an AIR is native with exact soundness.
+  - **Single soundness object** (RS-proximity/FRI + Merkle) with active Lean 4 blueprints → **the most
+    tractable to formally verify**, which is the deciding factor given the author verifies it personally.
+  - Plonky3 (Least-Authority-audited, PQ-pure) and un-wrapped SP1/RISC Zero remain fallbacks if the
+    self-verification plan changes; their default Groth16-over-BN254 wrap is quantum-broken (hard exclusion).
+- **Narrow exception — reach for lattice ZK only when the statement is *intrinsically* about ML-DSA/ML-KEM
+  key material** (e.g. proving knowledge of an ML-DSA-87 secret, or relations among ML-KEM ciphertexts),
+  where nativity beats simulating the lattice verifier inside a STARK — *and* the app tolerates the relaxed
+  relation. None of B's three predicates fall here; noted for completeness / future statements.
+- **Proximity test is a swappable, still-PQ component — target STIR/WHIR, not stock FRI.** The low-degree
+  test underneath the STARK (FRI → STIR → WHIR) is interchangeable and all hash-based (CRHF → PQ; the
+  assumption class does not change). The newer tests are strictly better on the axes that matter here:
+  - **STIR** (Arnon–Chiesa–Fenzi–Yogev, 2024) — reduces query complexity (~O(λ + log²N) vs FRI's
+    O(λ·log N)) → smaller arguments, cheaper verify, and a *higher* soundness margin per query.
+  - **WHIR** (2024/25) — Reed–Solomon (constrained-RS) proximity with **super-fast verification** (µs-scale)
+    and a tighter, more current soundness analysis; unifies multilinear + univariate IOPs.
+  - **Motivation is also defensive:** plain **FRI's above-Johnson soundness lost its theorem (late 2025)**
+    (eprint 2026/858), so leaning on the *newest* proximity analysis (STIR/WHIR) rather than a regressed
+    FRI bound is the conservative call. Maturity caveat: STIR/WHIR have reference Rust implementations but
+    are newer than FRI — acceptable here precisely because the author formally verifies the chosen test
+    rather than trusting an audit. **Plan: integrate WHIR (fallback STIR) as the proximity layer;** stock
+    Winterfell's FRI is the reference/fallback if WHIR integration slips, at the cost of the regressed bound.
 - **All three claim archetypes reduce to one circuit family: Merkle / cert-chain membership.**
   - `MemberOfKnownSet` ("you know me"): prove a Merkle authentication path from the prover's committed leaf
     to a `set_commitment` (the verifier's known-set Merkle root), revealing neither the leaf nor the index.
@@ -179,11 +211,13 @@ committed alongside).
    witness (statistical masking check). No off-the-shelf crate is assumed ZK.
 2. **Arithmetization-friendly hashes under active cryptanalysis.** Poseidon2/Rescue (incl. over KoalaBear)
    have improving algebraic attacks. **Security-critical commitments use a conventional hash (Keccak/SHA3
-   or Blake3, both supported in Plonky3), accepting prover cost;** AF-hashes only where a break degrades
-   performance, not soundness. (talkrypt already standardizes on SHA3/Keccak — consistent.)
-3. **FRI above-Johnson soundness lost its theorem (late 2025).** Recalibrate query counts to the
-   unconditional bound (eprint 2026/858 — ~one extra query round). Soundness parameters are a review item,
-   not a copied default.
+   or Blake3), accepting prover cost;** AF-hashes only where a break degrades performance, not soundness.
+   (talkrypt already standardizes on SHA3/Keccak — consistent, and one fewer novel assumption to verify.)
+3. **Proximity-test soundness is a moving target — pin the analysis, don't copy a default.** Plain FRI's
+   above-Johnson soundness lost its theorem (late 2025; eprint 2026/858 restores an unconditional bound at
+   ~one extra query round). This is a primary reason to target **STIR/WHIR** (§4a) whose current analyses
+   are tighter — but *whichever* test is chosen, the concrete query count / soundness parameters are a
+   **formal-verification obligation**, derived and machine-checked, never a copied library default.
 
 ### 4c. Attestation layer (the "one-time proof → cheap attest" pattern)
 - **Verifiable-credential shape:** a verifier who *ran* a Backend-1 proof once issues an **ML-DSA-87
@@ -284,10 +318,13 @@ optional access/delivery predicate. CLI mirrors: `/opsec`, `/grouping`, `/showal
   from-named), opsec modes, show-all/foremost, isolated tint + display-vs-disclosure split, sybil-count,
   access-predicate gating over Backend 0, all surfaces, descriptor v3. Ships on ML-DSA-87 — no new crypto
   assumptions. This is a complete, useful feature by itself.
-- **Phase B1 (design complete here; build behind `zk` feature; REVIEW-GATED):** the STARK ZK backend,
-  attestation quorum, prove-then-KEM predicate-gated delivery. Implemented off-by-default with full tests,
-  then **externally reviewed by a cryptographer** before it is ever a ship default — enforcing the
-  project's standing audit-before-ship rule and #73. The three sharp risks (§4b) are explicit review items.
+- **Phase B1 (design complete here; build behind `zk` feature; VERIFICATION-GATED):** the Winterfell ZK
+  backend, attestation quorum, prove-then-KEM predicate-gated delivery. Implemented off-by-default with full
+  tests, then **formally verified by the author** — the machine-checked soundness of the FRI/STARK object
+  (Lean 4 STARK-soundness blueprints), the added ZK-masking property (§4b.1), and the circuit relations for
+  each predicate — before it is ever a ship default. This is the audit-before-ship gate for novel crypto
+  (#73), discharged by formal proof rather than eyeball review. The three sharp risks (§4b) are explicit
+  verification obligations; an external cryptographer pass on the *formalization* remains advisable.
 - **Vouching (Sub-spec C, #67)** consumes the shared attestation layer defined in §4c.
 
 This delivers the *whole* design (nothing deferred vaguely, the hard crypto specified concretely) while

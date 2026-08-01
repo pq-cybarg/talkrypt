@@ -24,6 +24,18 @@ Post-quantum soundness is decided by the **polynomial-commitment scheme**, not t
 | Binius64 | `binius*` | binary Merkle | Yes | none | orig repo archived 2025 |
 | Nova/Halo2/`rabe`/BBS+ | — | EC/pairing | **NO** | — | **excluded (quantum-broken)** |
 
+## Proximity test: FRI → STIR → WHIR (swappable, all hash-based/PQ)
+The low-degree test under a STARK is interchangeable; the assumption class stays CRHF (PQ) regardless.
+Prefer the newer tests — better queries/verify AND a defensive response to FRI's soundness regression:
+- **STIR** (Arnon–Chiesa–Fenzi–Yogev, 2024) — query complexity ~O(λ + log²N) vs FRI O(λ·log N); smaller
+  arguments, higher soundness margin/query.
+- **WHIR** (2024/25) — constrained-Reed–Solomon proximity, **super-fast (µs) verification**, tighter current
+  soundness analysis; unifies multilinear + univariate IOPs. Reference Rust impls exist (newer than FRI).
+- **FRI caveat:** above-Johnson soundness lost its theorem late 2025 (eprint 2026/858 restores an
+  unconditional bound at ~one extra query round) → lean on STIR/WHIR's current analysis, not a regressed FRI
+  default. Whichever is used, derive + machine-check the concrete soundness parameters (author formally
+  verifies). Winterfell's stock FRI is the reference/fallback.
+
 ## Three sharp risks (must be design/review items)
 1. **STARKs are not ZK by default** — need witness+quotient masking, FRI-fold entropy care
    (Haböck–Kindi, eprint 2024/1037). Verify a ZK config; test witness independence.
