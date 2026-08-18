@@ -485,6 +485,14 @@ struct Inner {
     presence_seq: std::sync::atomic::AtomicU64,
     /// How often/when we re-announce our name (manual, on-join, periodic).
     cadence: Mutex<crate::presence::PresenceCadence>,
+    /// SUB-SPEC B: the user's per-chat opsec/linkage-disclosure policy (Clean default).
+    opsec_mode: Mutex<crate::linkage::OpsecMode>,
+    /// SUB-SPEC B: defined groupings — grouping id -> the name-entry ids it links.
+    groupings: Mutex<std::collections::HashMap<crate::linkage::GroupingId, Vec<String>>>,
+    /// SUB-SPEC B: 32-byte root seed for this device's grouping key (account-unlinkable).
+    grouping_root: [u8; 32],
+    /// SUB-SPEC B: whether to emit ALL associated identities vs just the leading one.
+    show_all: std::sync::atomic::AtomicBool,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -648,6 +656,15 @@ impl Core {
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
             cadence: Mutex::new(crate::presence::PresenceCadence::default()),
+            opsec_mode: Mutex::new(crate::linkage::OpsecMode::default()),
+            groupings: Mutex::new(std::collections::HashMap::new()),
+            grouping_root: {
+                use rand::RngCore;
+                let mut s = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut s);
+                s
+            },
+            show_all: std::sync::atomic::AtomicBool::new(false),
         });
         (Core { inner }, events_rx)
     }
@@ -1328,6 +1345,54 @@ impl Core {
     /// Does not send; call [`announce_presence`](Core::announce_presence) to broadcast.
     pub fn set_leading_name(&self, entry: Option<crate::presence::NameEntry>) {
         *self.inner.leading_name.lock().unwrap() = entry;
+    }
+
+    // ----- SUB-SPEC B: opsec modes + groupings (disclosure is user-controlled) -----
+
+    /// Set the user's per-chat opsec/linkage-disclosure policy. Controls only what
+    /// THIS user emits; a group can never compel disclosure.
+    pub fn set_opsec_mode(&self, mode: crate::linkage::OpsecMode) {
+        *self.inner.opsec_mode.lock().unwrap() = mode;
+    }
+
+    /// The current opsec mode.
+    pub fn opsec_mode(&self) -> crate::linkage::OpsecMode {
+        *self.inner.opsec_mode.lock().unwrap()
+    }
+
+    /// Define (or replace) a grouping of the user's own name-entry ids. Returns a
+    /// stable grouping id (derived from the sorted member ids, so redefining the
+    /// same set is idempotent). No presence is emitted here — call
+    /// [`present_grouping`](Core::present_grouping).
+    pub fn define_grouping(&self, name_ids: &[String]) -> crate::linkage::GroupingId {
+        let mut sorted: Vec<String> = name_ids.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let mut id_bytes = [0u8; 16];
+        talkrypt_crypto::kdf::mac_kdf(
+            &self.inner.grouping_root,
+            sorted.join("\u{0}").as_bytes(),
+            b"talkrypt-grouping-id-v1",
+            &mut id_bytes,
+        );
+        let id: String = id_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        self.inner.groupings.lock().unwrap().insert(id.clone(), sorted);
+        id
+    }
+
+    /// The name-entry ids in a defined grouping, if any.
+    pub fn grouping_members(&self, id: &crate::linkage::GroupingId) -> Option<Vec<String>> {
+        self.inner.groupings.lock().unwrap().get(id).cloned()
+    }
+
+    /// Per-chat: emit ALL associated identities (a grouping) vs just the leading one.
+    pub fn show_all_identities(&self, on: bool) {
+        self.inner.show_all.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether show-all is enabled.
+    pub fn show_all(&self) -> bool {
+        self.inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
@@ -2764,6 +2829,37 @@ mod tests {
             "welcome",
             "the host's pre-ratchet message must be delivered, not dropped"
         );
+    }
+
+    /// SUB-SPEC B (Task 4): opsec mode + grouping state on Core — set/get round-trips,
+    /// grouping ids are stable/idempotent for the same set, show-all toggles.
+    #[test]
+    fn opsec_mode_and_grouping_state() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#b",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Default is Clean.
+        assert_eq!(core.opsec_mode(), OpsecMode::Clean);
+        core.set_opsec_mode(OpsecMode::Transparent { hide: true });
+        assert_eq!(core.opsec_mode(), OpsecMode::Transparent { hide: true });
+        // Grouping id is stable for the same set regardless of order, and stores members.
+        let id1 = core.define_grouping(&["work".into(), "alt".into()]);
+        let id2 = core.define_grouping(&["alt".into(), "work".into()]);
+        assert_eq!(id1, id2, "grouping id is order-independent + idempotent");
+        assert_eq!(core.grouping_members(&id1), Some(vec!["alt".to_string(), "work".to_string()]));
+        // A different set → different id.
+        assert_ne!(id1, core.define_grouping(&["work".into()]));
+        // show-all toggles.
+        assert!(!core.show_all());
+        core.show_all_identities(true);
+        assert!(core.show_all());
     }
 
     /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each

@@ -87,6 +87,24 @@ pub enum Verdict {
     Fail,
 }
 
+/// The user's per-chat policy for disclosing linkage between their own identities
+/// (Sub-spec B §0/§1). This controls only what the user EMITS — a group can never
+/// compel disclosure (disclosure != display).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OpsecMode {
+    /// Never emit linkage proofs; every identity stands alone (max unlinkability).
+    #[default]
+    Clean,
+    /// Disclose within-grouping linkage (account-hidden, per-chat grouping key).
+    Selective,
+    /// Disclose that presented identities link to the account. `hide` = don't
+    /// advertise the transparency choice on the wire (hide-transparency).
+    Transparent { hide: bool },
+}
+
+/// A stable local id for a defined grouping of the user's own name entries.
+pub type GroupingId = String;
+
 /// Pluggable proof backend. Phase B0 ships `MlDsaCertBackend`; Backend 1 (ZK) is a
 /// separate, review-gated implementor behind the `zk` feature.
 pub trait ProofBackend {
