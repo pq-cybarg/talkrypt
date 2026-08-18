@@ -18,6 +18,7 @@ pub mod aead;
 pub mod beacon;
 pub mod error;
 pub mod group;
+pub mod grouping;
 pub mod hash;
 pub mod hybrid;
 pub mod identity;
@@ -37,6 +38,7 @@ pub use account::{
 pub use beacon::BeaconBody;
 pub use error::{CryptoError, Result};
 pub use group::{GroupSession, MemberId};
+pub use grouping::{verify_grouping_cert, GroupingKey};
 pub use hybrid::{KemPosture, KemProfile};
 pub use identity::{IdentityKeyPair, IdentityPublic, FINGERPRINT_LEN};
 pub use mem::{ensure_hardened, harden_process, HardeningReport, LockedBox};
