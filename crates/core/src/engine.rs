@@ -1419,6 +1419,34 @@ impl Core {
         self.inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// An honest lower bound on distinct people present (SUB-SPEC B): distinct
+    /// accounts + distinct groupings + isolated (unlinked bare) identities.
+    pub fn sybil_estimate(&self) -> crate::linkage::SybilCount {
+        let names = self.inner.names.lock().unwrap();
+        let groupings = self.inner.groupings_seen.lock().unwrap();
+        let grouped: std::collections::HashSet<[u8; 48]> =
+            groupings.values().flatten().copied().collect();
+        let mut accounts = std::collections::HashSet::new();
+        let mut isolated = 0usize;
+        for (fp, rec) in names.iter() {
+            match rec.account_fp {
+                Some(a) => {
+                    accounts.insert(a);
+                }
+                None if !grouped.contains(fp) => isolated += 1,
+                None => {} // bare, but in a verified grouping → counted under the grouping
+            }
+        }
+        let distinct_accounts = accounts.len();
+        let distinct_groupings = groupings.len();
+        crate::linkage::SybilCount {
+            distinct_accounts,
+            distinct_groupings,
+            isolated,
+            min_distinct_people: distinct_accounts + distinct_groupings + isolated,
+        }
+    }
+
     /// Set the persistent, user-held grouping root seed (SUB-SPEC B). The SAME seed
     /// across the user's sessions is what lets a viewer aggregate their leaves into
     /// one grouping; app-persisted. Not derived from any device key (that would only
@@ -3021,6 +3049,56 @@ mod tests {
         assert!(!core.show_all());
         core.show_all_identities(true);
         assert!(core.show_all());
+    }
+
+    /// SUB-SPEC B (Task 7): honest sybil-count = distinct accounts + distinct
+    /// groupings + isolated bare identities.
+    #[test]
+    fn sybil_estimate_counts_distinct_people() {
+        use crate::nametrust::NameTier;
+        use crate::presence::NameRecord;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#s",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let linked = |label: &str, acct: [u8; 48]| NameRecord {
+            label: label.into(),
+            tier: NameTier::Linked,
+            seq: 1,
+            account_fp: Some(acct),
+        };
+        let bare = |label: &str| NameRecord {
+            label: label.into(),
+            tier: NameTier::Bare,
+            seq: 1,
+            account_fp: None,
+        };
+        {
+            let mut names = core.inner.names.lock().unwrap();
+            // Two linked names sharing ONE account.
+            names.insert([1u8; 48], linked("A", [9u8; 48]));
+            names.insert([2u8; 48], linked("B", [9u8; 48]));
+            // Two isolated bare identities.
+            names.insert([5u8; 48], bare("C"));
+            names.insert([6u8; 48], bare("D"));
+            // A bare identity that IS in a grouping — counted under the grouping, not isolated.
+            names.insert([3u8; 48], bare("E"));
+        }
+        // A 2-leaf grouping (leaves [3],[4]).
+        core.inner.groupings_seen.lock().unwrap().insert(
+            vec![7u8; 4],
+            std::collections::HashSet::from([[3u8; 48], [4u8; 48]]),
+        );
+        let s = core.sybil_estimate();
+        assert_eq!(s.distinct_accounts, 1);
+        assert_eq!(s.distinct_groupings, 1);
+        assert_eq!(s.isolated, 2, "C and D; E is grouped");
+        assert_eq!(s.min_distinct_people, 4);
     }
 
     /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each

@@ -105,6 +105,17 @@ pub enum OpsecMode {
 /// A stable local id for a defined grouping of the user's own name entries.
 pub type GroupingId = String;
 
+/// An honest lower bound on how many DISTINCT people are present, from the linkage
+/// a viewer can verify: each account counts once, each grouping counts once, and
+/// each isolated (unlinked) bare identity counts as a worst-case distinct person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SybilCount {
+    pub distinct_accounts: usize,
+    pub distinct_groupings: usize,
+    pub isolated: usize,
+    pub min_distinct_people: usize,
+}
+
 /// Pluggable proof backend. Phase B0 ships `MlDsaCertBackend`; Backend 1 (ZK) is a
 /// separate, review-gated implementor behind the `zk` feature.
 pub trait ProofBackend {
