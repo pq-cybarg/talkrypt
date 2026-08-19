@@ -138,6 +138,13 @@ grouping itself becoming a cross-chat linkage vector**:
   model's existing "rotating per-conversation" option. B removes the grouping key as a *new* linkage vector.
 - **Sybil-count payoff:** distinct people present ≥ `count(distinct account_fp) + count(distinct G_c.pub) +
   count(isolated leaves as worst-case-1-each)`, computed within the chat. The group can display this honestly.
+- **B0 realization (one leaf key per session).** talkrypt runs **one device leaf key per `Core`/session**;
+  the user's several identities in a chat are several *sessions* (pseudonyms/segments). So `g_root` is a
+  **persistent, user-held secret shared across the user's sessions** (set via `Core::set_grouping_root`,
+  app-persisted — NOT derived from any single session's device key, which would only link same-device
+  sessions). Each session presents **its own** leaf certified under the shared per-chat `G_c`
+  (single-member `GroupingProof`); a viewer **aggregates** all leaves it sees bearing the same `G_c.pub`
+  into one grouping. Unset `g_root` → an ephemeral per-session key (a grouping of one; harmless).
 
 **Why a fresh per-chat key, not the account:** the account root is the linkable secret. A per-chat grouping
 key discloses *multiplicity* ("one person holds these, here") while hiding *which* person **and** not

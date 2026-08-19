@@ -161,6 +161,47 @@ impl LinkageProof {
     }
 }
 
+/// The on-wire linkage disclosure a session broadcasts. B0 carries a single-member
+/// grouping proof (the sender's own leaf, certified under the per-chat grouping key);
+/// viewers aggregate all senders sharing `grouping_pub`. `seq` is per-sender monotonic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkagePayload {
+    GroupingProof { grouping_pub: Vec<u8>, cert: SignedCert, ctx_sig: Vec<u8>, seq: u64 },
+}
+
+impl LinkagePayload {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        match self {
+            LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq } => {
+                w.put_u8(0);
+                w.put_bytes(grouping_pub);
+                w.put_bytes(&cert.encode());
+                w.put_bytes(ctx_sig);
+                w.put_u32((*seq >> 32) as u32);
+                w.put_u32(*seq as u32);
+            }
+        }
+        w.into_vec()
+    }
+    pub fn decode(bytes: &[u8]) -> Option<LinkagePayload> {
+        let mut r = Reader::new(bytes);
+        let p = match r.get_u8().ok()? {
+            0 => {
+                let grouping_pub = r.get_vec().ok()?;
+                let cert = SignedCert::decode(r.get_bytes().ok()?).ok()?;
+                let ctx_sig = r.get_vec().ok()?;
+                let hi = r.get_u32().ok()? as u64;
+                let lo = r.get_u32().ok()? as u64;
+                LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq: (hi << 32) | lo }
+            }
+            _ => return None,
+        };
+        r.finish().ok()?;
+        Some(p)
+    }
+}
+
 /// The audited Phase-B0 backend: verifies Backend-0 predicates purely from ML-DSA
 /// cert machinery (`account.rs` + `grouping.rs`). `now` is the verifier's clock.
 pub struct MlDsaCertBackend {

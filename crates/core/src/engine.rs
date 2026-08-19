@@ -76,6 +76,15 @@ pub enum Event {
         seq: u64,
         caveat: Option<String>,
     },
+    /// SUB-SPEC B: a peer disclosed grouping linkage — `subject` (a leaf fp) is a
+    /// member of the grouping identified by `grouping_pub` (per-chat `G_c`). Viewers
+    /// aggregate all subjects sharing a `grouping_pub` into one grouping (one person).
+    /// `verdict` is false if a presented proof failed verification.
+    Linkage {
+        subject: [u8; 48],
+        grouping_pub: Vec<u8>,
+        verdict: bool,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -489,10 +498,18 @@ struct Inner {
     opsec_mode: Mutex<crate::linkage::OpsecMode>,
     /// SUB-SPEC B: defined groupings — grouping id -> the name-entry ids it links.
     groupings: Mutex<std::collections::HashMap<crate::linkage::GroupingId, Vec<String>>>,
-    /// SUB-SPEC B: 32-byte root seed for this device's grouping key (account-unlinkable).
-    grouping_root: [u8; 32],
+    /// SUB-SPEC B: 32-byte root seed for the user's grouping key (account-unlinkable).
+    /// A persistent, user-held secret SHARED across the user's sessions (set via
+    /// `set_grouping_root`); random per-session by default (a grouping of one).
+    grouping_root: Mutex<[u8; 32]>,
     /// SUB-SPEC B: whether to emit ALL associated identities vs just the leading one.
     show_all: std::sync::atomic::AtomicBool,
+    /// SUB-SPEC B: grouping public (per-chat `G_c`) -> the set of leaf fingerprints
+    /// seen certified under it. Aggregation is how a viewer resolves "these leaves
+    /// are one grouping (one person)"; also feeds the sybil-count.
+    groupings_seen: Mutex<std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>>>,
+    /// SUB-SPEC B: last linkage seq seen per sender (anti-replay/reorder).
+    linkage_seq: Mutex<std::collections::HashMap<[u8; 48], u64>>,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -658,13 +675,15 @@ impl Core {
             cadence: Mutex::new(crate::presence::PresenceCadence::default()),
             opsec_mode: Mutex::new(crate::linkage::OpsecMode::default()),
             groupings: Mutex::new(std::collections::HashMap::new()),
-            grouping_root: {
+            grouping_root: Mutex::new({
                 use rand::RngCore;
                 let mut s = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut s);
                 s
-            },
+            }),
             show_all: std::sync::atomic::AtomicBool::new(false),
+            groupings_seen: Mutex::new(std::collections::HashMap::new()),
+            linkage_seq: Mutex::new(std::collections::HashMap::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -1370,7 +1389,7 @@ impl Core {
         sorted.dedup();
         let mut id_bytes = [0u8; 16];
         talkrypt_crypto::kdf::mac_kdf(
-            &self.inner.grouping_root,
+            &*self.inner.grouping_root.lock().unwrap(),
             sorted.join("\u{0}").as_bytes(),
             b"talkrypt-grouping-id-v1",
             &mut id_bytes,
@@ -1393,6 +1412,27 @@ impl Core {
     /// Whether show-all is enabled.
     pub fn show_all(&self) -> bool {
         self.inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the persistent, user-held grouping root seed (SUB-SPEC B). The SAME seed
+    /// across the user's sessions is what lets a viewer aggregate their leaves into
+    /// one grouping; app-persisted. Not derived from any device key (that would only
+    /// link same-device sessions).
+    pub fn set_grouping_root(&self, seed: [u8; 32]) {
+        *self.inner.grouping_root.lock().unwrap() = seed;
+    }
+
+    /// Disclose this session's leaf as a member of a grouping (SUB-SPEC B): certify
+    /// our device leaf under the per-chat grouping key `G_c` and broadcast the proof.
+    /// A no-op under `OpsecMode::Clean`. Each of the user's sessions calls this; a
+    /// viewer aggregates all leaves sharing `G_c.pub` into one grouping.
+    pub async fn present_grouping(&self, _id: &crate::linkage::GroupingId) {
+        if matches!(*self.inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean) {
+            return; // Clean never emits linkage.
+        }
+        if let Some(bytes) = build_my_grouping_proof(&self.inner) {
+            send_linkage_now(&self.inner, bytes).await;
+        }
     }
 
     /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
@@ -1468,6 +1508,109 @@ async fn send_presence_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
             route(inner, frame, Route::Broadcast).await;
         }
     }
+}
+
+/// SUB-SPEC B: leading byte marking a grouping-linkage payload (vs a presence
+/// `0xF5` or a legacy Chat payload). Distinct value so the dispatch is unambiguous;
+/// old clients drop it (`marking::decode_payload` returns None).
+pub(crate) const LINKAGE_SENTINEL: u8 = 0xF6;
+
+fn encode_group_linkage(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.push(LINKAGE_SENTINEL);
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Build this session's single-member grouping proof: certify OUR device leaf under
+/// the per-chat grouping key `G_c`, and sign the chat context. `None` if unbuildable.
+fn build_my_grouping_proof(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::linkage::LinkagePayload;
+    let root = *inner.grouping_root.lock().unwrap();
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let g = talkrypt_crypto::GroupingKey::from_root_seed(root);
+    let now = now_secs();
+    let cert = g.certify(&ctx, inner.identity.public(), now, now + 30 * 24 * 3600);
+    let ctx_sig = inner.identity.sign(&ctx);
+    let grouping_pub = g.derive_for_chat(&ctx).public().sig_vk.clone();
+    let seq = inner.presence_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }.encode())
+}
+
+/// Send an encoded `LinkagePayload` via the role-appropriate path, behind
+/// `LINKAGE_SENTINEL` (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`).
+async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let mut framed = Vec::with_capacity(bytes.len() + 1);
+            framed.push(LINKAGE_SENTINEL);
+            framed.extend_from_slice(&bytes);
+            let payload = Frame::Presence(framed).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_linkage(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return,
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// Verify a grouping-linkage proof attributed to `sender_fp`, record the grouping
+/// association on success, and emit `Event::Linkage`. Reuses the audited
+/// `MlDsaCertBackend`. Binds the cert subject to the authenticated sender and
+/// enforces per-sender seq monotonicity (anti-replay).
+fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    use crate::linkage::{Claim, LinkageProof, MlDsaCertBackend, LinkagePayload, Predicate, Proof, ProofBackend, Verdict};
+    let Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }) =
+        LinkagePayload::decode(&bytes)
+    else {
+        return;
+    };
+    // Anti-replay/reorder: per-sender seq must strictly increase.
+    {
+        let mut seqs = inner.linkage_seq.lock().unwrap();
+        if let Some(last) = seqs.get(&sender_fp) {
+            if seq <= *last {
+                return;
+            }
+        }
+        seqs.insert(sender_fp, seq);
+    }
+    // Bind the certified leaf to the authenticated sender (no restamping).
+    let subject_ok = cert.cert.subject.fingerprint() == sender_fp;
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let claim = Claim { predicate: Predicate::Grouping { grouping_pub: grouping_pub.clone() }, context: ctx };
+    let proof = Proof(
+        LinkageProof::Grouping { member: cert.cert.subject.clone(), cert, ctx_sig }.encode(),
+    );
+    let verdict = subject_ok
+        && MlDsaCertBackend { now: now_secs() }.verify(&claim, &proof) == Verdict::Pass;
+    if verdict {
+        inner
+            .groupings_seen
+            .lock()
+            .unwrap()
+            .entry(grouping_pub.clone())
+            .or_default()
+            .insert(sender_fp);
+    }
+    let _ = inner.events_tx.send(Event::Linkage { subject: sender_fp, grouping_pub, verdict });
 }
 
 /// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
@@ -1831,8 +1974,13 @@ async fn reader_loop(
                 handle_group_msg(&inner, from, b).await;
             }
             Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
-                // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
-                handle_presence(&inner, fingerprint, bytes);
+                if bytes.first() == Some(&LINKAGE_SENTINEL) {
+                    // SUB-SPEC B: a grouping-linkage disclosure; attribute to this peer.
+                    handle_linkage(&inner, fingerprint, bytes[1..].to_vec());
+                } else {
+                    // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
+                    handle_presence(&inner, fingerprint, bytes);
+                }
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
                 match handle_identity(&inner, fingerprint, bytes) {
@@ -2524,6 +2672,9 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     if pt.first() == Some(&PRESENCE_SENTINEL) {
         // A self-declared name riding the signed group path (SUB-SPEC A).
         handle_presence(&inner, sender, pt[1..].to_vec());
+    } else if pt.first() == Some(&LINKAGE_SENTINEL) {
+        // SUB-SPEC B: a grouping-linkage disclosure on the signed group path.
+        handle_linkage(&inner, sender, pt[1..].to_vec());
     } else if let Some((marking, text)) = marking::decode_payload(&pt) {
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
@@ -2860,6 +3011,61 @@ mod tests {
         assert!(!core.show_all());
         core.show_all_identities(true);
         assert!(core.show_all());
+    }
+
+    /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each
+    /// presents its own leaf certified under the per-chat grouping key. A viewer
+    /// AGGREGATES both leaves under one `grouping_pub` (one person) — and learns NO
+    /// account (account-hidden). A third, non-grouped session is not aggregated.
+    #[tokio::test]
+    async fn grouping_disclosure_aggregates_by_grouping_pub() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#grp",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        // Two of ONE user's sessions, sharing a grouping root secret.
+        let shared_root = [42u8; 32];
+        let (d1, _r1) = core_on(&fabric, "d1", &desc);
+        let (d2, _r2) = core_on(&fabric, "d2", &desc);
+        for d in [&d1, &d2] {
+            d.set_grouping_root(shared_root);
+            d.set_opsec_mode(OpsecMode::Selective);
+        }
+        d1.connect("host").await.unwrap();
+        d2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        d1.present_grouping(&"g".to_string()).await;
+        d2.present_grouping(&"g".to_string()).await;
+
+        // Collect linkage verdicts on the host.
+        let mut seen: std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>> =
+            Default::default();
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), host_rx.recv()).await {
+                Ok(Some(Event::Linkage { subject, grouping_pub, verdict: true })) => {
+                    seen.entry(grouping_pub).or_default().insert(subject);
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => {
+                    if seen.values().any(|s| s.len() >= 2) {
+                        break;
+                    }
+                }
+            }
+        }
+        // Exactly one grouping_pub, aggregating BOTH sessions' leaves.
+        let (_gp, members) = seen.iter().max_by_key(|(_, s)| s.len()).expect("a grouping was seen");
+        assert!(members.contains(&d1.fingerprint()), "d1 aggregated");
+        assert!(members.contains(&d2.fingerprint()), "d2 aggregated");
+        assert_eq!(members.len(), 2, "both under ONE grouping_pub (account-hidden)");
     }
 
     /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each

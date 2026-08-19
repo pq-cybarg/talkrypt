@@ -1475,6 +1475,12 @@ async fn repl(
                         println!("\r* {} is calling as {badge}\"{label}\"{cav}", short_fp(&from));
                     }
                 }
+                Event::Linkage { subject, verdict, .. } => {
+                    // SUB-SPEC B: a peer disclosed grouping linkage (account-hidden).
+                    if verdict {
+                        println!("\r* {} disclosed grouping linkage", short_fp(&subject));
+                    }
+                }
                 Event::Error(e) => eprintln!("\r! {e}"),
             }
         }

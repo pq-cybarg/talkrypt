@@ -384,6 +384,13 @@ pub enum FfiEvent {
         seq: u64,
         caveat: String,
     },
+    /// SUB-SPEC B: a peer disclosed grouping linkage. `subject` is a leaf fp hex;
+    /// `grouping` is a short id for the grouping (hosts aggregate subjects sharing it).
+    Linkage {
+        subject: String,
+        grouping: String,
+        verdict: bool,
+    },
     Error {
         message: String,
     },
@@ -472,6 +479,13 @@ fn map_event(e: Event) -> FfiEvent {
             tier: format!("{tier:?}"),
             seq,
             caveat: caveat.unwrap_or_default(),
+        },
+        Event::Linkage { subject, grouping_pub, verdict } => FfiEvent::Linkage {
+            subject: hex_fp(&subject),
+            // A short, stable id for the grouping (the full per-chat grouping pub is
+            // large); clients aggregate subjects sharing this id.
+            grouping: grouping_pub.iter().take(8).map(|b| format!("{b:02x}")).collect(),
+            verdict,
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
