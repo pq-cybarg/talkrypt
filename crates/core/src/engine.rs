@@ -510,10 +510,6 @@ struct Inner {
     groupings_seen: Mutex<std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>>>,
     /// SUB-SPEC B: last linkage seq seen per sender (anti-replay/reorder).
     linkage_seq: Mutex<std::collections::HashMap<[u8; 48], u64>>,
-    /// SUB-SPEC B: the group's DISPLAY policy — whether to surface isolated
-    /// identities with a caveat (set from the descriptor; group controls only its
-    /// own rendering, never a member's disclosure). Task 8 wires it to the descriptor.
-    amplify_isolated: std::sync::atomic::AtomicBool,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -688,7 +684,6 @@ impl Core {
             show_all: std::sync::atomic::AtomicBool::new(false),
             groupings_seen: Mutex::new(std::collections::HashMap::new()),
             linkage_seq: Mutex::new(std::collections::HashMap::new()),
-            amplify_isolated: std::sync::atomic::AtomicBool::new(false),
         });
         (Core { inner }, events_rx)
     }
@@ -2365,7 +2360,7 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
     // (a possible sybil) → subtle tint / optional group-amplified caveat.
     let isolated = rec.account_fp.is_none()
         && !inner.groupings_seen.lock().unwrap().values().any(|s| s.contains(&key));
-    let amplify_isolated = inner.amplify_isolated.load(std::sync::atomic::Ordering::Relaxed);
+    let amplify_isolated = inner.descriptor.group_display_amplify_isolated;
     let (label, caveat, tier, account_fp) = {
         let names = inner.names.lock().unwrap();
         let policy = inner.descriptor.name_trust_policy;

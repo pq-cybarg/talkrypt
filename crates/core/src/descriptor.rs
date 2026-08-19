@@ -14,7 +14,7 @@ use crate::b32;
 use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
-const DESCRIPTOR_VERSION: u16 = 2;
+const DESCRIPTOR_VERSION: u16 = 3;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
 
@@ -129,6 +129,13 @@ pub struct ChatDescriptor {
     /// that collides with a verified one is shown. v2+; a v1 invite decodes with
     /// the default (`SignalStyle`). See [`crate::nametrust::NameTrustPolicy`].
     pub name_trust_policy: crate::nametrust::NameTrustPolicy,
+    /// SUB-SPEC B (v3+): the group's DISPLAY policy — surface isolated (unlinked)
+    /// identities with a caveat. Controls only how THIS group renders unproven
+    /// identities; never compels a member's disclosure. v1/v2 default false.
+    pub group_display_amplify_isolated: bool,
+    /// SUB-SPEC B (v3+): an optional access predicate — only parties satisfying it
+    /// (via a Backend-0 claim) are admitted. v1/v2 default `None`.
+    pub access_predicate: Option<crate::linkage::Predicate>,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -159,6 +166,8 @@ impl ChatDescriptor {
             group: false,
             channel_marking: None,
             name_trust_policy: crate::nametrust::NameTrustPolicy::default(),
+            group_display_amplify_isolated: false,
+            access_predicate: None,
             password: None,
         }
     }
@@ -245,6 +254,18 @@ impl ChatDescriptor {
         if self.version >= 2 {
             w.put_u8(self.name_trust_policy.tag());
         }
+        // v3+: SUB-SPEC B group display policy + optional access predicate. Written
+        // ONLY when this descriptor is v3+ (same round-trip discipline as v2).
+        if self.version >= 3 {
+            w.put_u8(self.group_display_amplify_isolated as u8);
+            match &self.access_predicate {
+                Some(pr) => {
+                    w.put_u8(1);
+                    w.put_bytes(&pr.encode());
+                }
+                None => w.put_u8(0),
+            }
+        }
         w.into_vec()
     }
 
@@ -279,6 +300,21 @@ impl ChatDescriptor {
         } else {
             crate::nametrust::NameTrustPolicy::default()
         };
+        // v3+: SUB-SPEC B group display policy + optional access predicate.
+        let (group_display_amplify_isolated, access_predicate) = if version >= 3 {
+            let amplify = r.get_u8()? != 0;
+            let pred = match r.get_u8()? {
+                0 => None,
+                1 => Some(
+                    crate::linkage::Predicate::decode(r.get_bytes()?)
+                        .ok_or(CoreError::Malformed("access predicate"))?,
+                ),
+                _ => return Err(CoreError::Malformed("access predicate flag")),
+            };
+            (amplify, pred)
+        } else {
+            (false, None)
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -293,6 +329,8 @@ impl ChatDescriptor {
             group,
             channel_marking,
             name_trust_policy,
+            group_display_amplify_isolated,
+            access_predicate,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -459,6 +497,8 @@ mod kat {
             group: false,
             channel_marking: None,
             name_trust_policy: crate::nametrust::NameTrustPolicy::SignalStyle,
+            group_display_amplify_isolated: false,
+            access_predicate: None,
             password: None,
         };
         assert_eq!(
@@ -486,6 +526,8 @@ mod kat {
             group: false,
             channel_marking: None,
             name_trust_policy: NameTrustPolicy::WarnOnCollision,
+            group_display_amplify_isolated: false,
+            access_predicate: None,
             password: None,
         };
         let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
@@ -505,5 +547,40 @@ mod kat {
             .expect("a re-encoded v1 descriptor must still parse");
         assert_eq!(v1, v1_reparsed, "v1 descriptor must round-trip through re-encode");
         assert_eq!(v1_reparsed.version, 1, "re-encode preserves the v1 version");
+    }
+
+    /// v3 (SUB-SPEC B) carries the group display policy + optional access predicate;
+    /// they round-trip, and a parsed v2 descriptor re-encodes/re-parses equal (the
+    /// fuzz-caught round-trip guard, now across the v2->v3 boundary).
+    #[test]
+    fn v3_fields_roundtrip_and_v2_defaults() {
+        use crate::linkage::Predicate;
+        let mut d = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            "tk.dr.kat",
+            vec![],
+            "#v3",
+        );
+        d.group_display_amplify_isolated = true;
+        d.access_predicate = Some(Predicate::LinkedToAccount { account_fp: [7u8; 48] });
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert!(back.group_display_amplify_isolated);
+        assert_eq!(back.access_predicate, Some(Predicate::LinkedToAccount { account_fp: [7u8; 48] }));
+        assert_eq!(back, d, "v3 descriptor round-trips");
+
+        // The frozen v1 URI still decodes with v3 fields defaulted.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert!(!v1.group_display_amplify_isolated);
+        assert!(v1.access_predicate.is_none());
+        // A parsed v2 descriptor must re-encode/re-parse equal (no trailing v3 bytes).
+        let mut v2 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#c");
+        v2.version = 2;
+        let v2_reparsed = ChatDescriptor::from_uri(&v2.to_uri()).expect("v2 re-encode parses");
+        assert_eq!(v2, v2_reparsed);
+        assert_eq!(v2_reparsed.version, 2);
     }
 }
