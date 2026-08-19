@@ -1565,6 +1565,12 @@ fn build_my_grouping_proof(inner: &Arc<Inner>) -> Option<Vec<u8>> {
     Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }.encode())
 }
 
+/// SUB-SPEC B: whether to auto-emit our grouping on join (show-all + not Clean).
+fn wants_show_all_grouping(inner: &Arc<Inner>) -> bool {
+    inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+        && !matches!(*inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean)
+}
+
 /// Send an encoded `LinkagePayload` via the role-appropriate path, behind
 /// `LINKAGE_SENTINEL` (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`).
 async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
@@ -1806,6 +1812,18 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
                 let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
             });
         }
+        // SUB-SPEC B: if show-all is on, also disclose our grouping on join.
+        if wants_show_all_grouping(inner) {
+            if let Some(gp) = build_my_grouping_proof(inner) {
+                let s = session.clone();
+                let w = writer.clone();
+                let mut framed = vec![LINKAGE_SENTINEL];
+                framed.extend_from_slice(&gp);
+                tokio::spawn(async move {
+                    let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                });
+            }
+        }
         // A pseudonym initiator with no leading name would otherwise send NOTHING
         // as its opening frame — leaving the responder's Double Ratchet unkeyed, so
         // the responder could never present its identity or announce its CQ name
@@ -1911,6 +1929,16 @@ async fn reader_loop(
             if let Some(bytes) = build_my_presence(&inner) {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC B: if show-all is on, disclose our grouping on join too.
+            if wants_show_all_grouping(&inner) {
+                if let Some(gp) = build_my_grouping_proof(&inner) {
+                    if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                        let mut framed = vec![LINKAGE_SENTINEL];
+                        framed.extend_from_slice(&gp);
+                        let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                    }
                 }
             }
         }
@@ -3094,6 +3122,55 @@ mod tests {
         assert_eq!(s.distinct_groupings, 1);
         assert_eq!(s.isolated, 2, "C and D; E is grouped");
         assert_eq!(s.min_distinct_people, 4);
+    }
+
+    /// SUB-SPEC B (Task 10): with show-all on, a session auto-discloses its grouping
+    /// on join; with show-all off, it does not.
+    #[tokio::test]
+    async fn show_all_emits_grouping_on_join() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sa");
+        // show-all ON
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h1", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d1", &desc);
+            d.set_grouping_root([1u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective);
+            d.show_all_identities(true);
+            d.connect("h1").await.unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { subject, verdict: true, .. }) => break Some(subject),
+                        Some(_) => continue,
+                        None => break None,
+                    }
+                }
+            }).await.ok().flatten();
+            assert_eq!(got, Some(d.fingerprint()), "show-all discloses grouping on join");
+        }
+        // show-all OFF (default) — no linkage disclosed.
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h2", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d2", &desc);
+            d.set_grouping_root([2u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective); // opted in, but show_all is off
+            d.connect("h2").await.unwrap();
+            let leaked = tokio::time::timeout(Duration::from_millis(400), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { verdict: true, .. }) => break true,
+                        Some(_) => continue,
+                        None => break false,
+                    }
+                }
+            }).await.unwrap_or(false);
+            assert!(!leaked, "no grouping disclosed when show-all is off");
+        }
     }
 
     /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each
