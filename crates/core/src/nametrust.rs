@@ -125,14 +125,23 @@ pub fn resolve_render(
     others: &HashMap<[u8; 48], NameRecord>,
     policy: NameTrustPolicy,
     safety_number: String,
+    // SUB-SPEC B: `isolated` = the viewer can verify NO linkage for this subject
+    // (not a contact/friend, no Linked name, no grouping) — a possible sybil.
+    // `amplify_isolated` = the GROUP's display policy wants isolation surfaced with
+    // a caveat (disclosure != display: the group only controls its own rendering).
+    isolated: bool,
+    amplify_isolated: bool,
 ) -> NameRender {
     let folded = confusable_fold(&rec.label);
     // A collision: some OTHER peer holds a HIGHER-tier name that folds the same.
     let collides = others.iter().any(|(fp, o)| {
         *fp != subject_fp && o.tier.rank() > rec.tier.rank() && confusable_fold(&o.label) == folded
     });
+    // Precedence: a Verified name is NEVER downgraded to Isolated; a bare, unlinked
+    // subject gets the subtle isolated tint (a possible sybil).
     let tint = match rec.tier {
         NameTier::Linked | NameTier::RegistryConfirmed => Tint::Verified,
+        NameTier::Bare if isolated => Tint::Isolated,
         NameTier::Bare => Tint::Default,
     };
     let (label, caveat) = match (collides, policy) {
@@ -153,6 +162,13 @@ pub fn resolve_render(
             )),
         ),
     };
+    // Group-display amplification (disclosure != display): if the group's policy
+    // wants isolation surfaced, add a subtle caveat for an isolated subject — but a
+    // collision caveat, being more specific, takes precedence.
+    let caveat = caveat.or_else(|| {
+        (tint == Tint::Isolated && amplify_isolated)
+            .then(|| "unverified — no linkage to a known identity".to_string())
+    });
     NameRender {
         label,
         tier: rec.tier,
@@ -193,6 +209,8 @@ mod tests {
             &others,
             NameTrustPolicy::SignalStyle,
             "SN".into(),
+            false,
+            false,
         );
         assert_eq!(r.label.as_deref(), Some("Alice"));
         assert!(r.caveat.is_none());
@@ -208,6 +226,8 @@ mod tests {
             &others,
             NameTrustPolicy::WarnOnCollision,
             "SN".into(),
+            false,
+            false,
         );
         assert_eq!(r.label.as_deref(), Some("Alice"));
         assert!(r.caveat.as_deref().unwrap().contains("does not match"));
@@ -223,6 +243,8 @@ mod tests {
             &others,
             NameTrustPolicy::SuppressColliding,
             "SN".into(),
+            false,
+            false,
         );
         assert!(r.label.is_none());
         assert!(r.caveat.as_deref().unwrap().contains("suppressed"));
@@ -236,7 +258,57 @@ mod tests {
             &HashMap::new(),
             NameTrustPolicy::SignalStyle,
             "SN".into(),
+            false,
+            false,
         );
         assert_eq!(r.tint, Tint::Verified);
+    }
+
+    // SUB-SPEC B (Task 6): isolated sybil tint + disclosure!=display amplification.
+
+    #[test]
+    fn isolated_bare_gets_isolated_tint() {
+        let r = resolve_render(
+            [2u8; 48],
+            &rec("Whiskey", NameTier::Bare, 2),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            true,  // isolated
+            false, // group does not amplify
+        );
+        assert_eq!(r.tint, Tint::Isolated);
+        assert!(r.caveat.is_none(), "no caveat unless the group amplifies");
+    }
+
+    #[test]
+    fn verified_is_never_downgraded_to_isolated() {
+        // Even if flagged isolated, a Linked/RegistryConfirmed name stays Verified.
+        let r = resolve_render(
+            [1u8; 48],
+            &rec("Alice", NameTier::Linked, 1),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            true,
+            true,
+        );
+        assert_eq!(r.tint, Tint::Verified);
+        assert!(r.caveat.is_none());
+    }
+
+    #[test]
+    fn group_amplify_adds_isolated_caveat() {
+        let r = resolve_render(
+            [2u8; 48],
+            &rec("Whiskey", NameTier::Bare, 2),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            true, // isolated
+            true, // group amplifies its own display
+        );
+        assert_eq!(r.tint, Tint::Isolated);
+        assert!(r.caveat.as_deref().unwrap().contains("no linkage"));
     }
 }
