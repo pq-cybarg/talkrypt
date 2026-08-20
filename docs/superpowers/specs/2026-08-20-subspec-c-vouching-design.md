@@ -45,7 +45,9 @@ tests must enforce them.
    **neutral, not behind**. Any eligible member may vouch anyone (no gatekeeping of who *can be* vouched).
    **Hyperinflation of trust cannot cause permanent isolation:** because the tint is additive-only, an
    inflated environment only makes the tint *less informative*, never makes a newcomer *worse than neutral*
-   — the catch-up path (earn vouches like everyone else) is always open. Thresholds SHOULD be relative
+   — the catch-up path (earn vouches like everyone else) is always open — reinforced by trust **freshness**
+   (§1.5): trust that isn't continually re-asserted decays to neutral, so a damaged source recovers the
+   moment support genuinely returns, and no one coasts on banked trust. Thresholds SHOULD be relative
    (percentage of eligible) and/or capped so an inflated absolute bar can't strand newcomers; the
    non-exclusion invariant (1) is the ultimate backstop.
 
@@ -57,6 +59,9 @@ tests must enforce them.
    - *Coercion:* a coerced vouch is **revocable**, and being additive-only it can only inflate someone, not
      isolate a target.
    - *Weaponization to isolate:* structurally impossible (invariant 1) — no negative signal exists.
+   - *Clock-gaming the decay:* defeated — freshness advances on **gossip-witnessed rounds among distinct
+     connected members** (§1.5), not any single node's wall clock; sock-puppets can't fast-forward it
+     (distinct-person deflation), and an isolated node can neither refresh its own nor expire others'.
    - *Surveillance / social-graph mapping:* vouches ride **inside the encrypted / group-epoch channel**,
      are **per-chat context-scoped** (no cross-chat graph is built), and never appear in cleartext or the
      invite. **Anonymous vouching** ("prove ≥ threshold vouchers without revealing which") is a **Backend-1
@@ -72,7 +77,8 @@ struct Vouch {
     target: VouchTarget,
     context: [u8; 32],   // chat_context(invite_token ‖ channel) — as A/B; scopes the vouch to THIS chat
     epoch: u64,          // supersede/anti-replay per (voucher, target)
-    sig: Vec<u8>,        // voucher ACCOUNT ML-DSA sig over (target ‖ context ‖ epoch)
+    asserted_at: u64,    // when this assertion was made — trust DECAYS unless re-asserted (§1.5)
+    sig: Vec<u8>,        // voucher ACCOUNT ML-DSA sig over (target ‖ context ‖ epoch ‖ asserted_at)
     voucher: AccountPub, // the voucher's account public (verifier binds it to a presented identity chain)
 }
 
@@ -92,6 +98,49 @@ enum VouchTarget {
   `Revocation` pattern for the account-signed unforgeability.
 - **Context-bound:** a vouch made in chat X does not count in chat Y (the `context` differs), matching B's
   grouping/linkage anti-replay.
+
+## 1.5 Trust freshness — continual re-assertion (anti "trust-banking"; graceful, recoverable decay)
+
+**A vouch is NOT permanent — it must be re-asserted at intervals to keep counting.** Each vouch carries
+`asserted_at`; a vouch contributes to the weighted score only while **fresh** (re-asserted within the
+policy's `freshness_interval`). Vouchers re-emit their current vouches periodically (a low-rate re-assertion
+beacon, on the same encrypted path as the CQ presence beacon; floor-clamped like A's cadence).
+
+**Why (from the threat model):** this stops a **long-lived trusted source from banking trust and then
+exploiting it** — going dormant or turning malicious while still *appearing* trusted on stale vouches. If
+the community stops supporting a source (because it damaged public trust), its vouches simply **stop being
+renewed and its trust decays to neutral** — automatically, with no negative signal and no coordinated
+"attack" needed.
+
+**Freshness is GOSSIP-CORROBORATED, not local-clock (anti clock-gaming).** A node must NOT decide freshness
+from `asserted_at` against its own wall clock — a single manipulated system clock could then keep stale
+trust "fresh" (or fast-expire a rival's). Instead, decay advances on a **network-relative logical clock**:
+each viewer maintains a **round counter that ticks only as it witnesses gossip activity from DISTINCT
+connected members** (re-assertion beacons + a low-rate freshness heartbeat, on the existing gossip mesh with
+`SeenSet` dedup). A vouch's freshness is measured in **rounds since its last re-assertion was witnessed**,
+not seconds. Because a round advances only via **multi-member** gossip:
+- a single node (or an attacker with a spoofed clock) **cannot unilaterally freeze or fast-forward** decay;
+- an attacker's **sock-puppets cannot fast-forward rounds** — round-advancing members are counted with the
+  same **distinct-person deflation as the vouch weighting** (B's grouping/sybil-count: N sock-puppets = 1);
+- a **partitioned/isolated** attacker simply stops advancing rounds → cannot refresh trust in isolation, and
+  cannot expire anyone else's (each viewer computes freshness from *its own* witnessed rounds).
+`asserted_at` remains only a monotonic tiebreaker + sanity bound (reject absurd future stamps), never the
+trust anchor. This makes decay **depend on connected other users**, as intended.
+
+**Decay is graceful and to NEUTRAL, never negative (invariant 1 holds):** the weight of a vouch decays with
+age from full (at re-assertion) toward zero at the interval boundary — a smooth ramp, not a cliff, so the
+exact expiry moment can't be gamed and short outages don't snap trust away. When all support lapses the
+subject lands at **neutral** (fully able to participate), never "distrusted."
+
+**Recovery is symmetric (invariant 3):** a source that genuinely restores trust is re-asserted by vouchers
+and its level **comes back** — the same earn-it path as a newcomer. Trust therefore always reflects the
+**current** community's standing, not a historical record that can be exploited or that permanently condemns.
+
+**Consequences to hold:** re-assertion needs vouchers to be periodically present (trust reflects *live*
+support — intended). The re-assertion cadence is a metadata surface (periodic vouch frames), mitigated by
+riding the encrypted/group-epoch channel + wire padding, and fully hidden only by the Backend-1
+ZK-anonymous-vouching follow-up. Re-assertion rate is floor-clamped (anti-spam) and viewer-side
+rate-limited, like A's presence cadence.
 
 ## 2. Weighted, multi-scope evaluation (the load-bearing generalization)
 
@@ -115,7 +164,9 @@ enum VoucherEligibility {
 struct VouchPolicy {
     eligibility: VoucherEligibility,
     weighting: VouchWeighting,
-    threshold: Threshold,      // Count(u32 weighted-score) | Percent(u8 of eligible weighted-max)
+    threshold: Threshold,        // Count(u32 weighted-score) | Percent(u8 of eligible weighted-max)
+    freshness_interval_rounds: u32, // re-assertion window in GOSSIP-WITNESSED rounds (§1.5), not seconds
+                                    // (anti clock-gaming). Chat baseline; a user may require STRICTER locally.
 }
 ```
 
@@ -130,8 +181,10 @@ struct VouchPolicy {
 - **`Percent` denominator:** the weighted-max over the *eligible* voucher set present (distinct
   account-linked members under the eligibility rule) — well-defined per viewer, per moment.
 
-**Decision:** `weighted_score(subject) = Σ over distinct eligible vouchers v: weight(v)` (transitive
-vouches decayed by depth); if `weighted_score ≥ effective_threshold` → `Tint::Vouched`, and the render
+**Decision:** `weighted_score(subject) = Σ over distinct eligible & FRESH vouchers v:
+weight(v) · age_decay(rounds_since_witnessed(v), freshness_interval_rounds)` — decay over
+**gossip-witnessed rounds** (§1.5), NOT local seconds (transitive vouches additionally decayed by depth);
+a stale vouch contributes 0. If `weighted_score ≥ effective_threshold` → `Tint::Vouched`, and the render
 carries the **weighted count / score** as a badge (e.g. "✳ vouched · 5").
 
 ## 3. Render (fills the reserved `Tint::Vouched` slot)
