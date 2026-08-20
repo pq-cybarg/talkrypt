@@ -52,10 +52,20 @@ tests must enforce them.
    non-exclusion invariant (1) is the ultimate backstop.
 
 4. **The measure must not be exploitable or manipulable.**
-   - *Inflation / sock-puppets:* N sybil accounts cast N vouches, so raw count is not trusted — the
-     **weighting** (a viewer counts its own friends/contacts more than strangers) and **eligibility**
-     (contacts-only) are the defenses, and **B's grouping/sybil-count deflates** colluding vouchers (a
-     grouping proof reveals several "vouchers" are one person → their weighted contribution collapses).
+   - *Inflation / sock-puppets ("vouchflation") — the MAIN residual attack of an additive-only system:*
+     N sybil accounts cast N vouches, so raw count is not trusted. Primary defenses: **trust weighting**
+     (a viewer counts its own friends/contacts more than strangers → a sybil swarm the viewer doesn't
+     know is near-weightless) + **eligibility** (contacts-only) + **B's grouping/sybil-count deflation**
+     (a grouping proof reveals several "vouchers" are one person → their weighted contribution
+     collapses). **OPEN QUESTION — network trust weighting by degrees of separation** (weight a
+     voucher by graph distance from the viewer, decaying with hops): it further blunts vouchflation but
+     is **not adopted as settled**, for two reasons the literature is clear on — (i) social-graph
+     transitive-trust metrics (Advogato / EigenTrust / SybilGuard-family) rest on a **fast-mixing**
+     assumption that sybil regions defeat, and transitive trust can *amplify* a compromise rather than
+     contain it; (ii) weighting by graph distance requires **observing the social graph**, a
+     surveillance/deanonymization leak (PGP web-of-trust's classic failure) that cuts against the
+     cypherpunk selective-disclosure value and this feature's anti-surveillance invariant. It is tracked
+     as an open research route (see §10), gated on a defensible, privacy-preserving construction.
    - *Coercion:* a coerced vouch is **revocable**, and being additive-only it can only inflate someone, not
      isolate a target.
    - *Weaponization to isolate:* structurally impossible (invariant 1) — no negative signal exists.
@@ -250,6 +260,20 @@ default (vouching off / threshold ∞ → never tinted).
   plan: vouch type + verification, weighted multi-scope evaluation, `Tint::Vouched` render, descriptor v4,
   propagation, surfaces, tests. It **shares the attestation type** defined in B design §4c (so if/when
   Backend-1 lands, ZK-predicate attestations and identity vouches use one mechanism).
+
+## 10. Open questions (researched, not settled)
+- **Network trust weighting by degrees of separation** (transitive/graph-distance weighting) as an
+  anti-vouchflation route — defensibility is **open**: social-graph transitive-trust metrics
+  (Advogato/EigenTrust/SybilGuard) have documented fragilities (fast-mixing assumption, sybil regions,
+  compromise amplification), AND graph-distance weighting leaks/uses the social graph (surveillance risk,
+  against the cypherpunk selective-disclosure value). A ZK, privacy-preserving formulation ("prove I am
+  within k hops without revealing the path") is a Backend-1 direction, itself an open problem. For now:
+  **weighting (friend/contact/stranger) + eligibility + B sybil-count are the adopted defenses; degrees of
+  separation is NOT adopted pending a defensible + private construction.**
+- Percentage vs absolute thresholds under adversarial churn; how relative thresholds interact with the
+  recovery invariant in tiny chats.
+- The exact age-decay curve (linear vs exponential over gossip rounds) and the round-advance rule's
+  sybil-resistance bound (how many *distinct* witnesses per round; interaction with B's grouping deflation).
 
 ## 9. Out of scope / follow-ups
 - Global (cross-chat) reputation aggregation — C is per-chat/context-scoped by design.
