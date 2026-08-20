@@ -1879,7 +1879,10 @@ async fn reader_loop(
     let mut decrypt_failures: u32 = 0;
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
-    let mut approved = inner.access.lock().unwrap().is_open();
+    // SUB-SPEC B: an access predicate means a peer is NOT auto-approved (even under
+    // an Open policy) — it must first present a satisfying identity (handle_identity).
+    let mut approved =
+        inner.access.lock().unwrap().is_open() && inner.descriptor.access_predicate.is_none();
     loop {
         let frame = match reader.recv_frame().await {
             Ok(f) => f,
@@ -2463,6 +2466,43 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
                 .lock()
                 .unwrap()
                 .insert(res.account_fingerprint, res.account.clone());
+            // SUB-SPEC B: an access PREDICATE is an ADDITIONAL admission gate on top
+            // of the AccessPolicy — satisfied here from the presented chain. It learns
+            // only pass/fail (no identity leaked to the group beyond admission).
+            match &inner.descriptor.access_predicate {
+                None => {}
+                Some(crate::linkage::Predicate::LinkedToAccount { account_fp }) => {
+                    if res.account_fingerprint != *account_fp {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "account does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(crate::linkage::Predicate::DerivedFromNamed { ancestor_fp }) => {
+                    let descends = presentation
+                        .chain
+                        .links
+                        .iter()
+                        .any(|l| l.issuer.fingerprint() == *ancestor_fp);
+                    if !descends {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "identity does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(_) => {
+                    // A grouping/ZK access predicate is not satisfiable by an identity
+                    // presentation — fail closed in B0 (Backend-1 adds the ZK path).
+                    let _ = inner.events_tx.send(Event::Error(
+                        "channel requires a proof this build cannot present".into(),
+                    ));
+                    return IdentityOutcome::Rejected;
+                }
+            }
+            // Remember the verified account key so the UI can pin it by
+            // fingerprint after an out-of-band safety-number comparison.
             let _ = inner.events_tx.send(Event::Identity {
                 from: peer_fp,
                 account_fingerprint: res.account_fingerprint,
@@ -3122,6 +3162,56 @@ mod tests {
         assert_eq!(s.distinct_groupings, 1);
         assert_eq!(s.isolated, 2, "C and D; E is grouped");
         assert_eq!(s.min_distinct_people, 4);
+    }
+
+    /// SUB-SPEC B (Task 9): an access predicate (LinkedToAccount) gates admission —
+    /// a joiner linked to the required account is admitted; a joiner linked to a
+    /// DIFFERENT account is rejected (AccessDenied), learning only pass/fail.
+    #[tokio::test]
+    async fn access_predicate_gates_admission() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let acct = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#gate");
+        desc.access_predicate = Some(Predicate::LinkedToAccount { account_fp: acct.public().fingerprint() });
+
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+
+        // Admitted: a joiner presenting a chain rooted at the required account.
+        let (ok, _r1) = core_on(&fabric, "ok", &desc);
+        let chain = IdentityChain::device(&acct, ok.identity_public(), "dev", 0, now_secs() + 10_000);
+        ok.present_identity(chain, None);
+        ok.connect("host").await.unwrap();
+        // Let the identity presentation land + be approved before sending (the
+        // initiator presents in a spawned task; a real user doesn't send instantly).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ok.send("i am in").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "i am in", "matching account is admitted");
+
+        // Rejected: a joiner linked to a DIFFERENT account must NOT be able to
+        // participate — the security property (no access bypass).
+        let other = IdentityKeyPair::generate();
+        let (bad, mut bad_rx) = core_on(&fabric, "bad", &desc);
+        let bad_chain = IdentityChain::device(&other, bad.identity_public(), "dev", 0, now_secs() + 10_000);
+        bad.present_identity(bad_chain, None);
+        bad.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = bad.send("sneak in").await; // may error once disconnected — fine
+        // The host must NOT deliver the rejected joiner's message.
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "sneak in" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "a wrong-account joiner must not get a message through the access gate");
+        let _ = &mut bad_rx; // (AccessDenied feedback path is covered by the existing reject test)
     }
 
     /// SUB-SPEC B (Task 10): with show-all on, a session auto-discloses its grouping
