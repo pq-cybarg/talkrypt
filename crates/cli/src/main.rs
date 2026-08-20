@@ -1389,6 +1389,10 @@ commands:
   /name <callsign>               set a bare self-declared name and announce it
   /name link <callsign>          set an account-linked (verified) name (needs /account)
   /name off                      clear your leading name
+  /opsec clean|selective|transparent [hide]   linkage-disclosure policy (SUB-SPEC B)
+  /grouping new <name-id...>      define + disclose a grouping of your names (account-hidden)
+  /showall on|off                disclose your grouping automatically on join
+  /sybil                         show the honest distinct-people estimate
   /cq                            re-announce your name to the chat now
   /cq periodic <mins>|off        auto re-beacon your name on a timer
   registry (username discovery):
@@ -1604,7 +1608,74 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
                 println!("usage: /cq   |   /cq periodic <minutes>|off");
             }
         }
+        "opsec" => cmd_opsec(core, arg),
+        "grouping" => cmd_grouping(core, arg).await,
+        "showall" => match arg.trim() {
+            "on" => {
+                core.show_all_identities(true);
+                println!("show-all: on — your grouping is disclosed on join");
+            }
+            "off" => {
+                core.show_all_identities(false);
+                println!("show-all: off");
+            }
+            _ => println!("usage: /showall on|off"),
+        },
+        "sybil" => {
+            let s = core.sybil_estimate();
+            println!(
+                "sybil estimate: >= {} distinct people ({} accounts, {} groupings, {} isolated)",
+                s.min_distinct_people, s.distinct_accounts, s.distinct_groupings, s.isolated
+            );
+        }
         other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// Map an `/opsec` argument to an [`OpsecMode`] (SUB-SPEC B linkage disclosure).
+fn parse_opsec(s: &str) -> Result<talkrypt_core::linkage::OpsecMode, String> {
+    use talkrypt_core::linkage::OpsecMode;
+    let mut it = s.trim().split_whitespace();
+    match it.next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "clean" => Ok(OpsecMode::Clean),
+        "selective" => Ok(OpsecMode::Selective),
+        "transparent" => Ok(OpsecMode::Transparent { hide: it.next() == Some("hide") }),
+        other => Err(format!(
+            "unknown opsec mode {other:?} (use clean | selective | transparent [hide])"
+        )),
+    }
+}
+
+/// `/opsec clean|selective|transparent [hide]` — set the linkage-disclosure policy.
+fn cmd_opsec(core: &Core, arg: &str) {
+    match parse_opsec(arg) {
+        Ok(m) => {
+            core.set_opsec_mode(m);
+            println!("opsec mode: {m:?}");
+        }
+        Err(e) => println!("{e}"),
+    }
+}
+
+/// `/grouping new <name-id...>` — define a grouping of your names and disclose it
+/// (account-hidden); `/grouping <id>` re-discloses an existing one.
+async fn cmd_grouping(core: &Core, arg: &str) {
+    let arg = arg.trim();
+    if let Some(rest) = arg.strip_prefix("new ") {
+        let ids: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
+        if ids.is_empty() {
+            println!("usage: /grouping new <name-id> [<name-id>...]");
+            return;
+        }
+        let id = core.define_grouping(&ids);
+        println!("grouping {id} defined ({} members)", ids.len());
+        core.present_grouping(&id).await;
+        println!("grouping disclosed to the chat (account-hidden)");
+    } else if arg.is_empty() || arg == "show" {
+        println!("usage: /grouping new <name-id...>   (define + disclose a grouping)");
+    } else {
+        core.present_grouping(&arg.to_string()).await;
+        println!("grouping disclosed");
     }
 }
 
@@ -1977,5 +2048,15 @@ mod tests {
     fn name_policy_rejects_unknown() {
         let e = parse_name_policy("trustme").unwrap_err();
         assert!(e.contains("signal | warn | suppress"), "message guides the user: {e}");
+    }
+
+    #[test]
+    fn opsec_parses_all_forms() {
+        use talkrypt_core::linkage::OpsecMode;
+        assert_eq!(parse_opsec("clean").unwrap(), OpsecMode::Clean);
+        assert_eq!(parse_opsec("selective").unwrap(), OpsecMode::Selective);
+        assert_eq!(parse_opsec("transparent").unwrap(), OpsecMode::Transparent { hide: false });
+        assert_eq!(parse_opsec("transparent hide").unwrap(), OpsecMode::Transparent { hide: true });
+        assert!(parse_opsec("sneaky").is_err());
     }
 }
