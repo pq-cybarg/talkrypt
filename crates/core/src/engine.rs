@@ -3263,6 +3263,85 @@ mod tests {
         }
     }
 
+    // ---- SUB-SPEC B hardening (adversarial): grouping-disclosure attack vectors ----
+
+    /// A member cannot RESTAMP a grouping cert onto another member's leaf:
+    /// handle_linkage binds the certified subject to the authenticated sender.
+    #[tokio::test]
+    async fn grouping_proof_cannot_be_restamped_to_another_leaf() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hr");
+        let (core, mut rx) = core_on(&fabric, "n", &desc);
+        let ctx = crate::presence::chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let victim = IdentityKeyPair::generate();
+        let g = talkrypt_crypto::GroupingKey::from_root_seed([1u8; 32]);
+        let cert = g.certify(&ctx, victim.public(), 0, now_secs() + 10_000);
+        let ctx_sig = victim.sign(&ctx);
+        let gp = g.derive_for_chat(&ctx).public().sig_vk.clone();
+        let payload = crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig, seq: 1 }.encode();
+        // An attacker with a DIFFERENT fp presents the victim's grouping cert.
+        let attacker_fp = [0x33u8; 48];
+        assert_ne!(attacker_fp, victim.public().fingerprint());
+        handle_linkage(&core.inner, attacker_fp, payload);
+        // Rejected (verdict false), aggregated under NOBODY.
+        assert!(core.inner.groupings_seen.lock().unwrap().values().all(|set| set.is_empty()));
+        let mut saw_false = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Linkage { verdict, .. } = ev {
+                assert!(!verdict, "restamped proof must not verify");
+                saw_false = true;
+            }
+        }
+        assert!(saw_false, "a verdict:false linkage event is emitted");
+    }
+
+    /// A grouping proof from one chat replayed into another must fail: the ctx-sig
+    /// is bound to the originating chat context.
+    #[tokio::test]
+    async fn grouping_proof_cross_chat_replay_fails() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hy");
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Build the proof entirely in a DIFFERENT chat context (ctx_x).
+        let ctx_x = [0xAAu8; 32];
+        let member = IdentityKeyPair::generate();
+        let g = talkrypt_crypto::GroupingKey::from_root_seed([2u8; 32]);
+        let cert = g.certify(&ctx_x, member.public(), 0, now_secs() + 10_000);
+        let ctx_sig = member.sign(&ctx_x);
+        let gp = g.derive_for_chat(&ctx_x).public().sig_vk.clone();
+        let payload = crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig, seq: 1 }.encode();
+        // Fed into THIS chat (whose real context != ctx_x), attributed to `member`.
+        handle_linkage(&core.inner, member.public().fingerprint(), payload);
+        assert!(
+            core.inner.groupings_seen.lock().unwrap().values().all(|set| set.is_empty()),
+            "a proof bound to another chat's context must not aggregate here"
+        );
+    }
+
+    /// A replayed/lower-seq grouping proof is dropped (anti-replay/reorder).
+    #[tokio::test]
+    async fn grouping_proof_stale_seq_is_dropped() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hs");
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = crate::presence::chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let member = IdentityKeyPair::generate();
+        let member_fp = member.public().fingerprint();
+        let ctx_sig = member.sign(&ctx);
+        let mk = |root: [u8; 32], seq: u64| {
+            let g = talkrypt_crypto::GroupingKey::from_root_seed(root);
+            let cert = g.certify(&ctx, member.public(), 0, now_secs() + 10_000);
+            let gp = g.derive_for_chat(&ctx).public().sig_vk.clone();
+            crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig: ctx_sig.clone(), seq }.encode()
+        };
+        // seq 5 (grouping A) aggregates; then a stale seq 3 (grouping B) is dropped.
+        handle_linkage(&core.inner, member_fp, mk([3u8; 32], 5));
+        handle_linkage(&core.inner, member_fp, mk([4u8; 32], 3));
+        let seen = core.inner.groupings_seen.lock().unwrap();
+        let groupings_with_member: usize = seen.values().filter(|set| set.contains(&member_fp)).count();
+        assert_eq!(groupings_with_member, 1, "only the higher-seq grouping is recorded; the stale replay is dropped");
+    }
+
     /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each
     /// presents its own leaf certified under the per-chat grouping key. A viewer
     /// AGGREGATES both leaves under one `grouping_pub` (one person) — and learns NO
