@@ -3164,6 +3164,79 @@ mod tests {
         assert_eq!(s.min_distinct_people, 4);
     }
 
+    /// SUB-SPEC B access hardening: a `DerivedFromNamed` predicate admits a joiner
+    /// whose cert chain descends from the named ancestor, and blocks one that doesn't.
+    #[tokio::test]
+    async fn access_predicate_derived_from_named() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let ancestor = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#dfn");
+        desc.access_predicate = Some(Predicate::DerivedFromNamed { ancestor_fp: ancestor.public().fingerprint() });
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+
+        // Descends from the ancestor → admitted.
+        let (ok, _r) = core_on(&fabric, "ok", &desc);
+        let chain = IdentityChain::device(&ancestor, ok.identity_public(), "dev", 0, now_secs() + 10_000);
+        ok.present_identity(chain, None);
+        ok.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ok.send("descendant").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "descendant", "a descendant is admitted");
+
+        // Rooted at a DIFFERENT account → blocked (no message through).
+        let other = IdentityKeyPair::generate();
+        let (bad, _r2) = core_on(&fabric, "bad", &desc);
+        let bad_chain = IdentityChain::device(&other, bad.identity_public(), "dev", 0, now_secs() + 10_000);
+        bad.present_identity(bad_chain, None);
+        bad.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = bad.send("intruder").await;
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "intruder" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "a non-descendant must be blocked");
+    }
+
+    /// SUB-SPEC B access hardening: an access predicate an identity CANNOT satisfy
+    /// (a grouping/ZK predicate in B0) fails closed — even a valid identity is blocked.
+    #[tokio::test]
+    async fn access_predicate_unsupported_fails_closed() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let acct = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#fc");
+        // A grouping predicate is not satisfiable by an identity presentation in B0.
+        desc.access_predicate = Some(Predicate::Grouping { grouping_pub: vec![0u8; 32] });
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (j, _r) = core_on(&fabric, "j", &desc);
+        let chain = IdentityChain::device(&acct, j.identity_public(), "dev", 0, now_secs() + 10_000);
+        j.present_identity(chain, None);
+        j.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = j.send("should not pass").await;
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "should not pass" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "an unsupported access predicate must fail closed");
+    }
+
     /// SUB-SPEC B (Task 9): an access predicate (LinkedToAccount) gates admission —
     /// a joiner linked to the required account is admitted; a joiner linked to a
     /// DIFFERENT account is rejected (AccessDenied), learning only pass/fail.
