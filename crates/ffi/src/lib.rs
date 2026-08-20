@@ -400,6 +400,28 @@ fn hex_fp(fp: &[u8; 48]) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Parse a 64-char hex string into a 32-byte seed (SUB-SPEC B grouping root).
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// SUB-SPEC B: the honest distinct-people estimate surfaced to clients.
+#[derive(uniffi::Record)]
+pub struct FfiSybilCount {
+    pub distinct_accounts: u32,
+    pub distinct_groupings: u32,
+    pub isolated: u32,
+    pub min_distinct_people: u32,
+}
+
 /// A persisted contact (account public key + remembered name + friend label).
 #[derive(uniffi::Record)]
 pub struct ContactRecord {
@@ -1074,6 +1096,57 @@ impl TalkryptClient {
                 periodic_secs: periodic,
                 on_message_id,
             });
+    }
+
+    // ----- SUB-SPEC B: linkage disclosure + opsec (Task 11) -----
+
+    /// Set the linkage-disclosure opsec mode: "clean" | "selective" | "transparent"
+    /// | "transparent-hide". Unknown values are ignored (mode unchanged).
+    pub fn set_opsec_mode(&self, mode: String) {
+        use talkrypt_core::linkage::OpsecMode;
+        let m = match mode.as_str() {
+            "clean" => OpsecMode::Clean,
+            "selective" => OpsecMode::Selective,
+            "transparent" => OpsecMode::Transparent { hide: false },
+            "transparent-hide" => OpsecMode::Transparent { hide: true },
+            _ => return,
+        };
+        self.core.set_opsec_mode(m);
+    }
+
+    /// Set the persistent grouping root (32-byte hex), shared across the user's
+    /// sessions so a viewer can aggregate their leaves into one grouping. No-op on
+    /// a malformed seed.
+    pub fn set_grouping_root(&self, seed_hex: String) {
+        if let Some(seed) = parse_hex32(&seed_hex) {
+            self.core.set_grouping_root(seed);
+        }
+    }
+
+    /// Define a grouping of the user's name-entry ids; returns its stable id.
+    pub fn define_grouping(&self, name_ids: Vec<String>) -> String {
+        self.core.define_grouping(&name_ids)
+    }
+
+    /// Disclose a grouping to the chat now (account-hidden). No-op under opsec Clean.
+    pub fn present_grouping(&self, id: String) {
+        self.rt.block_on(async { self.core.present_grouping(&id).await });
+    }
+
+    /// Auto-disclose the grouping on join (vs just the leading name).
+    pub fn show_all_identities(&self, on: bool) {
+        self.core.show_all_identities(on);
+    }
+
+    /// The honest distinct-people estimate for the chat (SUB-SPEC B sybil-count).
+    pub fn sybil_estimate(&self) -> FfiSybilCount {
+        let s = self.core.sybil_estimate();
+        FfiSybilCount {
+            distinct_accounts: s.distinct_accounts as u32,
+            distinct_groupings: s.distinct_groupings as u32,
+            isolated: s.isolated as u32,
+            min_distinct_people: s.min_distinct_people as u32,
+        }
     }
 
     /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
