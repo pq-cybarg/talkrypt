@@ -14,13 +14,14 @@
 delivery, all post-quantum (hash/CRHF) and **formally verified** before default-enable.
 
 **Architecture:** A new `talkrypt-zk` crate (feature-gated) implements `ProofBackend` over a **Winterfell
-FRI-STARK** with a **WHIR/STIR** proximity layer and **SHA3** commitments; all three predicates are one
+FRI-STARK** on **KoalaBear** with a **WHIR/STIR** proximity layer, **Rescue-Prime** as the in-circuit
+arithmetization hash, and **SHA3/SHAKE** commitments; all three predicates are one
 **Merkle / cert-chain membership circuit** family with **verifier-issued witnesses** (VC/anon-cred-via-
 Merkle). Attestation reuses B0's ML-DSA machinery; predicate-gated delivery layers a **predicate epoch
 key** over the existing TreeKEM keying. The core wires `ZkPredicateBackend` behind `#[cfg(feature = "zk")]`.
 
-**Tech Stack:** Rust; `winterfell` (FRI STARK, AIR); a WHIR/STIR proximity backend; SHA3/Keccak
-(`tiny_keccak`, already in-tree) for commitments; ML-DSA-87 + ML-KEM-1024 (RustCrypto, in-tree). Formal
+**Tech Stack:** Rust; `winterfell` (FRI STARK, AIR); a WHIR/STIR proximity backend; **KoalaBear**
+field; **Rescue-Prime** in-circuit hash; **SHA3/SHAKE** (`tiny_keccak`, in-tree) commitments; ML-DSA-87 + ML-KEM-1024 (RustCrypto, in-tree). Formal
 verification: the repo's existing EasyCrypt / F* / Kani CI, extended with the STARK-soundness + ZK-masking
 theorems.
 
@@ -32,7 +33,13 @@ theorems.
   verify). Lattice ZK only for statements intrinsically about ML-DSA/ML-KEM key material (none of B1's are).
 - **STARKs are NOT ZK by default** — witness + quotient masking must be ADDED and its zero-knowledge
   property machine-checked (Haböck–Kindi, eprint 2024/1037). No off-the-shelf crate is assumed ZK.
-- **Security-critical commitments use SHA3/Keccak** (not Poseidon2/Rescue, under active cryptanalysis).
+- **Layered hashing (deliberate):** the **in-circuit arithmetization hash is Rescue-Prime** — its
+  *bidirectional full-round* structure resists the algebraic (Gröbner/resultant) attacks that break
+  Poseidon/Poseidon2, so it is the SECURE AF-hash here (NOT interchangeable with Poseidon). The
+  **commitment/Merkle layer uses SHA3/SHAKE** (Keccak sponge → length-extension resistant; SHA-384
+  likewise, being truncated). **KoalaBear** (31-bit) is the field — chosen for **mobile device limits** (cheap arithmetic + low
+  memory on phone CPUs; talkrypt is mobile-first); the KoalaBear-*Poseidon* cryptanalysis is moot since
+  we use Rescue-Prime.
 - **Proximity soundness parameters are derived + machine-checked, never a copied default** (FRI's above-
   Johnson bound regressed, 2026/858; prefer WHIR/STIR's current analysis).
 - **Feature-gated + off by default; verification-gated to ship.** No B1 code path is reachable in a default
@@ -62,17 +69,20 @@ theorems.
 
 **Files:** `crates/zk/src/pcs.rs` (proximity), `crates/zk/src/commit.rs` (SHA3 Merkle).
 
-- [ ] Integrate a WHIR (fallback STIR) proximity backend into the Winterfell pipeline; SHA3 Merkle
-  commitments (reuse `tiny_keccak`). Field = a small STARK field (BabyBear/KoalaBear/M31) — **document the
-  choice and its 2-adicity/soundness tradeoff**; masking + hash concerns dominate over the prime.
+- [ ] Integrate a WHIR (fallback STIR) proximity backend into the Winterfell pipeline on the **KoalaBear**
+  field. **In-circuit hash = Rescue-Prime** (bidirectional full-round; the secure AF-hash). **Merkle /
+  commitment hash = SHA3/SHAKE** (length-extension resistant). Configure for **true zero-knowledge**
+  (witness + quotient masking, Phase-1 obligation 2).
 - [ ] Derive the concrete query count / soundness parameters for the chosen proximity test; encode them as
   constants with a comment citing the analysis, NOT a library default.
 - **Verification obligations (must pass before Phase 2 builds on it):**
   1. **Soundness** — machine-checked proof (Lean 4 STARK-soundness blueprint / EasyCrypt) of the FRI/WHIR
      round bound at the deployed parameters.
   2. **ZK / masking** — the added witness+quotient masking yields a proof statistically independent of the
-     witness (a leak test + the Haböck–Kindi masking argument).
-  3. **Kani** — decoder/verifier totality on the proof bytes (extends the existing Kani CI job).
+     witness (a leak test + the Haböck–Kindi masking argument) → **true ZK**.
+  3. **Rescue-Prime algebraic security** — track/justify the round count against min-degree /
+     Gröbner-basis analyses (the full-round bidirectional argument), and SHA3/SHAKE commitment binding.
+  4. **Kani** — decoder/verifier totality on the proof bytes (extends the existing Kani CI job).
 
 ## Phase 2 — Merkle / cert-chain membership circuit + verifier-issued witnesses (VERIFICATION-GATED)
 
