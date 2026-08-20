@@ -76,6 +76,15 @@ class ChatEventsTest {
         assertEquals("Whiskey", named.display)
     }
 
+    @Test fun linkage_marks_peer_as_grouped_and_notes_it() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Linkage("peerfp123456", "abcd1234", true))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("grouping"))
+        assertTrue(a.roster["peerfp123456"]!!.grouped)
+    }
+
     @Test fun identity_line_variants() {
         assertEquals("✓ friend bob", identityLine(true, true, "bob"))
         assertEquals("• contact bob", identityLine(true, false, "bob"))
