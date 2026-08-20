@@ -571,6 +571,7 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("{} is calling as \"{label}\"", short(&from)) });
                 }
                 Event::Name { .. } => {}
+                Event::Linkage { .. } => {} // SUB-SPEC B (UI: Task 13)
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();

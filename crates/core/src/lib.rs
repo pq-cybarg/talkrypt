@@ -14,6 +14,7 @@ pub mod descriptor;
 pub mod engine;
 pub mod error;
 pub mod handshake;
+pub mod linkage;
 pub mod linking;
 pub mod marking;
 pub mod nametrust;

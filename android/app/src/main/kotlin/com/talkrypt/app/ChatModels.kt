@@ -111,4 +111,6 @@ data class Member(
     var contact: Boolean = false,
     var friend: Boolean = false,
     var connected: Boolean = false,
+    /** SUB-SPEC B: this peer disclosed grouping linkage (not an isolated sybil). */
+    var grouped: Boolean = false,
 )

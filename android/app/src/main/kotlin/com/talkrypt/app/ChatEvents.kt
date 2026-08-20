@@ -48,6 +48,17 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
             val shown = e.label.ifEmpty { e.from.take(8) }
             sysMsg("$badge${e.from.take(8)} is “$shown”$cav", now)
         }
+        is FfiEvent.Linkage -> {
+            // SUB-SPEC B: a peer disclosed grouping linkage (account-hidden). Mark it
+            // as grouped (so it's not rendered as an isolated sybil) and note it.
+            val mem = lc.roster.getOrPut(e.subject) { Member(e.subject) }
+            mem.grouped = e.verdict
+            if (e.verdict) {
+                sysMsg("🔗 ${e.subject.take(8)} disclosed grouping ${e.grouping} (account-hidden)", now)
+            } else {
+                sysMsg("${e.subject.take(8)} presented an invalid grouping proof", now)
+            }
+        }
         is FfiEvent.Error -> sysMsg("! ${e.message}", now)
     }
     sessions.recordIncoming(id, msg)

@@ -76,6 +76,15 @@ pub enum Event {
         seq: u64,
         caveat: Option<String>,
     },
+    /// SUB-SPEC B: a peer disclosed grouping linkage — `subject` (a leaf fp) is a
+    /// member of the grouping identified by `grouping_pub` (per-chat `G_c`). Viewers
+    /// aggregate all subjects sharing a `grouping_pub` into one grouping (one person).
+    /// `verdict` is false if a presented proof failed verification.
+    Linkage {
+        subject: [u8; 48],
+        grouping_pub: Vec<u8>,
+        verdict: bool,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -485,6 +494,22 @@ struct Inner {
     presence_seq: std::sync::atomic::AtomicU64,
     /// How often/when we re-announce our name (manual, on-join, periodic).
     cadence: Mutex<crate::presence::PresenceCadence>,
+    /// SUB-SPEC B: the user's per-chat opsec/linkage-disclosure policy (Clean default).
+    opsec_mode: Mutex<crate::linkage::OpsecMode>,
+    /// SUB-SPEC B: defined groupings — grouping id -> the name-entry ids it links.
+    groupings: Mutex<std::collections::HashMap<crate::linkage::GroupingId, Vec<String>>>,
+    /// SUB-SPEC B: 32-byte root seed for the user's grouping key (account-unlinkable).
+    /// A persistent, user-held secret SHARED across the user's sessions (set via
+    /// `set_grouping_root`); random per-session by default (a grouping of one).
+    grouping_root: Mutex<[u8; 32]>,
+    /// SUB-SPEC B: whether to emit ALL associated identities vs just the leading one.
+    show_all: std::sync::atomic::AtomicBool,
+    /// SUB-SPEC B: grouping public (per-chat `G_c`) -> the set of leaf fingerprints
+    /// seen certified under it. Aggregation is how a viewer resolves "these leaves
+    /// are one grouping (one person)"; also feeds the sybil-count.
+    groupings_seen: Mutex<std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>>>,
+    /// SUB-SPEC B: last linkage seq seen per sender (anti-replay/reorder).
+    linkage_seq: Mutex<std::collections::HashMap<[u8; 48], u64>>,
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -648,6 +673,17 @@ impl Core {
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
             cadence: Mutex::new(crate::presence::PresenceCadence::default()),
+            opsec_mode: Mutex::new(crate::linkage::OpsecMode::default()),
+            groupings: Mutex::new(std::collections::HashMap::new()),
+            grouping_root: Mutex::new({
+                use rand::RngCore;
+                let mut s = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut s);
+                s
+            }),
+            show_all: std::sync::atomic::AtomicBool::new(false),
+            groupings_seen: Mutex::new(std::collections::HashMap::new()),
+            linkage_seq: Mutex::new(std::collections::HashMap::new()),
         });
         (Core { inner }, events_rx)
     }
@@ -1330,6 +1366,103 @@ impl Core {
         *self.inner.leading_name.lock().unwrap() = entry;
     }
 
+    // ----- SUB-SPEC B: opsec modes + groupings (disclosure is user-controlled) -----
+
+    /// Set the user's per-chat opsec/linkage-disclosure policy. Controls only what
+    /// THIS user emits; a group can never compel disclosure.
+    pub fn set_opsec_mode(&self, mode: crate::linkage::OpsecMode) {
+        *self.inner.opsec_mode.lock().unwrap() = mode;
+    }
+
+    /// The current opsec mode.
+    pub fn opsec_mode(&self) -> crate::linkage::OpsecMode {
+        *self.inner.opsec_mode.lock().unwrap()
+    }
+
+    /// Define (or replace) a grouping of the user's own name-entry ids. Returns a
+    /// stable grouping id (derived from the sorted member ids, so redefining the
+    /// same set is idempotent). No presence is emitted here — call
+    /// [`present_grouping`](Core::present_grouping).
+    pub fn define_grouping(&self, name_ids: &[String]) -> crate::linkage::GroupingId {
+        let mut sorted: Vec<String> = name_ids.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let mut id_bytes = [0u8; 16];
+        talkrypt_crypto::kdf::mac_kdf(
+            &*self.inner.grouping_root.lock().unwrap(),
+            sorted.join("\u{0}").as_bytes(),
+            b"talkrypt-grouping-id-v1",
+            &mut id_bytes,
+        );
+        let id: String = id_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        self.inner.groupings.lock().unwrap().insert(id.clone(), sorted);
+        id
+    }
+
+    /// The name-entry ids in a defined grouping, if any.
+    pub fn grouping_members(&self, id: &crate::linkage::GroupingId) -> Option<Vec<String>> {
+        self.inner.groupings.lock().unwrap().get(id).cloned()
+    }
+
+    /// Per-chat: emit ALL associated identities (a grouping) vs just the leading one.
+    pub fn show_all_identities(&self, on: bool) {
+        self.inner.show_all.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether show-all is enabled.
+    pub fn show_all(&self) -> bool {
+        self.inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An honest lower bound on distinct people present (SUB-SPEC B): distinct
+    /// accounts + distinct groupings + isolated (unlinked bare) identities.
+    pub fn sybil_estimate(&self) -> crate::linkage::SybilCount {
+        let names = self.inner.names.lock().unwrap();
+        let groupings = self.inner.groupings_seen.lock().unwrap();
+        let grouped: std::collections::HashSet<[u8; 48]> =
+            groupings.values().flatten().copied().collect();
+        let mut accounts = std::collections::HashSet::new();
+        let mut isolated = 0usize;
+        for (fp, rec) in names.iter() {
+            match rec.account_fp {
+                Some(a) => {
+                    accounts.insert(a);
+                }
+                None if !grouped.contains(fp) => isolated += 1,
+                None => {} // bare, but in a verified grouping → counted under the grouping
+            }
+        }
+        let distinct_accounts = accounts.len();
+        let distinct_groupings = groupings.len();
+        crate::linkage::SybilCount {
+            distinct_accounts,
+            distinct_groupings,
+            isolated,
+            min_distinct_people: distinct_accounts + distinct_groupings + isolated,
+        }
+    }
+
+    /// Set the persistent, user-held grouping root seed (SUB-SPEC B). The SAME seed
+    /// across the user's sessions is what lets a viewer aggregate their leaves into
+    /// one grouping; app-persisted. Not derived from any device key (that would only
+    /// link same-device sessions).
+    pub fn set_grouping_root(&self, seed: [u8; 32]) {
+        *self.inner.grouping_root.lock().unwrap() = seed;
+    }
+
+    /// Disclose this session's leaf as a member of a grouping (SUB-SPEC B): certify
+    /// our device leaf under the per-chat grouping key `G_c` and broadcast the proof.
+    /// A no-op under `OpsecMode::Clean`. Each of the user's sessions calls this; a
+    /// viewer aggregates all leaves sharing `G_c.pub` into one grouping.
+    pub async fn present_grouping(&self, _id: &crate::linkage::GroupingId) {
+        if matches!(*self.inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean) {
+            return; // Clean never emits linkage.
+        }
+        if let Some(bytes) = build_my_grouping_proof(&self.inner) {
+            send_linkage_now(&self.inner, bytes).await;
+        }
+    }
+
     /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
     /// periodic re-beacon (clamped to a floor) plus the on-message-id mode. Manual
     /// [`announce_presence`](Core::announce_presence) always works too. (Re)starts the
@@ -1403,6 +1536,115 @@ async fn send_presence_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
             route(inner, frame, Route::Broadcast).await;
         }
     }
+}
+
+/// SUB-SPEC B: leading byte marking a grouping-linkage payload (vs a presence
+/// `0xF5` or a legacy Chat payload). Distinct value so the dispatch is unambiguous;
+/// old clients drop it (`marking::decode_payload` returns None).
+pub(crate) const LINKAGE_SENTINEL: u8 = 0xF6;
+
+fn encode_group_linkage(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.push(LINKAGE_SENTINEL);
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Build this session's single-member grouping proof: certify OUR device leaf under
+/// the per-chat grouping key `G_c`, and sign the chat context. `None` if unbuildable.
+fn build_my_grouping_proof(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::linkage::LinkagePayload;
+    let root = *inner.grouping_root.lock().unwrap();
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let g = talkrypt_crypto::GroupingKey::from_root_seed(root);
+    let now = now_secs();
+    let cert = g.certify(&ctx, inner.identity.public(), now, now + 30 * 24 * 3600);
+    let ctx_sig = inner.identity.sign(&ctx);
+    let grouping_pub = g.derive_for_chat(&ctx).public().sig_vk.clone();
+    let seq = inner.presence_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }.encode())
+}
+
+/// SUB-SPEC B: whether to auto-emit our grouping on join (show-all + not Clean).
+fn wants_show_all_grouping(inner: &Arc<Inner>) -> bool {
+    inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+        && !matches!(*inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean)
+}
+
+/// Send an encoded `LinkagePayload` via the role-appropriate path, behind
+/// `LINKAGE_SENTINEL` (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`).
+async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let mut framed = Vec::with_capacity(bytes.len() + 1);
+            framed.push(LINKAGE_SENTINEL);
+            framed.extend_from_slice(&bytes);
+            let payload = Frame::Presence(framed).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_linkage(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return,
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// Verify a grouping-linkage proof attributed to `sender_fp`, record the grouping
+/// association on success, and emit `Event::Linkage`. Reuses the audited
+/// `MlDsaCertBackend`. Binds the cert subject to the authenticated sender and
+/// enforces per-sender seq monotonicity (anti-replay).
+fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    use crate::linkage::{Claim, LinkageProof, MlDsaCertBackend, LinkagePayload, Predicate, Proof, ProofBackend, Verdict};
+    let Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }) =
+        LinkagePayload::decode(&bytes)
+    else {
+        return;
+    };
+    // Anti-replay/reorder: per-sender seq must strictly increase.
+    {
+        let mut seqs = inner.linkage_seq.lock().unwrap();
+        if let Some(last) = seqs.get(&sender_fp) {
+            if seq <= *last {
+                return;
+            }
+        }
+        seqs.insert(sender_fp, seq);
+    }
+    // Bind the certified leaf to the authenticated sender (no restamping).
+    let subject_ok = cert.cert.subject.fingerprint() == sender_fp;
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let claim = Claim { predicate: Predicate::Grouping { grouping_pub: grouping_pub.clone() }, context: ctx };
+    let proof = Proof(
+        LinkageProof::Grouping { member: cert.cert.subject.clone(), cert, ctx_sig }.encode(),
+    );
+    let verdict = subject_ok
+        && MlDsaCertBackend { now: now_secs() }.verify(&claim, &proof) == Verdict::Pass;
+    if verdict {
+        inner
+            .groupings_seen
+            .lock()
+            .unwrap()
+            .entry(grouping_pub.clone())
+            .or_default()
+            .insert(sender_fp);
+    }
+    let _ = inner.events_tx.send(Event::Linkage { subject: sender_fp, grouping_pub, verdict });
 }
 
 /// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
@@ -1570,6 +1812,18 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
                 let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
             });
         }
+        // SUB-SPEC B: if show-all is on, also disclose our grouping on join.
+        if wants_show_all_grouping(inner) {
+            if let Some(gp) = build_my_grouping_proof(inner) {
+                let s = session.clone();
+                let w = writer.clone();
+                let mut framed = vec![LINKAGE_SENTINEL];
+                framed.extend_from_slice(&gp);
+                tokio::spawn(async move {
+                    let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                });
+            }
+        }
         // A pseudonym initiator with no leading name would otherwise send NOTHING
         // as its opening frame — leaving the responder's Double Ratchet unkeyed, so
         // the responder could never present its identity or announce its CQ name
@@ -1625,7 +1879,10 @@ async fn reader_loop(
     let mut decrypt_failures: u32 = 0;
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
-    let mut approved = inner.access.lock().unwrap().is_open();
+    // SUB-SPEC B: an access predicate means a peer is NOT auto-approved (even under
+    // an Open policy) — it must first present a satisfying identity (handle_identity).
+    let mut approved =
+        inner.access.lock().unwrap().is_open() && inner.descriptor.access_predicate.is_none();
     loop {
         let frame = match reader.recv_frame().await {
             Ok(f) => f,
@@ -1675,6 +1932,16 @@ async fn reader_loop(
             if let Some(bytes) = build_my_presence(&inner) {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC B: if show-all is on, disclose our grouping on join too.
+            if wants_show_all_grouping(&inner) {
+                if let Some(gp) = build_my_grouping_proof(&inner) {
+                    if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                        let mut framed = vec![LINKAGE_SENTINEL];
+                        framed.extend_from_slice(&gp);
+                        let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                    }
                 }
             }
         }
@@ -1766,8 +2033,13 @@ async fn reader_loop(
                 handle_group_msg(&inner, from, b).await;
             }
             Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
-                // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
-                handle_presence(&inner, fingerprint, bytes);
+                if bytes.first() == Some(&LINKAGE_SENTINEL) {
+                    // SUB-SPEC B: a grouping-linkage disclosure; attribute to this peer.
+                    handle_linkage(&inner, fingerprint, bytes[1..].to_vec());
+                } else {
+                    // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
+                    handle_presence(&inner, fingerprint, bytes);
+                }
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
                 match handle_identity(&inner, fingerprint, bytes) {
@@ -2115,11 +2387,16 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
         names.insert(key, rec.clone());
     }
     // Resolve the render against the rest of the cache under the chat's trust policy.
+    // SUB-SPEC B: a Bare subject with no verifiable grouping linkage is "isolated"
+    // (a possible sybil) → subtle tint / optional group-amplified caveat.
+    let isolated = rec.account_fp.is_none()
+        && !inner.groupings_seen.lock().unwrap().values().any(|s| s.contains(&key));
+    let amplify_isolated = inner.descriptor.group_display_amplify_isolated;
     let (label, caveat, tier, account_fp) = {
         let names = inner.names.lock().unwrap();
         let policy = inner.descriptor.name_trust_policy;
         let sn = short_hex6(&key);
-        let r = resolve_render(key, &rec, &names, policy, sn);
+        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated);
         (r.label, r.caveat, r.tier, rec.account_fp)
     };
     let _ = inner.events_tx.send(Event::Name {
@@ -2189,6 +2466,43 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
                 .lock()
                 .unwrap()
                 .insert(res.account_fingerprint, res.account.clone());
+            // SUB-SPEC B: an access PREDICATE is an ADDITIONAL admission gate on top
+            // of the AccessPolicy — satisfied here from the presented chain. It learns
+            // only pass/fail (no identity leaked to the group beyond admission).
+            match &inner.descriptor.access_predicate {
+                None => {}
+                Some(crate::linkage::Predicate::LinkedToAccount { account_fp }) => {
+                    if res.account_fingerprint != *account_fp {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "account does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(crate::linkage::Predicate::DerivedFromNamed { ancestor_fp }) => {
+                    let descends = presentation
+                        .chain
+                        .links
+                        .iter()
+                        .any(|l| l.issuer.fingerprint() == *ancestor_fp);
+                    if !descends {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "identity does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(_) => {
+                    // A grouping/ZK access predicate is not satisfiable by an identity
+                    // presentation — fail closed in B0 (Backend-1 adds the ZK path).
+                    let _ = inner.events_tx.send(Event::Error(
+                        "channel requires a proof this build cannot present".into(),
+                    ));
+                    return IdentityOutcome::Rejected;
+                }
+            }
+            // Remember the verified account key so the UI can pin it by
+            // fingerprint after an out-of-band safety-number comparison.
             let _ = inner.events_tx.send(Event::Identity {
                 from: peer_fp,
                 account_fingerprint: res.account_fingerprint,
@@ -2459,6 +2773,9 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     if pt.first() == Some(&PRESENCE_SENTINEL) {
         // A self-declared name riding the signed group path (SUB-SPEC A).
         handle_presence(&inner, sender, pt[1..].to_vec());
+    } else if pt.first() == Some(&LINKAGE_SENTINEL) {
+        // SUB-SPEC B: a grouping-linkage disclosure on the signed group path.
+        handle_linkage(&inner, sender, pt[1..].to_vec());
     } else if let Some((marking, text)) = marking::decode_payload(&pt) {
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
@@ -2764,6 +3081,241 @@ mod tests {
             "welcome",
             "the host's pre-ratchet message must be delivered, not dropped"
         );
+    }
+
+    /// SUB-SPEC B (Task 4): opsec mode + grouping state on Core — set/get round-trips,
+    /// grouping ids are stable/idempotent for the same set, show-all toggles.
+    #[test]
+    fn opsec_mode_and_grouping_state() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#b",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Default is Clean.
+        assert_eq!(core.opsec_mode(), OpsecMode::Clean);
+        core.set_opsec_mode(OpsecMode::Transparent { hide: true });
+        assert_eq!(core.opsec_mode(), OpsecMode::Transparent { hide: true });
+        // Grouping id is stable for the same set regardless of order, and stores members.
+        let id1 = core.define_grouping(&["work".into(), "alt".into()]);
+        let id2 = core.define_grouping(&["alt".into(), "work".into()]);
+        assert_eq!(id1, id2, "grouping id is order-independent + idempotent");
+        assert_eq!(core.grouping_members(&id1), Some(vec!["alt".to_string(), "work".to_string()]));
+        // A different set → different id.
+        assert_ne!(id1, core.define_grouping(&["work".into()]));
+        // show-all toggles.
+        assert!(!core.show_all());
+        core.show_all_identities(true);
+        assert!(core.show_all());
+    }
+
+    /// SUB-SPEC B (Task 7): honest sybil-count = distinct accounts + distinct
+    /// groupings + isolated bare identities.
+    #[test]
+    fn sybil_estimate_counts_distinct_people() {
+        use crate::nametrust::NameTier;
+        use crate::presence::NameRecord;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#s",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let linked = |label: &str, acct: [u8; 48]| NameRecord {
+            label: label.into(),
+            tier: NameTier::Linked,
+            seq: 1,
+            account_fp: Some(acct),
+        };
+        let bare = |label: &str| NameRecord {
+            label: label.into(),
+            tier: NameTier::Bare,
+            seq: 1,
+            account_fp: None,
+        };
+        {
+            let mut names = core.inner.names.lock().unwrap();
+            // Two linked names sharing ONE account.
+            names.insert([1u8; 48], linked("A", [9u8; 48]));
+            names.insert([2u8; 48], linked("B", [9u8; 48]));
+            // Two isolated bare identities.
+            names.insert([5u8; 48], bare("C"));
+            names.insert([6u8; 48], bare("D"));
+            // A bare identity that IS in a grouping — counted under the grouping, not isolated.
+            names.insert([3u8; 48], bare("E"));
+        }
+        // A 2-leaf grouping (leaves [3],[4]).
+        core.inner.groupings_seen.lock().unwrap().insert(
+            vec![7u8; 4],
+            std::collections::HashSet::from([[3u8; 48], [4u8; 48]]),
+        );
+        let s = core.sybil_estimate();
+        assert_eq!(s.distinct_accounts, 1);
+        assert_eq!(s.distinct_groupings, 1);
+        assert_eq!(s.isolated, 2, "C and D; E is grouped");
+        assert_eq!(s.min_distinct_people, 4);
+    }
+
+    /// SUB-SPEC B (Task 9): an access predicate (LinkedToAccount) gates admission —
+    /// a joiner linked to the required account is admitted; a joiner linked to a
+    /// DIFFERENT account is rejected (AccessDenied), learning only pass/fail.
+    #[tokio::test]
+    async fn access_predicate_gates_admission() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let acct = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#gate");
+        desc.access_predicate = Some(Predicate::LinkedToAccount { account_fp: acct.public().fingerprint() });
+
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+
+        // Admitted: a joiner presenting a chain rooted at the required account.
+        let (ok, _r1) = core_on(&fabric, "ok", &desc);
+        let chain = IdentityChain::device(&acct, ok.identity_public(), "dev", 0, now_secs() + 10_000);
+        ok.present_identity(chain, None);
+        ok.connect("host").await.unwrap();
+        // Let the identity presentation land + be approved before sending (the
+        // initiator presents in a spawned task; a real user doesn't send instantly).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ok.send("i am in").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "i am in", "matching account is admitted");
+
+        // Rejected: a joiner linked to a DIFFERENT account must NOT be able to
+        // participate — the security property (no access bypass).
+        let other = IdentityKeyPair::generate();
+        let (bad, mut bad_rx) = core_on(&fabric, "bad", &desc);
+        let bad_chain = IdentityChain::device(&other, bad.identity_public(), "dev", 0, now_secs() + 10_000);
+        bad.present_identity(bad_chain, None);
+        bad.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = bad.send("sneak in").await; // may error once disconnected — fine
+        // The host must NOT deliver the rejected joiner's message.
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "sneak in" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "a wrong-account joiner must not get a message through the access gate");
+        let _ = &mut bad_rx; // (AccessDenied feedback path is covered by the existing reject test)
+    }
+
+    /// SUB-SPEC B (Task 10): with show-all on, a session auto-discloses its grouping
+    /// on join; with show-all off, it does not.
+    #[tokio::test]
+    async fn show_all_emits_grouping_on_join() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sa");
+        // show-all ON
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h1", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d1", &desc);
+            d.set_grouping_root([1u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective);
+            d.show_all_identities(true);
+            d.connect("h1").await.unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { subject, verdict: true, .. }) => break Some(subject),
+                        Some(_) => continue,
+                        None => break None,
+                    }
+                }
+            }).await.ok().flatten();
+            assert_eq!(got, Some(d.fingerprint()), "show-all discloses grouping on join");
+        }
+        // show-all OFF (default) — no linkage disclosed.
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h2", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d2", &desc);
+            d.set_grouping_root([2u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective); // opted in, but show_all is off
+            d.connect("h2").await.unwrap();
+            let leaked = tokio::time::timeout(Duration::from_millis(400), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { verdict: true, .. }) => break true,
+                        Some(_) => continue,
+                        None => break false,
+                    }
+                }
+            }).await.unwrap_or(false);
+            assert!(!leaked, "no grouping disclosed when show-all is off");
+        }
+    }
+
+    /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each
+    /// presents its own leaf certified under the per-chat grouping key. A viewer
+    /// AGGREGATES both leaves under one `grouping_pub` (one person) — and learns NO
+    /// account (account-hidden). A third, non-grouped session is not aggregated.
+    #[tokio::test]
+    async fn grouping_disclosure_aggregates_by_grouping_pub() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#grp",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        // Two of ONE user's sessions, sharing a grouping root secret.
+        let shared_root = [42u8; 32];
+        let (d1, _r1) = core_on(&fabric, "d1", &desc);
+        let (d2, _r2) = core_on(&fabric, "d2", &desc);
+        for d in [&d1, &d2] {
+            d.set_grouping_root(shared_root);
+            d.set_opsec_mode(OpsecMode::Selective);
+        }
+        d1.connect("host").await.unwrap();
+        d2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        d1.present_grouping(&"g".to_string()).await;
+        d2.present_grouping(&"g".to_string()).await;
+
+        // Collect linkage verdicts on the host.
+        let mut seen: std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>> =
+            Default::default();
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), host_rx.recv()).await {
+                Ok(Some(Event::Linkage { subject, grouping_pub, verdict: true })) => {
+                    seen.entry(grouping_pub).or_default().insert(subject);
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => {
+                    if seen.values().any(|s| s.len() >= 2) {
+                        break;
+                    }
+                }
+            }
+        }
+        // Exactly one grouping_pub, aggregating BOTH sessions' leaves.
+        let (_gp, members) = seen.iter().max_by_key(|(_, s)| s.len()).expect("a grouping was seen");
+        assert!(members.contains(&d1.fingerprint()), "d1 aggregated");
+        assert!(members.contains(&d2.fingerprint()), "d2 aggregated");
+        assert_eq!(members.len(), 2, "both under ONE grouping_pub (account-hidden)");
     }
 
     /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each

@@ -184,6 +184,7 @@ async fn run(
                     Some(CoreEvent::Name { from, label: Some(label), .. }) =>
                         app.push(format!("* {} is calling as \"{label}\"", short_fp(&from))),
                     Some(CoreEvent::Name { .. }) => {}
+                    Some(CoreEvent::Linkage { .. }) => {} // SUB-SPEC B (UI: Task 13)
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }
