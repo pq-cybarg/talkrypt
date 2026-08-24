@@ -1485,6 +1485,14 @@ async fn repl(
                         println!("\r* {} disclosed grouping linkage", short_fp(&subject));
                     }
                 }
+                Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => {
+                    // SUB-SPEC C: a subject's vouch standing changed (display-only).
+                    if inflation_rejected {
+                        println!("\r* {} vouch inflation rejected (sybil) — neutral", short_fp(&subject));
+                    } else if vouched {
+                        println!("\r\u{2733} {} vouched (score {weighted_score})", short_fp(&subject));
+                    }
+                }
                 Event::Error(e) => eprintln!("\r! {e}"),
             }
         }

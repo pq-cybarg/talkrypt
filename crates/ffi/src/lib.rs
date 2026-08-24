@@ -391,6 +391,14 @@ pub enum FfiEvent {
         grouping: String,
         verdict: bool,
     },
+    /// SUB-SPEC C: a subject's vouch standing changed. `weightedScore` may be negative
+    /// when inflation was rejected (antibody); `vouched` gates the tint. Display-only.
+    Vouch {
+        subject: String,
+        weighted_score: i64,
+        vouched: bool,
+        inflation_rejected: bool,
+    },
     Error {
         message: String,
     },
@@ -508,6 +516,12 @@ fn map_event(e: Event) -> FfiEvent {
             // large); clients aggregate subjects sharing this id.
             grouping: grouping_pub.iter().take(8).map(|b| format!("{b:02x}")).collect(),
             verdict,
+        },
+        Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => FfiEvent::Vouch {
+            subject: hex_fp(&subject),
+            weighted_score,
+            vouched,
+            inflation_rejected,
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
