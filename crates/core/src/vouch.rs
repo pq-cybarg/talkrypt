@@ -167,9 +167,379 @@ pub fn sign_vouch(
     Vouch { target, context, epoch, asserted_at, sig, voucher: voucher.public().clone() }
 }
 
+// ---------------------------------------------------------------------------
+// Weighted, multi-scope evaluation + gossip-round freshness decay (spec §2, §1.5)
+// + sybil antibody backfire (spec §6a). Pure functions over per-viewer snapshots.
+// ---------------------------------------------------------------------------
+
+/// The viewer's relationship to a voucher — drives how much that vouch counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relationship {
+    Friend,
+    Contact,
+    Stranger,
+}
+
+/// How much a single vouch counts, from the VIEWER's perspective (spec §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VouchWeighting {
+    pub friend: u32,
+    pub contact: u32,
+    pub stranger: u32,
+}
+impl Default for VouchWeighting {
+    fn default() -> Self {
+        Self { friend: 4, contact: 2, stranger: 1 }
+    }
+}
+impl VouchWeighting {
+    pub fn weight_for(&self, r: Relationship) -> u32 {
+        match r {
+            Relationship::Friend => self.friend,
+            Relationship::Contact => self.contact,
+            Relationship::Stranger => self.stranger,
+        }
+    }
+}
+
+/// Which vouchers are allowed to count (spec §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoucherEligibility {
+    AnyLinked,
+    ContactsOfViewer,
+    Transitive { depth: u8 },
+}
+
+/// A weighted score bar: an absolute count or a percentage of the eligible max.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Threshold {
+    Count(u32),
+    Percent(u8),
+}
+
+/// The composed policy a viewer evaluates under (chat baseline ⊔ user overrides).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VouchPolicy {
+    pub eligibility: VoucherEligibility,
+    pub weighting: VouchWeighting,
+    pub threshold: Threshold,
+    /// Freshness window in GOSSIP-WITNESSED rounds (spec §1.5), NOT seconds.
+    pub freshness_interval_rounds: u32,
+}
+impl Default for VouchPolicy {
+    fn default() -> Self {
+        // Vouching OFF by default: threshold Count(u32::MAX) → never tinted (v1-v3 invites).
+        Self {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting::default(),
+            threshold: Threshold::Count(u32::MAX),
+            freshness_interval_rounds: 64,
+        }
+    }
+}
+
+/// A viewer-side snapshot of one voucher's contribution to a subject.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoucherView {
+    pub voucher_fp: [u8; 48],
+    pub relationship: Relationship,
+    /// Rounds since this voucher's assertion was last WITNESSED via gossip (§1.5).
+    pub rounds_since_witnessed: u32,
+    /// The grouping_pub this voucher is known (via B) to belong to, if any. Feeds
+    /// the antibody: ≥2 vouchers sharing a grouping = one operator (spec §6a).
+    pub grouping: Option<Vec<u8>>,
+}
+
+/// The result of evaluating a subject's vouches for one viewer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VouchDecision {
+    pub weighted_score: i64,
+    pub vouched: bool,
+    pub inflation_rejected: bool,
+    pub flagged: Vec<[u8; 48]>,
+}
+
+/// Linear decay to NEUTRAL over the freshness window, as a 0..=1000 permille factor.
+/// Never negative (invariant 1): a vouch past its window contributes exactly 0.
+pub fn age_decay(rounds_since_witnessed: u32, interval_rounds: u32) -> u32 {
+    if interval_rounds == 0 || rounds_since_witnessed >= interval_rounds {
+        return 0;
+    }
+    ((interval_rounds - rounds_since_witnessed) as u64 * 1000 / interval_rounds as u64) as u32
+}
+
+fn eligible(v: &VoucherView, e: VoucherEligibility) -> bool {
+    match e {
+        VoucherEligibility::AnyLinked => true,
+        VoucherEligibility::ContactsOfViewer => {
+            matches!(v.relationship, Relationship::Friend | Relationship::Contact)
+        }
+        // Transitive collapses to "linked" at this layer; depth-decay is applied by
+        // the engine when it materializes transitive VoucherViews. Direct here.
+        VoucherEligibility::Transitive { .. } => true,
+    }
+}
+
+fn meets_threshold(score: i64, vouchers: &[VoucherView], policy: &VouchPolicy) -> bool {
+    match policy.threshold {
+        Threshold::Count(c) => score >= c as i64,
+        Threshold::Percent(p) => {
+            let max: u64 = vouchers
+                .iter()
+                .filter(|v| eligible(v, policy.eligibility))
+                .map(|v| policy.weighting.weight_for(v.relationship) as u64)
+                .sum();
+            if max == 0 {
+                return false;
+            }
+            (score.max(0) as u64) * 100 >= (p as u64) * max
+        }
+    }
+}
+
+/// Evaluate a subject's vouches for one viewer under `policy`.
+///
+/// Additive core (spec §2) + sybil ANTIBODY backfire (spec §6a): eligible vouchers
+/// that are PROVEN (via B's unforgeable grouping proof) to be one operator have
+/// their aggregate contribution REVERSED (the boost backfires, EV-negative) and are
+/// flagged. A single grouped voucher, or an honest cluster with NO shared grouping
+/// proof, is never punished — only the hard, unfakeable same-operator evidence goes
+/// negative. A negative score renders NEUTRAL (invariant 1), never "distrusted".
+pub fn evaluate(vouchers: &[VoucherView], policy: &VouchPolicy) -> VouchDecision {
+    use std::collections::HashMap;
+    let mut by_grouping: HashMap<Vec<u8>, Vec<&VoucherView>> = HashMap::new();
+    let mut singletons: Vec<&VoucherView> = Vec::new();
+    for v in vouchers.iter().filter(|v| eligible(v, policy.eligibility)) {
+        match &v.grouping {
+            Some(g) => by_grouping.entry(g.clone()).or_default().push(v),
+            None => singletons.push(v),
+        }
+    }
+    let decayed = |v: &VoucherView| -> i64 {
+        let base = policy.weighting.weight_for(v.relationship) as u64;
+        (base * age_decay(v.rounds_since_witnessed, policy.freshness_interval_rounds) as u64 / 1000)
+            as i64
+    };
+    let mut score: i64 = 0;
+    let mut flagged: Vec<[u8; 48]> = Vec::new();
+    let mut inflation_rejected = false;
+    for v in &singletons {
+        score += decayed(v);
+    }
+    for (_g, members) in by_grouping {
+        let cluster: i64 = members.iter().map(|v| decayed(v)).sum();
+        if members.len() >= 2 {
+            // HARD proof of one operator wearing many hats → antibody backfire.
+            score -= cluster;
+            inflation_rejected = true;
+            flagged.extend(members.iter().map(|v| v.voucher_fp));
+        } else {
+            score += cluster; // a single grouped voucher = one honest person
+        }
+    }
+    let vouched = score >= 0 && meets_threshold(score, vouchers, policy);
+    VouchDecision { weighted_score: score, vouched, inflation_rejected, flagged }
+}
+
+impl VouchPolicy {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        match self.eligibility {
+            VoucherEligibility::AnyLinked => w.put_u8(0),
+            VoucherEligibility::ContactsOfViewer => w.put_u8(1),
+            VoucherEligibility::Transitive { depth } => {
+                w.put_u8(2);
+                w.put_u8(depth);
+            }
+        }
+        w.put_u32(self.weighting.friend);
+        w.put_u32(self.weighting.contact);
+        w.put_u32(self.weighting.stranger);
+        match self.threshold {
+            Threshold::Count(c) => {
+                w.put_u8(0);
+                w.put_u32(c);
+            }
+            Threshold::Percent(p) => {
+                w.put_u8(1);
+                w.put_u8(p);
+            }
+        }
+        w.put_u32(self.freshness_interval_rounds);
+        w.into_vec()
+    }
+    pub fn decode(bytes: &[u8]) -> Option<VouchPolicy> {
+        let mut r = Reader::new(bytes);
+        let eligibility = match r.get_u8().ok()? {
+            0 => VoucherEligibility::AnyLinked,
+            1 => VoucherEligibility::ContactsOfViewer,
+            2 => VoucherEligibility::Transitive { depth: r.get_u8().ok()? },
+            _ => return None,
+        };
+        let weighting = VouchWeighting {
+            friend: r.get_u32().ok()?,
+            contact: r.get_u32().ok()?,
+            stranger: r.get_u32().ok()?,
+        };
+        let threshold = match r.get_u8().ok()? {
+            0 => Threshold::Count(r.get_u32().ok()?),
+            1 => Threshold::Percent(r.get_u8().ok()?),
+            _ => return None,
+        };
+        let freshness_interval_rounds = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some(VouchPolicy { eligibility, weighting, threshold, freshness_interval_rounds })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view(fp: u8, rel: Relationship, rounds: u32) -> VoucherView {
+        VoucherView {
+            voucher_fp: [fp; 48],
+            relationship: rel,
+            rounds_since_witnessed: rounds,
+            grouping: None,
+        }
+    }
+    fn gview(fp: u8, rel: Relationship, grouping: &[u8]) -> VoucherView {
+        VoucherView {
+            voucher_fp: [fp; 48],
+            relationship: rel,
+            rounds_since_witnessed: 0,
+            grouping: Some(grouping.to_vec()),
+        }
+    }
+
+    #[test]
+    fn age_decay_is_linear_to_neutral() {
+        assert_eq!(age_decay(0, 10), 1000);
+        assert_eq!(age_decay(5, 10), 500);
+        assert_eq!(age_decay(10, 10), 0);
+        assert_eq!(age_decay(99, 10), 0);
+    }
+
+    #[test]
+    fn weighted_score_counts_fresh_eligible_vouchers() {
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 1 },
+            threshold: Threshold::Count(5),
+            freshness_interval_rounds: 10,
+        };
+        let d = evaluate(
+            &[view(1, Relationship::Friend, 0), view(2, Relationship::Contact, 0)],
+            &policy,
+        );
+        assert_eq!(d.weighted_score, 6);
+        assert!(d.vouched);
+        let d2 = evaluate(
+            &[view(1, Relationship::Friend, 10), view(2, Relationship::Contact, 0)],
+            &policy,
+        );
+        assert_eq!(d2.weighted_score, 2);
+        assert!(!d2.vouched);
+    }
+
+    #[test]
+    fn contacts_only_eligibility_drops_strangers() {
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::ContactsOfViewer,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 1 },
+            threshold: Threshold::Count(1),
+            freshness_interval_rounds: 10,
+        };
+        let strangers: Vec<VoucherView> =
+            (10..40).map(|i| view(i as u8, Relationship::Stranger, 0)).collect();
+        let d = evaluate(&strangers, &policy);
+        assert_eq!(d.weighted_score, 0);
+        assert!(!d.vouched);
+    }
+
+    #[test]
+    fn detected_sybil_cluster_backfires_below_neutral() {
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 3 },
+            threshold: Threshold::Count(5),
+            freshness_interval_rounds: 10,
+        };
+        let d = evaluate(
+            &[
+                gview(1, Relationship::Stranger, b"G"),
+                gview(2, Relationship::Stranger, b"G"),
+                gview(3, Relationship::Stranger, b"G"),
+            ],
+            &policy,
+        );
+        assert!(d.inflation_rejected, "a proven cluster is antibody-rejected");
+        assert!(d.weighted_score < 0, "the boost backfires (EV-negative)");
+        assert!(!d.vouched, "target snaps to neutral, never above");
+        assert_eq!(d.flagged.len(), 3, "the whole proven cluster is flagged");
+    }
+
+    #[test]
+    fn honest_friend_cluster_is_not_flagged_or_reversed() {
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 1 },
+            threshold: Threshold::Count(5),
+            freshness_interval_rounds: 10,
+        };
+        let d = evaluate(
+            &[
+                VoucherView {
+                    voucher_fp: [1; 48],
+                    relationship: Relationship::Friend,
+                    rounds_since_witnessed: 0,
+                    grouping: None,
+                },
+                VoucherView {
+                    voucher_fp: [2; 48],
+                    relationship: Relationship::Friend,
+                    rounds_since_witnessed: 0,
+                    grouping: None,
+                },
+            ],
+            &policy,
+        );
+        assert!(!d.inflation_rejected);
+        assert!(d.flagged.is_empty());
+        assert_eq!(d.weighted_score, 8);
+        assert!(d.vouched);
+    }
+
+    #[test]
+    fn single_grouped_voucher_counts_once_not_rejected() {
+        // One honest person who happens to be in a disclosed grouping — not a cluster.
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 1 },
+            threshold: Threshold::Count(1),
+            freshness_interval_rounds: 10,
+        };
+        let d = evaluate(&[gview(1, Relationship::Contact, b"G")], &policy);
+        assert!(!d.inflation_rejected);
+        assert_eq!(d.weighted_score, 2);
+        assert!(d.vouched);
+    }
+
+    #[test]
+    fn vouch_policy_roundtrips() {
+        let p = VouchPolicy {
+            eligibility: VoucherEligibility::Transitive { depth: 2 },
+            weighting: VouchWeighting { friend: 5, contact: 3, stranger: 1 },
+            threshold: Threshold::Percent(60),
+            freshness_interval_rounds: 32,
+        };
+        assert_eq!(VouchPolicy::decode(&p.encode()).as_ref(), Some(&p));
+        assert_eq!(
+            VouchPolicy::decode(&VouchPolicy::default().encode()).as_ref(),
+            Some(&VouchPolicy::default())
+        );
+    }
 
     #[test]
     fn vouch_target_roundtrips_all_variants() {
