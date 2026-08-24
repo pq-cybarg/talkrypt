@@ -1545,18 +1545,6 @@ impl Core {
         compute_vouch_decision(&self.inner, subject)
     }
 
-    /// Advance the gossip-witnessed round (§1.5) — anti clock-gaming. A round advances
-    /// only when the witnessed member is DISTINCT from the last advancer, so one
-    /// sender's repeated gossip (or a sock-puppet swarm behind one link) can't
-    /// fast-forward freshness.
-    pub(crate) fn witness_round(&self, member_fp: [u8; 48]) {
-        let mut last = self.inner.last_round_advancer.lock().unwrap();
-        if *last != Some(member_fp) {
-            self.inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            *last = Some(member_fp);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn debug_chat_context(&self) -> [u8; 32] {
         crate::presence::chat_context(
@@ -1621,6 +1609,9 @@ impl Core {
                     if let Some(bytes) = build_my_presence(&inner) {
                         send_presence_now(&inner, bytes).await;
                     }
+                    // SUB-SPEC C (§1.5): re-assert our vouches so they stay fresh —
+                    // trust reflects LIVE support; a lapsed voucher decays to neutral.
+                    reassert_my_vouches(&inner).await;
                 }
             });
         }
@@ -1747,6 +1738,8 @@ async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
 /// `MlDsaCertBackend`. Binds the cert subject to the authenticated sender and
 /// enforces per-sender seq monotonicity (anti-replay).
 fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // A distinct member's linkage disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
     use crate::linkage::{Claim, LinkageProof, MlDsaCertBackend, LinkagePayload, Predicate, Proof, ProofBackend, Verdict};
     let Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }) =
         LinkagePayload::decode(&bytes)
@@ -1834,10 +1827,29 @@ async fn send_vouch_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
     }
 }
 
+/// SUB-SPEC C (§1.5): re-emit our current outbound vouches at a fresh `asserted_at`
+/// (a low-rate re-assertion beacon on the encrypted path). A vouch we stop
+/// re-asserting decays to neutral on peers' gossip clocks — trust reflects live
+/// support. Epoch is bumped so the re-assertion supersedes the prior one.
+async fn reassert_my_vouches(inner: &Arc<Inner>) {
+    let targets = inner.my_vouches.lock().unwrap().clone();
+    if targets.is_empty() {
+        return;
+    }
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let now = now_secs();
+    for target in targets {
+        let v = crate::vouch::sign_vouch(&inner.identity, target, ctx, now, now);
+        send_vouch_now(inner, v.encode()).await;
+    }
+}
+
 /// Verify + record a vouch attributed to the delivering `sender_fp`, then emit
 /// `Event::Vouch` with the recomputed decision. Account-bound + context-bound +
 /// self-vouch-dropped + epoch-monotonic + distinct-voucher dedup (spec §1, §4).
 fn handle_vouch(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // Hearing a distinct member's disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
     let Some(v) = crate::vouch::Vouch::decode(&bytes) else { return };
     // Context-bound: only vouches for THIS chat count.
     let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
@@ -1880,6 +1892,19 @@ fn handle_vouch(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
     });
 }
 
+/// SUB-SPEC C (§1.5): advance the gossip-witnessed round when a DISTINCT member is
+/// heard. A round advances only when `member_fp` differs from the last advancer, so
+/// one sender's repeated gossip — or a sock-puppet swarm behind a single link —
+/// cannot fast-forward freshness (distinct-person deflation). This makes decay depend
+/// on connected OTHER users and defeats local wall-clock manipulation.
+fn witness_gossip_round(inner: &Arc<Inner>, member_fp: [u8; 48]) {
+    let mut last = inner.last_round_advancer.lock().unwrap();
+    if *last != Some(member_fp) {
+        inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *last = Some(member_fp);
+    }
+}
+
 /// The viewer's effective policy: chat baseline (descriptor v4) merged with user
 /// overrides in the PROTECTIVE direction only — the viewer may be STRICTER, never
 /// weaker (spec §2, mirrors A's "render stricter, never weaker").
@@ -1891,6 +1916,10 @@ fn effective_policy(inner: &Arc<Inner>) -> crate::vouch::VouchPolicy {
     }
     if let Some(t) = *inner.user_threshold.lock().unwrap() {
         p.threshold = match (p.threshold, t) {
+            // Chat vouching OFF (the default sentinel) → the user's own bar applies
+            // directly (opting IN for their own view is not "weaker than" an unset bar).
+            (Threshold::Count(u32::MAX), _) => t,
+            // Otherwise the viewer may only be STRICTER, never weaker (spec §2).
             (Threshold::Count(a), Threshold::Count(b)) => Threshold::Count(a.max(b)),
             (Threshold::Percent(a), Threshold::Percent(b)) => Threshold::Percent(a.max(b)),
             _ => t, // cross-kind: the viewer's own bar
@@ -3265,6 +3294,43 @@ mod tests {
         let wrong = sign_vouch(&acct, VouchTarget::Leaf([3u8; 48]), [0xAA; 32], 1, 10);
         core.debug_ingest_vouch(acct.public().fingerprint(), wrong);
         assert_eq!(core.debug_vouch_count([3u8; 48]), 0);
+    }
+
+    // SUB-SPEC C (Task 8): freshness decays over GOSSIP rounds, not wall-clock secs.
+    #[test]
+    fn freshness_decays_over_gossip_rounds_not_seconds() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert!(core.vouch_decision([9u8; 48]).weighted_score > 0, "fresh at round 0");
+        assert!(core.vouch_decision([9u8; 48]).vouched);
+        // Advancing rounds past the default freshness window (64) with no re-assertion
+        // decays the vouch to NEUTRAL — no wall clock is consulted.
+        for _ in 0..100 {
+            core.debug_advance_round();
+        }
+        assert_eq!(core.vouch_decision([9u8; 48]).weighted_score, 0, "decayed to neutral");
+        assert!(!core.vouch_decision([9u8; 48]).vouched);
+    }
+
+    // A distinct member advances the round; the SAME sender repeated does not (anti
+    // sock-puppet fast-forward, §1.5).
+    #[test]
+    fn only_distinct_members_advance_the_gossip_round() {
+        let inner = test_inner_pairwise();
+        let r0 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        witness_gossip_round(&inner, [1u8; 48]);
+        witness_gossip_round(&inner, [1u8; 48]); // same sender → no advance
+        witness_gossip_round(&inner, [1u8; 48]);
+        let r1 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r1, r0 + 1, "one distinct sender advances the round once");
+        witness_gossip_round(&inner, [2u8; 48]); // a distinct sender → advance
+        let r2 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r2, r0 + 2);
     }
 
     #[test]
