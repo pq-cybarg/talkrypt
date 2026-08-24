@@ -2396,7 +2396,7 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
         let names = inner.names.lock().unwrap();
         let policy = inner.descriptor.name_trust_policy;
         let sn = short_hex6(&key);
-        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated);
+        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated, false, None);
         (r.label, r.caveat, r.tier, rec.account_fp)
     };
     let _ = inner.events_tx.send(Event::Name {

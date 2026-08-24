@@ -131,6 +131,11 @@ pub fn resolve_render(
     // a caveat (disclosure != display: the group only controls its own rendering).
     isolated: bool,
     amplify_isolated: bool,
+    // SUB-SPEC C: `vouched` = this subject cleared the viewer's effective weighted
+    // vouch threshold (never set from a below-neutral/inflation-rejected score —
+    // invariant 1). `vouch_badge` carries the weighted count (e.g. "✳ vouched · 6").
+    vouched: bool,
+    vouch_badge: Option<String>,
 ) -> NameRender {
     let folded = confusable_fold(&rec.label);
     // A collision: some OTHER peer holds a HIGHER-tier name that folds the same.
@@ -169,6 +174,12 @@ pub fn resolve_render(
         (tint == Tint::Isolated && amplify_isolated)
             .then(|| "unverified — no linkage to a known identity".to_string())
     });
+    // SUB-SPEC C: Vouched is the strongest, peer-corroborated tint — it outranks
+    // Verified and Isolated (precedence Vouched > Verified > Isolated > Default) but
+    // retains the tier badge. A below-threshold subject is untouched (no regression);
+    // the engine passes vouched=false when inflation was rejected (invariant 1).
+    let tint = if vouched { Tint::Vouched } else { tint };
+    let caveat = if vouched { vouch_badge.or(caveat) } else { caveat };
     NameRender {
         label,
         tier: rec.tier,
@@ -211,6 +222,8 @@ mod tests {
             "SN".into(),
             false,
             false,
+            false,
+            None,
         );
         assert_eq!(r.label.as_deref(), Some("Alice"));
         assert!(r.caveat.is_none());
@@ -228,6 +241,8 @@ mod tests {
             "SN".into(),
             false,
             false,
+            false,
+            None,
         );
         assert_eq!(r.label.as_deref(), Some("Alice"));
         assert!(r.caveat.as_deref().unwrap().contains("does not match"));
@@ -245,6 +260,8 @@ mod tests {
             "SN".into(),
             false,
             false,
+            false,
+            None,
         );
         assert!(r.label.is_none());
         assert!(r.caveat.as_deref().unwrap().contains("suppressed"));
@@ -260,6 +277,8 @@ mod tests {
             "SN".into(),
             false,
             false,
+            false,
+            None,
         );
         assert_eq!(r.tint, Tint::Verified);
     }
@@ -276,6 +295,8 @@ mod tests {
             "SN".into(),
             true,  // isolated
             false, // group does not amplify
+            false,
+            None,
         );
         assert_eq!(r.tint, Tint::Isolated);
         assert!(r.caveat.is_none(), "no caveat unless the group amplifies");
@@ -292,9 +313,58 @@ mod tests {
             "SN".into(),
             true,
             true,
+            false,
+            None,
         );
         assert_eq!(r.tint, Tint::Verified);
         assert!(r.caveat.is_none());
+    }
+
+    // SUB-SPEC C (Task 5): Vouched tint precedence.
+
+    #[test]
+    fn vouched_outranks_verified_and_isolated() {
+        // A verified name that is ALSO vouched shows the Vouched tint, badge retained.
+        let r = resolve_render(
+            [1u8; 48],
+            &rec("Alice", NameTier::Linked, 1),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            false,
+            false,
+            true,
+            Some("✳ vouched · 6".into()),
+        );
+        assert_eq!(r.tint, Tint::Vouched);
+        assert_eq!(r.badge, NameTier::Linked.badge()); // verified badge kept
+        assert_eq!(r.caveat.as_deref(), Some("✳ vouched · 6"));
+        // An isolated bare subject that is vouched also shows Vouched (outranks Isolated).
+        let r2 = resolve_render(
+            [2u8; 48],
+            &rec("Bravo", NameTier::Bare, 2),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            true,
+            true,
+            true,
+            Some("✳ vouched · 3".into()),
+        );
+        assert_eq!(r2.tint, Tint::Vouched);
+        // Not vouched → unchanged (no regression): isolated stays Isolated.
+        let r3 = resolve_render(
+            [3u8; 48],
+            &rec("Charlie", NameTier::Bare, 3),
+            &HashMap::new(),
+            NameTrustPolicy::SignalStyle,
+            "SN".into(),
+            true,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(r3.tint, Tint::Isolated);
     }
 
     #[test]
@@ -307,6 +377,8 @@ mod tests {
             "SN".into(),
             true, // isolated
             true, // group amplifies its own display
+            false,
+            None,
         );
         assert_eq!(r.tint, Tint::Isolated);
         assert!(r.caveat.as_deref().unwrap().contains("no linkage"));
