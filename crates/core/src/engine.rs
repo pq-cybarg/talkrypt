@@ -3296,6 +3296,183 @@ mod tests {
         assert_eq!(core.debug_vouch_count([3u8; 48]), 0);
     }
 
+    // SUB-SPEC C (Task 9): a vouch delivered over the pairwise wire clears the chat
+    // threshold and surfaces Event::Vouch { vouched: true } at the receiver.
+    #[tokio::test]
+    async fn vouch_over_wire_clears_threshold_and_tints() {
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#vw",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // one stranger vouch suffices
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("hi").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hi");
+        // Joiner vouches for an (abstract) leaf target; host must see it.
+        let target = [0x9u8; 48];
+        joiner.vouch_for(VouchTarget::Leaf(target)).await;
+        let got = tokio::time::timeout(Duration::from_millis(800), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Vouch { subject, vouched, .. }) if subject == target => break vouched,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .expect("Event::Vouch must arrive");
+        assert!(got, "one stranger vouch clears Count(1) at the host");
+        assert!(host.vouch_decision(target).vouched);
+    }
+
+    // A viewer stricter than the chat baseline withholds the tint though the chat bar
+    // is met (spec §2, user-trumps-group protective direction).
+    #[test]
+    fn user_stricter_than_chat_withholds_tint() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#us");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Chat bar Count(1) met by one stranger vouch...
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        core.debug_ingest_vouch(
+            voucher.public().fingerprint(),
+            sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10),
+        );
+        assert!(core.vouch_decision([9u8; 48]).vouched, "chat bar met");
+        // ...but the viewer requires Count(5) → withheld (score 1 < 5).
+        core.set_vouch_threshold(Threshold::Count(5));
+        assert!(!core.vouch_decision([9u8; 48]).vouched, "viewer is stricter → not tinted");
+    }
+
+    // A proven sybil cluster (two vouchers whose delivering leaves share a grouping)
+    // backfires: inflation_rejected, subject snaps to neutral, cluster flagged (§6a).
+    #[test]
+    fn proven_sybil_cluster_backfires_end_to_end() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sy");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let target = [9u8; 48];
+        // Two DISTINCT voucher accounts, delivered by two leaves proven (B) to share
+        // one grouping = one operator.
+        let a = IdentityKeyPair::generate();
+        let b = IdentityKeyPair::generate();
+        let (leaf_a, leaf_b) = ([0xA1u8; 48], [0xB2u8; 48]);
+        core.debug_record_grouping(vec![7u8; 4], leaf_a);
+        core.debug_record_grouping(vec![7u8; 4], leaf_b);
+        core.debug_ingest_vouch(leaf_a, sign_vouch(&a, VouchTarget::Leaf(target), ctx, 1, 10));
+        core.debug_ingest_vouch(leaf_b, sign_vouch(&b, VouchTarget::Leaf(target), ctx, 1, 10));
+        let d = core.vouch_decision(target);
+        assert!(d.inflation_rejected, "a proven cluster is antibody-rejected");
+        assert!(!d.vouched, "target snaps to neutral, never above");
+        assert!(d.weighted_score < 0, "EV-negative backfire");
+        assert_eq!(d.flagged.len(), 2, "both operator leaves flagged");
+    }
+
+    // Poisoning: an adversary vouching an honest subject cannot push it BELOW neutral —
+    // the subject returns to neutral; the negativity falls on the adversary's own
+    // proven cluster (invariant 1). Here the honest subject has one genuine vouch.
+    #[test]
+    fn poisoning_an_honest_target_only_self_harms() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#po");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let honest_target = [9u8; 48];
+        // Adversary runs two grouped sybils that BOTH vouch the honest target to taint it.
+        let s1 = IdentityKeyPair::generate();
+        let s2 = IdentityKeyPair::generate();
+        core.debug_record_grouping(vec![0xEE; 4], [0x01; 48]);
+        core.debug_record_grouping(vec![0xEE; 4], [0x02; 48]);
+        core.debug_ingest_vouch([0x01; 48], sign_vouch(&s1, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        core.debug_ingest_vouch([0x02; 48], sign_vouch(&s2, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        let d = core.vouch_decision(honest_target);
+        // The subject is NOT vouched (the boost was rejected) but is NEVER below neutral.
+        assert!(!d.vouched);
+        assert!(d.inflation_rejected);
+        // The flagged fps are the ADVERSARY's VOUCHER ACCOUNTS (whose future vouches
+        // get discounted) — the honest subject is never flagged.
+        assert!(d.flagged.contains(&s1.public().fingerprint()));
+        assert!(d.flagged.contains(&s2.public().fingerprint()));
+        assert!(!d.flagged.contains(&honest_target), "the target is never flagged");
+    }
+
+    // SUB-SPEC C (Task 10): a forged/tampered vouch sig is rejected (ledger untouched).
+    #[test]
+    fn forged_vouch_sig_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let mut v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        v.sig[0] ^= 0xFF; // tamper
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 0, "a forged sig never enters the ledger");
+    }
+
+    // Stale/replayed epoch (≤ last) for a (voucher, subject) is ignored; the recorded
+    // epoch is not rolled back.
+    #[test]
+    fn stale_epoch_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let fp = voucher.public().fingerprint();
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 50));
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 3, 30)); // stale
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+        // The stale replay did not roll the epoch back: a fresh epoch-6 supersedes,
+        // an epoch-5 replay does not.
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 55)); // == last, ignored
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+    }
+
+    // INVARIANT 2 (trust ≠ access): a chat with a vouch policy still admits a joiner
+    // who has NEVER been vouched — vouching is display-only and NEVER gates access.
+    #[tokio::test]
+    async fn vouch_never_gates_access() {
+        use crate::vouch::Threshold;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#ng",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // vouching configured...
+        // ...but access_predicate is None → Open. A never-vouched joiner is admitted.
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("i was never vouched").await.unwrap();
+        assert_eq!(
+            next_message(&mut host_rx).await.0,
+            "i was never vouched",
+            "vouch state must NEVER gate participation (invariant 2)"
+        );
+    }
+
     // SUB-SPEC C (Task 8): freshness decays over GOSSIP rounds, not wall-clock secs.
     #[test]
     fn freshness_decays_over_gossip_rounds_not_seconds() {
