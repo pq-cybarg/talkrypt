@@ -3473,6 +3473,57 @@ mod tests {
         );
     }
 
+    // SUB-SPEC C end-to-end antibody (B+C composition over the real wire): one operator
+    // running two group sessions that SHARE a grouping root discloses grouping from both
+    // and vouches the same target from both. The host correlates the two vouchers' leaves
+    // under one grouping proof → antibody backfire, target snaps to neutral (spec §6a).
+    #[tokio::test]
+    async fn end_to_end_grouped_double_vouch_backfires() {
+        use crate::linkage::OpsecMode;
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#e2e",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // absent the antibody, 1 vouch tints
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // One operator, two sessions, SAME grouping root → same per-chat grouping pub.
+        let op_root = [0x5Au8; 32];
+        let target = [0x9u8; 48];
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        for m in [&m1, &m2] {
+            m.set_grouping_root(op_root);
+            m.set_opsec_mode(OpsecMode::Selective);
+        }
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Each session discloses its grouping FIRST (so the host records both leaves
+        // under one grouping pub), then vouches the target.
+        let gid1 = m1.define_grouping(&["1".into()]);
+        let gid2 = m2.define_grouping(&["2".into()]);
+        m1.present_grouping(&gid1).await;
+        m2.present_grouping(&gid2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.vouch_for(VouchTarget::Leaf(target)).await;
+        m2.vouch_for(VouchTarget::Leaf(target)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // The host, having verified both grouping proofs share one grouping pub, must
+        // reject the doubled vouch as inflation — the target is NOT vouched (neutral).
+        let d = host.vouch_decision(target);
+        assert!(d.inflation_rejected, "host correlates the two vouchers as one operator");
+        assert!(!d.vouched, "the doubled vouch backfires → neutral, never tinted");
+    }
+
     // SUB-SPEC C (Task 8): freshness decays over GOSSIP rounds, not wall-clock secs.
     #[test]
     fn freshness_decays_over_gossip_rounds_not_seconds() {
