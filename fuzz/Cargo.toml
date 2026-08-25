@@ -39,6 +39,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "presence_parser"
+path = "fuzz_targets/presence_parser.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "identity_chain"
 path = "fuzz_targets/identity_chain.rs"
 test = false
