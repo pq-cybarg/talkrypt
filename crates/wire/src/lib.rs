@@ -139,6 +139,50 @@ impl<'a> Reader<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Length-bucketing pad (SECURITY-AUDIT F-16).
+//
+// A message-length side-channel closer: a non-member relay decrypts the pairwise
+// hop and sees each inner group-ciphertext's exact size, leaking coarse content
+// class. Padding the plaintext to a bucket boundary *before* the group AEAD
+// quantizes the ciphertext length to a handful of classes. The pad is
+// self-describing (`u32` real length ‖ payload ‖ zero fill) so the receiver
+// recovers the exact payload; both sides opt in via the chat descriptor.
+// ---------------------------------------------------------------------------
+
+/// Pad `payload` to the next multiple of `step` bytes, prefixed with its true
+/// length. `step` is clamped to ≥1. The result length is always a multiple of
+/// `step` and always holds `4 + payload.len()` bytes, so [`unpad_bucket`] recovers
+/// the exact payload. Quantizing (not fixed-size) bounds overhead to `< step`.
+pub fn pad_to_bucket(payload: &[u8], step: usize) -> Vec<u8> {
+    let step = if step == 0 { 1 } else { step };
+    let raw = 4 + payload.len();
+    // Round `raw` up to the next multiple of `step` (no div_ceil, for MSRV).
+    let total = raw
+        .checked_add(step - 1)
+        .map(|x| (x / step) * step)
+        .unwrap_or(raw);
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out.resize(total.max(raw), 0); // zero fill (never shrink below the payload)
+    out
+}
+
+/// Recover the exact payload from a buffer produced by [`pad_to_bucket`]. Returns
+/// `None` on any malformed input (too short, or a length prefix past the buffer or
+/// over `MAX_FRAME`) — never panics.
+pub fn unpad_bucket(padded: &[u8]) -> Option<Vec<u8>> {
+    if padded.len() < 4 {
+        return None;
+    }
+    let real = u32::from_be_bytes([padded[0], padded[1], padded[2], padded[3]]) as usize;
+    if real > MAX_FRAME || 4usize.checked_add(real)? > padded.len() {
+        return None;
+    }
+    Some(padded[4..4 + real].to_vec())
+}
+
 /// Formal verification harnesses (run with `cargo kani`).
 ///
 /// These prove the decoder is memory-safe on *arbitrary* input: no panic, no
@@ -146,6 +190,33 @@ impl<'a> Reader<'a> {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+
+    /// F-16 pad: for any payload (≤16 B) and step (1..=8), the padded length is a
+    /// multiple of `step`, holds the payload, and `unpad_bucket` recovers it exactly
+    /// — proven for all inputs, and never panics.
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn pad_bucket_roundtrips_and_quantizes() {
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let payload: [u8; 16] = kani::any();
+        let step: usize = kani::any();
+        kani::assume(step >= 1 && step <= 8);
+        let p = &payload[..len];
+        let padded = pad_to_bucket(p, step);
+        assert!(padded.len() % step == 0); // quantized to the bucket
+        assert!(padded.len() >= 4 + len); // holds the length prefix + payload
+        assert_eq!(unpad_bucket(&padded).as_deref(), Some(p)); // exact round-trip
+    }
+
+    /// F-16 unpad never panics on arbitrary bytes (it runs on attacker-influenced
+    /// input after AEAD open).
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn unpad_never_panics() {
+        let data: [u8; 8] = kani::any();
+        let _ = unpad_bucket(&data);
+    }
 
     /// `get_bytes` on any ≤16-byte input never panics; on success the returned
     /// slice length never exceeds the remaining input.
@@ -176,6 +247,41 @@ mod proofs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SECURITY-AUDIT F-16: length-bucketing pad.
+
+    #[test]
+    fn pad_bucket_quantizes_and_roundtrips() {
+        let step = 256;
+        for len in [0usize, 1, 5, 200, 255, 256, 257, 1000] {
+            let payload: Vec<u8> = (0..len).map(|i| (i & 0xFF) as u8).collect();
+            let padded = pad_to_bucket(&payload, step);
+            assert_eq!(padded.len() % step, 0, "padded length is a bucket multiple");
+            assert!(padded.len() >= 4 + len);
+            assert!(padded.len() < 4 + len + step, "overhead is bounded by < step");
+            assert_eq!(unpad_bucket(&padded).unwrap(), payload, "exact round-trip");
+        }
+    }
+
+    #[test]
+    fn pad_bucket_collapses_distinct_lengths_to_same_size() {
+        // Two different plaintext lengths in the same bucket pad to the SAME size —
+        // that is the length-indistinguishability the relay/observer sees.
+        let a = pad_to_bucket(&[1u8; 10], 256);
+        let b = pad_to_bucket(&[2u8; 200], 256);
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.len(), 256);
+    }
+
+    #[test]
+    fn unpad_rejects_malformed_without_panic() {
+        assert!(unpad_bucket(&[]).is_none());
+        assert!(unpad_bucket(&[0, 0, 1]).is_none()); // < 4 bytes
+        // A length prefix past the buffer is rejected, not indexed.
+        assert!(unpad_bucket(&[0xFF, 0xFF, 0xFF, 0xFF, 0x00]).is_none());
+        // Zero-length payload round-trips to empty.
+        assert_eq!(unpad_bucket(&pad_to_bucket(&[], 64)).unwrap(), Vec::<u8>::new());
+    }
 
     #[test]
     fn roundtrip_multiple_fields() {
