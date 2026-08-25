@@ -421,6 +421,19 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Parse a 96-char hex string into a 48-byte fingerprint (SUB-SPEC C vouch target).
+fn parse_hex48(s: &str) -> Option<[u8; 48]> {
+    let s = s.trim();
+    if s.len() != 96 {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// SUB-SPEC B: the honest distinct-people estimate surfaced to clients.
 #[derive(uniffi::Record)]
 pub struct FfiSybilCount {
@@ -1150,6 +1163,46 @@ impl TalkryptClient {
     /// Auto-disclose the grouping on join (vs just the leading name).
     pub fn show_all_identities(&self, on: bool) {
         self.core.show_all_identities(on);
+    }
+
+    // ---- SUB-SPEC C: vouching (display-only; never gates access) --------------
+
+    /// Vouch for a peer's account (durable trust). `fp_hex` = 96-char account fp.
+    pub fn vouch_for_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// Vouch for a peer's bare per-chat leaf (minimal, opsec-clean). `fp_hex` = leaf fp.
+    pub fn vouch_for_leaf(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Leaf(fp)).await
+            });
+        }
+    }
+
+    /// Withdraw a vouch for an account (additive-only: only removes a positive hint).
+    pub fn revoke_vouch_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.revoke_vouch(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// User-scope vouch threshold (viewer's own bar, stricter-only vs the chat).
+    pub fn set_vouch_threshold_count(&self, count: u32) {
+        self.core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(count));
+    }
+
+    /// The current weighted vouch score for a subject (may be negative when the
+    /// antibody rejected inflation; display snaps to neutral).
+    pub fn vouch_score(&self, fp_hex: String) -> i64 {
+        parse_hex48(&fp_hex).map(|fp| self.core.vouch_decision(fp).weighted_score).unwrap_or(0)
     }
 
     /// The honest distinct-people estimate for the chat (SUB-SPEC B sybil-count).

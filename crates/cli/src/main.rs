@@ -1393,6 +1393,8 @@ commands:
   /grouping new <name-id...>      define + disclose a grouping of your names (account-hidden)
   /showall on|off                disclose your grouping automatically on join
   /sybil                         show the honest distinct-people estimate
+  /vouch <fp> | /unvouch <fp>    vouch / withdraw for an account fp (SUB-SPEC C; display-only)
+  /vouchpolicy count <n>         your own vouch-tint threshold (stricter-only)
   /cq                            re-announce your name to the chat now
   /cq periodic <mins>|off        auto re-beacon your name on a timer
   registry (username discovery):
@@ -1636,7 +1638,46 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
                 s.min_distinct_people, s.distinct_accounts, s.distinct_groupings, s.isolated
             );
         }
+        // SUB-SPEC C: vouching (display-only; never gates access).
+        "vouch" => cmd_vouch(core, arg, true).await,
+        "unvouch" => cmd_vouch(core, arg, false).await,
+        "vouchpolicy" => match arg.trim().split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["count", n] => match n.parse::<u32>() {
+                Ok(c) => {
+                    core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(c));
+                    println!("vouch threshold (yours): weighted score >= {c}");
+                }
+                Err(_) => println!("usage: /vouchpolicy count <n>"),
+            },
+            _ => println!("usage: /vouchpolicy count <n>"),
+        },
         other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// `/vouch <fp>` / `/unvouch <fp>` — cast or withdraw a vouch for a 96-char hex
+/// account fp (SUB-SPEC C). Additive-only, display-only; never gates access.
+async fn cmd_vouch(core: &Core, arg: &str, on: bool) {
+    let fp_hex = arg.trim();
+    let mut fp = [0u8; 48];
+    if fp_hex.len() != 96
+        || (0..48).any(|i| {
+            match u8::from_str_radix(&fp_hex[i * 2..i * 2 + 2], 16) {
+                Ok(b) => { fp[i] = b; false }
+                Err(_) => true,
+            }
+        })
+    {
+        println!("usage: /{} <96-char-hex-account-fp>", if on { "vouch" } else { "unvouch" });
+        return;
+    }
+    let target = talkrypt_core::vouch::VouchTarget::Account(fp);
+    if on {
+        core.vouch_for(target).await;
+        println!("vouched for {}", &fp_hex[..8]);
+    } else {
+        core.revoke_vouch(target).await;
+        println!("withdrew vouch for {}", &fp_hex[..8]);
     }
 }
 

@@ -59,6 +59,20 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
                 sysMsg("${e.subject.take(8)} presented an invalid grouping proof", now)
             }
         }
+        is FfiEvent.Vouch -> {
+            // SUB-SPEC C: a subject's vouch standing changed (display-only; never gates
+            // access). Antibody: inflation_rejected snaps to neutral, never below.
+            val mem = lc.roster.getOrPut(e.subject) { Member(e.subject) }
+            mem.vouched = e.vouched
+            when {
+                e.inflationRejected ->
+                    sysMsg("${e.subject.take(8)} vouch inflation rejected (sybil) — neutral", now)
+                e.vouched ->
+                    sysMsg("✳ ${e.subject.take(8)} is vouched (score ${e.weightedScore})", now)
+                else ->
+                    sysMsg("${e.subject.take(8)} vouch below threshold", now)
+            }
+        }
         is FfiEvent.Error -> sysMsg("! ${e.message}", now)
     }
     sessions.recordIncoming(id, msg)
