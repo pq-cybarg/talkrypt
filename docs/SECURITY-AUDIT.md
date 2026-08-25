@@ -41,7 +41,7 @@ restricted channels.
 
 | Adversary | Capability | Primary mitigation |
 | --- | --- | --- |
-| Network / metadata observer | sees all ciphertext + timing | Tor onion transport; PQ inner layer; wire padding for frame-indistinguishability |
+| Network / metadata observer | sees all ciphertext + timing | Tor onion transport (or optional Nym mixnet); PQ inner layer; KEM-posture wire padding for *posture*-indistinguishability. **Residual:** message *length* is not bucketed, so ciphertext size leaks plaintext length to an observer/relay — see F-16 |
 | Store-now-decrypt-later (quantum) | records ciphertext, breaks ECC later | ML-KEM-1024 KEM; ML-DSA-87 identity (zero load-bearing ECC) |
 | First-contact MITM | active on the first connection | invite-token PSK in the handshake + out-of-band safety-number (SHA3-384) comparison |
 | Malicious peer | a valid session peer | identity unforgeable without the account ML-DSA key; access-policy gating; revocation |
@@ -220,6 +220,7 @@ who has read the disclaimers.
 | F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
 | F-14 | Medium | Remote-DoS panic in the ratchet-header decoder: a hybrid / padded-PQ-pure `RatchetPublic` whose length-prefixed X25519/pad field was shorter than 32 bytes triggered an out-of-range slice index (`hybrid.rs::to_32`), panicking the receiver on a single malformed inbound message. Found by the new `ratchet_header` fuzz target (R-6), in ~3.5k executions. | **Resolved** — decode path now uses a fallible `try_to_32` returning `Malformed`; regression test `short_x25519_or_pad_field_is_rejected_not_panic` + corpus seed `corpus/ratchet_header/regression-short-x25519-field` |
 | F-15 | Medium | RAM-capture exposure: long-lived secrets (notably the ML-DSA-87 identity seed) could be paged to swap or written to a core dump, and no process hardening blocked `ptrace`/`/proc/<pid>/mem` scraping. On a fully compromised (root/kernel) device this is unwinnable in software, but the disk-spill and same-uid vectors are mitigable. | **Resolved (mitigated)** — identity seed now in `mlock`'d, `MADV_DONTDUMP`, zeroize-on-drop page-locked memory (`mem::LockedBox`); startup `harden_process` disables core dumps + sets non-dumpable. Residual (hostile-device) folded into F-1. Hardware-backed *signing* of the PQ key is impossible on today's classical-only secure elements (StrongBox / Seeker SE / Secure Enclave / TPM lack ML-DSA); hardware-backed *at-rest sealing* is the available next step (R-8). See §3b |
+| F-16 | Low (metadata) | **Relay / observer message-length side-channel.** The "wire padding" mitigation is KEM-*posture* padding only (`hybrid.rs` pads a PQ-pure key to hybrid's byte length so the KEM choice is frame-indistinguishable). It does **not** bucket message length: a non-member relay (`RelayHub`) decrypts the *pairwise* hop to route, so it observes each inner group-ciphertext's exact size and forward timing, and any on-path observer sees quantized-only-by-transport frame sizes. Content stays confidential (E2E to the group key the relay lacks), but *message length* — and thus coarse content class (typing/one-liner vs. paste/file) — leaks. A related, **inherent** leak: `Route::Peer(dst)` must be cleartext to the relay (it needs the destination to deliver a DM), so a blind relay learns pairwise who-talks-to-whom. Neither is a confidentiality break; both are metadata. | **Documented residual** — see §4a "F-16". Fix path: (a) a versioned, negotiated **length-bucketing** pad *inside* the group ciphertext (padding at the pairwise/transport layer cannot help, since the relay decrypts that layer) so relay/observer see quantized sizes; (b) for who-talks-to-whom, prefer P2P/gossip topology over a relay for sensitive DMs, or the **Nym mixnet** transport (already optional) for sender-recipient unlinkability. Not yet implemented — flagged so a relay deployment (e.g. an untrusted third-party relayer) ships with the residual understood. |
 | G1 | **High** | Group-message sender forgery: messages were authenticated only by the shared `epoch_secret` with the sender `leaf` an unauthenticated plaintext header — any member could derive any other member's chain and post a message every receiver attributed to the victim. Demonstrated by an in-repo test. | **Resolved** — versioned v2 group-message format carries a per-sender ML-DSA-87 signature over a domain-separated transcript, signed with a **per-membership leaf signature key** (a per-group alias, preserving pseudonymity), verified against the sending leaf's tree-bound key before decrypt. `treekem.rs::decrypt_verified`; F\* `thm_authenticity`/`thm_no_cross_leaf_forgery`; proptest + unit |
 | G2 | **High** | Relay attribution forgery: `Frame::Roster` had no per-message signature, so a relaying host/peer could restamp the sender. | **Resolved** — same per-sender signature; the engine drops (never forwards) any group message that fails verification, so a forged frame cannot ride the gossip fan-out. `engine.rs::handle_group_msg` |
 | G3 | Medium | Unauthenticated commits could crash the receiver (out-of-range leaf/`span==0` panics). | **Resolved** — bounds-checked node/leaf decode (`get_node`, `apply_proposals`); Kani-proven parser totality + proptest |
@@ -410,6 +411,38 @@ member→host→broadcast relay: the member sends its update commit to the host
 re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
 `handle_keypackage`, then routed as the existing `Frame::Commit` broadcast.
 
+### F-16 — relay / observer metadata (message length + DM graph) — DESIGN
+
+Two distinct leaks, neither a confidentiality break:
+
+1. **Message length.** `RelayHub::forward_loop` decrypts the *pairwise* hop to read
+   the `Routed` envelope and route it, so it sees each inner group-ciphertext's exact
+   size. AEAD adds only a fixed tag, so ciphertext length ≈ plaintext length — leaking
+   coarse content class (a one-liner vs. a pasted block/file). Padding at the pairwise
+   or transport layer does **not** help: the relay decrypts that layer. The pad must
+   live **inside** the group ciphertext.
+   **Design:** a versioned, negotiated **length bucket** — the sender prepends the true
+   length as a `u32` and zero-fills the plaintext up to the next bucket boundary (e.g.
+   256 B / 1 KiB / 8 KiB / 64 KiB) *before* the group AEAD; the receiver reads the
+   prefix and truncates. Bucketing (not fixed size) bounds overhead while collapsing
+   the length distribution to a handful of classes. Gate it behind a descriptor
+   capability bit (append-only, like the v2→v4 fields) so mixed-version chats stay
+   interoperable and a legacy peer that omits it simply gets today's behavior. Cost:
+   bandwidth (worst-case ~2×), acceptable for a metadata-sensitive posture and
+   opt-in per chat.
+
+2. **DM destination graph.** `Route::Peer(dst)` is necessarily cleartext to the relay
+   (it needs `dst` to deliver), so a blind relay learns pairwise who-talks-to-whom.
+   This is **inherent** to the delivery-service model — a single relay cannot route a
+   DM without knowing its target. Mitigations are topological, not a patch: prefer the
+   **P2P / gossip** topology (no routing relay) for sensitive DMs, or the optional
+   **Nym mixnet** transport, which provides sender↔recipient unlinkability at the
+   network layer (F-62 wiring). Broadcasts already carry no destination; only unicast
+   `Route::Peer` exposes a pair.
+
+Neither is implemented; both are flagged so an untrusted-third-party relay deployment
+(e.g. a zRonin-style relayer) ships with the residual understood and a concrete path.
+
 ---
 
 ## 5. Attack surface
@@ -434,7 +467,10 @@ re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
 - **FFI boundary** (`crates/ffi`): the host UI supplies opaque hex/URIs; malformed
   input returns typed errors, never panics across the boundary (uniffi).
 - **Transport** (`crates/transport`): sees only ciphertext; a hostile relay
-  (`RelayHub`) forwards without the group key.
+  (`RelayHub`) forwards without the group key — but observes routing metadata:
+  the sender fp, the `Route` intent, a `Route::Peer` DM's destination fp, and each
+  inner ciphertext's length + timing (metadata side-channel, F-16). Content stays
+  E2E-confidential; length/graph metadata does not.
 
 ---
 
