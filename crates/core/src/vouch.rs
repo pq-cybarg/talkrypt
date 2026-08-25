@@ -317,8 +317,11 @@ pub fn evaluate(vouchers: &[VoucherView], policy: &VouchPolicy) -> VouchDecision
     }
     let decayed = |v: &VoucherView| -> i64 {
         let base = policy.weighting.weight_for(v.relationship) as u64;
-        (base * age_decay(v.rounds_since_witnessed, policy.freshness_interval_rounds) as u64 / 1000)
-            as i64
+        // Round to NEAREST, not truncate: a weight-1 vouch must not collapse to 0 after
+        // a single round (984/1000 would truncate to 0, destroying small weights). It
+        // rounds down to 0 only past the half-life, giving a smooth ramp to neutral.
+        let permille = age_decay(v.rounds_since_witnessed, policy.freshness_interval_rounds) as u64;
+        ((base * permille + 500) / 1000) as i64
     };
     let mut score: i64 = 0;
     let mut flagged: Vec<[u8; 48]> = Vec::new();
@@ -441,6 +444,24 @@ mod tests {
         );
         assert_eq!(d2.weighted_score, 2);
         assert!(!d2.vouched);
+    }
+
+    #[test]
+    fn small_weight_vouch_survives_one_round_no_truncation() {
+        // Regression: a weight-1 stranger vouch must NOT collapse to 0 after a single
+        // round (984/1000 truncated to 0 before the round-to-nearest fix).
+        let policy = VouchPolicy {
+            eligibility: VoucherEligibility::AnyLinked,
+            weighting: VouchWeighting { friend: 4, contact: 2, stranger: 1 },
+            threshold: Threshold::Count(1),
+            freshness_interval_rounds: 64,
+        };
+        let d = evaluate(&[view(1, Relationship::Stranger, 1)], &policy);
+        assert_eq!(d.weighted_score, 1, "a weight-1 vouch stays 1 one round in");
+        assert!(d.vouched);
+        // Past the half-life it rounds down to neutral (a smooth ramp, not a cliff).
+        let d2 = evaluate(&[view(1, Relationship::Stranger, 40)], &policy);
+        assert_eq!(d2.weighted_score, 0);
     }
 
     #[test]

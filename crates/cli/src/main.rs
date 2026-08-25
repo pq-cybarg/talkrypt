@@ -1395,6 +1395,7 @@ commands:
   /sybil                         show the honest distinct-people estimate
   /vouch <fp> | /unvouch <fp>    vouch / withdraw for an account fp (SUB-SPEC C; display-only)
   /vouchpolicy count <n>         your own vouch-tint threshold (stricter-only)
+  /vouches                       list heard vouches (subject, score, standing)
   /cq                            re-announce your name to the chat now
   /cq periodic <mins>|off        auto re-beacon your name on a timer
   registry (username discovery):
@@ -1641,6 +1642,18 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
         // SUB-SPEC C: vouching (display-only; never gates access).
         "vouch" => cmd_vouch(core, arg, true).await,
         "unvouch" => cmd_vouch(core, arg, false).await,
+        "vouches" => {
+            let sum = core.vouch_summary();
+            if sum.is_empty() {
+                println!("no vouches heard yet");
+            } else {
+                for (subject, score, vouched) in sum {
+                    let fp: String = subject.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    let tag = if vouched { "✳ vouched" } else if score < 0 { "inflation-rejected (neutral)" } else { "below threshold" };
+                    println!("  {fp}  score {score}  {tag}");
+                }
+            }
+        }
         "vouchpolicy" => match arg.trim().split_whitespace().collect::<Vec<_>>().as_slice() {
             ["count", n] => match n.parse::<u32>() {
                 Ok(c) => {

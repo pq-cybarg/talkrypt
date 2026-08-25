@@ -1545,6 +1545,23 @@ impl Core {
         compute_vouch_decision(&self.inner, subject)
     }
 
+    /// A snapshot of every subject that has received a vouch, with its current decision
+    /// under this viewer's effective policy. Sorted by subject fp for stable display.
+    /// Display-only (invariant 2). Returns `(subject_fp, weighted_score, vouched)`.
+    pub fn vouch_summary(&self) -> Vec<([u8; 48], i64, bool)> {
+        let subjects: Vec<[u8; 48]> =
+            self.inner.vouches.lock().unwrap().keys().copied().collect();
+        let mut out: Vec<([u8; 48], i64, bool)> = subjects
+            .into_iter()
+            .map(|s| {
+                let d = compute_vouch_decision(&self.inner, s);
+                (s, d.weighted_score, d.vouched)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_chat_context(&self) -> [u8; 32] {
         crate::presence::chat_context(
@@ -3412,6 +3429,24 @@ mod tests {
         assert!(d.flagged.contains(&s1.public().fingerprint()));
         assert!(d.flagged.contains(&s2.public().fingerprint()));
         assert!(!d.flagged.contains(&honest_target), "the target is never flagged");
+    }
+
+    // SUB-SPEC C: vouch_summary lists every vouched subject with its decision.
+    #[test]
+    fn vouch_summary_lists_subjects_with_decisions() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let ctx = core.debug_chat_context();
+        let v1 = IdentityKeyPair::generate();
+        let v2 = IdentityKeyPair::generate();
+        core.debug_ingest_vouch(v1.public().fingerprint(), sign_vouch(&v1, VouchTarget::Leaf([1u8; 48]), ctx, 1, 10));
+        core.debug_ingest_vouch(v2.public().fingerprint(), sign_vouch(&v2, VouchTarget::Leaf([2u8; 48]), ctx, 1, 10));
+        let sum = core.vouch_summary();
+        assert_eq!(sum.len(), 2);
+        assert_eq!(sum[0].0, [1u8; 48]); // sorted by subject fp
+        assert_eq!(sum[1].0, [2u8; 48]);
+        assert!(sum.iter().all(|(_, _, vouched)| *vouched));
     }
 
     // SUB-SPEC C (Task 10): a forged/tampered vouch sig is rejected (ledger untouched).
