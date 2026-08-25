@@ -27,6 +27,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "vouch_parser"
+path = "fuzz_targets/vouch_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "linkage_parser"
+path = "fuzz_targets/linkage_parser.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "identity_chain"
 path = "fuzz_targets/identity_chain.rs"
 test = false

@@ -446,6 +446,38 @@ mod tests {
         assert!(!d2.vouched);
     }
 
+    // Hardening: adversarial bytes must NEVER panic; a successful decode must
+    // re-encode/re-decode equal (the wire round-trip invariant the fuzzer enforces,
+    // run deterministically in the normal test job too). Decode precedes signature
+    // verification, so it must tolerate anything.
+    #[test]
+    fn decoders_never_panic_on_adversarial_bytes() {
+        // Deterministic xorshift PRNG (no Date/rand → stable in CI).
+        let mut s: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..50_000 {
+            let len = (next() % 160) as usize;
+            let mut buf = vec![0u8; len];
+            for b in buf.iter_mut() {
+                *b = (next() & 0xFF) as u8;
+            }
+            if let Some(t) = VouchTarget::decode(&buf) {
+                assert_eq!(VouchTarget::decode(&t.encode()).as_ref(), Some(&t));
+            }
+            if let Some(v) = Vouch::decode(&buf) {
+                assert_eq!(Vouch::decode(&v.encode()).as_ref(), Some(&v));
+            }
+            if let Some(p) = VouchPolicy::decode(&buf) {
+                assert_eq!(VouchPolicy::decode(&p.encode()).as_ref(), Some(&p));
+            }
+        }
+    }
+
     #[test]
     fn small_weight_vouch_survives_one_round_no_truncation() {
         // Regression: a weight-1 stranger vouch must NOT collapse to 0 after a single
