@@ -340,8 +340,18 @@ pub fn evaluate(vouchers: &[VoucherView], policy: &VouchPolicy) -> VouchDecision
             score += cluster; // a single grouped voucher = one honest person
         }
     }
-    let vouched = score >= 0 && meets_threshold(score, vouchers, policy);
+    let vouched = is_vouched(score, meets_threshold(score, vouchers, policy));
     VouchDecision { weighted_score: score, vouched, inflation_rejected, flagged }
+}
+
+/// The vouch DECISION guard, extracted as a pure heap-free kernel so INVARIANT 1
+/// ("never render above neutral from a below-neutral / inflation-rejected score")
+/// is machine-checkable independently of how `score` was computed. This is the
+/// load-bearing ethics guard: a subject is `Vouched` only if its score is
+/// non-negative AND the threshold is met. Kani-proven: `is_vouched(s, _) ⟹ s ≥ 0`.
+#[inline]
+pub fn is_vouched(score: i64, threshold_met: bool) -> bool {
+    score >= 0 && threshold_met
 }
 
 impl VouchPolicy {
@@ -422,6 +432,45 @@ mod proofs {
         kani::assume(len <= 20);
         let data: [u8; 20] = kani::any();
         let _ = VouchPolicy::decode(&data[..len]);
+    }
+
+    /// INVARIANT 1, formally (spec §0.5 / §6a): a subject is NEVER rendered `Vouched`
+    /// from a below-neutral score — the antibody backfire can drive a score negative,
+    /// but the decision guard forbids marking it vouched. Proven on the PURE decision
+    /// kernel `is_vouched` for ALL scores, independent of the (CBMC-intractable)
+    /// HashMap grouping that computes the score. This is the "extract the equivalent
+    /// simpler statement" technique: the grouping is irrelevant to this guarantee.
+    #[kani::proof]
+    fn vouched_implies_non_negative_score() {
+        let score: i64 = kani::any();
+        let threshold_met: bool = kani::any();
+        if is_vouched(score, threshold_met) {
+            assert!(score >= 0, "vouched implies a non-negative (>= neutral) score");
+        }
+    }
+
+    /// `age_decay` is BOUNDED (never exceeds full = 1000 permille) and decays to
+    /// NEUTRAL past the freshness window (spec §1.5) — proven for all `rounds` at the
+    /// two production windows. A concrete `interval` keeps 64-bit symbolic division
+    /// (the CBMC bottleneck) out of the SAT instance; the code path is identical for
+    /// every interval.
+    fn age_decay_bounded_and_neutral_for<const I: u32>() {
+        let rounds: u32 = kani::any();
+        let d = age_decay(rounds, I);
+        assert!(d <= 1000, "decay never exceeds full");
+        if rounds >= I {
+            assert_eq!(d, 0, "past the freshness window decays to neutral");
+        }
+    }
+
+    #[kani::proof]
+    fn age_decay_bounded_window10() {
+        age_decay_bounded_and_neutral_for::<10>();
+    }
+
+    #[kani::proof]
+    fn age_decay_bounded_window64() {
+        age_decay_bounded_and_neutral_for::<64>();
     }
 }
 
