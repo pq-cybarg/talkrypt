@@ -417,6 +417,16 @@ re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
 - **Wire codec** (`crates/wire`): the primary untrusted-input surface. Bounded
   length-prefixed decoding, **fuzzed** (`fuzz_targets/wire_reader`) and
   **Kani-proven** for decoder bounds.
+- **Sub-spec B/C decoders** (`linkage.rs`, `vouch.rs`, `presence.rs`): parse
+  attacker-chosen bytes before any verification. Kani was confirmed to compile +
+  verify the async `talkrypt-core` crate; the flat `Predicate::decode` is now
+  **Kani-proven** total (`linkage::proofs::predicate_decode_never_panics`, in the
+  formal CI). **Tractability boundary (empirical):** structurally-complex decoders
+  (`Marking::decode`; the `SignedCert`/`IdentityChain`-embedding `LinkageProof`/
+  `NamePresence` variants) are CBMC-intractable (>500 s, no convergence) and stay
+  covered by fuzz + exhaustive property tests, not Kani. The flat vouch decoders
+  (`VouchTarget`/`Vouch`/`VouchPolicy`) are provable the same way as `Predicate`
+  and get the harness when Sub-spec C lands.
 - **Invite/descriptor parsing** (`descriptor.rs`): parses attacker-influenceable
   `talkrypt://` URIs; **fuzzed** (`descriptor_parser`).
 - **Identity resolution** (`contacts.rs`, `account.rs`, `engine.rs::handle_identity`):

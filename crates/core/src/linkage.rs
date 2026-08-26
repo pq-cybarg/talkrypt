@@ -264,6 +264,24 @@ impl MlDsaCertBackend {
     }
 }
 
+/// Formal verification harnesses (run with `cargo kani -p talkrypt-core`).
+/// Proves the untrusted-input linkage decoder is memory-safe on arbitrary bytes.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `Predicate::decode` never panics on any ≤12-byte input (it runs on
+    /// attacker-chosen bytes before any cryptographic verification).
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn predicate_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 12);
+        let data: [u8; 12] = kani::any();
+        let _ = Predicate::decode(&data[..len]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
