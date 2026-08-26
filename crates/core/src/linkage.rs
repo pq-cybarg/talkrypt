@@ -280,6 +280,28 @@ mod proofs {
         let data: [u8; 12] = kani::any();
         let _ = Predicate::decode(&data[..len]);
     }
+
+    // ---- Compositional (assume-guarantee) totality of LinkageProof::decode ----
+    //
+    // DESIGN, NOT YET LANDED (honest status). `LinkageProof::decode` embeds
+    // `IdentityChain::decode` + `SignedCert::decode`, whose big ML-DSA byte fields +
+    // chain loops make a MONOLITHIC Kani proof CBMC-intractable (a direct attempt blew
+    // up to ~34M clauses, SATISFIABLE, no convergence). The intended proof is
+    // compositional: the wrapper is total IFF (a) its wire reads are total — already
+    // Kani-proven in `talkrypt-wire` — and (b) the two callees are total. Discharge (b)
+    // by STUBBING the callees with total (nondeterministic Ok-or-Err) replacements via
+    // `#[kani::stub(...)]` (`-Z stubbing`), so CBMC proves the wrapper without exploring
+    // the callee internals; the canned Ok values are constructible (`IdentityChain {
+    // links: vec![] }`, `SignedCert { issuer, cert: account::Cert{..}, sig: vec![] }`).
+    //
+    // BLOCKER (attempted, documented): under Kani 0.67 the stub for the cross-crate
+    // INHERENT method `IdentityChain::decode` / `SignedCert::decode` did not take effect
+    // with either `talkrypt_crypto::IdentityChain::decode` or the use-alias path — CBMC
+    // kept exploring the real decoders. Landing this needs the correct defining-path form
+    // (likely `talkrypt_crypto::account::…`) or a newer Kani, plus the callees' OWN
+    // totality (a loop-abstraction proof — separate obligation). Until then these
+    // decoders stay covered by the `identity_chain`/`signed_claim`/`linkage_parser` fuzz
+    // targets + the property tests, NOT Kani. See SECURITY-AUDIT §5.
 }
 
 #[cfg(test)]
