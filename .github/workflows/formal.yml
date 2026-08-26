@@ -48,6 +48,7 @@ jobs:
         run: |
           cargo kani -p talkrypt-core --harness vouch::proofs::vouch_target_decode_never_panics
           cargo kani -p talkrypt-core --harness vouch::proofs::vouch_policy_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_decode_never_panics
       - name: Prove the Sub-spec C antibody invariant + decay bounds (extracted kernels)
         # Invariant 1 ("never Vouched below neutral") + age_decay bounds, proven on the
         # PURE heap-free kernels — the CBMC-intractable HashMap grouping in `evaluate` is

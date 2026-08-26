@@ -434,6 +434,17 @@ mod proofs {
         let _ = VouchPolicy::decode(&data[..len]);
     }
 
+    /// `Vouch::decode` never panics on any ≤24-byte input. Tests whether the two
+    /// `get_vec` allocations (sig, voucher key) keep it CBMC-tractable.
+    #[kani::proof]
+    #[kani::unwind(28)]
+    fn vouch_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 24);
+        let data: [u8; 24] = kani::any();
+        let _ = Vouch::decode(&data[..len]);
+    }
+
     /// INVARIANT 1, formally (spec §0.5 / §6a): a subject is NEVER rendered `Vouched`
     /// from a below-neutral score — the antibody backfire can drive a score negative,
     /// but the decision guard forbids marking it vouched. Proven on the PURE decision
