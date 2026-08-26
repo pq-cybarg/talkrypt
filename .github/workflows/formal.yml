@@ -41,6 +41,13 @@ jobs:
         run: cargo kani -p talkrypt-wire
       - name: Prove group-message + membership decoders are total
         run: cargo kani -p talkrypt-crypto
+      - name: Prove the Sub-spec C vouch decoders are total (core)
+        # Flat decoders are CBMC-tractable; run the proven harnesses by name (a
+        # whole-crate `cargo kani -p talkrypt-core` would also pick up intractable
+        # decoders — see SECURITY-AUDIT §5). Each verifies in ~3 s of solve time.
+        run: |
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_target_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_policy_decode_never_panics
 
   fstar:
     name: "F* — auth theorems"

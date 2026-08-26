@@ -395,6 +395,36 @@ impl VouchPolicy {
     }
 }
 
+/// Formal verification (run with `cargo kani -p talkrypt-core`). The vouch decoders
+/// parse attacker-chosen bytes before any signature verification, so they must be
+/// memory-safe on arbitrary input. These flat decoders are CBMC-tractable (like
+/// `linkage::Predicate::decode`); the complex, chain-embedding decoders are not
+/// (SECURITY-AUDIT §5).
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `VouchTarget::decode` never panics on any ≤16-byte input.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn vouch_target_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let data: [u8; 16] = kani::any();
+        let _ = VouchTarget::decode(&data[..len]);
+    }
+
+    /// `VouchPolicy::decode` never panics on any ≤20-byte input.
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn vouch_policy_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 20);
+        let data: [u8; 20] = kani::any();
+        let _ = VouchPolicy::decode(&data[..len]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
