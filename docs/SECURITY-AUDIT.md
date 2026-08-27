@@ -421,12 +421,19 @@ re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
   attacker-chosen bytes before any verification. Kani was confirmed to compile +
   verify the async `talkrypt-core` crate; the flat `Predicate::decode` is now
   **Kani-proven** total (`linkage::proofs::predicate_decode_never_panics`, in the
-  formal CI). **Tractability boundary (empirical):** structurally-complex decoders
-  (`Marking::decode`; the `SignedCert`/`IdentityChain`-embedding `LinkageProof`/
-  `NamePresence` variants) are CBMC-intractable (>500 s, no convergence) and stay
-  covered by fuzz + exhaustive property tests, not Kani. The flat vouch decoders
-  (`VouchTarget`/`Vouch`/`VouchPolicy`) are provable the same way as `Predicate`
-  and get the harness when Sub-spec C lands.
+  formal CI). The flat vouch decoders `VouchTarget`/`Vouch`/`VouchPolicy` are also
+  now **Kani-proven** total. **Tractability boundary (empirically diagnosed):** the
+  `SignedCert`/`IdentityChain`-embedding decoders (`LinkageProof`/`LinkagePayload`/
+  `NamePresence`) are CBMC-intractable (~34M clauses, no convergence). Root cause,
+  pinned down by a dependency-injection experiment (`LinkageProof::decode_with`):
+  with the sub-decoders replaced by trivial total stubs — so the crypto internals
+  are NEVER explored — it STILL blew up. So the bottleneck is NOT the sub-decoders;
+  it is the **nested-heap RETURN TYPE** (`IdentityChain(Vec<SignedCert{String, Vec,
+  Vec}>)`), whose construct-and-drop CBMC models expensively regardless of the parse
+  logic — which is why flat, fixed-array decoders (`VouchTarget`) verify in ~3 s and
+  these cannot. `Marking::decode` (its own nested/`String` structure) is the same
+  class. These stay fuzz + property-tested, not Kani, until a CBMC/Kani that models
+  nested heap drops cheaply; the `decode_with` seam is kept so the proof lands then.
 - **Invite/descriptor parsing** (`descriptor.rs`): parses attacker-influenceable
   `talkrypt://` URIs; **fuzzed** (`descriptor_parser`).
 - **Identity resolution** (`contacts.rs`, `account.rs`, `engine.rs::handle_identity`):

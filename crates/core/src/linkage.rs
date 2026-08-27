@@ -154,15 +154,32 @@ impl LinkageProof {
     }
 
     pub fn decode(bytes: &[u8]) -> Option<LinkageProof> {
+        Self::decode_with(bytes, IdentityChain::decode, SignedCert::decode)
+    }
+
+    /// Compositional core of [`decode`](Self::decode): the two crypto sub-decoders are
+    /// INJECTED. This makes the wrapper's TOTALITY (never panics) verifiable in
+    /// isolation — a Kani harness passes total stub closures, so CBMC proves the
+    /// wrapper without exploring the sub-decoders' (intractable) ML-DSA/chain internals
+    /// (assume-guarantee; the sub-decoders' own totality is a separate obligation). In
+    /// production the real `IdentityChain::decode`/`SignedCert::decode` are passed;
+    /// monomorphized to identical code (zero runtime cost). This dependency-injection
+    /// form sidesteps `kani::stub`, whose cross-crate inherent-method stubbing did not
+    /// apply under Kani 0.67.
+    fn decode_with(
+        bytes: &[u8],
+        chain_dec: impl Fn(&[u8]) -> talkrypt_crypto::Result<IdentityChain>,
+        cert_dec: impl Fn(&[u8]) -> talkrypt_crypto::Result<SignedCert>,
+    ) -> Option<LinkageProof> {
         let mut r = Reader::new(bytes);
         let p = match r.get_u8().ok()? {
             0 => LinkageProof::Chain {
-                chain: IdentityChain::decode(r.get_bytes().ok()?).ok()?,
+                chain: chain_dec(r.get_bytes().ok()?).ok()?,
                 ctx_sig: r.get_vec().ok()?,
             },
             1 => LinkageProof::Grouping {
                 member: IdentityPublic { sig_vk: r.get_vec().ok()? },
-                cert: SignedCert::decode(r.get_bytes().ok()?).ok()?,
+                cert: cert_dec(r.get_bytes().ok()?).ok()?,
                 ctx_sig: r.get_vec().ok()?,
             },
             _ => return None,
@@ -281,27 +298,27 @@ mod proofs {
         let _ = Predicate::decode(&data[..len]);
     }
 
-    // ---- Compositional (assume-guarantee) totality of LinkageProof::decode ----
+    // ---- LinkageProof::decode totality — diagnosed, not landed (honest) ----
     //
-    // DESIGN, NOT YET LANDED (honest status). `LinkageProof::decode` embeds
-    // `IdentityChain::decode` + `SignedCert::decode`, whose big ML-DSA byte fields +
-    // chain loops make a MONOLITHIC Kani proof CBMC-intractable (a direct attempt blew
-    // up to ~34M clauses, SATISFIABLE, no convergence). The intended proof is
-    // compositional: the wrapper is total IFF (a) its wire reads are total — already
-    // Kani-proven in `talkrypt-wire` — and (b) the two callees are total. Discharge (b)
-    // by STUBBING the callees with total (nondeterministic Ok-or-Err) replacements via
-    // `#[kani::stub(...)]` (`-Z stubbing`), so CBMC proves the wrapper without exploring
-    // the callee internals; the canned Ok values are constructible (`IdentityChain {
-    // links: vec![] }`, `SignedCert { issuer, cert: account::Cert{..}, sig: vec![] }`).
+    // `decode` now delegates to the injectable `decode_with` (dependency injection), a
+    // genuine decoupling that makes the compositional argument explicit: the wrapper is
+    // total IFF its wire reads are total (Kani-proven in `talkrypt-wire`) and its
+    // injected sub-decoders are total.
     //
-    // BLOCKER (attempted, documented): under Kani 0.67 the stub for the cross-crate
-    // INHERENT method `IdentityChain::decode` / `SignedCert::decode` did not take effect
-    // with either `talkrypt_crypto::IdentityChain::decode` or the use-alias path — CBMC
-    // kept exploring the real decoders. Landing this needs the correct defining-path form
-    // (likely `talkrypt_crypto::account::…`) or a newer Kani, plus the callees' OWN
-    // totality (a loop-abstraction proof — separate obligation). Until then these
-    // decoders stay covered by the `identity_chain`/`signed_claim`/`linkage_parser` fuzz
-    // targets + the property tests, NOT Kani. See SECURITY-AUDIT §5.
+    // Four Kani attempts (monolithic; `kani::stub` ×2; dependency-injection with total
+    // stub closures) ALL blew up to ~34M clauses. The DI attempt is the diagnostic: with
+    // the real `IdentityChain::decode`/`SignedCert::decode` NEVER called (trivial stub
+    // closures passed), it was STILL 34M clauses — so the sub-decoders are NOT the
+    // bottleneck. The real cost is the NESTED-HEAP RETURN TYPE: `LinkageProof` holds
+    // `IdentityChain(Vec<SignedCert>)`, and each `SignedCert` has a `String` + multiple
+    // `Vec<u8>`; CBMC models constructing and DROPPING that nested heap expensively,
+    // independent of the parse logic. (This is why the flat, fixed-array `VouchTarget`
+    // decoder verifies in ~3 s and this cannot.) Discharging it would need a CBMC/Kani
+    // that models nested heap drops cheaply, or a proof formulation that avoids
+    // constructing the value. Until then `LinkageProof`/`LinkagePayload`/`NamePresence`
+    // stay covered by the `linkage_parser`/`identity_chain`/`signed_claim` fuzz targets
+    // + property tests, NOT Kani. See SECURITY-AUDIT §5. The `decode_with` seam is kept
+    // so the proof lands as soon as the tooling allows.
 }
 
 #[cfg(test)]
