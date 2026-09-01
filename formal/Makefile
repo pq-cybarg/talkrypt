@@ -12,6 +12,7 @@ verify: fstar easycrypt
 
 fstar:
 	$(FSTAR) GroupAuth.fst
+	$(FSTAR) DecodeTotality.fst
 
 easycrypt:
 	$(EASYCRYPT) compile GroupAuthQROM.ec
