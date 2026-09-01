@@ -6,7 +6,11 @@
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 ARG CHARON_NIGHTLY=nightly-2026-08-18
-ARG FSTAR_VER=v2026.08.23
+# F* pinned to match Aeneas main's flake.lock (F* commit 7c23ae8, 2026-03-13). v2026.04.17
+# is the closest release that ships a Linux-aarch64 binary (v2026.03.24 does not); its
+# Primitives.fst scalar/prop typing matches Aeneas's generated backend. The 2026.08.x F*
+# releases changed scalar typing and reject Aeneas's Primitives.fst.
+ARG FSTAR_VER=v2026.04.17
 ARG OCAML_VER=5.3.0
 
 # System deps for opam/OCaml, Rust, F*, Z3.
@@ -23,14 +27,14 @@ WORKDIR /home/fv
 ENV PATH=/home/fv/.cargo/bin:/home/fv/fstar/bin:/home/fv/.opam/${OCAML_VER}/bin:$PATH \
     RUSTUP_HOME=/home/fv/.rustup CARGO_HOME=/home/fv/.cargo
 
-# Rust nightly Charon pins (+ rustc-dev: Charon links rustc_driver).
+# rustup only (no default toolchain — Charon's rust-toolchain.toml at its pinned commit
+# selects the exact nightly; we add rustc-dev for it below since Charon links rustc_driver).
 RUN set -eux; \
     curl -fsSL --retry 6 --retry-delay 4 --retry-all-errors https://sh.rustup.rs -o /tmp/rustup.sh; \
-    sh /tmp/rustup.sh -y --profile minimal --default-toolchain "${CHARON_NIGHTLY}" \
-        -c rust-src -c rustc-dev -c llvm-tools; \
+    sh /tmp/rustup.sh -y --profile minimal --default-toolchain none; \
     rm -f /tmp/rustup.sh
 
-# F* prebuilt (Linux-aarch64) + matching Z3 already from apt.
+# F* prebuilt (Linux-aarch64) + Z3 from apt.
 RUN set -eux; \
     curl -fsSL --retry 6 --retry-delay 4 --retry-all-errors -o /tmp/fstar.tgz \
       "https://github.com/FStarLang/FStar/releases/download/${FSTAR_VER}/fstar-${FSTAR_VER}-Linux-aarch64.tar.gz"; \
@@ -38,26 +42,49 @@ RUN set -eux; \
     mv /home/fv/fstar* /home/fv/fstar 2>/dev/null || true; \
     rm -f /tmp/fstar.tgz
 
-# OCaml/opam (containers need --disable-sandboxing since bwrap can't nest without caps).
+# OCaml/opam switch (containers need --disable-sandboxing: bwrap can't nest without caps).
 RUN set -eux; \
     opam init --bare --disable-sandboxing -y; \
-    opam switch create "${OCAML_VER}" -y; \
-    eval "$(opam env)"; \
-    opam install -y calendar core_unix domainslib easy_logging menhir ppx_deriving \
-        visitors zarith yojson unionFind ocamlgraph
+    opam switch create "${OCAML_VER}" -y
 
-# Charon (contained; its 11 CVEs never touch the host) + Aeneas.
-RUN set -eux; \
-    git clone --depth 1 https://github.com/AeneasVerif/charon.git /home/fv/charon; \
-    cd /home/fv/charon; \
-    cargo build --release
-
+# Aeneas + its PINNED Charon. Charon's own rust-toolchain drives the nightly; we install
+# it with rustc-dev, build Charon, symlink it into Aeneas (setup-charon accepts a symlink
+# and skips the rebuild), install Aeneas's opam deps from its own metadata, then build.
 RUN set -eux; \
     eval "$(opam env)"; \
-    git clone --depth 1 https://github.com/AeneasVerif/aeneas.git /home/fv/aeneas; \
+    git clone https://github.com/AeneasVerif/aeneas.git /home/fv/aeneas; \
+    PIN="$(tail -1 /home/fv/aeneas/charon-pin)"; \
+    git clone https://github.com/AeneasVerif/charon.git /home/fv/charon; \
+    cd /home/fv/charon && git checkout "$PIN"; \
+    rustup show active-toolchain; \
+    TC="$(rustup show active-toolchain | awk '{print $1}')"; \
+    rustup component add rust-src rustc-dev llvm-tools rustfmt --toolchain "$TC"; \
+    for f in $(find /home/fv/charon -maxdepth 2 -name '*.opam'); do opam install "$f" --deps-only -y || true; done; \
+    opam install -y yojson zarith logs unionFind ppx_deriving visitors \
+        easy_logging core_unix ocamlgraph progress domainslib ppx_deriving_yojson \
+        menhir sedlex calendar re terminal_size ocamlformat odoc; \
+    make build; \
+    ln -s /home/fv/charon /home/fv/aeneas/charon; \
     cd /home/fv/aeneas; \
-    ln -s /home/fv/charon charon || true; \
-    make || true   # best-effort; the pipeline is exercised via the entrypoint script
+    (opam install . --deps-only -y || opam install -y calendar core_unix domainslib \
+        easy_logging menhir ppx_deriving visitors zarith yojson unionFind ocamlgraph \
+        ocamlgraph ppxlib sedlex terminal_size); \
+    make; \
+    # --- slim (same layer, so it actually shrinks): keep the runtime set only ---
+    # runtime needs: charon/bin/charon (+ rust toolchain, since charon drives rustc),
+    # aeneas/bin/aeneas, aeneas/backends/fstar, fstar/, opam switch binaries. Drop the
+    # multi-GB Cargo target/, opam build caches + package sources, .git, and docs.
+    test -x /home/fv/charon/bin/charon; \
+    test -x /home/fv/aeneas/bin/aeneas; \
+    opam clean -a -c --logs 2>/dev/null || opam clean -a 2>/dev/null || true; \
+    rm -rf /home/fv/charon/charon/target \
+           /home/fv/charon/.git /home/fv/aeneas/.git \
+           /home/fv/.opam/download-cache /home/fv/.opam/repo \
+           /home/fv/.opam/5.3.0/.opam-switch/build \
+           /home/fv/.opam/5.3.0/.opam-switch/sources \
+           /home/fv/.cargo/registry/cache /home/fv/.cargo/registry/src \
+           /home/fv/.rustup/toolchains/*/share/doc; \
+    du -sh /home/fv/* 2>/dev/null | sort -h | tail -8
 
 COPY --chown=fv:fv aeneas_decode.rs /home/fv/aeneas_decode.rs
 COPY --chown=fv:fv run-aeneas.sh /home/fv/run-aeneas.sh
