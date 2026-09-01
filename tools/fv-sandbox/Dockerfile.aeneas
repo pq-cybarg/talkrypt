@@ -1,0 +1,65 @@
+# Hardened FV sandbox — Aeneas -> F* pipeline (route 2: ownership -> functional model,
+# the heap "disappears"). Native arm64 (F* ships a Linux-aarch64 binary), so no
+# emulation. Charon (Rust, 11 CVEs — contained here) + Aeneas (OCaml) are source-built;
+# F* + Z3 are pinned downloads. Same run-phase hardening as hardened-run.sh (airgapped,
+# cap-dropped, read-only, --rm).
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+
+ARG CHARON_NIGHTLY=nightly-2026-08-18
+ARG FSTAR_VER=v2026.08.23
+ARG OCAML_VER=5.3.0
+
+# System deps for opam/OCaml, Rust, F*, Z3.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git unzip xz-utils build-essential m4 pkg-config \
+        libgmp-dev python3 bubblewrap opam z3; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd --uid 10001 --create-home --shell /bin/bash fv
+USER fv
+WORKDIR /home/fv
+ENV PATH=/home/fv/.cargo/bin:/home/fv/fstar/bin:/home/fv/.opam/${OCAML_VER}/bin:$PATH \
+    RUSTUP_HOME=/home/fv/.rustup CARGO_HOME=/home/fv/.cargo
+
+# Rust nightly Charon pins (+ rustc-dev: Charon links rustc_driver).
+RUN set -eux; \
+    curl -fsSL --retry 6 --retry-delay 4 --retry-all-errors https://sh.rustup.rs -o /tmp/rustup.sh; \
+    sh /tmp/rustup.sh -y --profile minimal --default-toolchain "${CHARON_NIGHTLY}" \
+        -c rust-src -c rustc-dev -c llvm-tools; \
+    rm -f /tmp/rustup.sh
+
+# F* prebuilt (Linux-aarch64) + matching Z3 already from apt.
+RUN set -eux; \
+    curl -fsSL --retry 6 --retry-delay 4 --retry-all-errors -o /tmp/fstar.tgz \
+      "https://github.com/FStarLang/FStar/releases/download/${FSTAR_VER}/fstar-${FSTAR_VER}-Linux-aarch64.tar.gz"; \
+    tar -xzf /tmp/fstar.tgz -C /home/fv; \
+    mv /home/fv/fstar* /home/fv/fstar 2>/dev/null || true; \
+    rm -f /tmp/fstar.tgz
+
+# OCaml/opam (containers need --disable-sandboxing since bwrap can't nest without caps).
+RUN set -eux; \
+    opam init --bare --disable-sandboxing -y; \
+    opam switch create "${OCAML_VER}" -y; \
+    eval "$(opam env)"; \
+    opam install -y calendar core_unix domainslib easy_logging menhir ppx_deriving \
+        visitors zarith yojson unionFind ocamlgraph
+
+# Charon (contained; its 11 CVEs never touch the host) + Aeneas.
+RUN set -eux; \
+    git clone --depth 1 https://github.com/AeneasVerif/charon.git /home/fv/charon; \
+    cd /home/fv/charon; \
+    cargo build --release
+
+RUN set -eux; \
+    eval "$(opam env)"; \
+    git clone --depth 1 https://github.com/AeneasVerif/aeneas.git /home/fv/aeneas; \
+    cd /home/fv/aeneas; \
+    ln -s /home/fv/charon charon || true; \
+    make || true   # best-effort; the pipeline is exercised via the entrypoint script
+
+COPY --chown=fv:fv aeneas_decode.rs /home/fv/aeneas_decode.rs
+COPY --chown=fv:fv run-aeneas.sh /home/fv/run-aeneas.sh
+
+ENTRYPOINT ["/bin/bash", "/home/fv/run-aeneas.sh"]
