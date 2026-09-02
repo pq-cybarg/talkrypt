@@ -21,34 +21,45 @@ mkdir -p /tmp/crate/src && cp aeneas_decode.rs /tmp/crate/src/lib.rs
 printf '[package]\nname="decode"\nversion="0.0.0"\nedition="2021"\n[lib]\npath="src/lib.rs"\n' > /tmp/crate/Cargo.toml
 ( cd /tmp/crate && "${CHARON}" cargo --preset aeneas ) || echo "CHARON_STEP_STATUS=$?"
 
-echo "== 2. Aeneas: LLBC -> F* =="
+echo "== 2. Aeneas: LLBC -> F* (recursive form, F*-verifiable) =="
+# -loops-to-rec  : emit loops as recursive `Tot` functions (the form Aeneas's own F* CI
+#                  verifies) instead of the default loop/control_flow combinator, whose
+#                  primitives this Aeneas build does not ship in Primitives.fst.
+# -decreases-clauses : emit a Decode.Clauses.Template.fst with the termination measure as
+#                  `admit ()` for us to fill (the sound termination-proof obligation).
+# -split-files   : one module per concern (Types / Clauses / FunsExternal / Funs).
 LLBC="$(find /tmp/crate -name '*.llbc' 2>/dev/null | head -1)"
 echo "LLBC=$LLBC"
-[ -n "${LLBC:-}" ] && "${AENEAS}" -backend fstar "$LLBC" -dest /tmp/out || echo "AENEAS_STEP_STATUS=$?"
+[ -n "${LLBC:-}" ] && "${AENEAS}" -backend fstar -loops-to-rec -decreases-clauses -split-files \
+    "$LLBC" -dest /tmp/out || echo "AENEAS_STEP_STATUS=$?"
 
-echo "== 3. F*: type-check Aeneas's runtime + the generated model =="
-# F* is pinned to v2026.04.17 (matches Aeneas main's flake era; it ships FStar.Mul, so no
-# shim is needed). The key flag is `--already_cached 'Prims FStar LowStar Steel'`, which
-# tells F* to TRUST the prebuilt ulib.checked instead of rechecking (and erroring on) its
-# own standard library. This is exactly what Aeneas's own backends/fstar/Makefile does
-# (minus --cmi, which this F* release predates).
+echo "== 3. F*: fill the termination measure, then verify the whole auto-translated model =="
+# --already_cached 'Prims FStar LowStar Steel' tells F* to TRUST the prebuilt ulib.checked
+# instead of rechecking (and erroring on) its own standard library — the flag Aeneas's own
+# backends/fstar/Makefile uses. F* is pinned to v2026.04.17 (matches Aeneas main's era).
 AC="Prims FStar LowStar Steel"
-if ls /tmp/out/Decode.fst >/dev/null 2>&1; then
+FAIL=0
+if ls /tmp/out/Decode.Funs.fst >/dev/null 2>&1; then
   cd /tmp/out
-  # Aeneas's runtime support library — verifies clean:
-  "$FSTAR" --already_cached "$AC" --cache_checked_modules --include . Primitives.fst \
-    || echo "FSTAR_PRIM_STATUS=$?"
-  # The generated model. NOTE (honest): this Aeneas `main` build emits references to the
-  # `control_flow` and `loop` primitives but does NOT define them in its own Primitives.fst
-  # (backends/fstar/ ships only Primitives.fst, defining neither). So Decode.fst does not
-  # type-check out of the box here — an Aeneas-internal coherence gap in this Charon-pin /
-  # Aeneas-main / F*-release triple, NOT a decoder problem. We deliberately do NOT hand-roll
-  # a total `loop`: a sound `loop` for a general Rust loop needs the Div effect, so a
-  # `Tot loop` stub would be verifier-passes-but-UNSOUND. The totality property is instead
-  # machine-checked (soundly, with an explicit `decreases`) in formal/DecodeTotality.fst.
-  "$FSTAR" --already_cached "$AC" --cache_checked_modules --include . Decode.fst \
-    || echo "FSTAR_DECODE_STATUS=$? (expected: missing Aeneas primitives control_flow/loop — see generated/README.md)"
+  # Fill the decreases measure Aeneas left as `admit ()`. The loop increments `i` toward `n`
+  # (i := i+1 each iteration, guard i < n), so `n - i` strictly decreases and is a nat under
+  # the guard. This is the ONLY human-supplied step, and F* then PROVES it discharges the
+  # decreases obligation (nothing is admitted).
+  sed -e 's/module Decode.Clauses.Template/module Decode.Clauses/' \
+      -e 's/admit ()/if i <= n then n - i else 0/' \
+      Decode.Clauses.Template.fst > Decode.Clauses.fst
+  for m in Primitives.fst Decode.Types.fst Decode.Clauses.fst Decode.FunsExternal.fsti Decode.Funs.fst; do
+    echo "---- verifying $m ----"
+    if "$FSTAR" --already_cached "$AC" --cache_checked_modules --include . "$m" 2>&1 \
+         | grep -viE 'spurious|suppressing|Unable to load' | grep -E 'Verified|Error|error'; then :; fi
+    "$FSTAR" --already_cached "$AC" --cache_checked_modules --include . "$m" >/dev/null 2>&1 || FAIL=1
+  done
+  if [ "$FAIL" = 0 ]; then
+    echo "RESULT: PROVEN — Charon->Aeneas->F* auto-translation of the decoder verified (Tot, all VCs discharged)."
+  else
+    echo "RESULT: a module failed to verify (FAIL=$FAIL)."
+  fi
 else
-  echo "(no Decode.fst generated)"
+  echo "(no Decode.Funs.fst generated)"
 fi
-echo "== pipeline attempt complete =="
+echo "== pipeline complete =="

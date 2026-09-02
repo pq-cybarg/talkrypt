@@ -4,21 +4,22 @@ module Decode.Funs
 open Primitives
 include Decode.Types
 include Decode.FunsExternal
+include Decode.Clauses
 
 #set-options "--z3rlimit 50 --fuel 1 --ifuel 1"
 
-(** [decode::decode]: loop body 0:
+(** [decode::decode]: loop 0:
     Source: 'src/lib.rs', lines 1:0-28:1
     Visibility: public *)
-let decode_loop_body
+let rec decode_loop
   (bytes : slice u8) (n : usize) (pos : usize) (i : usize) :
-  result (control_flow (usize & usize) (option doc_t))
+  Tot (result (option doc_t)) (decreases (decode_loop_decreases bytes n pos i))
   =
   if i < n
   then
     let i1 = slice_len bytes in
     if pos >= i1
-    then Ok (Done None)
+    then Ok None
     else
       let* i2 = slice_index_usize bytes pos in
       let* ll = scalar_cast U8 Usize i2 in
@@ -26,12 +27,12 @@ let decode_loop_body
       let i3 = slice_len bytes in
       let* i4 = usize_sub i3 pos1 in
       if ll > i4
-      then Ok (Done None)
+      then Ok None
       else
         let* pos2 = usize_add pos1 ll in
         let i5 = slice_len bytes in
         if pos2 >= i5
-        then Ok (Done None)
+        then Ok None
         else
           let* i6 = slice_index_usize bytes pos2 in
           let* dl = scalar_cast U8 Usize i6 in
@@ -39,23 +40,12 @@ let decode_loop_body
           let i7 = slice_len bytes in
           let* i9 = usize_sub i7 pos3 in
           if dl > i9
-          then Ok (Done None)
+          then Ok None
           else
             let* pos4 = usize_add pos3 dl in
             let* i10 = usize_add i 1 in
-            Ok (Cont (pos4, i10))
-  else Ok (Done (Some { n }))
-
-(** [decode::decode]: loop 0:
-    Source: 'src/lib.rs', lines 1:0-28:1
-    Visibility: public *)
-let decode_loop
-  (bytes : slice u8) (n : usize) (pos : usize) (i : usize) :
-  result (option doc_t)
-  =
-  loop
-    (fun (pos1, i1) -> decode_loop_body bytes n pos1 i1)
-    (pos, i)
+            decode_loop bytes n pos4 i10
+  else Ok (Some { n })
 
 (** [decode::decode]:
     Source: 'src/lib.rs', lines 11:0-28:1
