@@ -213,6 +213,11 @@ pub(crate) fn decode_payload(bytes: &[u8]) -> Option<(Option<Marking>, String)> 
     Some((marking, text))
 }
 
+// NB: a Kani no-panic proof of `Marking::decode` is intentionally NOT included —
+// it is CBMC-INTRACTABLE (its nested/looping structure did not converge in >500s),
+// unlike the flat `Predicate::decode` (verified in ~3s). `Marking::decode` stays
+// covered by the `beacon_body`/property/fuzz tests. See SECURITY-AUDIT R-6.
+
 #[cfg(test)]
 mod tests {
     use super::*;
