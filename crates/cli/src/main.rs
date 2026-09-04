@@ -1393,6 +1393,9 @@ commands:
   /grouping new <name-id...>      define + disclose a grouping of your names (account-hidden)
   /showall on|off                disclose your grouping automatically on join
   /sybil                         show the honest distinct-people estimate
+  /vouch <fp> | /unvouch <fp>    vouch / withdraw for an account fp (SUB-SPEC C; display-only)
+  /vouchpolicy count <n>         your own vouch-tint threshold (stricter-only)
+  /vouches                       list heard vouches (subject, score, standing)
   /cq                            re-announce your name to the chat now
   /cq periodic <mins>|off        auto re-beacon your name on a timer
   registry (username discovery):
@@ -1483,6 +1486,14 @@ async fn repl(
                     // SUB-SPEC B: a peer disclosed grouping linkage (account-hidden).
                     if verdict {
                         println!("\r* {} disclosed grouping linkage", short_fp(&subject));
+                    }
+                }
+                Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => {
+                    // SUB-SPEC C: a subject's vouch standing changed (display-only).
+                    if inflation_rejected {
+                        println!("\r* {} vouch inflation rejected (sybil) — neutral", short_fp(&subject));
+                    } else if vouched {
+                        println!("\r\u{2733} {} vouched (score {weighted_score})", short_fp(&subject));
                     }
                 }
                 Event::Error(e) => eprintln!("\r! {e}"),
@@ -1628,7 +1639,58 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
                 s.min_distinct_people, s.distinct_accounts, s.distinct_groupings, s.isolated
             );
         }
+        // SUB-SPEC C: vouching (display-only; never gates access).
+        "vouch" => cmd_vouch(core, arg, true).await,
+        "unvouch" => cmd_vouch(core, arg, false).await,
+        "vouches" => {
+            let sum = core.vouch_summary();
+            if sum.is_empty() {
+                println!("no vouches heard yet");
+            } else {
+                for (subject, score, vouched) in sum {
+                    let fp: String = subject.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    let tag = if vouched { "✳ vouched" } else if score < 0 { "inflation-rejected (neutral)" } else { "below threshold" };
+                    println!("  {fp}  score {score}  {tag}");
+                }
+            }
+        }
+        "vouchpolicy" => match arg.trim().split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["count", n] => match n.parse::<u32>() {
+                Ok(c) => {
+                    core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(c));
+                    println!("vouch threshold (yours): weighted score >= {c}");
+                }
+                Err(_) => println!("usage: /vouchpolicy count <n>"),
+            },
+            _ => println!("usage: /vouchpolicy count <n>"),
+        },
         other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// `/vouch <fp>` / `/unvouch <fp>` — cast or withdraw a vouch for a 96-char hex
+/// account fp (SUB-SPEC C). Additive-only, display-only; never gates access.
+async fn cmd_vouch(core: &Core, arg: &str, on: bool) {
+    let fp_hex = arg.trim();
+    let mut fp = [0u8; 48];
+    if fp_hex.len() != 96
+        || (0..48).any(|i| {
+            match u8::from_str_radix(&fp_hex[i * 2..i * 2 + 2], 16) {
+                Ok(b) => { fp[i] = b; false }
+                Err(_) => true,
+            }
+        })
+    {
+        println!("usage: /{} <96-char-hex-account-fp>", if on { "vouch" } else { "unvouch" });
+        return;
+    }
+    let target = talkrypt_core::vouch::VouchTarget::Account(fp);
+    if on {
+        core.vouch_for(target).await;
+        println!("vouched for {}", &fp_hex[..8]);
+    } else {
+        core.revoke_vouch(target).await;
+        println!("withdrew vouch for {}", &fp_hex[..8]);
     }
 }
 

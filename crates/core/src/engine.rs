@@ -85,6 +85,15 @@ pub enum Event {
         grouping_pub: Vec<u8>,
         verdict: bool,
     },
+    /// SUB-SPEC C: a subject's vouch standing changed. `weighted_score` may be
+    /// negative when inflation was rejected (antibody, §6a) — display then snaps to
+    /// NEUTRAL, never below (invariant 1). Display-only; never gates access.
+    Vouch {
+        subject: [u8; 48],
+        weighted_score: i64,
+        vouched: bool,
+        inflation_rejected: bool,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -510,6 +519,33 @@ struct Inner {
     groupings_seen: Mutex<std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>>>,
     /// SUB-SPEC B: last linkage seq seen per sender (anti-replay/reorder).
     linkage_seq: Mutex<std::collections::HashMap<[u8; 48], u64>>,
+    /// SUB-SPEC C: per-subject vouch ledger — subject fp -> (voucher ACCOUNT fp ->
+    /// record). Dedup is by distinct voucher account (one effective vouch each);
+    /// `sender_fp` records the delivering leaf so the antibody can correlate a
+    /// voucher against B's grouping proofs (spec §6a).
+    vouches: Mutex<std::collections::HashMap<[u8; 48], std::collections::HashMap<[u8; 48], VouchRecord>>>,
+    /// SUB-SPEC C: user-scope overrides (stricter-than-chat only; spec §2).
+    user_weighting: Mutex<Option<crate::vouch::VouchWeighting>>,
+    user_threshold: Mutex<Option<crate::vouch::Threshold>>,
+    /// SUB-SPEC C: our own outbound vouches, re-asserted on the presence cadence
+    /// (spec §1.5). Kept so freshness reflects LIVE support.
+    my_vouches: Mutex<Vec<crate::vouch::VouchTarget>>,
+    /// SUB-SPEC C: gossip-witnessed round counter (§1.5) + the round at which each
+    /// voucher account fp was last witnessed; freshness = current - last_seen.
+    round: std::sync::atomic::AtomicU64,
+    voucher_round: Mutex<std::collections::HashMap<[u8; 48], u64>>,
+    /// SUB-SPEC C: the fp that advanced the last round — so one sender's repeated
+    /// gossip can't fast-forward rounds (distinct-person deflation, §1.5).
+    last_round_advancer: Mutex<Option<[u8; 48]>>,
+}
+
+/// SUB-SPEC C: one recorded vouch in the ledger (value type of `Inner::vouches`).
+struct VouchRecord {
+    epoch: u64,
+    voucher: IdentityPublic,
+    /// The authenticated leaf/transport fp that delivered this vouch (groupings_seen
+    /// key space) — lets the antibody correlate this voucher to a grouping proof.
+    sender_fp: [u8; 48],
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -691,6 +727,13 @@ impl Core {
             show_all: std::sync::atomic::AtomicBool::new(false),
             groupings_seen: Mutex::new(std::collections::HashMap::new()),
             linkage_seq: Mutex::new(std::collections::HashMap::new()),
+            vouches: Mutex::new(std::collections::HashMap::new()),
+            user_weighting: Mutex::new(None),
+            user_threshold: Mutex::new(None),
+            my_vouches: Mutex::new(Vec::new()),
+            round: std::sync::atomic::AtomicU64::new(0),
+            voucher_round: Mutex::new(std::collections::HashMap::new()),
+            last_round_advancer: Mutex::new(None),
         });
         (Core { inner }, events_rx)
     }
@@ -1457,6 +1500,105 @@ impl Core {
         *self.inner.grouping_root.lock().unwrap() = seed;
     }
 
+    // ---- SUB-SPEC C: vouching ------------------------------------------------
+
+    /// Cast a vouch for `target` (async broadcast). Strictly ADDITIVE, display-only —
+    /// it never gates access (invariants 1-2). Re-cast with a higher epoch supersedes;
+    /// the vouch is re-asserted on the presence cadence to stay fresh (§1.5).
+    pub async fn vouch_for(&self, target: crate::vouch::VouchTarget) {
+        let ctx = crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        );
+        let now = now_secs();
+        let v = crate::vouch::sign_vouch(&self.inner.identity, target.clone(), ctx, now, now);
+        {
+            let mut mine = self.inner.my_vouches.lock().unwrap();
+            if !mine.contains(&target) {
+                mine.push(target);
+            }
+        }
+        send_vouch_now(&self.inner, v.encode()).await;
+    }
+
+    /// Withdraw a vouch: stop re-asserting it (it decays to neutral, §1.5) and emit a
+    /// higher-epoch superseding cast so peers drop it promptly. Additive-only: this
+    /// only removes a positive hint, it can never push the subject below neutral.
+    pub async fn revoke_vouch(&self, target: crate::vouch::VouchTarget) {
+        self.inner.my_vouches.lock().unwrap().retain(|t| t != &target);
+        // A higher-epoch re-cast that we then stop refreshing: the ledger supersedes
+        // and freshness lapses. (A dedicated tombstone is a follow-up; decay suffices.)
+        let ctx = crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        );
+        let now = now_secs();
+        let v = crate::vouch::sign_vouch(&self.inner.identity, target, ctx, now + 1, now);
+        send_vouch_now(&self.inner, v.encode()).await;
+    }
+
+    /// User-scope weighting override (spec §2): the viewer's own trust weighting.
+    pub fn set_vouch_weighting(&self, w: crate::vouch::VouchWeighting) {
+        *self.inner.user_weighting.lock().unwrap() = Some(w);
+    }
+
+    /// User-scope threshold override (spec §2): merged STRICTER-only with the chat bar.
+    pub fn set_vouch_threshold(&self, t: crate::vouch::Threshold) {
+        *self.inner.user_threshold.lock().unwrap() = Some(t);
+    }
+
+    /// The current vouch decision for `subject` under this viewer's effective policy.
+    pub fn vouch_decision(&self, subject: [u8; 48]) -> crate::vouch::VouchDecision {
+        compute_vouch_decision(&self.inner, subject)
+    }
+
+    /// A snapshot of every subject that has received a vouch, with its current decision
+    /// under this viewer's effective policy. Sorted by subject fp for stable display.
+    /// Display-only (invariant 2). Returns `(subject_fp, weighted_score, vouched)`.
+    pub fn vouch_summary(&self) -> Vec<([u8; 48], i64, bool)> {
+        let subjects: Vec<[u8; 48]> =
+            self.inner.vouches.lock().unwrap().keys().copied().collect();
+        let mut out: Vec<([u8; 48], i64, bool)> = subjects
+            .into_iter()
+            .map(|s| {
+                let d = compute_vouch_decision(&self.inner, s);
+                (s, d.weighted_score, d.vouched)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_chat_context(&self) -> [u8; 32] {
+        crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_ingest_vouch(&self, sender: [u8; 48], v: crate::vouch::Vouch) {
+        handle_vouch(&self.inner, sender, v.encode());
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_vouch_count(&self, subject: [u8; 48]) -> usize {
+        self.inner.vouches.lock().unwrap().get(&subject).map(|m| m.len()).unwrap_or(0)
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_advance_round(&self) {
+        self.inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_record_grouping(&self, grouping_pub: Vec<u8>, leaf_fp: [u8; 48]) {
+        self.inner
+            .groupings_seen
+            .lock()
+            .unwrap()
+            .entry(grouping_pub)
+            .or_default()
+            .insert(leaf_fp);
+    }
+
     /// Disclose this session's leaf as a member of a grouping (SUB-SPEC B): certify
     /// our device leaf under the per-chat grouping key `G_c` and broadcast the proof.
     /// A no-op under `OpsecMode::Clean`. Each of the user's sessions calls this; a
@@ -1491,6 +1633,9 @@ impl Core {
                     if let Some(bytes) = build_my_presence(&inner) {
                         send_presence_now(&inner, bytes).await;
                     }
+                    // SUB-SPEC C (§1.5): re-assert our vouches so they stay fresh —
+                    // trust reflects LIVE support; a lapsed voucher decays to neutral.
+                    reassert_my_vouches(&inner).await;
                 }
             });
         }
@@ -1617,6 +1762,8 @@ async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
 /// `MlDsaCertBackend`. Binds the cert subject to the authenticated sender and
 /// enforces per-sender seq monotonicity (anti-replay).
 fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // A distinct member's linkage disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
     use crate::linkage::{Claim, LinkageProof, MlDsaCertBackend, LinkagePayload, Predicate, Proof, ProofBackend, Verdict};
     let Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }) =
         LinkagePayload::decode(&bytes)
@@ -1652,6 +1799,208 @@ fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
             .insert(sender_fp);
     }
     let _ = inner.events_tx.send(Event::Linkage { subject: sender_fp, grouping_pub, verdict });
+}
+
+// ---------------------------------------------------------------------------
+// SUB-SPEC C: vouching wire + evaluation glue.
+// ---------------------------------------------------------------------------
+
+/// SUB-SPEC C: leading byte marking a vouch payload (vs presence `0xF5` / linkage
+/// `0xF6`). Distinct value → unambiguous dispatch; old clients drop it.
+pub(crate) const VOUCH_SENTINEL: u8 = 0xF7;
+
+fn encode_group_vouch(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.push(VOUCH_SENTINEL);
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Send an encoded `Vouch` via the role-appropriate path, behind `VOUCH_SENTINEL`
+/// (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`). Mirrors
+/// `send_linkage_now`.
+async fn send_vouch_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let mut framed = Vec::with_capacity(bytes.len() + 1);
+            framed.push(VOUCH_SENTINEL);
+            framed.extend_from_slice(&bytes);
+            let payload = Frame::Presence(framed).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_vouch(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return,
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// SUB-SPEC C (§1.5): re-emit our current outbound vouches at a fresh `asserted_at`
+/// (a low-rate re-assertion beacon on the encrypted path). A vouch we stop
+/// re-asserting decays to neutral on peers' gossip clocks — trust reflects live
+/// support. Epoch is bumped so the re-assertion supersedes the prior one.
+async fn reassert_my_vouches(inner: &Arc<Inner>) {
+    let targets = inner.my_vouches.lock().unwrap().clone();
+    if targets.is_empty() {
+        return;
+    }
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let now = now_secs();
+    for target in targets {
+        let v = crate::vouch::sign_vouch(&inner.identity, target, ctx, now, now);
+        send_vouch_now(inner, v.encode()).await;
+    }
+}
+
+/// Verify + record a vouch attributed to the delivering `sender_fp`, then emit
+/// `Event::Vouch` with the recomputed decision. Account-bound + context-bound +
+/// self-vouch-dropped + epoch-monotonic + distinct-voucher dedup (spec §1, §4).
+fn handle_vouch(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // Hearing a distinct member's disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
+    let Some(v) = crate::vouch::Vouch::decode(&bytes) else { return };
+    // Context-bound: only vouches for THIS chat count.
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    if v.context != ctx {
+        return;
+    }
+    // Unforgeable: the sig must verify under the voucher account key (a vouch cannot
+    // be forged without that private key, nor replayed into another chat).
+    if !v.verify() {
+        return;
+    }
+    let voucher_fp = v.voucher.fingerprint();
+    // Self-vouch dropped (voucher == subject).
+    let subject = v.target_fp();
+    if voucher_fp == subject {
+        return;
+    }
+    {
+        let mut led = inner.vouches.lock().unwrap();
+        let per = led.entry(subject).or_default();
+        // Dedup by distinct voucher account; epoch strictly increases per (voucher,
+        // subject) — a stale/replayed epoch is ignored, a higher epoch supersedes
+        // (a revoke is a higher-epoch withdraw handled by the caller's re-cast).
+        if let Some(existing) = per.get(&voucher_fp) {
+            if v.epoch <= existing.epoch {
+                return;
+            }
+        }
+        per.insert(voucher_fp, VouchRecord { epoch: v.epoch, voucher: v.voucher.clone(), sender_fp });
+    }
+    // Witnessing this assertion refreshes freshness for this voucher (§1.5).
+    let r = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+    inner.voucher_round.lock().unwrap().insert(voucher_fp, r);
+    let d = compute_vouch_decision(inner, subject);
+    let _ = inner.events_tx.send(Event::Vouch {
+        subject,
+        weighted_score: d.weighted_score,
+        vouched: d.vouched,
+        inflation_rejected: d.inflation_rejected,
+    });
+}
+
+/// SUB-SPEC C (§1.5): advance the gossip-witnessed round when a DISTINCT member is
+/// heard. A round advances only when `member_fp` differs from the last advancer, so
+/// one sender's repeated gossip — or a sock-puppet swarm behind a single link —
+/// cannot fast-forward freshness (distinct-person deflation). This makes decay depend
+/// on connected OTHER users and defeats local wall-clock manipulation.
+fn witness_gossip_round(inner: &Arc<Inner>, member_fp: [u8; 48]) {
+    let mut last = inner.last_round_advancer.lock().unwrap();
+    if *last != Some(member_fp) {
+        inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *last = Some(member_fp);
+    }
+}
+
+/// The viewer's effective policy: chat baseline (descriptor v4) merged with user
+/// overrides in the PROTECTIVE direction only — the viewer may be STRICTER, never
+/// weaker (spec §2, mirrors A's "render stricter, never weaker").
+fn effective_policy(inner: &Arc<Inner>) -> crate::vouch::VouchPolicy {
+    use crate::vouch::Threshold;
+    let mut p = inner.descriptor.vouch_policy;
+    if let Some(w) = *inner.user_weighting.lock().unwrap() {
+        p.weighting = w; // the viewer's own trust weighting
+    }
+    if let Some(t) = *inner.user_threshold.lock().unwrap() {
+        p.threshold = match (p.threshold, t) {
+            // Chat vouching OFF (the default sentinel) → the user's own bar applies
+            // directly (opting IN for their own view is not "weaker than" an unset bar).
+            (Threshold::Count(u32::MAX), _) => t,
+            // Otherwise the viewer may only be STRICTER, never weaker (spec §2).
+            (Threshold::Count(a), Threshold::Count(b)) => Threshold::Count(a.max(b)),
+            (Threshold::Percent(a), Threshold::Percent(b)) => Threshold::Percent(a.max(b)),
+            _ => t, // cross-kind: the viewer's own bar
+        };
+    }
+    p
+}
+
+/// Invert `groupings_seen` (grouping_pub -> {leaf fps}) into leaf fp -> grouping_pub,
+/// so the antibody can tell whether a voucher's delivering leaf sits in a grouping.
+fn grouping_index(inner: &Arc<Inner>) -> std::collections::HashMap<[u8; 48], Vec<u8>> {
+    let mut out = std::collections::HashMap::new();
+    for (gp, leaves) in inner.groupings_seen.lock().unwrap().iter() {
+        for leaf in leaves {
+            out.insert(*leaf, gp.clone());
+        }
+    }
+    out
+}
+
+fn relationship_of(inner: &Arc<Inner>, voucher: &IdentityPublic) -> crate::vouch::Relationship {
+    let store = inner.contacts.lock().unwrap();
+    if store.is_friend(voucher) {
+        crate::vouch::Relationship::Friend
+    } else if store.is_contact(voucher) {
+        crate::vouch::Relationship::Contact
+    } else {
+        crate::vouch::Relationship::Stranger
+    }
+}
+
+/// Materialize per-viewer `VoucherView`s from the ledger + relationship + grouping +
+/// gossip-round freshness, then run the pure evaluator under the effective policy.
+fn compute_vouch_decision(inner: &Arc<Inner>, subject: [u8; 48]) -> crate::vouch::VouchDecision {
+    use crate::vouch::VoucherView;
+    let policy = effective_policy(inner);
+    let cur = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+    let gidx = grouping_index(inner);
+    let led = inner.vouches.lock().unwrap();
+    let rounds = inner.voucher_round.lock().unwrap();
+    let views: Vec<VoucherView> = led
+        .get(&subject)
+        .map(|per| {
+            per.iter()
+                .map(|(vf, rec)| {
+                    let last = rounds.get(vf).copied().unwrap_or(0);
+                    VoucherView {
+                        voucher_fp: *vf,
+                        relationship: relationship_of(inner, &rec.voucher),
+                        rounds_since_witnessed: cur.saturating_sub(last) as u32,
+                        grouping: gidx.get(&rec.sender_fp).cloned(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::vouch::evaluate(&views, &policy)
 }
 
 /// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
@@ -2043,6 +2392,9 @@ async fn reader_loop(
                 if bytes.first() == Some(&LINKAGE_SENTINEL) {
                     // SUB-SPEC B: a grouping-linkage disclosure; attribute to this peer.
                     handle_linkage(&inner, fingerprint, bytes[1..].to_vec());
+                } else if bytes.first() == Some(&VOUCH_SENTINEL) {
+                    // SUB-SPEC C: a vouch; attribute delivery to this peer.
+                    handle_vouch(&inner, fingerprint, bytes[1..].to_vec());
                 } else {
                     // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
                     handle_presence(&inner, fingerprint, bytes);
@@ -2399,11 +2751,30 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
     let isolated = rec.account_fp.is_none()
         && !inner.groupings_seen.lock().unwrap().values().any(|s| s.contains(&key));
     let amplify_isolated = inner.descriptor.group_display_amplify_isolated;
+    // SUB-SPEC C: does this subject clear the viewer's effective vouch threshold?
+    // A vouch may target the leaf (== render key) or the account; check both. Never
+    // vouched from a below-neutral/inflation-rejected score (invariant 1).
+    let (vouched, vouch_badge) = {
+        let mut d = compute_vouch_decision(inner, key);
+        if !d.vouched {
+            if let Some(acct) = rec.account_fp {
+                let da = compute_vouch_decision(inner, acct);
+                if da.vouched {
+                    d = da;
+                }
+            }
+        }
+        if d.vouched {
+            (true, Some(format!("\u{2733} vouched \u{00b7} {}", d.weighted_score)))
+        } else {
+            (false, None)
+        }
+    };
     let (label, caveat, tier, account_fp) = {
         let names = inner.names.lock().unwrap();
         let policy = inner.descriptor.name_trust_policy;
         let sn = short_hex6(&key);
-        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated);
+        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated, vouched, vouch_badge);
         (r.label, r.caveat, r.tier, rec.account_fp)
     };
     let _ = inner.events_tx.send(Event::Name {
@@ -2790,6 +3161,9 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     } else if pt.first() == Some(&LINKAGE_SENTINEL) {
         // SUB-SPEC B: a grouping-linkage disclosure on the signed group path.
         handle_linkage(&inner, sender, pt[1..].to_vec());
+    } else if pt.first() == Some(&VOUCH_SENTINEL) {
+        // SUB-SPEC C: a vouch on the signed group path (attributed to the leaf sender).
+        handle_vouch(&inner, sender, pt[1..].to_vec());
     } else if let Some((marking, text)) = marking::decode_payload(&pt) {
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
@@ -2903,6 +3277,337 @@ mod tests {
             desc,
         );
         core.inner.clone()
+    }
+
+    fn test_core_pairwise() -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#t",
+        );
+        Core::new(IdentityKeyPair::generate(), suite, Arc::new(fabric.transport("a")), desc)
+    }
+
+    // SUB-SPEC C (Task 7): ledger dedup + epoch monotonicity via the engine glue.
+    #[test]
+    fn vouch_ledger_dedups_by_voucher_and_honors_epoch() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let target = VouchTarget::Leaf([9u8; 48]);
+        let sender = voucher.public().fingerprint();
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 1, 10));
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 2, 20));
+        // A stale epoch (1 <= 2) is ignored.
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 1, 5));
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1, "one distinct voucher recorded");
+        assert!(core.vouch_decision([9u8; 48]).weighted_score >= 0);
+    }
+
+    // A self-vouch (voucher == subject) is dropped, and a wrong-context vouch too.
+    #[test]
+    fn vouch_self_and_wrong_context_dropped() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let acct = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        // self-vouch
+        let selfv = sign_vouch(&acct, VouchTarget::Account(acct.public().fingerprint()), ctx, 1, 10);
+        core.debug_ingest_vouch(acct.public().fingerprint(), selfv);
+        assert_eq!(core.debug_vouch_count(acct.public().fingerprint()), 0);
+        // wrong context
+        let wrong = sign_vouch(&acct, VouchTarget::Leaf([3u8; 48]), [0xAA; 32], 1, 10);
+        core.debug_ingest_vouch(acct.public().fingerprint(), wrong);
+        assert_eq!(core.debug_vouch_count([3u8; 48]), 0);
+    }
+
+    // SUB-SPEC C (Task 9): a vouch delivered over the pairwise wire clears the chat
+    // threshold and surfaces Event::Vouch { vouched: true } at the receiver.
+    #[tokio::test]
+    async fn vouch_over_wire_clears_threshold_and_tints() {
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#vw",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // one stranger vouch suffices
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("hi").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hi");
+        // Joiner vouches for an (abstract) leaf target; host must see it.
+        let target = [0x9u8; 48];
+        joiner.vouch_for(VouchTarget::Leaf(target)).await;
+        let got = tokio::time::timeout(Duration::from_millis(800), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Vouch { subject, vouched, .. }) if subject == target => break vouched,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .expect("Event::Vouch must arrive");
+        assert!(got, "one stranger vouch clears Count(1) at the host");
+        assert!(host.vouch_decision(target).vouched);
+    }
+
+    // A viewer stricter than the chat baseline withholds the tint though the chat bar
+    // is met (spec §2, user-trumps-group protective direction).
+    #[test]
+    fn user_stricter_than_chat_withholds_tint() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#us");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Chat bar Count(1) met by one stranger vouch...
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        core.debug_ingest_vouch(
+            voucher.public().fingerprint(),
+            sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10),
+        );
+        assert!(core.vouch_decision([9u8; 48]).vouched, "chat bar met");
+        // ...but the viewer requires Count(5) → withheld (score 1 < 5).
+        core.set_vouch_threshold(Threshold::Count(5));
+        assert!(!core.vouch_decision([9u8; 48]).vouched, "viewer is stricter → not tinted");
+    }
+
+    // A proven sybil cluster (two vouchers whose delivering leaves share a grouping)
+    // backfires: inflation_rejected, subject snaps to neutral, cluster flagged (§6a).
+    #[test]
+    fn proven_sybil_cluster_backfires_end_to_end() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sy");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let target = [9u8; 48];
+        // Two DISTINCT voucher accounts, delivered by two leaves proven (B) to share
+        // one grouping = one operator.
+        let a = IdentityKeyPair::generate();
+        let b = IdentityKeyPair::generate();
+        let (leaf_a, leaf_b) = ([0xA1u8; 48], [0xB2u8; 48]);
+        core.debug_record_grouping(vec![7u8; 4], leaf_a);
+        core.debug_record_grouping(vec![7u8; 4], leaf_b);
+        core.debug_ingest_vouch(leaf_a, sign_vouch(&a, VouchTarget::Leaf(target), ctx, 1, 10));
+        core.debug_ingest_vouch(leaf_b, sign_vouch(&b, VouchTarget::Leaf(target), ctx, 1, 10));
+        let d = core.vouch_decision(target);
+        assert!(d.inflation_rejected, "a proven cluster is antibody-rejected");
+        assert!(!d.vouched, "target snaps to neutral, never above");
+        assert!(d.weighted_score < 0, "EV-negative backfire");
+        assert_eq!(d.flagged.len(), 2, "both operator leaves flagged");
+    }
+
+    // Poisoning: an adversary vouching an honest subject cannot push it BELOW neutral —
+    // the subject returns to neutral; the negativity falls on the adversary's own
+    // proven cluster (invariant 1). Here the honest subject has one genuine vouch.
+    #[test]
+    fn poisoning_an_honest_target_only_self_harms() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#po");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let honest_target = [9u8; 48];
+        // Adversary runs two grouped sybils that BOTH vouch the honest target to taint it.
+        let s1 = IdentityKeyPair::generate();
+        let s2 = IdentityKeyPair::generate();
+        core.debug_record_grouping(vec![0xEE; 4], [0x01; 48]);
+        core.debug_record_grouping(vec![0xEE; 4], [0x02; 48]);
+        core.debug_ingest_vouch([0x01; 48], sign_vouch(&s1, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        core.debug_ingest_vouch([0x02; 48], sign_vouch(&s2, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        let d = core.vouch_decision(honest_target);
+        // The subject is NOT vouched (the boost was rejected) but is NEVER below neutral.
+        assert!(!d.vouched);
+        assert!(d.inflation_rejected);
+        // The flagged fps are the ADVERSARY's VOUCHER ACCOUNTS (whose future vouches
+        // get discounted) — the honest subject is never flagged.
+        assert!(d.flagged.contains(&s1.public().fingerprint()));
+        assert!(d.flagged.contains(&s2.public().fingerprint()));
+        assert!(!d.flagged.contains(&honest_target), "the target is never flagged");
+    }
+
+    // SUB-SPEC C: vouch_summary lists every vouched subject with its decision.
+    #[test]
+    fn vouch_summary_lists_subjects_with_decisions() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let ctx = core.debug_chat_context();
+        let v1 = IdentityKeyPair::generate();
+        let v2 = IdentityKeyPair::generate();
+        core.debug_ingest_vouch(v1.public().fingerprint(), sign_vouch(&v1, VouchTarget::Leaf([1u8; 48]), ctx, 1, 10));
+        core.debug_ingest_vouch(v2.public().fingerprint(), sign_vouch(&v2, VouchTarget::Leaf([2u8; 48]), ctx, 1, 10));
+        let sum = core.vouch_summary();
+        assert_eq!(sum.len(), 2);
+        assert_eq!(sum[0].0, [1u8; 48]); // sorted by subject fp
+        assert_eq!(sum[1].0, [2u8; 48]);
+        assert!(sum.iter().all(|(_, _, vouched)| *vouched));
+    }
+
+    // SUB-SPEC C (Task 10): a forged/tampered vouch sig is rejected (ledger untouched).
+    #[test]
+    fn forged_vouch_sig_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let mut v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        v.sig[0] ^= 0xFF; // tamper
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 0, "a forged sig never enters the ledger");
+    }
+
+    // Stale/replayed epoch (≤ last) for a (voucher, subject) is ignored; the recorded
+    // epoch is not rolled back.
+    #[test]
+    fn stale_epoch_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let fp = voucher.public().fingerprint();
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 50));
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 3, 30)); // stale
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+        // The stale replay did not roll the epoch back: a fresh epoch-6 supersedes,
+        // an epoch-5 replay does not.
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 55)); // == last, ignored
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+    }
+
+    // INVARIANT 2 (trust ≠ access): a chat with a vouch policy still admits a joiner
+    // who has NEVER been vouched — vouching is display-only and NEVER gates access.
+    #[tokio::test]
+    async fn vouch_never_gates_access() {
+        use crate::vouch::Threshold;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#ng",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // vouching configured...
+        // ...but access_predicate is None → Open. A never-vouched joiner is admitted.
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("i was never vouched").await.unwrap();
+        assert_eq!(
+            next_message(&mut host_rx).await.0,
+            "i was never vouched",
+            "vouch state must NEVER gate participation (invariant 2)"
+        );
+    }
+
+    // SUB-SPEC C end-to-end antibody (B+C composition over the real wire): one operator
+    // running two group sessions that SHARE a grouping root discloses grouping from both
+    // and vouches the same target from both. The host correlates the two vouchers' leaves
+    // under one grouping proof → antibody backfire, target snaps to neutral (spec §6a).
+    #[tokio::test]
+    async fn end_to_end_grouped_double_vouch_backfires() {
+        use crate::linkage::OpsecMode;
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#e2e",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // absent the antibody, 1 vouch tints
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // One operator, two sessions, SAME grouping root → same per-chat grouping pub.
+        let op_root = [0x5Au8; 32];
+        let target = [0x9u8; 48];
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        for m in [&m1, &m2] {
+            m.set_grouping_root(op_root);
+            m.set_opsec_mode(OpsecMode::Selective);
+        }
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Each session discloses its grouping FIRST (so the host records both leaves
+        // under one grouping pub), then vouches the target.
+        let gid1 = m1.define_grouping(&["1".into()]);
+        let gid2 = m2.define_grouping(&["2".into()]);
+        m1.present_grouping(&gid1).await;
+        m2.present_grouping(&gid2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.vouch_for(VouchTarget::Leaf(target)).await;
+        m2.vouch_for(VouchTarget::Leaf(target)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // The host, having verified both grouping proofs share one grouping pub, must
+        // reject the doubled vouch as inflation — the target is NOT vouched (neutral).
+        let d = host.vouch_decision(target);
+        assert!(d.inflation_rejected, "host correlates the two vouchers as one operator");
+        assert!(!d.vouched, "the doubled vouch backfires → neutral, never tinted");
+    }
+
+    // SUB-SPEC C (Task 8): freshness decays over GOSSIP rounds, not wall-clock secs.
+    #[test]
+    fn freshness_decays_over_gossip_rounds_not_seconds() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert!(core.vouch_decision([9u8; 48]).weighted_score > 0, "fresh at round 0");
+        assert!(core.vouch_decision([9u8; 48]).vouched);
+        // Advancing rounds past the default freshness window (64) with no re-assertion
+        // decays the vouch to NEUTRAL — no wall clock is consulted.
+        for _ in 0..100 {
+            core.debug_advance_round();
+        }
+        assert_eq!(core.vouch_decision([9u8; 48]).weighted_score, 0, "decayed to neutral");
+        assert!(!core.vouch_decision([9u8; 48]).vouched);
+    }
+
+    // A distinct member advances the round; the SAME sender repeated does not (anti
+    // sock-puppet fast-forward, §1.5).
+    #[test]
+    fn only_distinct_members_advance_the_gossip_round() {
+        let inner = test_inner_pairwise();
+        let r0 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        witness_gossip_round(&inner, [1u8; 48]);
+        witness_gossip_round(&inner, [1u8; 48]); // same sender → no advance
+        witness_gossip_round(&inner, [1u8; 48]);
+        let r1 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r1, r0 + 1, "one distinct sender advances the round once");
+        witness_gossip_round(&inner, [2u8; 48]); // a distinct sender → advance
+        let r2 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r2, r0 + 2);
     }
 
     #[test]

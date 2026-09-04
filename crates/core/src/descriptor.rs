@@ -14,10 +14,10 @@ use crate::b32;
 use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
-// NB (merge coordination): Sub-spec C's separate branch also introduces a v4
-// (vouch_policy). Whichever lands second must rebase to v5 and append its field —
-// the encode/decode here is strictly append-only, so that is a mechanical bump.
-const DESCRIPTOR_VERSION: u16 = 4;
+// v4 appended F-16 `message_padding` (SECURITY-AUDIT); v5 appends Sub-spec C
+// `vouch_policy`. Both are strictly append-only and read only when `version` is high
+// enough, so v1-v4 invites still parse.
+const DESCRIPTOR_VERSION: u16 = 5;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
 
@@ -145,6 +145,10 @@ pub struct ChatDescriptor {
     /// sizes, not exact lengths. `None` = off (v1-v3 default; unpadded, back-compat).
     /// All members read this from the shared invite, so they agree.
     pub message_padding: Option<u32>,
+    /// SUB-SPEC C (v5+): the chat's baseline vouch policy (eligibility + weighting +
+    /// threshold + freshness window). Display-only — NEVER gates access (invariant 2).
+    /// v1-v4 invites default to `VouchPolicy::default()` (vouching off → never tinted).
+    pub vouch_policy: crate::vouch::VouchPolicy,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -178,6 +182,7 @@ impl ChatDescriptor {
             group_display_amplify_isolated: false,
             access_predicate: None,
             message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
             password: None,
         }
     }
@@ -281,6 +286,11 @@ impl ChatDescriptor {
         if self.version >= 4 {
             w.put_u32(self.message_padding.unwrap_or(0));
         }
+        // v5+: SUB-SPEC C chat vouch policy. Appended after F-16, read only at v5+
+        // (a parsed v4 must re-encode equal — strictly append-only).
+        if self.version >= 5 {
+            w.put_bytes(&self.vouch_policy.encode());
+        }
         w.into_vec()
     }
 
@@ -339,6 +349,13 @@ impl ChatDescriptor {
         } else {
             None
         };
+        // v5+: SUB-SPEC C chat vouch policy; v1-v4 default to vouching off.
+        let vouch_policy = if version >= 5 {
+            crate::vouch::VouchPolicy::decode(r.get_bytes()?)
+                .ok_or(CoreError::Malformed("vouch policy"))?
+        } else {
+            crate::vouch::VouchPolicy::default()
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -356,6 +373,7 @@ impl ChatDescriptor {
             group_display_amplify_isolated,
             access_predicate,
             message_padding,
+            vouch_policy,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -525,6 +543,7 @@ mod kat {
             group_display_amplify_isolated: false,
             access_predicate: None,
             message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
             password: None,
         };
         assert_eq!(
@@ -555,6 +574,7 @@ mod kat {
             group_display_amplify_isolated: false,
             access_predicate: None,
             message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
             password: None,
         };
         let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
@@ -574,6 +594,43 @@ mod kat {
             .expect("a re-encoded v1 descriptor must still parse");
         assert_eq!(v1, v1_reparsed, "v1 descriptor must round-trip through re-encode");
         assert_eq!(v1_reparsed.version, 1, "re-encode preserves the v1 version");
+    }
+
+    /// v4 (SUB-SPEC C) carries the chat vouch policy; it round-trips, and a parsed v3
+    /// descriptor re-encodes/re-parses equal (the fuzz-caught round-trip guard, across
+    /// the v3->v4 boundary). A v1 invite still decodes with vouching defaulted OFF.
+    #[test]
+    fn v4_vouch_policy_roundtrips_and_v3_defaults() {
+        use crate::vouch::{Threshold, VoucherEligibility, VouchPolicy, VouchWeighting};
+        let mut d = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            "tk.dr.kat",
+            vec![],
+            "#v4",
+        );
+        d.vouch_policy = VouchPolicy {
+            eligibility: VoucherEligibility::ContactsOfViewer,
+            weighting: VouchWeighting { friend: 5, contact: 3, stranger: 1 },
+            threshold: Threshold::Percent(60),
+            freshness_interval_rounds: 32,
+        };
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.vouch_policy, d.vouch_policy);
+        assert_eq!(back, d, "v4 descriptor round-trips");
+
+        // The frozen v1 URI still decodes with vouching defaulted OFF.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert_eq!(v1.vouch_policy, VouchPolicy::default());
+        // A parsed v3 descriptor must re-encode/re-parse equal (no trailing v4 bytes).
+        let mut v3 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#c");
+        v3.version = 3;
+        let v3_reparsed = ChatDescriptor::from_uri(&v3.to_uri()).expect("v3 re-encode parses");
+        assert_eq!(v3, v3_reparsed);
+        assert_eq!(v3_reparsed.version, 3);
     }
 
     /// v3 (SUB-SPEC B) carries the group display policy + optional access predicate;

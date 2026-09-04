@@ -572,6 +572,10 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                 }
                 Event::Name { .. } => {}
                 Event::Linkage { .. } => {} // SUB-SPEC B (UI: Task 13)
+                Event::Vouch { subject, vouched, .. } if vouched => {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
+                }
+                Event::Vouch { .. } => {} // below threshold / withdrawn — no status line
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();

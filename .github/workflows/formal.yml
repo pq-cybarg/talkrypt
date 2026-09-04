@@ -46,6 +46,22 @@ jobs:
         # proven harness by name (a whole-crate `cargo kani -p talkrypt-core` would also
         # pick up intractable decoders like Marking — see SECURITY-AUDIT R-6).
         run: cargo kani -p talkrypt-core --harness linkage::proofs::predicate_decode_never_panics
+      - name: Prove the Sub-spec C vouch decoders are total (core)
+        # Flat decoders are CBMC-tractable; run the proven harnesses by name (a
+        # whole-crate `cargo kani -p talkrypt-core` would also pick up intractable
+        # decoders — see SECURITY-AUDIT §5). Each verifies in ~3 s of solve time.
+        run: |
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_target_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_policy_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_decode_never_panics
+      - name: Prove the Sub-spec C antibody invariant + decay bounds (extracted kernels)
+        # Invariant 1 ("never Vouched below neutral") + age_decay bounds, proven on the
+        # PURE heap-free kernels — the CBMC-intractable HashMap grouping in `evaluate` is
+        # irrelevant to these guarantees, so extracting them makes the proof trivial.
+        run: |
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouched_implies_non_negative_score
+          cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window10
+          cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window64
 
   fstar:
     name: "F* — auth theorems"

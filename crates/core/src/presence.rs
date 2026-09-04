@@ -413,4 +413,29 @@ mod tests {
         assert_ne!(name_tag("Alice", &ctx, 1), name_tag("Alice", &ctx, 2));
         assert_ne!(name_tag("Alice", &ctx, 1), name_tag("Bob", &ctx, 1));
     }
+
+    // Hardening: the presence beacon decoder parses untrusted bytes (attacker-chosen,
+    // BEFORE chain/signature verification), so adversarial input must never panic and
+    // any success must round-trip. Deterministic xorshift → stable in CI; mirrors the
+    // `presence_parser` fuzz target for coverage in the normal test job.
+    #[test]
+    fn name_presence_decode_never_panics_on_adversarial_bytes() {
+        let mut s: u64 = 0xD1B54A32D192ED03;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..50_000 {
+            let len = (next() % 200) as usize;
+            let mut buf = vec![0u8; len];
+            for b in buf.iter_mut() {
+                *b = (next() & 0xFF) as u8;
+            }
+            if let Ok(np) = NamePresence::decode(&buf) {
+                assert_eq!(NamePresence::decode(&np.encode()).ok().as_ref(), Some(&np));
+            }
+        }
+    }
 }

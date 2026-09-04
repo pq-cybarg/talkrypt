@@ -85,6 +85,23 @@ class ChatEventsTest {
         assertTrue(a.roster["peerfp123456"]!!.grouped)
     }
 
+    @Test fun vouch_marks_member_vouched_and_notes_it() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Vouch("peerfp123456", 6, true, false))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("vouched"))
+        assertTrue(a.roster["peerfp123456"]!!.vouched)
+    }
+
+    @Test fun vouch_inflation_rejected_is_neutral_not_vouched() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Vouch("peerfp123456", -3, false, true))
+        assertTrue(m.text.contains("inflation rejected"))
+        assertFalse(a.roster["peerfp123456"]!!.vouched) // snaps to neutral, never above
+    }
+
     @Test fun identity_line_variants() {
         assertEquals("✓ friend bob", identityLine(true, true, "bob"))
         assertEquals("• contact bob", identityLine(true, false, "bob"))
