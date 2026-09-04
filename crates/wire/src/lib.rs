@@ -139,6 +139,87 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// FV **bounded-implementation route** (`docs/fv-heap-decoder-spike.md`): a heap-FREE
+/// analog of a nested decoder. talkrypt's chain-embedding decoders return nested heap
+/// (`Vec<Struct{String, Vec<u8>}>`), which CBMC/Kani cannot verify total — not because
+/// of the parse logic, but because it models constructing + dropping that nested heap
+/// expensively (proven by a dependency-injection experiment; see the spike doc). This
+/// module shows the alternative: the SAME grammar decoded into FIXED-CAPACITY arrays
+/// (no `Vec`, no `String`) is **directly Kani-verifiable** — as fast as the flat
+/// `VouchTarget` decoder. It demonstrates that bounding the wire types (caps enforced
+/// anyway by [`MAX_FRAME`]) makes the whole parser surface BMC-tractable, closing the
+/// FV gap *in-repo* without a separation-logic tool. Reference for a future migration.
+pub mod bounded {
+    /// Compile-time caps (tiny here for a fast proof; production would size to the
+    /// protocol's real maxima, all ≤ [`super::MAX_FRAME`]).
+    pub const MAX_ITEMS: usize = 4;
+    pub const MAX_FIELD: usize = 8;
+
+    #[derive(Clone, Copy)]
+    pub struct BItem {
+        pub label_len: usize,
+        pub label: [u8; MAX_FIELD],
+        pub data_len: usize,
+        pub data: [u8; MAX_FIELD],
+    }
+    pub struct BDoc {
+        pub n: usize,
+        pub items: [BItem; MAX_ITEMS],
+    }
+
+    /// Decode into fixed arrays. Returns `None` on a short read OR on exceeding a cap.
+    /// Every index is bounds-guarded by construction — no heap, so no CBMC blowup.
+    pub fn decode(bytes: &[u8]) -> Option<BDoc> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let n: usize = bytes[0] as usize;
+        if n > MAX_ITEMS {
+            return None;
+        }
+        let empty = BItem { label_len: 0, label: [0u8; MAX_FIELD], data_len: 0, data: [0u8; MAX_FIELD] };
+        let mut items = [empty; MAX_ITEMS];
+        let mut pos: usize = 1;
+        let mut i: usize = 0;
+        while i < n {
+            // label
+            if pos >= bytes.len() {
+                return None;
+            }
+            let ll: usize = bytes[pos] as usize;
+            pos += 1;
+            if ll > MAX_FIELD || ll > bytes.len() - pos {
+                return None;
+            }
+            let mut j: usize = 0;
+            while j < ll {
+                items[i].label[j] = bytes[pos + j];
+                j += 1;
+            }
+            items[i].label_len = ll;
+            pos += ll;
+            // data
+            if pos >= bytes.len() {
+                return None;
+            }
+            let dl: usize = bytes[pos] as usize;
+            pos += 1;
+            if dl > MAX_FIELD || dl > bytes.len() - pos {
+                return None;
+            }
+            let mut k: usize = 0;
+            while k < dl {
+                items[i].data[k] = bytes[pos + k];
+                k += 1;
+            }
+            items[i].data_len = dl;
+            pos += dl;
+            i += 1;
+        }
+        Some(BDoc { n, items })
+    }
+}
+
 /// Formal verification harnesses (run with `cargo kani`).
 ///
 /// These prove the decoder is memory-safe on *arbitrary* input: no panic, no
@@ -146,6 +227,19 @@ impl<'a> Reader<'a> {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+
+    /// FV bounded route: the heap-free nested decoder ([`bounded::decode`]) is proven
+    /// TOTAL (never panics) on all ≤16-byte inputs — the exact obligation the
+    /// heap-based `LinkageProof::decode` could NOT discharge. Fixed arrays, so CBMC
+    /// stays tractable.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn bounded_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let data: [u8; 16] = kani::any();
+        let _ = bounded::decode(&data[..len]);
+    }
 
     /// `get_bytes` on any ≤16-byte input never panics; on success the returned
     /// slice length never exceeds the remaining input.
@@ -176,6 +270,24 @@ mod proofs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // FV bounded-implementation route: the heap-free decoder parses correctly and
+    // rejects (never panics on) short reads / over-cap inputs.
+    #[test]
+    fn bounded_decode_parses_and_rejects() {
+        // n=1 item, label "hi" (len 2), data "yo" (len 2).
+        let buf = [1u8, 2, b'h', b'i', 2, b'y', b'o'];
+        let d = bounded::decode(&buf).expect("well-formed");
+        assert_eq!(d.n, 1);
+        assert_eq!(d.items[0].label_len, 2);
+        assert_eq!(&d.items[0].label[..2], b"hi");
+        assert_eq!(&d.items[0].data[..2], b"yo");
+        // Over-cap count / field are rejected, not panicked.
+        assert!(bounded::decode(&[99]).is_none()); // n > MAX_ITEMS
+        assert!(bounded::decode(&[1, 99]).is_none()); // label len > MAX_FIELD
+        assert!(bounded::decode(&[1, 5, b'a']).is_none()); // short read
+        assert!(bounded::decode(&[]).is_none());
+    }
 
     #[test]
     fn roundtrip_multiple_fields() {
