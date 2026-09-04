@@ -658,6 +658,12 @@ pub struct TreeKemGroup {
     /// installed when the host's commit carrying our Update proposal is applied. We
     /// do NOT advance our epoch on proposing, so there is no concurrent-commit fork.
     pending_update: Option<LeafKeyPair>,
+    /// SECURITY-AUDIT F-16: length-bucket step in bytes. When > 0, every outgoing
+    /// group message plaintext is padded to a multiple of this before the AEAD, so a
+    /// non-member relay (and any observer) sees quantized ciphertext sizes rather than
+    /// exact message lengths. 0 = off (default; back-compat with unpadded peers). Set
+    /// per chat from the descriptor; all members must agree (they share the descriptor).
+    pad_bucket: usize,
 }
 
 // Zero the group's secret material on drop: the ratchet-tree node secrets, the
@@ -722,6 +728,7 @@ impl TreeKemGroup {
             leaf_pops: HashMap::new(),
             my_sig: Some(my_sig),
             pending_update: None,
+            pad_bucket: 0,
         };
         g.occupied[0] = true;
         // Set the founder's whole path (leaf -> root) from a fresh secret chain.
@@ -1126,6 +1133,7 @@ impl TreeKemGroup {
             leaf_pops,
             my_sig: Some(sig),
             pending_update: None,
+            pad_bucket: 0,
         };
         g.leaf_sig_keys
             .insert(welcome.your_leaf, g.my_sig.as_ref().unwrap().public().clone());
@@ -1220,6 +1228,17 @@ impl TreeKemGroup {
     /// message without revealing a long-term identity.
     ///
     /// [`decrypt_verified`]: TreeKemGroup::decrypt_verified
+    /// SECURITY-AUDIT F-16: set the length-bucket step (bytes) for outgoing messages.
+    /// 0 disables padding. All members share the descriptor, so they agree on this.
+    pub fn set_pad_bucket(&mut self, step: usize) {
+        self.pad_bucket = step;
+    }
+
+    /// The current length-bucket step (0 = padding off).
+    pub fn pad_bucket(&self) -> usize {
+        self.pad_bucket
+    }
+
     pub fn encrypt_signed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let my_sig = self
             .my_sig
@@ -1229,7 +1248,16 @@ impl TreeKemGroup {
         let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let n = self.send_n;
         let aad = msg_aad(self.epoch, self.me, n);
-        let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
+        // F-16: pad the plaintext to a bucket boundary BEFORE the AEAD so the relay /
+        // observer sees a quantized ciphertext length. Unpadded when pad_bucket == 0.
+        let padded;
+        let body: &[u8] = if self.pad_bucket > 0 {
+            padded = talkrypt_wire::pad_to_bucket(plaintext, self.pad_bucket);
+            &padded
+        } else {
+            plaintext
+        };
+        let ct = aead_seal(&key, &nonce, body, &aad)?;
         let sig = my_sig.sign(&sig_transcript(self.epoch, self.me, n, &ct));
         self.send_chain = *next;
         self.send_n += 1;
@@ -1274,7 +1302,14 @@ impl TreeKemGroup {
         if epoch != self.epoch {
             return Err(CryptoError::DecryptionFailed);
         }
-        self.decrypt_body(epoch, leaf, n, &ct)
+        let body = self.decrypt_body(epoch, leaf, n, &ct)?;
+        // F-16: strip the length-bucket pad the sender applied (both share the
+        // descriptor's pad setting). A malformed pad is a decrypt failure, not a panic.
+        if self.pad_bucket > 0 {
+            talkrypt_wire::unpad_bucket(&body).ok_or(CryptoError::DecryptionFailed)
+        } else {
+            Ok(body)
+        }
     }
 
     /// Decrypt an **unsigned** (v1) group message. Forgeable by any member; used
@@ -1419,6 +1454,7 @@ mod tests {
             leaf_pops: HashMap::new(),
             my_sig: None,
             pending_update: None,
+            pad_bucket: 0,
         };
         unsafe {
             crate::assert_drop_zeroes(
@@ -1766,6 +1802,38 @@ mod tests {
         // And the reverse direction (b -> a) also authenticates.
         let msg2 = b.encrypt_signed(b"hi back").unwrap();
         assert_eq!(a.decrypt_verified(&msg2).unwrap(), b"hi back");
+    }
+
+    /// SECURITY-AUDIT F-16: with a length bucket set, two DIFFERENT-length messages
+    /// in the same bucket produce the SAME on-wire ciphertext length (what the relay /
+    /// observer sees), and each still round-trips to its exact plaintext.
+    #[test]
+    fn f16_padding_quantizes_ciphertext_length_and_round_trips() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        a.set_pad_bucket(256);
+        b.set_pad_bucket(256);
+
+        let short = a.encrypt_signed(b"hi").unwrap();
+        let long = a.encrypt_signed(&vec![b'x'; 200]).unwrap();
+        // Both plaintexts fall in the first 256-byte bucket → identical wire length.
+        assert_eq!(short.len(), long.len(), "distinct lengths pad to one bucket size");
+        // Each still decrypts to its exact plaintext (pad stripped).
+        assert_eq!(b.decrypt_verified(&short).unwrap(), b"hi");
+        assert_eq!(b.decrypt_verified(&long).unwrap(), vec![b'x'; 200]);
+
+        // A larger message crosses into a bigger bucket (still quantized, not exact).
+        let bigger = a.encrypt_signed(&vec![b'y'; 500]).unwrap();
+        assert!(bigger.len() > short.len());
+        assert_eq!(b.decrypt_verified(&bigger).unwrap(), vec![b'y'; 500]);
+
+        // Without padding (default), the two lengths differ — the leak F-16 closes.
+        let mut c = TreeKemGroup::create();
+        let mut d = add_member(&mut c, &mut []);
+        let s2 = c.encrypt_signed(b"hi").unwrap();
+        let l2 = c.encrypt_signed(&vec![b'x'; 200]).unwrap();
+        assert_ne!(s2.len(), l2.len(), "unpadded lengths leak the plaintext size");
+        assert_eq!(d.decrypt_verified(&s2).unwrap(), b"hi");
     }
 
     /// A v2 receiver rejects a v1 (unsigned) message on the trust boundary.

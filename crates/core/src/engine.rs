@@ -668,7 +668,14 @@ impl Core {
         // sessions, so TreeKEM node keys and ratchet keys agree posture + wire.
         let kem_profile = suite.kem_profile();
         let group = match role {
-            GroupRole::Host => Some(TreeKemGroup::create_with(kem_profile)),
+            GroupRole::Host => {
+                let mut g = TreeKemGroup::create_with(kem_profile);
+                // F-16: apply the chat's length-bucket padding to outgoing messages.
+                if let Some(step) = descriptor.message_padding {
+                    g.set_pad_bucket(step as usize);
+                }
+                Some(g)
+            }
             _ => None,
         };
         let leaf_keypair = match role {
@@ -3028,7 +3035,14 @@ async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
             Err(_) => return,
         };
         match TreeKemGroup::join_with_welcome(kp, &welcome) {
-            Ok(grp) => *inner.group.lock().await = Some(grp),
+            Ok(mut grp) => {
+                // F-16: match the chat's padding so our outgoing messages are bucketed
+                // like everyone else's (all members share this from the descriptor).
+                if let Some(step) = inner.descriptor.message_padding {
+                    grp.set_pad_bucket(step as usize);
+                }
+                *inner.group.lock().await = Some(grp);
+            }
             Err(e) => {
                 let _ = inner
                     .events_tx
