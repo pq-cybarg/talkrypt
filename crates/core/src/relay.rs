@@ -267,4 +267,54 @@ mod tests {
         // The relay has two participants and — by construction — no group state.
         assert_eq!(relay.participant_count(), 2);
     }
+
+    /// SECURITY-AUDIT F-16: a group chat with length-bucket padding enabled still
+    /// delivers end-to-end through the blind relay — the padding is applied inside
+    /// the group ciphertext (which the relay forwards without the group key), so the
+    /// relay sees quantized sizes yet members recover the exact plaintext.
+    #[tokio::test]
+    async fn padded_group_chat_through_relay_still_delivers() {
+        let fabric = LoopbackFabric::new();
+        let mut desc = crate::ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["relay".into()],
+            "#padded",
+        );
+        desc.message_padding = Some(256); // F-16 length bucketing on
+
+        let relay = RelayHub::new(
+            talkrypt_crypto::IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("relay")),
+            &desc,
+        );
+        relay.run().await.unwrap();
+
+        let (committer, mut c_rx) = Core::new_relayed_group(
+            talkrypt_crypto::IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("committer")),
+            desc.clone(),
+            true,
+        );
+        committer.connect("relay").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let (member, mut m_rx) = Core::new_relayed_group(
+            talkrypt_crypto::IdentityKeyPair::generate(),
+            suite(),
+            Arc::new(fabric.transport("member")),
+            desc.clone(),
+            false,
+        );
+        member.connect("relay").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Two DIFFERENT-length messages both deliver exactly, through the relay.
+        committer.send("hi").await.unwrap();
+        assert_eq!(next_message(&mut m_rx).await, "hi");
+        member.send(&"x".repeat(200)).await.unwrap();
+        assert_eq!(next_message(&mut c_rx).await, "x".repeat(200));
+    }
 }
