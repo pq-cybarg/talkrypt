@@ -46,13 +46,13 @@ module type DOracle = {
   proc derive(g : gid_t) : seed_t
 }.
 
-module Real : DOracle = {
+module DReal = {
   var root : root_t
   proc init() : unit = { root <$ droot; }
   proc derive(g : gid_t) : seed_t = { return prf root g; }
 }.
 
-module Ideal : DOracle = {
+module DIdeal = {
   var seen : (gid_t * seed_t) list
   proc init() : unit = { seen <- []; }
   proc derive(g : gid_t) : seed_t = {
@@ -68,11 +68,11 @@ module type Distinguisher (O : DOracle) = {
 }.
 
 module PRFExp_Real (D : Distinguisher) = {
-  proc main() : bool = { var b; Real.init(); b <@ D(Real).distinguish(); return b; }
+  proc main() : bool = { var b; DReal.init(); b <@ D(DReal).distinguish(); return b; }
 }.
 
 module PRFExp_Ideal (D : Distinguisher) = {
-  proc main() : bool = { var b; Ideal.init(); b <@ D(Ideal).distinguish(); return b; }
+  proc main() : bool = { var b; DIdeal.init(); b <@ D(DIdeal).distinguish(); return b; }
 }.
 
 (* ---- The unlinkability / key-hiding adversary. It interacts with the derivation
@@ -84,10 +84,10 @@ module type AdvUnlink (O : DOracle) = {
 }.
 
 module UnlinkReal  (A : AdvUnlink) = {
-  proc main() : bool = { var b; Real.init();  b <@ A(Real).guess();  return b; }
+  proc main() : bool = { var b; DReal.init();  b <@ A(DReal).guess();  return b; }
 }.
 module UnlinkIdeal (A : AdvUnlink) = {
-  proc main() : bool = { var b; Ideal.init(); b <@ A(Ideal).guess(); return b; }
+  proc main() : bool = { var b; DIdeal.init(); b <@ A(DIdeal).guess(); return b; }
 }.
 
 (* ---- The reduction: an unlinkability adversary IS a PRF distinguisher ----
@@ -102,7 +102,7 @@ module BD (A : AdvUnlink) (O : DOracle) = {
 
 section.
 
-declare module A <: AdvUnlink {-Real, -Ideal}.
+declare module A <: AdvUnlink {-DReal, -DIdeal}.
 
 (* THEOREM (tight, black-box reduction). For any adversary A, its behaviour in the REAL
    world equals the reduction B(A) as a PRF distinguisher against the real oracle, and
@@ -115,7 +115,7 @@ lemma unlink_real_eq_prf_real &m :
   Pr[UnlinkReal(A).main() @ &m : res] = Pr[PRFExp_Real(BD(A)).main() @ &m : res].
 proof.
   byequiv => //. proc; inline *.
-  wp; call (_: ={Real.root}); first sim.
+  wp; call (_: ={DReal.root}); first sim.
   auto.
 qed.
 
@@ -123,7 +123,7 @@ lemma unlink_ideal_eq_prf_ideal &m :
   Pr[UnlinkIdeal(A).main() @ &m : res] = Pr[PRFExp_Ideal(BD(A)).main() @ &m : res].
 proof.
   byequiv => //. proc; inline *.
-  wp; call (_: ={Ideal.seen}); first sim.
+  wp; call (_: ={DIdeal.seen}); first sim.
   auto.
 qed.
 
@@ -138,13 +138,13 @@ proof. by rewrite (unlink_real_eq_prf_real &m) (unlink_ideal_eq_prf_ideal &m). q
 end section.
 
 (* ---- IDEAL-world facts: in the ideal world the derived seeds carry NO identity
-   information — the oracle never reads `Real.root` (indeed there is no root at all),
+   information — the oracle never reads `DReal.root` (indeed there is no root at all),
    and distinct chat ids get independently-sampled uniform seeds. Thus:
      * KEY-HIDING: the derived (public) leaf keys are a function of the ideal random
        function alone, independent of identity_root — nothing about the root is leaked.
      * CROSS-CHAT UNLINKABILITY: two distinct chats' derived seeds are independent
        uniform values, so they cannot be linked to a common identity.
-   These are manifest from `Ideal.derive` (root-free, fresh-uniform-per-distinct-gid),
+   These are manifest from `DIdeal.derive` (root-free, fresh-uniform-per-distinct-gid),
    so the ONLY gap between the ideal guarantees and the real system is the PRF advantage
    bounded above. QED.
 
