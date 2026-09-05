@@ -154,6 +154,12 @@ enum Frame {
     /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
     /// RouteDescriptor / UpdateProposal from the group-security hardening).
     Presence(Vec<u8>),
+    /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
+    /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
+    /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
+    /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
+    /// so `GroupAuth.fst` is unaffected. Tag 15 (13/14 reserved for Sub-spec D2).
+    DeliveryAck(Vec<[u8; 32]>),
 }
 
 impl Frame {
@@ -223,6 +229,13 @@ impl Frame {
                 w.put_u8(12);
                 w.put_bytes(b);
             }
+            Frame::DeliveryAck(ids) => {
+                w.put_u8(15);
+                w.put_u32(ids.len() as u32);
+                for id in ids {
+                    w.put_bytes(id);
+                }
+            }
         }
         w.into_vec()
     }
@@ -267,6 +280,25 @@ impl Frame {
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
             12 => Frame::Presence(r.get_vec().ok()?),
+            15 => {
+                const MAX_ACK: usize = 64;
+                let n = r.get_u32().ok()? as usize;
+                if n > MAX_ACK {
+                    return None;
+                }
+                let mut ids = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let b = r.get_bytes().ok()?;
+                    if b.len() != 32 {
+                        return None;
+                    }
+                    let mut id = [0u8; 32];
+                    id.copy_from_slice(b);
+                    ids.push(id);
+                }
+                r.finish().ok()?;
+                Frame::DeliveryAck(ids)
+            }
             _ => return None,
         };
         Some(frame)
@@ -6050,5 +6082,40 @@ mod tests {
         );
         assert_ne!(leaf_vk(&e1), leaf_vk(&e2), "ephemeral leaf keys differ per construction");
         assert_ne!(leaf_vk(&m1), leaf_vk(&e1), "ephemeral differs from the derived key");
+    }
+
+    #[test]
+    fn delivery_ack_frame_roundtrips_and_caps() {
+        let ids = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let bytes = Frame::DeliveryAck(ids.clone()).encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::DeliveryAck(got)) => assert_eq!(got, ids),
+            _ => panic!("expected DeliveryAck"),
+        }
+        // Empty batch round-trips.
+        assert!(matches!(
+            Frame::decode(&Frame::DeliveryAck(vec![]).encode()),
+            Some(Frame::DeliveryAck(v)) if v.is_empty()
+        ));
+        // A count over MAX_ACK is rejected (never allocates unboundedly).
+        let mut hostile = Writer::new();
+        hostile.put_u8(15);
+        hostile.put_u32(70); // > MAX_ACK (64)
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+}
+
+#[cfg(kani)]
+mod d1_proofs {
+    use super::*;
+    /// D1 `DeliveryAck` decode never panics on arbitrary <=64-byte input (it runs on
+    /// bytes from a possibly-hostile peer). Flat/bounded => CBMC-tractable.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn delivery_ack_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64);
+        let data: [u8; 64] = kani::any();
+        let _ = Frame::decode(&data[..len]);
     }
 }
