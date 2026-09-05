@@ -242,10 +242,13 @@ This is the novel layer. It is designed here concretely; it does **not** ship en
    masking with preserved degree bounds and FRI-folding entropy care (Haböck–Kindi, eprint 2024/1037). The
    design MUST select a ZK-enabled configuration and include a test that the proof leaks nothing about the
    witness (statistical masking check). No off-the-shelf crate is assumed ZK.
-2. **Arithmetization-friendly hashes under active cryptanalysis.** Poseidon2/Rescue (incl. over KoalaBear)
-   have improving algebraic attacks. **Security-critical commitments use a conventional hash (Keccak/SHA3
-   or Blake3), accepting prover cost;** AF-hashes only where a break degrades performance, not soundness.
-   (talkrypt already standardizes on SHA3/Keccak — consistent, and one fewer novel assumption to verify.)
+2. **Arithmetization-friendly hashes — choose the SECURE one, layer the rest.** Poseidon/Poseidon2 are
+   under active algebraic (Gröbner/resultant) cryptanalysis. **Rescue-Prime is NOT interchangeable**:
+   its *bidirectional full-round* structure resists those attacks, so it is the **in-circuit
+   arithmetization hash**. The **commitment/Merkle layer uses SHA3/SHAKE** (Keccak sponge →
+   length-extension resistant; SHA-384 likewise, truncated) — talkrypt already standardizes on
+   SHA3/Keccak, consistent. Field = **KoalaBear** (31-bit) — chosen for **mobile device limits** (cheap arithmetic + low memory
+   on phone CPUs); the KoalaBear-*Poseidon* cryptanalysis is moot since we use Rescue-Prime. Round counts are a verification obligation (min-degree analysis).
 3. **Proximity-test soundness is a moving target — pin the analysis, don't copy a default.** Plain FRI's
    above-Johnson soundness lost its theorem (late 2025; eprint 2026/858 restores an unconditional bound at
    ~one extra query round). This is a primary reason to target **STIR/WHIR** (§4a) whose current analyses
