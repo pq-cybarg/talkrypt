@@ -29,7 +29,7 @@ pub use custody::{Capabilities, CustodyTier};
 pub use seal::{seal, tier_of, unseal, KeyWrapper, SealOptions, WrapError};
 pub use marking::{Classification, Marking};
 pub use descriptor::{ChannelPassword, ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
-pub use engine::{AccessPolicy, Core, Event, GroupRole};
+pub use engine::{AccessPolicy, Core, Event, GroupRole, LeafSigMode};
 pub use contacts::{Contact, ContactStore, Presentation, Resolved};
 pub use linking::{LinkClient, LinkHost, Linked};
 pub use registry::{resolve_across, RegistryClient, RegistryServer};
