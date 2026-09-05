@@ -111,4 +111,8 @@ data class Member(
     var contact: Boolean = false,
     var friend: Boolean = false,
     var connected: Boolean = false,
+    /** SUB-SPEC B: this peer disclosed grouping linkage (not an isolated sybil). */
+    var grouped: Boolean = false,
+    /** SUB-SPEC C: this subject cleared the vouch threshold (display-only tint). */
+    var vouched: Boolean = false,
 )

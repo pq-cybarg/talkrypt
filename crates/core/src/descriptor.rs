@@ -14,7 +14,10 @@ use crate::b32;
 use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
-const DESCRIPTOR_VERSION: u16 = 1;
+// v4 appended F-16 `message_padding` (SECURITY-AUDIT); v5 appends Sub-spec C
+// `vouch_policy`. Both are strictly append-only and read only when `version` is high
+// enough, so v1-v4 invites still parse.
+const DESCRIPTOR_VERSION: u16 = 5;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
 
@@ -125,6 +128,27 @@ pub struct ChatDescriptor {
     /// Optional channel classification marking/policy (advisory). Present only
     /// for marked channels; consumer builds leave it `None`.
     pub channel_marking: Option<crate::marking::Marking>,
+    /// Per-chat policy (advisory display) for how a lower-tier self-declared name
+    /// that collides with a verified one is shown. v2+; a v1 invite decodes with
+    /// the default (`SignalStyle`). See [`crate::nametrust::NameTrustPolicy`].
+    pub name_trust_policy: crate::nametrust::NameTrustPolicy,
+    /// SUB-SPEC B (v3+): the group's DISPLAY policy — surface isolated (unlinked)
+    /// identities with a caveat. Controls only how THIS group renders unproven
+    /// identities; never compels a member's disclosure. v1/v2 default false.
+    pub group_display_amplify_isolated: bool,
+    /// SUB-SPEC B (v3+): an optional access predicate — only parties satisfying it
+    /// (via a Backend-0 claim) are admitted. v1/v2 default `None`.
+    pub access_predicate: Option<crate::linkage::Predicate>,
+    /// SECURITY-AUDIT F-16 (v4+): length-bucket step in bytes for group messages. When
+    /// `Some(step)`, every group message plaintext is padded to a multiple of `step`
+    /// before the AEAD, so a non-member relay / observer sees quantized ciphertext
+    /// sizes, not exact lengths. `None` = off (v1-v3 default; unpadded, back-compat).
+    /// All members read this from the shared invite, so they agree.
+    pub message_padding: Option<u32>,
+    /// SUB-SPEC C (v5+): the chat's baseline vouch policy (eligibility + weighting +
+    /// threshold + freshness window). Display-only — NEVER gates access (invariant 2).
+    /// v1-v4 invites default to `VouchPolicy::default()` (vouching off → never tinted).
+    pub vouch_policy: crate::vouch::VouchPolicy,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -154,6 +178,11 @@ impl ChatDescriptor {
             channel: channel.into(),
             group: false,
             channel_marking: None,
+            name_trust_policy: crate::nametrust::NameTrustPolicy::default(),
+            group_display_amplify_isolated: false,
+            access_predicate: None,
+            message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
             password: None,
         }
     }
@@ -231,13 +260,46 @@ impl ChatDescriptor {
         w.put_bytes(self.channel.as_bytes());
         w.put_u8(self.group as u8);
         crate::marking::put_opt(&mut w, &self.channel_marking);
+        // v2+: per-chat name trust policy (advisory display). Appended last so a
+        // v1 reader that stops after channel_marking is unaffected — and ONLY when
+        // this descriptor is itself v2+. Writing it for a parsed v1 descriptor would
+        // append a trailing byte that the v1 decode path (which never reads it) then
+        // rejects in `r.finish()`, breaking re-encode->re-parse round-trip. A v1
+        // descriptor predates this field, so its policy is always the default.
+        if self.version >= 2 {
+            w.put_u8(self.name_trust_policy.tag());
+        }
+        // v3+: SUB-SPEC B group display policy + optional access predicate. Written
+        // ONLY when this descriptor is v3+ (same round-trip discipline as v2).
+        if self.version >= 3 {
+            w.put_u8(self.group_display_amplify_isolated as u8);
+            match &self.access_predicate {
+                Some(pr) => {
+                    w.put_u8(1);
+                    w.put_bytes(&pr.encode());
+                }
+                None => w.put_u8(0),
+            }
+        }
+        // v4+: SECURITY-AUDIT F-16 message-padding bucket (0 = off). Written ONLY when
+        // this descriptor is v4+ (same round-trip discipline as v2/v3).
+        if self.version >= 4 {
+            w.put_u32(self.message_padding.unwrap_or(0));
+        }
+        // v5+: SUB-SPEC C chat vouch policy. Appended after F-16, read only at v5+
+        // (a parsed v4 must re-encode equal — strictly append-only).
+        if self.version >= 5 {
+            w.put_bytes(&self.vouch_policy.encode());
+        }
         w.into_vec()
     }
 
     fn decode_bytes(bytes: &[u8]) -> Result<Self> {
         let mut r = talkrypt_wire::Reader::new(bytes);
         let version = r.get_u32()? as u16;
-        if version != DESCRIPTOR_VERSION {
+        // Accept every version up to the current one; new fields are appended and
+        // read only when `version` is high enough (v1 invites still parse).
+        if version == 0 || version > DESCRIPTOR_VERSION {
             return Err(CoreError::UnsupportedVersion(version));
         }
         let topology = TopologyKind::from_tag(r.get_u8()?)?;
@@ -256,6 +318,44 @@ impl ChatDescriptor {
         let channel = string(r.get_bytes()?)?;
         let group = r.get_u8()? != 0;
         let channel_marking = crate::marking::get_opt(&mut r)?;
+        // v2+ appends the name trust policy; a v1 invite ends here and defaults it.
+        let name_trust_policy = if version >= 2 {
+            crate::nametrust::NameTrustPolicy::from_tag(r.get_u8()?)
+                .ok_or(CoreError::Malformed("name trust policy tag"))?
+        } else {
+            crate::nametrust::NameTrustPolicy::default()
+        };
+        // v3+: SUB-SPEC B group display policy + optional access predicate.
+        let (group_display_amplify_isolated, access_predicate) = if version >= 3 {
+            let amplify = r.get_u8()? != 0;
+            let pred = match r.get_u8()? {
+                0 => None,
+                1 => Some(
+                    crate::linkage::Predicate::decode(r.get_bytes()?)
+                        .ok_or(CoreError::Malformed("access predicate"))?,
+                ),
+                _ => return Err(CoreError::Malformed("access predicate flag")),
+            };
+            (amplify, pred)
+        } else {
+            (false, None)
+        };
+        // v4+: F-16 message-padding bucket. 0 (or absent) = off.
+        let message_padding = if version >= 4 {
+            match r.get_u32()? {
+                0 => None,
+                step => Some(step),
+            }
+        } else {
+            None
+        };
+        // v5+: SUB-SPEC C chat vouch policy; v1-v4 default to vouching off.
+        let vouch_policy = if version >= 5 {
+            crate::vouch::VouchPolicy::decode(r.get_bytes()?)
+                .ok_or(CoreError::Malformed("vouch policy"))?
+        } else {
+            crate::vouch::VouchPolicy::default()
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -269,6 +369,11 @@ impl ChatDescriptor {
             channel,
             group,
             channel_marking,
+            name_trust_policy,
+            group_display_amplify_isolated,
+            access_predicate,
+            message_padding,
+            vouch_policy,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -418,13 +523,13 @@ mod kat {
     use super::*;
 
     /// Known-answer vector locking the descriptor wire format (talkrypt-mlspq
-    /// wire v1). A canonical descriptor with fixed fields must always produce
+    /// wire v2). A canonical descriptor with fixed fields must always produce
     /// this exact `talkrypt://` URI; any change to the field order, tags, or
     /// base32 encoding breaks it.
     #[test]
     fn descriptor_uri_kat() {
         let d = ChatDescriptor {
-            version: 1,
+            version: 2,
             topology: TopologyKind::P2P,
             persistence: Persistence::Ephemeral,
             suite_id: "tk.dr.kat".to_string(),
@@ -434,13 +539,159 @@ mod kat {
             channel: "#kat".to_string(),
             group: false,
             channel_marking: None,
+            name_trust_policy: crate::nametrust::NameTrustPolicy::SignalStyle,
+            group_display_amplify_isolated: false,
+            access_predicate: None,
+            message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
             password: None,
         };
         assert_eq!(
             d.to_uri(),
-            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa"
+            "talkrypt://aaaaaaqaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaaaa"
         );
         // And it must round-trip back to the same descriptor.
         assert_eq!(ChatDescriptor::from_uri(&d.to_uri()).unwrap(), d);
+    }
+
+    /// v2 carries the per-chat name trust policy; a v1 invite (the frozen v1 KAT
+    /// string) still decodes and defaults the policy to `SignalStyle`.
+    #[test]
+    fn v2_policy_roundtrips_and_v1_defaults() {
+        use crate::nametrust::NameTrustPolicy;
+        let d = ChatDescriptor {
+            version: 2,
+            topology: TopologyKind::P2P,
+            persistence: Persistence::Ephemeral,
+            suite_id: "tk.dr.kat".to_string(),
+            suite_params: vec![],
+            endpoints: vec![],
+            invite_token: vec![0u8; 32],
+            channel: "#kat".to_string(),
+            group: false,
+            channel_marking: None,
+            name_trust_policy: NameTrustPolicy::WarnOnCollision,
+            group_display_amplify_isolated: false,
+            access_predicate: None,
+            message_padding: None,
+            vouch_policy: crate::vouch::VouchPolicy::default(),
+            password: None,
+        };
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.name_trust_policy, NameTrustPolicy::WarnOnCollision);
+        // The frozen v1 URI still decodes, defaulting to SignalStyle.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert_eq!(v1.name_trust_policy, NameTrustPolicy::SignalStyle);
+        assert_eq!(v1.version, 1);
+        // Regression (fuzzer descriptor_parser round-trip panic): re-encoding a
+        // PARSED v1 descriptor must produce a URI that parses back to an equal
+        // value. encode must NOT append the v2 policy byte for a v1 descriptor,
+        // else the v1 decode path rejects the trailing byte in `finish()`.
+        let v1_reparsed = ChatDescriptor::from_uri(&v1.to_uri())
+            .expect("a re-encoded v1 descriptor must still parse");
+        assert_eq!(v1, v1_reparsed, "v1 descriptor must round-trip through re-encode");
+        assert_eq!(v1_reparsed.version, 1, "re-encode preserves the v1 version");
+    }
+
+    /// v4 (SUB-SPEC C) carries the chat vouch policy; it round-trips, and a parsed v3
+    /// descriptor re-encodes/re-parses equal (the fuzz-caught round-trip guard, across
+    /// the v3->v4 boundary). A v1 invite still decodes with vouching defaulted OFF.
+    #[test]
+    fn v4_vouch_policy_roundtrips_and_v3_defaults() {
+        use crate::vouch::{Threshold, VoucherEligibility, VouchPolicy, VouchWeighting};
+        let mut d = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            "tk.dr.kat",
+            vec![],
+            "#v4",
+        );
+        d.vouch_policy = VouchPolicy {
+            eligibility: VoucherEligibility::ContactsOfViewer,
+            weighting: VouchWeighting { friend: 5, contact: 3, stranger: 1 },
+            threshold: Threshold::Percent(60),
+            freshness_interval_rounds: 32,
+        };
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.vouch_policy, d.vouch_policy);
+        assert_eq!(back, d, "v4 descriptor round-trips");
+
+        // The frozen v1 URI still decodes with vouching defaulted OFF.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert_eq!(v1.vouch_policy, VouchPolicy::default());
+        // A parsed v3 descriptor must re-encode/re-parse equal (no trailing v4 bytes).
+        let mut v3 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#c");
+        v3.version = 3;
+        let v3_reparsed = ChatDescriptor::from_uri(&v3.to_uri()).expect("v3 re-encode parses");
+        assert_eq!(v3, v3_reparsed);
+        assert_eq!(v3_reparsed.version, 3);
+    }
+
+    /// v3 (SUB-SPEC B) carries the group display policy + optional access predicate;
+    /// they round-trip, and a parsed v2 descriptor re-encodes/re-parses equal (the
+    /// fuzz-caught round-trip guard, now across the v2->v3 boundary).
+    #[test]
+    fn v3_fields_roundtrip_and_v2_defaults() {
+        use crate::linkage::Predicate;
+        let mut d = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            "tk.dr.kat",
+            vec![],
+            "#v3",
+        );
+        d.group_display_amplify_isolated = true;
+        d.access_predicate = Some(Predicate::LinkedToAccount { account_fp: [7u8; 48] });
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert!(back.group_display_amplify_isolated);
+        assert_eq!(back.access_predicate, Some(Predicate::LinkedToAccount { account_fp: [7u8; 48] }));
+        assert_eq!(back, d, "v3 descriptor round-trips");
+
+        // The frozen v1 URI still decodes with v3 fields defaulted.
+        let v1 = ChatDescriptor::from_uri(
+            "talkrypt://aaaaaaiaaaaaaaajorvs4zdsfzvwc5aaaaaaaaaaaaaaaaaaeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccg23boqaaa",
+        )
+        .unwrap();
+        assert!(!v1.group_display_amplify_isolated);
+        assert!(v1.access_predicate.is_none());
+        // A parsed v2 descriptor must re-encode/re-parse equal (no trailing v3 bytes).
+        let mut v2 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#c");
+        v2.version = 2;
+        let v2_reparsed = ChatDescriptor::from_uri(&v2.to_uri()).expect("v2 re-encode parses");
+        assert_eq!(v2, v2_reparsed);
+        assert_eq!(v2_reparsed.version, 2);
+    }
+
+    /// v4 (SECURITY-AUDIT F-16) carries the message-padding bucket; it round-trips,
+    /// a parsed v3 re-encodes/re-parses equal (no trailing v4 bytes), and a v1 invite
+    /// still decodes with padding OFF.
+    #[test]
+    fn v4_message_padding_roundtrips_and_v3_defaults() {
+        let mut d = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#v4");
+        d.message_padding = Some(256);
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.message_padding, Some(256));
+        assert_eq!(back, d, "v4 descriptor round-trips");
+
+        // A genuine v1 descriptor (built programmatically, not a trusted magic
+        // constant) decodes with padding defaulted OFF — a v1 invite predates the
+        // field, so it can never carry padding.
+        let mut v1 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#v1");
+        v1.version = 1;
+        let v1 = ChatDescriptor::from_uri(&v1.to_uri()).unwrap();
+        assert_eq!(v1.version, 1);
+        assert!(v1.message_padding.is_none());
+        // A parsed v3 descriptor must re-encode/re-parse equal (no trailing v4 bytes).
+        let mut v3 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#c");
+        v3.version = 3;
+        let v3_reparsed = ChatDescriptor::from_uri(&v3.to_uri()).expect("v3 re-encode parses");
+        assert_eq!(v3, v3_reparsed);
+        assert_eq!(v3_reparsed.version, 3);
     }
 }

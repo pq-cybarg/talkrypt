@@ -1597,11 +1597,38 @@ class MainActivity : Activity() {
     private fun sendMessage(chatId: String, t: String) {
         val lc = sessions.get(chatId) ?: return
         val c = lc.client ?: run { reconnect(chatId); toast("reconnecting — resend in a moment"); return }
+        // SUB-SPEC A: /name and /cq are handled locally (self-declared name + CQ beacon),
+        // mirroring the CLI, rather than sent as chat text.
+        if (t.startsWith("/name") || t.startsWith("/cq")) { handleNameCommand(chatId, c, t.trim()); return }
         val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null, ts = System.currentTimeMillis())
         lc.history.add(msg); sessions.touch(chatId, msg.ts)
         addBubble(t, mine = true)
         scheduleSave(chatId)
         thread { runCatching { c.send(t) }.onFailure { ui.post { toast("send failed") } } }
+    }
+
+    /** SUB-SPEC A slash commands (self-declared name + CQ beacon), mirroring the CLI:
+     *  `/name <callsign>` | `/name off` | `/cq` | `/cq periodic <mins>|off`. */
+    private fun handleNameCommand(chatId: String, c: TalkryptClient, t: String) {
+        when {
+            t.startsWith("/name ") -> {
+                val label = t.removePrefix("/name ").trim()
+                if (label == "off") { c.setLeadingName(""); sysLine(chatId, "name cleared") }
+                else {
+                    c.setLeadingName(label)
+                    thread { runCatching { c.announcePresence() } }
+                    sysLine(chatId, "calling as “$label”")
+                }
+            }
+            t == "/cq" -> { thread { runCatching { c.announcePresence() } }; sysLine(chatId, "CQ — announced your name") }
+            t.startsWith("/cq periodic") -> {
+                val rest = t.removePrefix("/cq periodic").trim()
+                val secs = if (rest == "off" || rest.isEmpty()) 0L else (rest.toLongOrNull()?.times(60) ?: 0L)
+                c.setPresenceCadence(secs.toULong(), false)
+                sysLine(chatId, if (secs == 0L) "CQ cadence off" else "CQ cadence: every ${secs / 60} min")
+            }
+            else -> sysLine(chatId, "usage: /name <callsign> | /name off | /cq | /cq periodic <mins>|off")
+        }
     }
 
     /** One loop drains every connected chat; events route to their room. The

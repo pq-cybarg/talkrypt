@@ -283,6 +283,12 @@ enum Cmd {
         id: u64,
         text: String,
     },
+    /// Set (and CQ-announce) this session's leading self-declared name (SUB-SPEC A).
+    /// An empty label clears it.
+    SetName {
+        id: u64,
+        label: String,
+    },
     /// Re-dial a joined session whose transport dropped (the host stays listening
     /// on its onion/port, so the joiner just re-runs the initiator handshake).
     Reconnect {
@@ -506,6 +512,22 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     }
                 }
             }
+            Cmd::SetName { id, label } => {
+                if let Some(c) = cores.get(&id) {
+                    if label.is_empty() {
+                        c.set_leading_name(None);
+                        let _ = ui_tx.send(UiEvt::Status { id, text: "name cleared".into() });
+                    } else {
+                        c.set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                            id: label.clone(),
+                            label: label.clone(),
+                            backing: talkrypt_core::presence::NameBacking::Bare,
+                        }));
+                        let _ = c.announce_presence().await;
+                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("calling as \"{label}\"") });
+                    }
+                }
+            }
             Cmd::Reconnect { id } => {
                 // A joined session re-dials its host (which is still listening on
                 // the same onion/port). A host has nothing to re-dial — it just
@@ -545,6 +567,15 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let who = username.unwrap_or_else(|| short(&account_fingerprint));
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
                 }
+                Event::Name { from, label: Some(label), .. } => {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("{} is calling as \"{label}\"", short(&from)) });
+                }
+                Event::Name { .. } => {}
+                Event::Linkage { .. } => {} // SUB-SPEC B (UI: Task 13)
+                Event::Vouch { subject, vouched, .. } if vouched => {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
+                }
+                Event::Vouch { .. } => {} // below threshold / withdrawn — no status line
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();
@@ -632,6 +663,7 @@ struct App {
     join_input: String,
     // ----- chat screen -----
     msg_input: String,
+    name_input: String, // SUB-SPEC A: leading self-declared name draft
     show_invite: bool, // toggles the invite/QR panel inside a chat
     notice: String,    // transient form message on the new-chat screen
     tor_progress: Option<f32>, // global Tor bootstrap fraction while < 1.0
@@ -651,6 +683,7 @@ impl App {
             channel_input: "#general".into(),
             posture: "pq-pure".into(),
             access: "open".into(),
+            name_input: String::new(),
             persistence: "Persistent".into(), // default Persistent, matching mobile
             // Tor on by default whenever this build can do Tor; a LAN-only
             // (--no-default-features) build starts unchecked.
@@ -1002,6 +1035,23 @@ impl App {
                 }
             });
         ui.add_space(8.0);
+        // Name row (SUB-SPEC A): declare + CQ-announce a self-declared name for this chat.
+        ui.horizontal(|ui| {
+            let nr = ui.add(
+                egui::TextEdit::singleline(&mut self.name_input)
+                    .hint_text("Your name (CQ)")
+                    .desired_width(160.0),
+            );
+            let set = ui.button("Set name").clicked()
+                || (nr.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if set {
+                let _ = self.cmd_tx.send(Cmd::SetName {
+                    id,
+                    label: self.name_input.trim().to_string(),
+                });
+            }
+        });
+        ui.add_space(4.0);
         // Message row: padded field + a Send button the SAME height.
         ui.horizontal(|ui| {
             let send_w = 64.0;

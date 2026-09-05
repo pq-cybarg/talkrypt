@@ -373,6 +373,32 @@ pub enum FfiEvent {
     Disconnected {
         fingerprint: String,
     },
+    /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
+    /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
+    /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
+    Name {
+        from: String,
+        account_fingerprint: String,
+        label: String,
+        tier: String,
+        seq: u64,
+        caveat: String,
+    },
+    /// SUB-SPEC B: a peer disclosed grouping linkage. `subject` is a leaf fp hex;
+    /// `grouping` is a short id for the grouping (hosts aggregate subjects sharing it).
+    Linkage {
+        subject: String,
+        grouping: String,
+        verdict: bool,
+    },
+    /// SUB-SPEC C: a subject's vouch standing changed. `weightedScore` may be negative
+    /// when inflation was rejected (antibody); `vouched` gates the tint. Display-only.
+    Vouch {
+        subject: String,
+        weighted_score: i64,
+        vouched: bool,
+        inflation_rejected: bool,
+    },
     Error {
         message: String,
     },
@@ -380,6 +406,41 @@ pub enum FfiEvent {
 
 fn hex_fp(fp: &[u8; 48]) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse a 64-char hex string into a 32-byte seed (SUB-SPEC B grouping root).
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Parse a 96-char hex string into a 48-byte fingerprint (SUB-SPEC C vouch target).
+fn parse_hex48(s: &str) -> Option<[u8; 48]> {
+    let s = s.trim();
+    if s.len() != 96 {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// SUB-SPEC B: the honest distinct-people estimate surfaced to clients.
+#[derive(uniffi::Record)]
+pub struct FfiSybilCount {
+    pub distinct_accounts: u32,
+    pub distinct_groupings: u32,
+    pub isolated: u32,
+    pub min_distinct_people: u32,
 }
 
 /// A persisted contact (account public key + remembered name + friend label).
@@ -446,6 +507,34 @@ fn map_event(e: Event) -> FfiEvent {
         },
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
             fingerprint: hex_fp(&fingerprint),
+        },
+        Event::Name {
+            from,
+            account_fingerprint,
+            label,
+            tier,
+            seq,
+            caveat,
+        } => FfiEvent::Name {
+            from: hex_fp(&from),
+            account_fingerprint: account_fingerprint.map(|f| hex_fp(&f)).unwrap_or_default(),
+            label: label.unwrap_or_default(),
+            tier: format!("{tier:?}"),
+            seq,
+            caveat: caveat.unwrap_or_default(),
+        },
+        Event::Linkage { subject, grouping_pub, verdict } => FfiEvent::Linkage {
+            subject: hex_fp(&subject),
+            // A short, stable id for the grouping (the full per-chat grouping pub is
+            // large); clients aggregate subjects sharing this id.
+            grouping: grouping_pub.iter().take(8).map(|b| format!("{b:02x}")).collect(),
+            verdict,
+        },
+        Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => FfiEvent::Vouch {
+            subject: hex_fp(&subject),
+            weighted_score,
+            vouched,
+            inflation_rejected,
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
@@ -995,6 +1084,136 @@ impl TalkryptClient {
     /// connected or no route worked. Safe to call on every disconnect / on a timer.
     pub fn reconnect(&self) -> Option<String> {
         self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+    }
+
+    /// Set (or clear) this node's leading self-declared **name** for the chat
+    /// (SUB-SPEC A). An empty `label` clears it. This is a *bare* (unverified) name;
+    /// peers see it over your messages, tinted per the chat's trust policy. Call
+    /// [`announce_presence`](Self::announce_presence) (or set a cadence) to broadcast.
+    pub fn set_leading_name(&self, label: String) {
+        if label.is_empty() {
+            self.core.set_leading_name(None);
+        } else {
+            self.core
+                .set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                    id: label.clone(),
+                    label,
+                    backing: talkrypt_core::presence::NameBacking::Bare,
+                }));
+        }
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat now.
+    pub fn announce_presence(&self) {
+        self.rt.block_on(async {
+            let _ = self.core.announce_presence().await;
+        });
+    }
+
+    /// Configure the CQ auto re-beacon (SUB-SPEC A): `periodic_secs == 0` disables the
+    /// periodic timer (manual/on-join announcements still fire). Clamped to a floor.
+    pub fn set_presence_cadence(&self, periodic_secs: u64, on_message_id: bool) {
+        let periodic = if periodic_secs == 0 {
+            None
+        } else {
+            Some(periodic_secs)
+        };
+        self.core
+            .set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                periodic_secs: periodic,
+                on_message_id,
+            });
+    }
+
+    // ----- SUB-SPEC B: linkage disclosure + opsec (Task 11) -----
+
+    /// Set the linkage-disclosure opsec mode: "clean" | "selective" | "transparent"
+    /// | "transparent-hide". Unknown values are ignored (mode unchanged).
+    pub fn set_opsec_mode(&self, mode: String) {
+        use talkrypt_core::linkage::OpsecMode;
+        let m = match mode.as_str() {
+            "clean" => OpsecMode::Clean,
+            "selective" => OpsecMode::Selective,
+            "transparent" => OpsecMode::Transparent { hide: false },
+            "transparent-hide" => OpsecMode::Transparent { hide: true },
+            _ => return,
+        };
+        self.core.set_opsec_mode(m);
+    }
+
+    /// Set the persistent grouping root (32-byte hex), shared across the user's
+    /// sessions so a viewer can aggregate their leaves into one grouping. No-op on
+    /// a malformed seed.
+    pub fn set_grouping_root(&self, seed_hex: String) {
+        if let Some(seed) = parse_hex32(&seed_hex) {
+            self.core.set_grouping_root(seed);
+        }
+    }
+
+    /// Define a grouping of the user's name-entry ids; returns its stable id.
+    pub fn define_grouping(&self, name_ids: Vec<String>) -> String {
+        self.core.define_grouping(&name_ids)
+    }
+
+    /// Disclose a grouping to the chat now (account-hidden). No-op under opsec Clean.
+    pub fn present_grouping(&self, id: String) {
+        self.rt.block_on(async { self.core.present_grouping(&id).await });
+    }
+
+    /// Auto-disclose the grouping on join (vs just the leading name).
+    pub fn show_all_identities(&self, on: bool) {
+        self.core.show_all_identities(on);
+    }
+
+    // ---- SUB-SPEC C: vouching (display-only; never gates access) --------------
+
+    /// Vouch for a peer's account (durable trust). `fp_hex` = 96-char account fp.
+    pub fn vouch_for_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// Vouch for a peer's bare per-chat leaf (minimal, opsec-clean). `fp_hex` = leaf fp.
+    pub fn vouch_for_leaf(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Leaf(fp)).await
+            });
+        }
+    }
+
+    /// Withdraw a vouch for an account (additive-only: only removes a positive hint).
+    pub fn revoke_vouch_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.revoke_vouch(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// User-scope vouch threshold (viewer's own bar, stricter-only vs the chat).
+    pub fn set_vouch_threshold_count(&self, count: u32) {
+        self.core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(count));
+    }
+
+    /// The current weighted vouch score for a subject (may be negative when the
+    /// antibody rejected inflation; display snaps to neutral).
+    pub fn vouch_score(&self, fp_hex: String) -> i64 {
+        parse_hex48(&fp_hex).map(|fp| self.core.vouch_decision(fp).weighted_score).unwrap_or(0)
+    }
+
+    /// The honest distinct-people estimate for the chat (SUB-SPEC B sybil-count).
+    pub fn sybil_estimate(&self) -> FfiSybilCount {
+        let s = self.core.sybil_estimate();
+        FfiSybilCount {
+            distinct_accounts: s.distinct_accounts as u32,
+            distinct_groupings: s.distinct_groupings as u32,
+            isolated: s.isolated as u32,
+            min_distinct_people: s.min_distinct_people as u32,
+        }
     }
 
     /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of

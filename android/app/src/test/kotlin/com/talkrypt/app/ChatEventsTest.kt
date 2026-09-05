@@ -55,6 +55,53 @@ class ChatEventsTest {
         assertFalse(m.friend)
     }
 
+    @Test fun name_updates_roster_display_and_notes() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("Whiskey"))
+        assertEquals("Whiskey", a.roster["peerfp123456"]!!.display)
+    }
+
+    @Test fun message_bubble_shows_resolved_cq_name_when_known() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        // Before hearing the peer's CQ name, a message is labeled by fingerprint.
+        val bare = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "one", ""))
+        assertEquals("peerfp12", bare.display)
+        // After the peer announces its name, later messages carry the resolved name.
+        applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        val named = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "two", ""))
+        assertEquals("Whiskey", named.display)
+    }
+
+    @Test fun linkage_marks_peer_as_grouped_and_notes_it() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Linkage("peerfp123456", "abcd1234", true))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("grouping"))
+        assertTrue(a.roster["peerfp123456"]!!.grouped)
+    }
+
+    @Test fun vouch_marks_member_vouched_and_notes_it() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Vouch("peerfp123456", 6, true, false))
+        assertEquals(MsgKind.SYSTEM, m.kind)
+        assertTrue(m.text.contains("vouched"))
+        assertTrue(a.roster["peerfp123456"]!!.vouched)
+    }
+
+    @Test fun vouch_inflation_rejected_is_neutral_not_vouched() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        val m = applyEvent(s, "a", a, FfiEvent.Vouch("peerfp123456", -3, false, true))
+        assertTrue(m.text.contains("inflation rejected"))
+        assertFalse(a.roster["peerfp123456"]!!.vouched) // snaps to neutral, never above
+    }
+
     @Test fun identity_line_variants() {
         assertEquals("✓ friend bob", identityLine(true, true, "bob"))
         assertEquals("• contact bob", identityLine(true, false, "bob"))

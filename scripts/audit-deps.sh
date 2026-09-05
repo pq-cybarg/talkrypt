@@ -32,10 +32,17 @@ if have cargo-audit; then
   AUDIT_IGNORES=(
     RUSTSEC-2023-0071
     RUSTSEC-2026-0124 RUSTSEC-2026-0125 RUSTSEC-2026-0126
+    RUSTSEC-2026-0207 RUSTSEC-2026-0208            # libcrux-sha3 (nym; fix blocked by nym's pin)
+    RUSTSEC-2026-0209 RUSTSEC-2026-0211            # libcrux-aesgcm (nym's AEAD, not ours; no upstream fix)
+    RUSTSEC-2026-0212                              # libcrux-secrets (nym; fix blocked by nym's pin)
     RUSTSEC-2026-0194 RUSTSEC-2026-0195
     RUSTSEC-2026-0098 RUSTSEC-2026-0099 RUSTSEC-2026-0104
     RUSTSEC-2025-0141
+    RUSTSEC-2026-0258                              # h2 0.3.27 (nym-only; tendermint-rpc→reqwest 0.11); 0.4 path FIXED by upgrade to 0.4.19
   )
+  # NB RUSTSEC-2026-0204 (crossbeam-epoch) is FIXED by upgrade to 0.9.20, not ignored.
+  # NB RUSTSEC-2026-0257 (webbrowser BROWSER arg-injection) was FIXED by upgrade to 1.2.4, not ignored.
+  # NB RUSTSEC-2026-0258 (h2) 0.4 path was FIXED by upgrade to 0.4.19; only the nym-only 0.3.27 path is ignored above.
   IGNORE_FLAGS=()
   for id in "${AUDIT_IGNORES[@]}"; do IGNORE_FLAGS+=(--ignore "$id"); done
   cargo audit "${IGNORE_FLAGS[@]}" || rc=1
