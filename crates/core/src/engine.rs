@@ -3932,6 +3932,50 @@ mod tests {
         );
     }
 
+    /// D1 Task 6 (the headline "phone was off" scenario): while a member is OFFLINE the
+    /// host's send is queued (not lost); when the member returns, `flush_outbox` delivers
+    /// the backlog over the same link and the member's ack drains the host's outbox.
+    #[tokio::test]
+    async fn offline_member_receives_backlog_on_flush() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true); // so it auto-acks on receipt
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // m1's phone goes off: the host's send is queued, m1 never receives it.
+        fabric.go_offline("m1");
+        host.send("while-you-were-out").await.unwrap();
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "host queued the send while m1 was offline"
+        );
+
+        // m1 comes back; the host flushes the backlog over the still-open link.
+        fabric.come_online("m1");
+        host.flush_outbox().await;
+        let (text, _) = next_message(&mut m1rx).await;
+        assert_eq!(text, "while-you-were-out", "the offline member catches up on return");
+
+        // m1's auto-ack drains the host outbox.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            host.inner.outbox.pending("#p").is_empty(),
+            "backlog cleared once the returned member acks"
+        );
+    }
+
     /// SUB-SPEC A CQ beacon (roster-grow re-announce): when a new member joins, the
     /// host re-announces its leading name automatically — the joiner resolves the host
     /// WITHOUT the host acting.
