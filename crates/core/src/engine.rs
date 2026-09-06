@@ -2544,6 +2544,17 @@ async fn reader_loop(
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
             }
+            Some(Frame::DeliveryAck(ids)) => {
+                // D1: the peer confirms it received these frames. Clear them from our
+                // outbox (we originated them) and from the keeper queue for that peer
+                // (we buffered them for it). Emit a delivery receipt. An ack for an
+                // unknown gid is a harmless no-op.
+                for gid in ids {
+                    inner.outbox.ack(&inner.descriptor.channel, gid);
+                    inner.keeper.ack(from, gid);
+                    let _ = inner.events_tx.send(Event::Delivered { gossip_id: gid });
+                }
+            }
             Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
                 if bytes.first() == Some(&LINKAGE_SENTINEL) {
                     // SUB-SPEC B: a grouping-linkage disclosure; attribute to this peer.
@@ -3327,6 +3338,15 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
             text,
             marking,
         });
+        // D1: in a persistent chat, acknowledge receipt to the peer we got it from so
+        // that node can clear this frame from its outbox. Keyed by the ciphertext
+        // gossip-id — the same key the sender's outbox used. Idempotent: a re-sent
+        // frame is dropped by the dedup above yet still re-acked here would not fire
+        // (dedup returns early), so a lost ack is recovered only by a fresh delivery;
+        // the outbox TTL bounds the worst case.
+        if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            route(inner, Frame::DeliveryAck(vec![gossip_id(&gct)]), Route::Peer(from)).await;
+        }
     }
     // Fan out to other members. In host-coordinated mode the host relays; a
     // gossip bridge re-floods regardless of role (that's what bridges transport
@@ -3853,6 +3873,36 @@ mod tests {
             attributed,
             Some(m1.fingerprint()),
             "the group name must be attributed to m1's verified leaf, not the relaying host"
+        );
+    }
+
+    /// D1 Task 5: a member's persistent-chat send is queued in its outbox, and the
+    /// host's auto-ack (on receipt) clears it — the delivery-confirmation round-trip.
+    #[tokio::test]
+    async fn ack_clears_sender_outbox_after_delivery() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        m1.send("hi").await.unwrap();
+        assert_eq!(m1.inner.outbox.pending("#p").len(), 1, "member queues its send");
+        // Host receives + surfaces the message, then auto-acks m1; m1 clears its outbox.
+        let _ = next_message(&mut host_rx).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            m1.inner.outbox.pending("#p").is_empty(),
+            "sender outbox cleared once the host acks receipt"
         );
     }
 
