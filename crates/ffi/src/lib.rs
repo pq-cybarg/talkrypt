@@ -373,6 +373,16 @@ pub enum FfiEvent {
     Disconnected {
         fingerprint: String,
     },
+    /// D1 store-and-forward: an outbox frame was delivered (its ack arrived).
+    /// `gossip_id` is the hex ciphertext id — a delivery receipt.
+    Delivered {
+        gossip_id: String,
+    },
+    /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted
+    /// (cap or TTL) — surfaced so a capped drop is never silent.
+    OutboxDropped {
+        count: u32,
+    },
     /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
     /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
     /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
@@ -536,6 +546,10 @@ fn map_event(e: Event) -> FfiEvent {
             vouched,
             inflation_rejected,
         },
+        Event::Delivered { gossip_id } => FfiEvent::Delivered {
+            gossip_id: gossip_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::OutboxDropped { count } => FfiEvent::OutboxDropped { count: count as u32 },
         Event::Error(message) => FfiEvent::Error { message },
     }
 }
@@ -1070,6 +1084,24 @@ impl TalkryptClient {
     /// account" badge vs. a pseudonymous sender.
     pub fn group_leaf_account(&self, leaf: u32) -> Option<String> {
         self.core.group_leaf_account(leaf).map(|fp| hex_fp(&fp))
+    }
+
+    /// D1 store-and-forward: turn this chat's persistent outbox on/off. When on,
+    /// outgoing group messages are queued until delivered (acked) and re-sent on
+    /// reconnect, so a member that was offline catches up.
+    pub fn set_persistence(&self, on: bool) {
+        self.core.set_persistence(on);
+    }
+
+    /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
+    /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
+    pub fn keeper_mode(&self, on: bool) {
+        self.core.keeper_mode(on);
+    }
+
+    /// D1: re-send any un-acked outbox backlog to connected peers (idempotent).
+    pub fn flush_outbox(&self) {
+        self.rt.block_on(self.core.flush_outbox());
     }
 
     /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1) —
