@@ -166,6 +166,15 @@ enum Frame {
     /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
     /// so `GroupAuth.fst` is unaffected. Tag 15 (13/14 reserved for Sub-spec D2).
     DeliveryAck(Vec<[u8; 32]>),
+    /// D1 Layer-B (anchor mailbox): a sender deposits an OPAQUE (already-encrypted) frame
+    /// at a recipient's always-on anchor for later pickup. `recipient` = who it's for;
+    /// the anchor stores it keyed by that fp. Flat: fixed fp + one length-prefixed blob.
+    /// Tag 16.
+    MailboxPut { recipient: [u8; 48], frame: Vec<u8> },
+    /// D1 Layer-B: a phone asks its anchor for any frames buffered for it. The anchor
+    /// replies (only) with frames stored for the AUTHENTICATED requester's fingerprint —
+    /// the pairwise session proves the fetcher is the recipient. No payload. Tag 17.
+    MailboxFetch,
 }
 
 impl Frame {
@@ -242,6 +251,14 @@ impl Frame {
                     w.put_bytes(id);
                 }
             }
+            Frame::MailboxPut { recipient, frame } => {
+                w.put_u8(16);
+                w.put_bytes(recipient);
+                w.put_bytes(frame);
+            }
+            Frame::MailboxFetch => {
+                w.put_u8(17);
+            }
         }
         w.into_vec()
     }
@@ -305,6 +322,18 @@ impl Frame {
                 r.finish().ok()?;
                 Frame::DeliveryAck(ids)
             }
+            16 => {
+                let rv = r.get_bytes().ok()?;
+                if rv.len() != 48 {
+                    return None;
+                }
+                let mut recipient = [0u8; 48];
+                recipient.copy_from_slice(rv);
+                let frame = r.get_vec().ok()?;
+                r.finish().ok()?;
+                Frame::MailboxPut { recipient, frame }
+            }
+            17 => Frame::MailboxFetch,
             _ => return None,
         };
         Some(frame)
@@ -561,6 +590,11 @@ struct Inner {
     /// replay on their reconnect. Holds ciphertext only (no group key).
     keeper: crate::keeper::KeeperQueue,
     keeper_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-B (anchor mailbox): when this node is someone's always-on anchor,
+    /// `MailboxPut` deposits are stored here per recipient fp (opaque ciphertext), and
+    /// a `MailboxFetch` from the authenticated recipient drains + replays them.
+    mailbox: crate::keeper::KeeperQueue,
+    anchor_enabled: std::sync::atomic::AtomicBool,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -833,6 +867,12 @@ impl Core {
                 30 * 24 * 3600,
             ),
             keeper_enabled: std::sync::atomic::AtomicBool::new(false),
+            mailbox: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            anchor_enabled: std::sync::atomic::AtomicBool::new(false),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1590,6 +1630,25 @@ impl Core {
     /// replay on their reconnect (holds ciphertext only, never a group key).
     pub fn keeper_mode(&self, on: bool) {
         self.inner.keeper_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: run as an anchor mailbox — accept `MailboxPut` deposits for offline
+    /// recipients and serve them on `MailboxFetch`. Holds opaque ciphertext only.
+    pub fn anchor_mode(&self, on: bool) {
+        self.inner.anchor_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: deposit an opaque `frame` at a connected anchor for `recipient` to
+    /// pick up later (used when the recipient's own device is offline but its anchor is
+    /// reachable). Sent to whichever connected peer is acting as the anchor.
+    pub async fn deposit_to_anchor(&self, recipient: [u8; 48], frame: Vec<u8>) {
+        route(&self.inner, Frame::MailboxPut { recipient, frame }, Route::Broadcast).await;
+    }
+
+    /// D1 Layer-B: ask connected anchors for any mail buffered for us (call on wake).
+    /// The anchor replies with the stored frames, which arrive as normal group frames.
+    pub async fn fetch_mailbox(&self) {
+        route(&self.inner, Frame::MailboxFetch, Route::Broadcast).await;
     }
 
     /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
@@ -2594,6 +2653,23 @@ async fn reader_loop(
                     inner.outbox.ack(&inner.descriptor.channel, gid);
                     inner.keeper.ack(from, gid);
                     let _ = inner.events_tx.send(Event::Delivered { gossip_id: gid });
+                }
+            }
+            Some(Frame::MailboxPut { recipient, frame }) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-B: as an anchor, store the opaque frame for `recipient`.
+                inner.mailbox.buffer(recipient, gossip_id(&frame), &frame, now_secs());
+            }
+            Some(Frame::MailboxFetch) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-B: serve the authenticated requester (`from`) its buffered
+                // mail — only frames stored for its own fingerprint. Re-send each raw
+                // (they are already-encoded frames); the requester dedups via SeenSet.
+                let mail = inner.mailbox.drain(from);
+                if let Some((s, w)) = peer_handles(&inner, from) {
+                    for (gid, bytes) in mail {
+                        if send_payload(&s, &w, &bytes).await.is_ok() {
+                            inner.mailbox.ack(from, gid);
+                        }
+                    }
                 }
             }
             Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
@@ -4048,6 +4124,48 @@ mod tests {
         assert!(
             !host.inner.keeper.drain(b_fp).is_empty(),
             "keeper buffered A's relayed frame for offline member B"
+        );
+    }
+
+    /// D1 Layer-B (anchor mailbox): a sender deposits an opaque frame at an anchor for a
+    /// recipient; the anchor stores it; when the recipient fetches, the anchor serves +
+    /// clears it (only the authenticated recipient can pull its own mail).
+    #[tokio::test]
+    async fn anchor_mailbox_stores_and_serves() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["anchor".into()],
+            "#m",
+        );
+        let (anchor, _arx) = core_on(&fabric, "anchor", &desc);
+        anchor.anchor_mode(true);
+        anchor.host().await.unwrap();
+        let (sender, _srx) = core_on(&fabric, "sender", &desc);
+        sender.connect("anchor").await.unwrap();
+        let (r, _rrx) = core_on(&fabric, "r", &desc);
+        r.connect("anchor").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Sender deposits a frame for R at the anchor.
+        let r_fp = r.fingerprint();
+        sender
+            .deposit_to_anchor(r_fp, Frame::MailboxFetch.encode())
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor stored the deposited frame for R"
+        );
+
+        // R pulls its mail; the anchor serves + clears it.
+        r.fetch_mailbox().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor cleared R's mail after serving the fetch"
         );
     }
 
@@ -6366,6 +6484,19 @@ mod tests {
         assert!(Frame::decode(&hostile.into_vec()).is_none());
     }
 
+    #[test]
+    fn mailbox_frames_roundtrip() {
+        let put = Frame::MailboxPut { recipient: [9u8; 48], frame: b"sealed".to_vec() };
+        match Frame::decode(&put.encode()) {
+            Some(Frame::MailboxPut { recipient, frame }) => {
+                assert_eq!(recipient, [9u8; 48]);
+                assert_eq!(frame, b"sealed");
+            }
+            _ => panic!("expected MailboxPut"),
+        }
+        assert!(matches!(Frame::decode(&Frame::MailboxFetch.encode()), Some(Frame::MailboxFetch)));
+    }
+
     #[tokio::test]
     async fn persistent_chat_enqueues_outgoing_group_frame() {
         let fabric = LoopbackFabric::new();
@@ -6410,6 +6541,17 @@ mod d1_proofs {
         let len: usize = kani::any();
         kani::assume(len <= 64);
         let data: [u8; 64] = kani::any();
+        let _ = Frame::decode(&data[..len]);
+    }
+
+    /// D1 Layer-B MailboxPut/Fetch decode never panics on arbitrary <=80-byte input
+    /// (flat: fixed fp + one length-prefixed blob). Frame::decode covers both tags.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn mailbox_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 80);
+        let data: [u8; 80] = kani::any();
         let _ = Frame::decode(&data[..len]);
     }
 }

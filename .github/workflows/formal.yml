@@ -62,10 +62,12 @@ jobs:
           cargo kani -p talkrypt-core --harness vouch::proofs::vouched_implies_non_negative_score
           cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window10
           cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window64
-      - name: Prove the D1 DeliveryAck decoder is total (core)
-        # Flat, count-capped [u8;32] batch — CBMC-tractable, so prove no-panic on all
-        # hostile <=64-byte inputs (the store-and-forward ack rides an untrusted path).
-        run: cargo kani -p talkrypt-core --harness engine::d1_proofs::delivery_ack_decode_never_panics
+      - name: Prove the D1 store-and-forward decoders are total (core)
+        # Flat frames (DeliveryAck: capped [u8;32] batch; MailboxPut: fixed fp + one
+        # length-prefixed blob) — CBMC-tractable, proven no-panic on all hostile inputs.
+        run: |
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::delivery_ack_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::mailbox_decode_never_panics
 
   fstar:
     name: "F* — auth theorems"

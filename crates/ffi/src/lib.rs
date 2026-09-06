@@ -1104,6 +1104,17 @@ impl TalkryptClient {
         self.rt.block_on(self.core.flush_outbox());
     }
 
+    /// D1 Layer-B: run this (always-on) node as an anchor mailbox — accept deposits for
+    /// offline recipients and serve them on fetch. Holds opaque ciphertext only.
+    pub fn anchor_mode(&self, on: bool) {
+        self.core.anchor_mode(on);
+    }
+
+    /// D1 Layer-B: ask connected anchors for any mail buffered for us (call on wake).
+    pub fn fetch_mailbox(&self) {
+        self.rt.block_on(self.core.fetch_mailbox());
+    }
+
     /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1) —
     /// its multi-homed endpoint set (e.g. `[onion, nym, lan]`), signed and gossiped
     /// so peers can reach it directly and reconnect via it if the host drops.
