@@ -1191,6 +1191,9 @@ impl Core {
         for ep in endpoints {
             if let Ok(fp) = self.connect(&ep).await {
                 if expected.contains(&fp) {
+                    // D1: healed the link — flush any un-acked outbox backlog so a peer
+                    // that was offline while we sent now catches up.
+                    self.flush_outbox().await;
                     return Some(fp);
                 }
                 // Answered, but not an expected member — drop it and keep trying.
@@ -1546,6 +1549,29 @@ impl Core {
             }
         }
         Ok(())
+    }
+
+    /// D1: re-send every un-acked outbox frame to currently-connected peers. Idempotent
+    /// — a receiver that already has a frame dedups it by gossip-id (SeenSet); a receiver
+    /// that missed it (was offline) surfaces + acks it, clearing our outbox. Called at the
+    /// end of `reconnect()` and safe to call opportunistically when a peer connects. Also
+    /// evicts TTL-expired frames first (surfacing the count).
+    pub async fn flush_outbox(&self) {
+        if !self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let chat = self.inner.descriptor.channel.clone();
+        let expired = self.inner.outbox.evict_expired(&chat, now_secs());
+        if expired > 0 {
+            let _ = self.inner.events_tx.send(Event::OutboxDropped { count: expired });
+        }
+        for (_gid, bytes) in self.inner.outbox.due_for_resend(&chat) {
+            // Stored bytes are a complete `Frame::GroupMsg(ct)` encoding; re-broadcast
+            // the SAME ciphertext (re-encrypting would advance the group ratchet).
+            if let Some(frame) = Frame::decode(&bytes) {
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
+        }
     }
 
     /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
