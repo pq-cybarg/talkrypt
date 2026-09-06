@@ -65,6 +65,12 @@ pub enum Event {
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
+    /// D1 store-and-forward: an outbox frame was delivered (its `DeliveryAck`
+    /// arrived) — a delivery receipt keyed by the ciphertext gossip-id.
+    Delivered { gossip_id: [u8; 32] },
+    /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted to
+    /// stay within the cap — surfaced so a capped drop is never silent.
+    OutboxDropped { count: usize },
     /// A peer's resolved self-declared name changed. `account_fingerprint` is set
     /// only for account-linked/registry tiers; `label` is `None` when suppressed by
     /// the chat's trust policy.
@@ -544,6 +550,17 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
+    /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
+    /// on reconnect so an offline member catches up. Default off (ephemeral).
+    persistent: std::sync::atomic::AtomicBool,
+    /// D1 Layer-0 outbox: un-acked outgoing group frames (opaque, already-encrypted),
+    /// keyed by ciphertext gossip-id. Persistence delegated to an `OutboxStore`.
+    outbox: crate::outbox::Outbox,
+    /// D1 Layer-A keeper: when enabled, buffer opaque frames for offline peers and
+    /// replay on their reconnect. Holds ciphertext only (no group key).
+    keeper: crate::keeper::KeeperQueue,
+    keeper_enabled: std::sync::atomic::AtomicBool,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -801,6 +818,21 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            // D1 store-and-forward. Default in-memory stores (delivery across
+            // reconnects within a run); a host injects a sealed-file `OutboxStore`
+            // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
+            persistent: std::sync::atomic::AtomicBool::new(false),
+            outbox: crate::outbox::Outbox::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper_enabled: std::sync::atomic::AtomicBool::new(false),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1482,21 +1514,56 @@ impl Core {
             }
             GroupRole::Host | GroupRole::Member => {
                 let payload = marking::encode_payload(&marking, text);
-                let frame = {
+                let ct = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
                         // Sign every group message with our per-membership leaf
                         // signature key so receivers can bind it to our leaf and
                         // reject impersonation or relay restamping, without exposing
                         // a long-term identity (SECURITY-AUDIT G1/G2).
-                        Some(grp) => Frame::GroupMsg(grp.encrypt_signed(&payload)?),
+                        Some(grp) => grp.encrypt_signed(&payload)?,
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
+                // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
+                // outbox (keyed by ciphertext gossip-id, which the receiver dedups +
+                // acks on) so an offline member catches up on reconnect. Re-encrypting
+                // later would advance the ratchet, so we store these exact bytes.
+                let frame = Frame::GroupMsg(ct.clone());
+                if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+                    let gid = gossip_id(&ct);
+                    let dropped = self.inner.outbox.enqueue(
+                        &self.inner.descriptor.channel,
+                        gid,
+                        &frame.encode(),
+                        now_secs(),
+                    );
+                    if dropped > 0 {
+                        let _ = self.inner.events_tx.send(Event::OutboxDropped { count: dropped });
+                    }
+                }
                 route(&self.inner, frame, Route::Broadcast).await;
             }
         }
         Ok(())
+    }
+
+    /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
+    /// promotion). When on, outgoing group frames are queued until acked and re-sent
+    /// on reconnect so offline members catch up.
+    pub fn set_persistence(&self, on: bool) {
+        self.inner.persistent.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this chat's persistent outbox is on.
+    pub fn is_persistent(&self) -> bool {
+        self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
+    /// replay on their reconnect (holds ciphertext only, never a group key).
+    pub fn keeper_mode(&self, on: bool) {
+        self.inner.keeper_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
@@ -6102,6 +6169,38 @@ mod tests {
         hostile.put_u8(15);
         hostile.put_u32(70); // > MAX_ACK (64)
         assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
+    #[tokio::test]
+    async fn persistent_chat_enqueues_outgoing_group_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#p",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let (host, _rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("h")),
+            desc,
+            true,
+        );
+        assert!(!host.is_persistent());
+        host.set_persistence(true);
+        host.send("hello").await.unwrap();
+        // The frame is now recoverable from the outbox for resend (keyed by channel).
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "a persistent-chat send is queued in the outbox"
+        );
+        // A second send adds a distinct entry.
+        host.send("world").await.unwrap();
+        assert_eq!(host.inner.outbox.pending("#p").len(), 2);
     }
 }
 
