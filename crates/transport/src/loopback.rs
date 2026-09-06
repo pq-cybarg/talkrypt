@@ -7,6 +7,7 @@
 //! and offline operation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,20 +18,32 @@ use crate::{
     TransportStatus,
 };
 
+/// Per-endpoint reachability flag (true = online). A stream end that writes TOWARD a
+/// node whose flag is false silently drops the frame — modelling an offline peer that
+/// loses inbound traffic without tearing down the app-level connection, so flipping the
+/// flag back online lets a re-send (e.g. `flush_outbox`) deliver over the same stream.
+type Gate = Arc<AtomicBool>;
+
 /// One end of a bidirectional in-memory connection.
 pub struct LoopStream {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Reachability of the REMOTE end (where our writes go). Frames are dropped while
+    /// it is offline.
+    gate: Gate,
 }
 
 /// Write half of a [`LoopStream`].
-pub struct LoopWriter(mpsc::UnboundedSender<Vec<u8>>);
+pub struct LoopWriter(mpsc::UnboundedSender<Vec<u8>>, Gate);
 /// Read half of a [`LoopStream`].
 pub struct LoopReader(mpsc::UnboundedReceiver<Vec<u8>>);
 
 #[async_trait]
 impl FrameWriter for LoopWriter {
     async fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if !self.1.load(Ordering::Relaxed) {
+            return Ok(()); // remote is offline: silently drop (link is lossy, not torn down)
+        }
         self.0
             .send(frame.to_vec())
             .map_err(|_| TransportError::Closed)
@@ -47,6 +60,9 @@ impl FrameReader for LoopReader {
 #[async_trait]
 impl Stream for LoopStream {
     async fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if !self.gate.load(Ordering::Relaxed) {
+            return Ok(()); // remote offline: drop (see `Gate`)
+        }
         self.tx
             .send(frame.to_vec())
             .map_err(|_| TransportError::Closed)
@@ -57,17 +73,22 @@ impl Stream for LoopStream {
     }
 
     fn into_split(self: Box<Self>) -> (Box<dyn FrameWriter>, Box<dyn FrameReader>) {
-        (Box::new(LoopWriter(self.tx)), Box::new(LoopReader(self.rx)))
+        (
+            Box::new(LoopWriter(self.tx, self.gate)),
+            Box::new(LoopReader(self.rx)),
+        )
     }
 }
 
-fn duplex() -> (LoopStream, LoopStream) {
+/// `dialer_gate` gates the dialer's writes (toward the listener); `listener_gate` gates
+/// the listener's writes (toward the dialer).
+fn duplex(dialer_gate: Gate, listener_gate: Gate) -> (LoopStream, LoopStream) {
     let (a_tx, a_rx) = mpsc::unbounded_channel();
     let (b_tx, b_rx) = mpsc::unbounded_channel();
     // a writes to a_tx -> b reads from a_rx; b writes to b_tx -> a reads b_rx.
     (
-        LoopStream { tx: a_tx, rx: b_rx },
-        LoopStream { tx: b_tx, rx: a_rx },
+        LoopStream { tx: a_tx, rx: b_rx, gate: dialer_gate },
+        LoopStream { tx: b_tx, rx: a_rx, gate: listener_gate },
     )
 }
 
@@ -78,6 +99,8 @@ type ListenerMap = HashMap<Endpoint, mpsc::UnboundedSender<Box<dyn Stream>>>;
 #[derive(Clone, Default)]
 pub struct LoopbackFabric {
     inner: Arc<Mutex<ListenerMap>>,
+    /// Per-endpoint reachability flags (default online). See [`Gate`].
+    gates: Arc<Mutex<HashMap<Endpoint, Gate>>>,
 }
 
 impl LoopbackFabric {
@@ -93,21 +116,48 @@ impl LoopbackFabric {
         }
     }
 
+    /// Get-or-create the reachability flag for `endpoint` (default online).
+    fn gate(&self, endpoint: &Endpoint) -> Gate {
+        self.gates
+            .lock()
+            .unwrap()
+            .entry(endpoint.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+            .clone()
+    }
+
+    /// TEST HOOK: mark `endpoint` offline — frames written toward it are silently
+    /// dropped (a lossy inbound link), without tearing down existing app-level
+    /// connections. Pair with [`come_online`](Self::come_online) + a re-send to
+    /// deliver the backlog. Models "the phone was off."
+    pub fn go_offline(&self, endpoint: impl Into<Endpoint>) {
+        self.gate(&endpoint.into()).store(false, Ordering::Relaxed);
+    }
+
+    /// TEST HOOK: mark `endpoint` online again (undo [`go_offline`](Self::go_offline)).
+    pub fn come_online(&self, endpoint: impl Into<Endpoint>) {
+        self.gate(&endpoint.into()).store(true, Ordering::Relaxed);
+    }
+
     fn register(&self, endpoint: Endpoint) -> mpsc::UnboundedReceiver<Box<dyn Stream>> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.inner.lock().unwrap().insert(endpoint, tx);
         rx
     }
 
-    fn connect(&self, endpoint: &Endpoint) -> Result<LoopStream> {
+    fn connect(&self, dialer: &Endpoint, target: &Endpoint) -> Result<LoopStream> {
+        // Gate each end on the REMOTE it writes toward: the dialer writes to the target,
+        // the listener writes to the dialer.
+        let dialer_gate = self.gate(target);
+        let listener_gate = self.gate(dialer);
         let guard = self.inner.lock().unwrap();
         let listener_tx = guard
-            .get(endpoint)
-            .ok_or_else(|| TransportError::NoListener(endpoint.clone()))?;
-        let (dialer_end, listener_end) = duplex();
+            .get(target)
+            .ok_or_else(|| TransportError::NoListener(target.clone()))?;
+        let (dialer_end, listener_end) = duplex(dialer_gate, listener_gate);
         listener_tx
             .send(Box::new(listener_end))
-            .map_err(|_| TransportError::NoListener(endpoint.clone()))?;
+            .map_err(|_| TransportError::NoListener(target.clone()))?;
         Ok(dialer_end)
     }
 }
@@ -145,7 +195,7 @@ impl Transport for LoopbackTransport {
     }
 
     async fn dial(&self, endpoint: &Endpoint) -> Result<Box<dyn Stream>> {
-        let stream = self.fabric.connect(endpoint)?;
+        let stream = self.fabric.connect(&self.local, endpoint)?;
         Ok(Box::new(stream))
     }
 
