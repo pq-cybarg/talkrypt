@@ -576,6 +576,8 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
                 }
                 Event::Vouch { .. } => {} // below threshold / withdrawn — no status line
+                Event::Delivered { .. } => {} // D1 delivery receipt (UI later)
+                Event::OutboxDropped { count } => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! outbox dropped {count} un-acked message(s)") }); }
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();
