@@ -2320,6 +2320,21 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
+    // D1 Layer-A keeper: if we buffered frames for this peer while it was offline,
+    // replay them now that it is back (holds ciphertext only). Spawned because
+    // `register` is synchronous; the peer's own writer/session carry the re-sends.
+    if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let buffered = inner.keeper.drain(fingerprint);
+        if !buffered.is_empty() {
+            let (rs, rw) = (session.clone(), writer.clone());
+            tokio::spawn(async move {
+                for (_gid, bytes) in buffered {
+                    let _ = send_payload(&rs, &rw, &bytes).await;
+                }
+            });
+        }
+    }
+
     // Identity presentation rides as the first frame *inside* the encrypted
     // session (never in the plaintext handshake), so the sensitive
     // account↔device linkage is AEAD-protected. Only in plain pairwise mode —
@@ -3380,9 +3395,30 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // non-member relay does the fan-out (Routed envelopes), so we never re-relay.
     let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
     if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
+        let frame_bytes = Frame::GroupMsg(gct.clone()).encode();
+        let connected: std::collections::HashSet<[u8; 48]> =
+            collect_peers(inner).iter().map(|(_, _, fp)| *fp).collect();
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
-                let _ = send_payload(&s, &w, &Frame::GroupMsg(gct.clone()).encode()).await;
+                let _ = send_payload(&s, &w, &frame_bytes).await;
+            }
+        }
+        // D1 Layer-A keeper: buffer the (opaque) frame for any roster member that is
+        // NOT currently connected, so it catches up when it reconnects. Holds
+        // ciphertext only. Skips the original sender and ourselves.
+        if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            let me = inner.identity.public().fingerprint();
+            let gid = gossip_id(&gct);
+            let offline: Vec<[u8; 48]> = {
+                let roster = inner.roster.lock().unwrap();
+                roster
+                    .values()
+                    .copied()
+                    .filter(|fp| *fp != from && *fp != me && !connected.contains(fp))
+                    .collect()
+            };
+            for fp in offline {
+                inner.keeper.buffer(fp, gid, &frame_bytes, now_secs());
             }
         }
     }
@@ -3973,6 +4009,45 @@ mod tests {
         assert!(
             host.inner.outbox.pending("#p").is_empty(),
             "backlog cleared once the returned member acks"
+        );
+    }
+
+    /// D1 Task 7 (group keeper): a keeper-enabled host relaying member A's message
+    /// BUFFERS it (opaque) for roster member B who is offline, so B can catch up on
+    /// return. Proves the buffer-for-offline-roster-member production path.
+    #[tokio::test]
+    async fn keeper_buffers_relayed_frame_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.keeper_mode(true);
+        let (a, _arx) = group_core(&fabric, "a", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        a.connect("host").await.unwrap();
+        b.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let b_fp = b.fingerprint();
+        assert!(
+            host.inner.roster.lock().unwrap().values().any(|fp| *fp == b_fp),
+            "B joined the group (in the host roster)"
+        );
+        // B goes offline: drop the host's peer entry for B (B is no longer connected).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        // A sends; the host relays to connected peers (B is gone) and, as keeper,
+        // buffers the opaque frame for offline roster member B.
+        a.send("for-b").await.unwrap();
+        let _ = next_message(&mut host_rx).await; // host surfaces A's message
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !host.inner.keeper.drain(b_fp).is_empty(),
+            "keeper buffered A's relayed frame for offline member B"
         );
     }
 
