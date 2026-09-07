@@ -7635,6 +7635,104 @@ mod tests {
         assert!(!core.is_persistent());
     }
 
+    /// D3 Task 6 (invariant 1, default-safe): the default retention (Fresh / any unknown
+    /// tag) seals nothing — no retroactive persistence without an explicit choice.
+    #[test]
+    fn invariant_default_safe_seals_nothing() {
+        // The wire/UI default is 0 = Fresh; an unrecognized tag also falls back to Fresh.
+        assert!(!should_seal(RetentionMode::from_u8(0).unwrap(), 0, 12345));
+        assert!(!should_seal(RetentionMode::from_u8(200).unwrap_or(RetentionMode::Fresh), 0, 12345));
+    }
+
+    /// D3 Task 6 (invariant 2, consented): a member that DECLINES a Carry promotion seals
+    /// nothing for itself, even though it holds a backlog — retention needs THAT member's
+    /// consent. Uses opt-in-successor (rule 1) so a decline doesn't abort the whole thing.
+    #[tokio::test]
+    async fn invariant_decliner_seals_nothing() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#in2",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        let m1_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m1.set_history_store(m1_hist.clone());
+        let (m2, mut m2rx) = group_core(&fabric, "m2", &desc, false);
+        let m2_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m2.set_history_store(m2_hist.clone());
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // Everyone builds a backlog.
+        host.send("hello all").await.unwrap();
+        wait_for_message(&mut m1rx, "hello all").await;
+        wait_for_message(&mut m2rx, "hello all").await;
+        assert!(m2.backlog_len() >= 1, "m2 has a backlog it COULD seal");
+
+        // Opt-in Carry picking host+m1+m2; m1 accepts, m2 declines.
+        let id = host
+            .propose_promote(1, 1, 1, vec![host.fingerprint(), m1.fingerprint(), m2.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        wait_for_promote(&mut m1rx, id).await;
+        wait_for_promote(&mut m2rx, id).await;
+        m1.respond_promote(id, true).await.unwrap();
+        m2.respond_promote(id, false).await.unwrap();
+        wait_for_promoted(&mut hrx, id).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(!m1_hist.load("#in2").is_empty(), "the accepter sealed its own backlog");
+        assert!(m2_hist.load("#in2").is_empty(), "the DECLINER sealed nothing (invariant 2)");
+    }
+
+    /// D3 Task 6 (invariant 3, no fabrication / no transmission): a latecomer who joins after
+    /// the messages were sent has an empty backlog, so a Carry promotion seals NOTHING for it
+    /// — history is never backfilled to a member who wasn't there. (Structurally, there is no
+    /// history wire frame at all, so carrying can never transmit.)
+    #[tokio::test]
+    async fn invariant_latecomer_gets_no_backfill() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#in3",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Messages exchanged BEFORE the latecomer joins.
+        host.send("early-1").await.unwrap();
+        wait_for_message(&mut m1rx, "early-1").await;
+        m1.send("early-2").await.unwrap();
+        wait_for_message(&mut hrx, "early-2").await;
+
+        // Latecomer joins now — its backlog is empty.
+        let (m3, mut m3rx) = group_core(&fabric, "m3", &desc, false);
+        let m3_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m3.set_history_store(m3_hist.clone());
+        m3.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(m3.backlog_len(), 0, "latecomer has no backlog");
+
+        // Carry promotion, m3 accepts.
+        let id = host
+            .propose_promote(1, 1, 1, vec![host.fingerprint(), m1.fingerprint(), m3.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        wait_for_promote(&mut m1rx, id).await;
+        wait_for_promote(&mut m3rx, id).await;
+        m1.respond_promote(id, true).await.unwrap();
+        m3.respond_promote(id, true).await.unwrap();
+        wait_for_promoted(&mut hrx, id).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(m3_hist.load("#in3").is_empty(), "no backfill to a latecomer (invariant 3)");
+    }
+
     /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
     /// stays ephemeral (nobody's expectation is overridden).
     #[tokio::test]
