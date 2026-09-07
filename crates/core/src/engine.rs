@@ -180,6 +180,10 @@ enum Frame {
     Promote(Vec<u8>),
     /// SUB-SPEC D2: a signed consent response (opaque `body ‖ leaf ‖ sig` blob). Tag 14.
     Consent(Vec<u8>),
+    /// SUB-SPEC D2/D3: the committer's signed announcement that a promotion COMMITTED
+    /// (opaque `promote_id ‖ leaf ‖ sig`); a member finalizes locally — flips persistence
+    /// and applies its consented D3 retention contract. Tag 19.
+    PromoteCommit(Vec<u8>),
     /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
     /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
     /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
@@ -277,6 +281,10 @@ impl Frame {
                 w.put_u8(14);
                 w.put_bytes(b);
             }
+            Frame::PromoteCommit(b) => {
+                w.put_u8(19);
+                w.put_bytes(b);
+            }
             Frame::DeliveryAck(ids) => {
                 w.put_u8(15);
                 w.put_u32(ids.len() as u32);
@@ -346,6 +354,7 @@ impl Frame {
             12 => Frame::Presence(r.get_vec().ok()?),
             13 => Frame::Promote(r.get_vec().ok()?),
             14 => Frame::Consent(r.get_vec().ok()?),
+            19 => Frame::PromoteCommit(r.get_vec().ok()?),
             15 => {
                 const MAX_ACK: usize = 64;
                 let n = r.get_u32().ok()? as usize;
@@ -549,6 +558,10 @@ struct PromoteState {
     body: PromoteBody,
     /// leaf -> accepted?  (only DISTINCT, signature-verified consents recorded).
     consents: std::collections::HashMap<u32, bool>,
+    /// SUB-SPEC D3 (member side): our own accept/decline to this proposal, set by
+    /// `respond_promote`. `Some(true)` authorizes sealing our OWN backlog when the
+    /// committer announces the commit; `Some(false)`/`None` ⇒ we seal nothing.
+    my_response: Option<bool>,
 }
 
 /// SUB-SPEC D3: one entry in a member's own ephemeral backlog — the gossip-id of the
@@ -1938,6 +1951,7 @@ impl Core {
         *self.inner.promote.lock().unwrap() = Some(PromoteState {
             body,
             consents: std::collections::HashMap::new(),
+            my_response: Some(true), // the proposer implicitly consents to its own promotion
         });
         route(&self.inner, Frame::Promote(payload), Route::Broadcast).await;
         // HostMandate (rule 2): the host converts unilaterally — commit immediately,
@@ -1971,6 +1985,13 @@ impl Core {
                 .map_err(|_| crate::error::CoreError::GroupNotReady)?;
             wrap_signed(&cb_bytes, grp.my_leaf(), &sig)
         };
+        // D3: remember our own authorization so a later PromoteCommit seals (or not) our
+        // OWN backlog per this decision — matches promote_id to avoid a stale carry-over.
+        if let Some(state) = self.inner.promote.lock().unwrap().as_mut() {
+            if state.body.id() == promote_id {
+                state.my_response = Some(accept);
+            }
+        }
         route(&self.inner, Frame::Consent(payload), Route::Committer).await;
         Ok(())
     }
@@ -3029,6 +3050,11 @@ async fn reader_loop(
                 // SUB-SPEC D2: a consent response — the host tallies + commits/aborts.
                 handle_consent(&inner, from, payload).await;
             }
+            Some(Frame::PromoteCommit(payload)) if inner.role == GroupRole::Member => {
+                // SUB-SPEC D2/D3: the committer announced the promotion committed — a member
+                // finalizes locally (persistence + its consented retention).
+                handle_promote_commit(&inner, payload).await;
+            }
             Some(Frame::DeliveryAck(ids)) => {
                 // D1: the peer confirms it received these frames. Clear them from our
                 // outbox (we originated them) and from the keeper queue for that peer
@@ -3861,6 +3887,7 @@ async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
     *inner.promote.lock().unwrap() = Some(PromoteState {
         body,
         consents: std::collections::HashMap::new(),
+        my_response: None, // set when this member calls respond_promote
     });
     let _ = inner.events_tx.send(ev);
 }
@@ -3923,6 +3950,41 @@ fn promotion_decision(
     }
 }
 
+/// SUB-SPEC D3: apply the retention contract at the promotion boundary. `Fresh` (and any
+/// unknown tag — fail-safe) seals nothing; `Carry` seals every backlog entry into the local
+/// history store; `CarryFromPoint` seals only entries with `ts >= carry_from_secs`. The
+/// in-memory ephemeral backlog is drained either way (the ephemeral window has closed).
+///
+/// LOCAL ONLY: this seals THIS node's own already-received/-sent messages — it never sends
+/// history to anyone (no transmission) and never fabricates messages for a latecomer (a
+/// member with an empty backlog seals nothing). See D3 spec "promotion authorizes RETENTION,
+/// never TRANSMISSION".
+fn apply_retention(inner: &Arc<Inner>, retention_mode: u8, carry_from_secs: u64) {
+    // Unknown tag ⇒ Fresh (retain nothing) — fail closed toward the ephemeral expectation.
+    let mode = RetentionMode::from_u8(retention_mode).unwrap_or(RetentionMode::Fresh);
+    let chat = inner.descriptor.channel.clone();
+    let entries: Vec<BacklogEntry> = std::mem::take(&mut *inner.backlog.lock().unwrap());
+    let to_seal: Vec<&BacklogEntry> =
+        entries.iter().filter(|e| should_seal(mode, carry_from_secs, e.ts)).collect();
+    if !to_seal.is_empty() {
+        let history = inner.history.lock().unwrap().clone();
+        for e in to_seal {
+            history.put(&chat, e.gid, &e.record);
+        }
+    }
+}
+
+/// SUB-SPEC D3: pure predicate — does a backlog entry with timestamp `ts` get sealed under
+/// `mode`? `Fresh` never seals; `Carry` always; `CarryFromPoint` seals only `ts >=
+/// carry_from_secs`. Kept pure (no I/O) so the boundary logic is deterministically testable.
+fn should_seal(mode: RetentionMode, carry_from_secs: u64, ts: u64) -> bool {
+    match mode {
+        RetentionMode::Fresh => false,
+        RetentionMode::Carry => true,
+        RetentionMode::CarryFromPoint => ts >= carry_from_secs,
+    }
+}
+
 /// SUB-SPEC D2 (HOST): commit the promotion — evict every roster member NOT in `carried`
 /// (member picker + decliners), re-key the group at the PCS boundary (reusing the audited
 /// `self_update` path so GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and
@@ -3931,6 +3993,29 @@ fn promotion_decision(
 async fn commit_promotion(inner: &Arc<Inner>, promote_id: [u8; 32], carried: &[[u8; 48]]) {
     let core = Core { inner: inner.clone() };
     let me = inner.identity.public().fingerprint();
+    // SUB-SPEC D3: read the authenticated retention contract from the committing proposal
+    // BEFORE it is cleared, and apply it (seal / drop our OWN backlog) at the boundary.
+    let (retention_mode, carry_from_secs) = inner
+        .promote
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| (s.body.retention_mode, s.body.carry_from_secs))
+        .unwrap_or((0, 0));
+    // SUB-SPEC D2/D3: announce the commit to members BEFORE the re-key so they verify at the
+    // still-current epoch, flip persistence, and apply their consented retention. Signed under
+    // our leaf over the distinct PROMO_COMMIT_CONTEXT (never confusable with a promote/consent).
+    if let Some(payload) = {
+        let g = inner.group.lock().await;
+        g.as_ref().and_then(|grp| {
+            grp.sign_promo_commit(&promote_id)
+                .ok()
+                .map(|sig| wrap_signed(&promote_id, grp.my_leaf(), &sig))
+        })
+    } {
+        route(inner, Frame::PromoteCommit(payload), Route::Broadcast).await;
+    }
+    apply_retention(inner, retention_mode, carry_from_secs);
     let keep: std::collections::HashSet<[u8; 48]> = carried.iter().copied().collect();
     let to_remove: Vec<[u8; 48]> = {
         let roster = inner.roster.lock().unwrap();
@@ -3947,6 +4032,45 @@ async fn commit_promotion(inner: &Arc<Inner>, promote_id: [u8; 32], carried: &[[
     core.set_persistence(true); // D1: the successor is persistent
     let _ = inner.events_tx.send(Event::Promoted { promote_id });
     *inner.promote.lock().unwrap() = None;
+}
+
+/// SUB-SPEC D2/D3 (MEMBER): the committer announced that promotion `promote_id` committed.
+/// Verify the announcement under the committer's leaf key (fail-closed), then — only if it
+/// matches the proposal WE consented to accept — apply our own D3 retention contract to our
+/// OWN backlog and flip this chat persistent. A member that declined (or never responded)
+/// seals nothing; a forged/unknown-leaf announcement is dropped.
+async fn handle_promote_commit(inner: &Arc<Inner>, payload: Vec<u8>) {
+    let Some((body, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let verified = {
+        let g = inner.group.lock().await;
+        g.as_ref().map(|grp| grp.verify_promo_commit(leaf, &body, &sig)).unwrap_or(false)
+    };
+    if !verified || body.len() != 32 {
+        return; // forged / unknown leaf / malformed — fail closed
+    }
+    let mut promote_id = [0u8; 32];
+    promote_id.copy_from_slice(&body);
+    // Pull the retention contract we consented to — only if this commit matches it AND we
+    // accepted. Clear the pending state regardless (the promotion is now decided).
+    let apply = {
+        let mut pend = inner.promote.lock().unwrap();
+        let decision = pend.as_ref().and_then(|s| {
+            if s.body.id() == promote_id && s.my_response == Some(true) {
+                Some((s.body.retention_mode, s.body.carry_from_secs))
+            } else {
+                None
+            }
+        });
+        *pend = None;
+        decision
+    };
+    if let Some((mode, carry_from_secs)) = apply {
+        apply_retention(inner, mode, carry_from_secs);
+        Core { inner: inner.clone() }.set_persistence(true);
+        let _ = inner.events_tx.send(Event::Promoted { promote_id });
+    }
 }
 
 /// SUB-SPEC D2 (HOST): a consent arrived. Verify it under the consenting leaf's key
@@ -4132,6 +4256,47 @@ mod tests {
             .await
             .expect("event before timeout")
             .expect("channel open")
+    }
+
+    /// D3 test helpers: block until a specific event arrives (ignoring other noise).
+    async fn wait_for_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, want: &str) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(rx).await {
+                    if text == want {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("message {want:?} before timeout"));
+    }
+    async fn wait_for_promote(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, id: [u8; 32]) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(rx).await {
+                    if promote_id == id {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("PromoteProposed before timeout");
+    }
+    async fn wait_for_promoted(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, id: [u8; 32]) {
+        timeout(Duration::from_secs(6), async {
+            loop {
+                if let Event::Promoted { promote_id } = next_event(rx).await {
+                    if promote_id == id {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Promoted before timeout");
     }
 
     /// Wait for the next `Message` event, ignoring Connected/Error noise.
@@ -7371,6 +7536,72 @@ mod tests {
         // Host: its own send + m1's reply. m1: host's message + its own send.
         assert_eq!(host.backlog_len(), 2, "host backlog = own send + received reply");
         assert_eq!(m1.backlog_len(), 2, "m1 backlog = received + own send");
+    }
+
+    /// D3 Task 4: the pure retention predicate covers all three modes deterministically
+    /// (no timing). Fresh never seals; Carry always; CarryFromPoint respects the marker.
+    #[test]
+    fn should_seal_covers_all_modes() {
+        // Fresh: nothing, regardless of ts/marker.
+        assert!(!should_seal(RetentionMode::Fresh, 0, 100));
+        assert!(!should_seal(RetentionMode::Fresh, 50, 100));
+        // Carry: everything.
+        assert!(should_seal(RetentionMode::Carry, 999, 0));
+        assert!(should_seal(RetentionMode::Carry, 0, 100));
+        // CarryFromPoint: at/after the marker only.
+        assert!(should_seal(RetentionMode::CarryFromPoint, 100, 100), "boundary is inclusive");
+        assert!(should_seal(RetentionMode::CarryFromPoint, 100, 101));
+        assert!(!should_seal(RetentionMode::CarryFromPoint, 100, 99));
+        // from_u8 fails closed on an unknown tag.
+        assert_eq!(RetentionMode::from_u8(3), None);
+        assert_eq!(RetentionMode::from_u8(0), Some(RetentionMode::Fresh));
+    }
+
+    /// D3 Task 4: a Carry promotion seals each node's OWN backlog into its history store;
+    /// a Fresh promotion seals nothing. Verifies host + member both apply the contract.
+    #[tokio::test]
+    async fn retention_carry_seals_own_backlog_fresh_seals_nothing() {
+        use crate::history::HistoryStore;
+        for (mode, expect_sealed) in [(1u8, true), (0u8, false)] {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#rt",
+            );
+            let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+            host.host().await.unwrap();
+            let host_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+            host.set_history_store(host_hist.clone());
+            let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+            let m1_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+            m1.set_history_store(m1_hist.clone());
+            m1.connect("host").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+
+            // Exchange two messages so both nodes have a non-empty backlog.
+            host.send("m-from-host").await.unwrap();
+            wait_for_message(&mut m1rx, "m-from-host").await;
+            m1.send("m-from-m1").await.unwrap();
+            wait_for_message(&mut hrx, "m-from-m1").await;
+
+            let id = host
+                .propose_promote(1, mode, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
+                .await
+                .unwrap();
+            // m1 consents accept.
+            wait_for_promote(&mut m1rx, id).await;
+            m1.respond_promote(id, true).await.unwrap();
+            wait_for_promoted(&mut hrx, id).await;
+            // Let the PromoteCommit reach m1 so it finalizes.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            if expect_sealed {
+                assert_eq!(host_hist.load("#rt").len(), 2, "Carry: host sealed its own backlog");
+                assert_eq!(m1_hist.load("#rt").len(), 2, "Carry: m1 sealed its own backlog");
+            } else {
+                assert!(host_hist.load("#rt").is_empty(), "Fresh: host sealed nothing");
+                assert!(m1_hist.load("#rt").is_empty(), "Fresh: m1 sealed nothing");
+            }
+        }
     }
 
     /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
