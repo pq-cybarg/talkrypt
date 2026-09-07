@@ -71,6 +71,20 @@ pub enum Event {
     /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted to
     /// stay within the cap — surfaced so a capped drop is never silent.
     OutboxDropped { count: usize },
+    /// SUB-SPEC D2: a (verified) promotion was proposed. The UI shows the target tier,
+    /// the retention contract being agreed to, and the picked membership, and prompts
+    /// the user to consent via `respond_promote`.
+    PromoteProposed {
+        by: [u8; 48],
+        promote_id: [u8; 32],
+        target_tier: u8,
+        retention_mode: u8,
+        picked: Vec<[u8; 48]>,
+    },
+    /// SUB-SPEC D2: the promotion committed — this chat is now persistent.
+    Promoted { promote_id: [u8; 32] },
+    /// SUB-SPEC D2: the promotion was aborted (declined / timed out); chat stays ephemeral.
+    PromoteAborted { promote_id: [u8; 32] },
     /// A peer's resolved self-declared name changed. `account_fingerprint` is set
     /// only for account-linked/registry tiers; `label` is `None` when suppressed by
     /// the chat's trust policy.
@@ -1837,6 +1851,23 @@ impl Core {
         Ok(id)
     }
 
+    /// SUB-SPEC D2: consent to (or decline) the pending promotion `promote_id`. Signs a
+    /// `ConsentBody` under our leaf key and sends it to the committer (host), who tallies.
+    pub async fn respond_promote(&self, promote_id: [u8; 32], accept: bool) -> Result<()> {
+        let payload = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let cb = ConsentBody { promote_id, accept, leaf: grp.my_leaf(), epoch: grp.epoch() };
+            let cb_bytes = cb.encode();
+            let sig = grp
+                .sign_consent(&cb_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            wrap_signed(&cb_bytes, grp.my_leaf(), &sig)
+        };
+        route(&self.inner, Frame::Consent(payload), Route::Committer).await;
+        Ok(())
+    }
+
     /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
     /// promotion). When on, outgoing group frames are queued until acked and re-sent
     /// on reconnect so offline members catch up.
@@ -2871,6 +2902,10 @@ async fn reader_loop(
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
             }
+            Some(Frame::Promote(payload)) if inner.role != GroupRole::None => {
+                // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
+                handle_promote(&inner, from, payload).await;
+            }
             Some(Frame::DeliveryAck(ids)) => {
                 // D1: the peer confirms it received these frames. Clear them from our
                 // outbox (we originated them) and from the keeper queue for that peer
@@ -3669,6 +3704,44 @@ async fn handle_update_proposal(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u
 }
 
 /// Decrypt a group message; the host also relays it to the other members.
+/// SUB-SPEC D2: a member received a promotion proposal. Verify the promoter's signature
+/// under its claimed leaf (fail-closed), check it binds the current epoch, record it as
+/// pending, and surface it for user consent. A forged/stale/malformed proposal is dropped.
+async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
+    let Some((body_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let ok = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => grp.verify_promote(leaf, &body_bytes, &sig) && {
+                // The proposal must bind the CURRENT epoch (anti replay/rollback).
+                PromoteBody::decode(&body_bytes).map(|b| b.epoch == grp.epoch()).unwrap_or(false)
+            },
+            None => false,
+        }
+    };
+    if !ok {
+        return; // forged, stale-epoch, or malformed — fail closed
+    }
+    let Some(body) = PromoteBody::decode(&body_bytes) else {
+        return;
+    };
+    let id = body.id();
+    let ev = Event::PromoteProposed {
+        by: from,
+        promote_id: id,
+        target_tier: body.target_tier,
+        retention_mode: body.retention_mode,
+        picked: body.picked.clone(),
+    };
+    *inner.promote.lock().unwrap() = Some(PromoteState {
+        body,
+        consents: std::collections::HashMap::new(),
+    });
+    let _ = inner.events_tx.send(ev);
+}
+
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
     // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
@@ -6858,6 +6931,41 @@ mod tests {
         let state = st.as_ref().expect("pending promotion tracked");
         assert_eq!(state.body.id(), id, "tracked body matches the returned promote_id");
         assert!(state.consents.is_empty(), "no consents yet");
+    }
+
+    /// D2 Task 4: a member receives the host's promotion proposal, VERIFIES the signature
+    /// under the host's leaf, surfaces `PromoteProposed`, and can send a signed consent.
+    #[tokio::test]
+    async fn member_receives_verifies_promote_and_can_consent() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let picked = vec![host.fingerprint(), m1.fingerprint()];
+        let id = host.propose_promote(1, 0, 0, picked, String::new()).await.unwrap();
+        // m1 verifies + surfaces the proposal.
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, target_tier, .. } = next_event(&mut m1rx).await {
+                    break (promote_id, target_tier);
+                }
+            }
+        })
+        .await
+        .expect("PromoteProposed before timeout");
+        assert_eq!(got.0, id, "the surfaced promote_id matches the proposal");
+        assert_eq!(got.1, 1);
+        // m1 consents (signs + sends without error).
+        m1.respond_promote(id, true).await.unwrap();
     }
 
     #[test]
