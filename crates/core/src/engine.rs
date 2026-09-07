@@ -1848,6 +1848,21 @@ impl Core {
             consents: std::collections::HashMap::new(),
         });
         route(&self.inner, Frame::Promote(payload), Route::Broadcast).await;
+        // HostMandate (rule 2): the host converts unilaterally — commit immediately,
+        // carrying every picked member (a member that later declines is out of scope for
+        // the MVP; unanimous/opt-in are the consent-gated paths).
+        if consent_rule == 2 {
+            let carried: Vec<[u8; 48]> = {
+                let roster = self.inner.roster.lock().unwrap();
+                let me = self.inner.identity.public().fingerprint();
+                let picked: std::collections::HashSet<[u8; 48]> =
+                    self.inner.promote.lock().unwrap().as_ref().map(|s| s.body.picked.iter().copied().collect()).unwrap_or_default();
+                std::iter::once(me)
+                    .chain(roster.values().copied().filter(|fp| picked.contains(fp) && *fp != me))
+                    .collect()
+            };
+            commit_promotion(&self.inner, id, &carried).await;
+        }
         Ok(id)
     }
 
@@ -3746,58 +3761,87 @@ async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
     let _ = inner.events_tx.send(ev);
 }
 
-/// SUB-SPEC D2: is the promotion decided given the current tally? `Some(true)` = commit,
-/// `Some(false)` = abort, `None` = keep waiting. The picked members (excluding the host
-/// itself) are resolved to their roster leaves and evaluated per the consent rule.
-fn promotion_decided(
+/// SUB-SPEC D2: the tally decision. `Commit(carried)` names the fingerprints (incl. the
+/// host) to keep in the persistent successor; `Abort` cancels; `Wait` keeps collecting.
+enum PromoDecision {
+    Wait,
+    Abort,
+    Commit(Vec<[u8; 48]>),
+}
+
+/// Evaluate the pending promotion per its consent rule given the current tally. Picked
+/// members (other than the host) are resolved to their roster leaves.
+///   0 Unanimous     — any decline aborts; all-accept commits carrying every picked member.
+///   1 OptInSuccessor— once every picked member has responded, commit carrying the accepters.
+///   2 HostMandate   — decided at propose time (see `propose_promote`), never here.
+fn promotion_decision(
     state: &PromoteState,
     roster: &std::collections::HashMap<u32, [u8; 48]>,
     me_fp: [u8; 48],
-) -> Option<bool> {
+) -> PromoDecision {
     let picked: std::collections::HashSet<[u8; 48]> = state.body.picked.iter().copied().collect();
-    // Leaves of picked members other than the host (the host is the committer).
-    let required: Vec<u32> = roster
+    let picked_members: Vec<(u32, [u8; 48])> = roster
         .iter()
         .filter(|(_, fp)| picked.contains(*fp) && **fp != me_fp)
-        .map(|(l, _)| *l)
+        .map(|(l, fp)| (*l, *fp))
         .collect();
+    let carried_all = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp).chain(picked_members.iter().map(|(_, fp)| *fp)).collect()
+    };
+    let carried_accepters = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp)
+            .chain(
+                picked_members
+                    .iter()
+                    .filter(|(l, _)| state.consents.get(l) == Some(&true))
+                    .map(|(_, fp)| *fp),
+            )
+            .collect()
+    };
     match state.body.consent_rule {
-        // Unanimous: any decline aborts; all-accept commits. (Rules 1/2 in Task 7.)
         0 => {
-            if required.iter().any(|l| state.consents.get(l) == Some(&false)) {
-                Some(false)
-            } else if required.iter().all(|l| state.consents.get(l) == Some(&true)) {
-                Some(true)
+            if picked_members.iter().any(|(l, _)| state.consents.get(l) == Some(&false)) {
+                PromoDecision::Abort
+            } else if picked_members.iter().all(|(l, _)| state.consents.get(l) == Some(&true)) {
+                PromoDecision::Commit(carried_all())
             } else {
-                None
+                PromoDecision::Wait
             }
         }
-        _ => None,
+        1 => {
+            if picked_members.iter().all(|(l, _)| state.consents.contains_key(l)) {
+                PromoDecision::Commit(carried_accepters())
+            } else {
+                PromoDecision::Wait
+            }
+        }
+        _ => PromoDecision::Wait,
     }
 }
 
-/// SUB-SPEC D2 (HOST): commit the promotion — evict un-picked members (member picker),
-/// re-key the group at the PCS boundary (reusing the audited `self_update` path so
-/// GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and announce. Reuses the
-/// existing, tested Core operations rather than duplicating the commit machinery.
-async fn commit_promotion(inner: &Arc<Inner>, body: &PromoteBody) {
+/// SUB-SPEC D2 (HOST): commit the promotion — evict every roster member NOT in `carried`
+/// (member picker + decliners), re-key the group at the PCS boundary (reusing the audited
+/// `self_update` path so GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and
+/// announce. Reuses the existing, tested Core operations rather than duplicating the
+/// commit machinery.
+async fn commit_promotion(inner: &Arc<Inner>, promote_id: [u8; 32], carried: &[[u8; 48]]) {
     let core = Core { inner: inner.clone() };
     let me = inner.identity.public().fingerprint();
-    let picked: std::collections::HashSet<[u8; 48]> = body.picked.iter().copied().collect();
+    let keep: std::collections::HashSet<[u8; 48]> = carried.iter().copied().collect();
     let to_remove: Vec<[u8; 48]> = {
         let roster = inner.roster.lock().unwrap();
         roster
             .values()
             .copied()
-            .filter(|fp| *fp != me && !picked.contains(fp))
+            .filter(|fp| *fp != me && !keep.contains(fp))
             .collect()
     };
     for fp in to_remove {
-        let _ = core.remove_member(fp).await; // evict un-picked (commit + roster broadcast)
+        let _ = core.remove_member(fp).await; // evict (commit + roster broadcast)
     }
     let _ = core.self_update().await; // PCS re-key boundary (Thms 7/8)
     core.set_persistence(true); // D1: the successor is persistent
-    let _ = inner.events_tx.send(Event::Promoted { promote_id: body.id() });
+    let _ = inner.events_tx.send(Event::Promoted { promote_id });
     *inner.promote.lock().unwrap() = None;
 }
 
@@ -3834,23 +3878,23 @@ async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
             return; // consent for a different / stale proposal
         }
         state.consents.insert(cb.leaf, cb.accept); // distinct-leaf dedup (overwrite)
-        promotion_decided(state, &inner.roster.lock().unwrap(), inner.identity.public().fingerprint())
+        promotion_decision(state, &inner.roster.lock().unwrap(), inner.identity.public().fingerprint())
     };
     match decided {
-        Some(true) => {
-            let body = inner.promote.lock().unwrap().as_ref().map(|s| s.body.clone());
-            if let Some(body) = body {
-                commit_promotion(inner, &body).await;
+        PromoDecision::Commit(carried) => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            if let Some(id) = id {
+                commit_promotion(inner, id, &carried).await;
             }
         }
-        Some(false) => {
+        PromoDecision::Abort => {
             let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
             *inner.promote.lock().unwrap() = None;
             if let Some(id) = id {
                 let _ = inner.events_tx.send(Event::PromoteAborted { promote_id: id });
             }
         }
-        None => {}
+        PromoDecision::Wait => {}
     }
 }
 
@@ -7138,6 +7182,72 @@ mod tests {
             !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
             "the un-picked member m2 was removed by the re-key commit"
         );
+    }
+
+    /// D2 Task 7 (HostMandate rule 2): the host converts unilaterally — the promotion
+    /// commits immediately at propose time with no consent, and un-picked members are removed.
+    #[tokio::test]
+    async fn host_mandate_commits_immediately() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        // Rule 2 = HostMandate; picks host + m1.
+        host.propose_promote(1, 0, 2, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        assert!(host.is_persistent(), "host-mandate commits immediately");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "un-picked m2 removed under host-mandate"
+        );
+    }
+
+    /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
+    /// stays ephemeral (nobody's expectation is overridden).
+    #[tokio::test]
+    async fn unanimous_decline_aborts() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        m1.respond_promote(id, false).await.unwrap(); // DECLINE
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteAborted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .expect("promotion aborts on decline");
+        assert!(!host.is_persistent(), "chat stays ephemeral after an abort");
     }
 
     #[test]
