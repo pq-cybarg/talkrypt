@@ -50,6 +50,29 @@ impl KeeperQueue {
         self.store.load(&key(&recipient))
     }
 
+    /// D1 Layer-C: a digest of everything held — `(gid, recipient)` pairs across all
+    /// recipients — for anti-entropy reconciliation with a peer keeper.
+    pub fn digest(&self) -> Vec<([u8; 32], [u8; 48])> {
+        let idx = self.index.lock().unwrap();
+        let mut out = Vec::new();
+        for (recipient, entries) in idx.iter() {
+            for (gid, _) in entries {
+                out.push((*gid, *recipient));
+            }
+        }
+        out
+    }
+
+    /// D1 Layer-C: the opaque frame held for `(recipient, gid)`, if any (for serving a
+    /// peer keeper the entry it is missing).
+    pub fn frame_for(&self, recipient: [u8; 48], gid: [u8; 32]) -> Option<Vec<u8>> {
+        self.store
+            .load(&key(&recipient))
+            .into_iter()
+            .find(|(g, _)| *g == gid)
+            .map(|(_, f)| f)
+    }
+
     pub fn ack(&self, recipient: [u8; 48], gid: [u8; 32]) {
         self.store.remove(&key(&recipient), gid);
         if let Some(v) = self.index.lock().unwrap().get_mut(&recipient) {

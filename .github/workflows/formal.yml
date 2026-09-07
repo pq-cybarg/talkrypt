@@ -68,6 +68,7 @@ jobs:
         run: |
           cargo kani -p talkrypt-core --harness engine::d1_proofs::delivery_ack_decode_never_panics
           cargo kani -p talkrypt-core --harness engine::d1_proofs::mailbox_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::queue_sync_decode_never_panics
 
   fstar:
     name: "F* — auth theorems"

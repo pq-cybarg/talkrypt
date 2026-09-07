@@ -175,6 +175,11 @@ enum Frame {
     /// replies (only) with frames stored for the AUTHENTICATED requester's fingerprint —
     /// the pairwise session proves the fetcher is the recipient. No payload. Tag 17.
     MailboxFetch,
+    /// D1 Layer-C (replicated queue anti-entropy): a keeper advertises a DIGEST of what
+    /// it holds — `(gossip_id, recipient)` pairs — so a peer keeper can reconcile gaps.
+    /// Flat: count + fixed `[u8;32]`‖`[u8;48]` pairs (capped, no nested heap →
+    /// Kani-provable). Frame transfer of a missing entry rides `MailboxPut`. Tag 18.
+    QueueSync(Vec<([u8; 32], [u8; 48])>),
 }
 
 impl Frame {
@@ -259,6 +264,14 @@ impl Frame {
             Frame::MailboxFetch => {
                 w.put_u8(17);
             }
+            Frame::QueueSync(entries) => {
+                w.put_u8(18);
+                w.put_u32(entries.len() as u32);
+                for (gid, fp) in entries {
+                    w.put_bytes(gid);
+                    w.put_bytes(fp);
+                }
+            }
         }
         w.into_vec()
     }
@@ -334,6 +347,31 @@ impl Frame {
                 Frame::MailboxPut { recipient, frame }
             }
             17 => Frame::MailboxFetch,
+            18 => {
+                const MAX_SYNC: usize = 512;
+                let n = r.get_u32().ok()? as usize;
+                if n > MAX_SYNC {
+                    return None;
+                }
+                let mut entries = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let gv = r.get_bytes().ok()?;
+                    if gv.len() != 32 {
+                        return None;
+                    }
+                    let fv = r.get_bytes().ok()?;
+                    if fv.len() != 48 {
+                        return None;
+                    }
+                    let mut gid = [0u8; 32];
+                    gid.copy_from_slice(gv);
+                    let mut fp = [0u8; 48];
+                    fp.copy_from_slice(fv);
+                    entries.push((gid, fp));
+                }
+                r.finish().ok()?;
+                Frame::QueueSync(entries)
+            }
             _ => return None,
         };
         Some(frame)
@@ -595,6 +633,10 @@ struct Inner {
     /// a `MailboxFetch` from the authenticated recipient drains + replays them.
     mailbox: crate::keeper::KeeperQueue,
     anchor_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-C: peers we've already sent our keeper digest to this session, so the
+    /// anti-entropy digest exchange terminates (the accepter replies exactly once, which
+    /// is needed because the pairwise responder is mute until the initiator speaks).
+    qs_sent: std::sync::Mutex<std::collections::HashSet<[u8; 48]>>,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -873,6 +915,7 @@ impl Core {
                 30 * 24 * 3600,
             ),
             anchor_enabled: std::sync::atomic::AtomicBool::new(false),
+            qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -2384,14 +2427,18 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     // `register` is synchronous; the peer's own writer/session carry the re-sends.
     if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
         let buffered = inner.keeper.drain(fingerprint);
-        if !buffered.is_empty() {
-            let (rs, rw) = (session.clone(), writer.clone());
-            tokio::spawn(async move {
-                for (_gid, bytes) in buffered {
-                    let _ = send_payload(&rs, &rw, &bytes).await;
-                }
-            });
-        }
+        // D1 Layer-C: advertise our digest to the newly-connected peer so a peer keeper
+        // can reconcile any entries it is missing (anti-entropy).
+        let digest = inner.keeper.digest();
+        let (rs, rw) = (session.clone(), writer.clone());
+        tokio::spawn(async move {
+            for (_gid, bytes) in buffered {
+                let _ = send_payload(&rs, &rw, &bytes).await;
+            }
+            // Always advertise our digest (even empty) so a peer keeper that HOLDS
+            // entries we lack sees the gap and pushes them (anti-entropy).
+            let _ = send_payload(&rs, &rw, &Frame::QueueSync(digest).encode()).await;
+        });
     }
 
     // Identity presentation rides as the first frame *inside* the encrypted
@@ -2655,9 +2702,41 @@ async fn reader_loop(
                     let _ = inner.events_tx.send(Event::Delivered { gossip_id: gid });
                 }
             }
-            Some(Frame::MailboxPut { recipient, frame }) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
-                // D1 Layer-B: as an anchor, store the opaque frame for `recipient`.
-                inner.mailbox.buffer(recipient, gossip_id(&frame), &frame, now_secs());
+            Some(Frame::MailboxPut { recipient, frame })
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    || inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                let gid = gossip_id(&frame);
+                // D1 Layer-B: as an anchor, store for pull-on-fetch.
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.mailbox.buffer(recipient, gid, &frame, now_secs());
+                }
+                // D1 Layer-C: as a keeper (anti-entropy replica), store for
+                // push-on-reconnect so a replicated frame survives other keepers dropping.
+                if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.keeper.buffer(recipient, gid, &frame, now_secs());
+                }
+            }
+            Some(Frame::QueueSync(peer_digest)) if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-C anti-entropy: push the peer any entry we hold that its digest
+                // lacks, as an opaque MailboxPut it will buffer (keeper). Bounded by our
+                // own queue size + the peer's digest cap.
+                let have: std::collections::HashSet<([u8; 32], [u8; 48])> = peer_digest.into_iter().collect();
+                let mine = inner.keeper.digest();
+                for (gid, recipient) in &mine {
+                    if !have.contains(&(*gid, *recipient)) {
+                        if let Some(frame) = inner.keeper.frame_for(*recipient, *gid) {
+                            route(&inner, Frame::MailboxPut { recipient: *recipient, frame }, Route::Peer(from)).await;
+                        }
+                    }
+                }
+                // Reply with OUR digest exactly once, so the peer (which may have been
+                // mute as the pairwise responder until now) learns what WE hold and can
+                // push us anything we lack. The `qs_sent` guard prevents a reply loop.
+                let should_reply = inner.qs_sent.lock().unwrap().insert(from);
+                if should_reply {
+                    route(&inner, Frame::QueueSync(inner.keeper.digest()), Route::Peer(from)).await;
+                }
             }
             Some(Frame::MailboxFetch) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
                 // D1 Layer-B: serve the authenticated requester (`from`) its buffered
@@ -3469,33 +3548,38 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // gossip bridge re-floods regardless of role (that's what bridges transport
     // islands). Both only apply to direct peer links — in relayed mode the
     // non-member relay does the fan-out (Routed envelopes), so we never re-relay.
+    let frame_bytes = Frame::GroupMsg(gct.clone()).encode();
+    let connected: std::collections::HashSet<[u8; 48]> =
+        collect_peers(inner).iter().map(|(_, _, fp)| *fp).collect();
     let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    // Fan out to other members. In host-coordinated mode the host relays; a gossip
+    // bridge re-floods regardless of role (that's what bridges transport islands). Both
+    // only apply to direct peer links — in relayed mode the non-member relay does the
+    // fan-out (Routed envelopes), so we never re-relay.
     if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
-        let frame_bytes = Frame::GroupMsg(gct.clone()).encode();
-        let connected: std::collections::HashSet<[u8; 48]> =
-            collect_peers(inner).iter().map(|(_, _, fp)| *fp).collect();
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
                 let _ = send_payload(&s, &w, &frame_bytes).await;
             }
         }
-        // D1 Layer-A keeper: buffer the (opaque) frame for any roster member that is
-        // NOT currently connected, so it catches up when it reconnects. Holds
-        // ciphertext only. Skips the original sender and ourselves.
-        if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            let me = inner.identity.public().fingerprint();
-            let gid = gossip_id(&gct);
-            let offline: Vec<[u8; 48]> = {
-                let roster = inner.roster.lock().unwrap();
-                roster
-                    .values()
-                    .copied()
-                    .filter(|fp| *fp != from && *fp != me && !connected.contains(fp))
-                    .collect()
-            };
-            for fp in offline {
-                inner.keeper.buffer(fp, gid, &frame_bytes, now_secs());
-            }
+    }
+    // D1 Layer-A/C keeper: ANY keeper-enabled node (not just the relaying host) buffers
+    // the opaque frame for roster members that are NOT currently connected, so an
+    // offline member catches up on reconnect — and multiple keepers replicate it. Holds
+    // ciphertext only; skips the original sender and ourselves.
+    if !inner.relayed && inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let me = inner.identity.public().fingerprint();
+        let gid = gossip_id(&gct);
+        let offline: Vec<[u8; 48]> = {
+            let roster = inner.roster.lock().unwrap();
+            roster
+                .values()
+                .copied()
+                .filter(|fp| *fp != from && *fp != me && !connected.contains(fp))
+                .collect()
+        };
+        for fp in offline {
+            inner.keeper.buffer(fp, gid, &frame_bytes, now_secs());
         }
     }
 }
@@ -4166,6 +4250,72 @@ mod tests {
         assert!(
             anchor.inner.mailbox.drain(r_fp).is_empty(),
             "anchor cleared R's mail after serving the fetch"
+        );
+    }
+
+    /// D1 Layer-C (replication): TWO keepers each independently buffer for an offline
+    /// member from one fan-out — so the offline member catches up from EITHER keeper,
+    /// surviving one of them dropping (the survive-node-loss guarantee).
+    #[tokio::test]
+    async fn multi_keeper_replicates_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (k1, _k1rx) = group_core(&fabric, "k1", &desc, false);
+        let (k2, _k2rx) = group_core(&fabric, "k2", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        k1.keeper_mode(true);
+        k2.keeper_mode(true);
+        for m in ["k1", "k2", "b"] {
+            let c = match m { "k1" => &k1, "k2" => &k2, _ => &b };
+            c.connect("host").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let b_fp = b.fingerprint();
+        // B goes offline (drop the host's peer entry for B).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        host.send("broadcast-to-all").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!k1.inner.keeper.drain(b_fp).is_empty(), "keeper k1 buffered for offline B");
+        assert!(!k2.inner.keeper.drain(b_fp).is_empty(), "keeper k2 also buffered (replicated)");
+    }
+
+    /// D1 Layer-C (anti-entropy): a keeper that missed a frame reconciles it from a peer
+    /// keeper on connect — the peer's QueueSync digest reveals the gap and the holder
+    /// pushes the opaque frame (via MailboxPut), which the keeper buffers.
+    #[tokio::test]
+    async fn keeper_anti_entropy_pushes_missing_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["k2".into()],
+            "#ae",
+        );
+        // k2 listens; k1 will dial it. Both are keepers.
+        let (k2, _k2rx) = core_on(&fabric, "k2", &desc);
+        k2.keeper_mode(true);
+        k2.host().await.unwrap();
+        let (k1, _k1rx) = core_on(&fabric, "k1", &desc);
+        k1.keeper_mode(true);
+        // Preload k1 with a frame for offline recipient B that k2 lacks.
+        let b_fp = [0x55u8; 48];
+        k1.inner.keeper.buffer(b_fp, gossip_id(b"held-for-b"), b"held-for-b", now_secs());
+        k1.connect("k2").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // k2 received k1's digest gap-fill: it now holds the frame for B too.
+        assert!(
+            !k2.inner.keeper.drain(b_fp).is_empty(),
+            "k2 reconciled the missing frame from k1 via QueueSync anti-entropy"
         );
     }
 
@@ -6497,6 +6647,19 @@ mod tests {
         assert!(matches!(Frame::decode(&Frame::MailboxFetch.encode()), Some(Frame::MailboxFetch)));
     }
 
+    #[test]
+    fn queue_sync_frame_roundtrips_and_caps() {
+        let entries = vec![([1u8; 32], [2u8; 48]), ([3u8; 32], [4u8; 48])];
+        match Frame::decode(&Frame::QueueSync(entries.clone()).encode()) {
+            Some(Frame::QueueSync(got)) => assert_eq!(got, entries),
+            _ => panic!("expected QueueSync"),
+        }
+        let mut hostile = Writer::new();
+        hostile.put_u8(18);
+        hostile.put_u32(1000); // > MAX_SYNC
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
     #[tokio::test]
     async fn persistent_chat_enqueues_outgoing_group_frame() {
         let fabric = LoopbackFabric::new();
@@ -6552,6 +6715,17 @@ mod d1_proofs {
         let len: usize = kani::any();
         kani::assume(len <= 80);
         let data: [u8; 80] = kani::any();
+        let _ = Frame::decode(&data[..len]);
+    }
+
+    /// D1 Layer-C QueueSync decode never panics on arbitrary <=96-byte input (flat:
+    /// count-capped [u8;32]+[u8;48] pairs).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn queue_sync_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 96);
+        let data: [u8; 96] = kani::any();
         let _ = Frame::decode(&data[..len]);
     }
 }
