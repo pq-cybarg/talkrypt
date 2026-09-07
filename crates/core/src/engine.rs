@@ -551,6 +551,33 @@ struct PromoteState {
     consents: std::collections::HashMap<u32, bool>,
 }
 
+/// SUB-SPEC D3: one entry in a member's own ephemeral backlog — the gossip-id of the
+/// message ciphertext (dedup/store key), the unix-second timestamp it was sent/received
+/// (the `CarryFromPoint` comparison basis), and the already-encoded [`HistoryRecord`].
+#[derive(Clone)]
+struct BacklogEntry {
+    gid: [u8; 32],
+    ts: u64,
+    record: Vec<u8>,
+}
+
+/// SUB-SPEC D3: cap on the in-memory ephemeral backlog (oldest dropped past this). Bounds
+/// memory while keeping a generous recent window for a Carry/CarryFromPoint promotion.
+const BACKLOG_CAP: usize = 4096;
+
+/// SUB-SPEC D3: append a message this node saw to its own ephemeral backlog (idempotent by
+/// gossip-id, oldest dropped past [`BACKLOG_CAP`]). Purely local bookkeeping — never sent.
+fn record_backlog(inner: &Arc<Inner>, gid: [u8; 32], record: Vec<u8>, ts: u64) {
+    let mut bl = inner.backlog.lock().unwrap();
+    if bl.iter().any(|e| e.gid == gid) {
+        return; // same message reached us twice (mesh dedup) — count it once
+    }
+    bl.push(BacklogEntry { gid, ts, record });
+    while bl.len() > BACKLOG_CAP {
+        bl.remove(0);
+    }
+}
+
 /// Wire a signed D2 control blob: `body ‖ leaf ‖ sig`, so the receiver knows which leaf
 /// to verify under. Used for both `Promote` and `Consent` payloads.
 fn wrap_signed(body: &[u8], leaf: u32, sig: &[u8]) -> Vec<u8> {
@@ -832,6 +859,14 @@ struct Inner {
     /// SUB-SPEC D2: the in-flight promotion proposal we originated or are consenting to,
     /// with the per-leaf consent tally. `None` when no promotion is pending.
     promote: std::sync::Mutex<Option<PromoteState>>,
+    /// SUB-SPEC D3: this node's OWN in-memory chat backlog while the room is ephemeral —
+    /// every group message it sent or received, newest last, bounded to [`BACKLOG_CAP`]
+    /// (oldest dropped). On promotion the authenticated `retention_mode` decides whether
+    /// any of it is sealed into `history`; nothing here is ever transmitted.
+    backlog: Mutex<Vec<BacklogEntry>>,
+    /// SUB-SPEC D3: host-injected at-rest store for sealed history (in-memory default).
+    /// Mutex-wrapped so a host can swap in a sealed-file impl after construction.
+    history: Mutex<Arc<dyn crate::history::HistoryStore>>,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -1112,6 +1147,8 @@ impl Core {
             anchor_enabled: std::sync::atomic::AtomicBool::new(false),
             qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
             promote: std::sync::Mutex::new(None),
+            backlog: Mutex::new(Vec::new()),
+            history: Mutex::new(Arc::new(crate::history::InMemoryHistory::new())),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1807,6 +1844,19 @@ impl Core {
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
+                // D3: record our OWN outgoing message in the ephemeral backlog so a later
+                // Carry/CarryFromPoint promotion can seal what we already hold. Local only.
+                {
+                    let me = self.inner.identity.public().fingerprint();
+                    let ts = now_secs();
+                    let rec = crate::history::HistoryRecord {
+                        from: me,
+                        ts,
+                        text: text.to_string(),
+                        marking: marking.clone(),
+                    };
+                    record_backlog(&self.inner, gossip_id(&ct), rec.encode(), ts);
+                }
                 // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
                 // outbox (keyed by ciphertext gossip-id, which the receiver dedups +
                 // acks on) so an offline member catches up on reconnect. Re-encrypting
@@ -1935,6 +1985,18 @@ impl Core {
     /// Whether this chat's persistent outbox is on.
     pub fn is_persistent(&self) -> bool {
         self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// SUB-SPEC D3: inject a host-provided at-rest [`crate::history::HistoryStore`] (sealed
+    /// file) in place of the in-memory default.
+    pub fn set_history_store(&self, store: Arc<dyn crate::history::HistoryStore>) {
+        *self.inner.history.lock().unwrap() = store;
+    }
+
+    /// SUB-SPEC D3 (test/inspection): number of messages in our own ephemeral backlog.
+    #[doc(hidden)]
+    pub fn backlog_len(&self) -> usize {
+        self.inner.backlog.lock().unwrap().len()
     }
 
     /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
@@ -3979,6 +4041,19 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         // SUB-SPEC C: a vouch on the signed group path (attributed to the leaf sender).
         handle_vouch(&inner, sender, pt[1..].to_vec());
     } else if let Some((marking, text)) = marking::decode_payload(&pt) {
+        // D3: record the received message in our OWN ephemeral backlog (before the text is
+        // moved into the event) so a later Carry/CarryFromPoint promotion can seal exactly
+        // what we already received — never anyone else's copy, never a transmission.
+        {
+            let ts = now_secs();
+            let rec = crate::history::HistoryRecord {
+                from: sender,
+                ts,
+                text: text.clone(),
+                marking: marking.clone(),
+            };
+            record_backlog(inner, gossip_id(&gct), rec.encode(), ts);
+        }
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
             channel: inner.descriptor.channel.clone(),
@@ -7252,6 +7327,50 @@ mod tests {
             !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
             "un-picked m2 removed under host-mandate"
         );
+    }
+
+    /// D3 Task 3: each node records its OWN group messages (sent + received) in its
+    /// ephemeral backlog — the material a later Carry promotion may seal.
+    #[tokio::test]
+    async fn backlog_captures_own_and_received_group_messages() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#bl",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        host.send("hello from host").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(&mut m1rx).await {
+                    if text == "hello from host" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("m1 receives host's message");
+        m1.send("hi back").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(&mut hrx).await {
+                    if text == "hi back" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("host receives m1's reply");
+
+        // Host: its own send + m1's reply. m1: host's message + its own send.
+        assert_eq!(host.backlog_len(), 2, "host backlog = own send + received reply");
+        assert_eq!(m1.backlog_len(), 2, "m1 backlog = received + own send");
     }
 
     /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
