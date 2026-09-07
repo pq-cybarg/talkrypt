@@ -1165,6 +1165,12 @@ impl TalkryptClient {
         self.core.set_persistence(on);
     }
 
+    /// SUB-SPEC D3: erase this chat's sealed history + drop the in-memory backlog. Backs
+    /// the Delete affordance and return-to-ephemeral (D3 invariant 4, recoverable).
+    pub fn purge_history(&self) {
+        self.core.purge_history();
+    }
+
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
     /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
     pub fn keeper_mode(&self, on: bool) {
