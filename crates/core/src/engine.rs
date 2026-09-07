@@ -2906,6 +2906,10 @@ async fn reader_loop(
                 // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
                 handle_promote(&inner, from, payload).await;
             }
+            Some(Frame::Consent(payload)) if inner.role == GroupRole::Host => {
+                // SUB-SPEC D2: a consent response — the host tallies + commits/aborts.
+                handle_consent(&inner, from, payload).await;
+            }
             Some(Frame::DeliveryAck(ids)) => {
                 // D1: the peer confirms it received these frames. Clear them from our
                 // outbox (we originated them) and from the keeper queue for that peer
@@ -3740,6 +3744,114 @@ async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
         consents: std::collections::HashMap::new(),
     });
     let _ = inner.events_tx.send(ev);
+}
+
+/// SUB-SPEC D2: is the promotion decided given the current tally? `Some(true)` = commit,
+/// `Some(false)` = abort, `None` = keep waiting. The picked members (excluding the host
+/// itself) are resolved to their roster leaves and evaluated per the consent rule.
+fn promotion_decided(
+    state: &PromoteState,
+    roster: &std::collections::HashMap<u32, [u8; 48]>,
+    me_fp: [u8; 48],
+) -> Option<bool> {
+    let picked: std::collections::HashSet<[u8; 48]> = state.body.picked.iter().copied().collect();
+    // Leaves of picked members other than the host (the host is the committer).
+    let required: Vec<u32> = roster
+        .iter()
+        .filter(|(_, fp)| picked.contains(*fp) && **fp != me_fp)
+        .map(|(l, _)| *l)
+        .collect();
+    match state.body.consent_rule {
+        // Unanimous: any decline aborts; all-accept commits. (Rules 1/2 in Task 7.)
+        0 => {
+            if required.iter().any(|l| state.consents.get(l) == Some(&false)) {
+                Some(false)
+            } else if required.iter().all(|l| state.consents.get(l) == Some(&true)) {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// SUB-SPEC D2 (HOST): commit the promotion — evict un-picked members (member picker),
+/// re-key the group at the PCS boundary (reusing the audited `self_update` path so
+/// GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and announce. Reuses the
+/// existing, tested Core operations rather than duplicating the commit machinery.
+async fn commit_promotion(inner: &Arc<Inner>, body: &PromoteBody) {
+    let core = Core { inner: inner.clone() };
+    let me = inner.identity.public().fingerprint();
+    let picked: std::collections::HashSet<[u8; 48]> = body.picked.iter().copied().collect();
+    let to_remove: Vec<[u8; 48]> = {
+        let roster = inner.roster.lock().unwrap();
+        roster
+            .values()
+            .copied()
+            .filter(|fp| *fp != me && !picked.contains(fp))
+            .collect()
+    };
+    for fp in to_remove {
+        let _ = core.remove_member(fp).await; // evict un-picked (commit + roster broadcast)
+    }
+    let _ = core.self_update().await; // PCS re-key boundary (Thms 7/8)
+    core.set_persistence(true); // D1: the successor is persistent
+    let _ = inner.events_tx.send(Event::Promoted { promote_id: body.id() });
+    *inner.promote.lock().unwrap() = None;
+}
+
+/// SUB-SPEC D2 (HOST): a consent arrived. Verify it under the consenting leaf's key
+/// (fail-closed), bind it to the pending proposal (id + epoch), record it once per
+/// distinct leaf, then commit or abort per the consent rule.
+async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
+    let Some((cb_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let (verified, cur_epoch) = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => (grp.verify_consent(leaf, &cb_bytes, &sig), grp.epoch()),
+            None => (false, 0),
+        }
+    };
+    if !verified {
+        return; // forged / unknown leaf — fail closed
+    }
+    let Some(cb) = ConsentBody::decode(&cb_bytes) else {
+        return;
+    };
+    // The consent's declared leaf must equal the SIGNING leaf, and bind the live epoch.
+    if cb.leaf != leaf || cb.epoch != cur_epoch {
+        return;
+    }
+    let decided = {
+        let mut pend = inner.promote.lock().unwrap();
+        let Some(state) = pend.as_mut() else {
+            return;
+        };
+        if cb.promote_id != state.body.id() || cb.epoch != state.body.epoch {
+            return; // consent for a different / stale proposal
+        }
+        state.consents.insert(cb.leaf, cb.accept); // distinct-leaf dedup (overwrite)
+        promotion_decided(state, &inner.roster.lock().unwrap(), inner.identity.public().fingerprint())
+    };
+    match decided {
+        Some(true) => {
+            let body = inner.promote.lock().unwrap().as_ref().map(|s| s.body.clone());
+            if let Some(body) = body {
+                commit_promotion(inner, &body).await;
+            }
+        }
+        Some(false) => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            *inner.promote.lock().unwrap() = None;
+            if let Some(id) = id {
+                let _ = inner.events_tx.send(Event::PromoteAborted { promote_id: id });
+            }
+        }
+        None => {}
+    }
 }
 
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
@@ -6966,6 +7078,66 @@ mod tests {
         assert_eq!(got.1, 1);
         // m1 consents (signs + sends without error).
         m1.respond_promote(id, true).await.unwrap();
+    }
+
+    /// D2 Task 5: unanimous consent over the picked set commits the promotion — the host
+    /// re-keys, marks the chat persistent, removes the un-picked member, and emits Promoted.
+    #[tokio::test]
+    async fn promotion_commits_on_unanimous_consent_and_removes_unpicked() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        assert!(host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp), "m2 joined");
+
+        // Promote picking host + m1 only (m2 un-picked); unanimous rule.
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        // m1 consents.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("m1 sees the proposal");
+        m1.respond_promote(id, true).await.unwrap();
+
+        // The host tallies + commits: Promoted fires.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::Promoted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("host commits the promotion");
+        assert!(host.is_persistent(), "chat is now persistent");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "the un-picked member m2 was removed by the re-key commit"
+        );
     }
 
     #[test]
