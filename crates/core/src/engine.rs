@@ -408,6 +408,39 @@ impl Frame {
     }
 }
 
+/// SUB-SPEC D3: what happens to the ephemeral backlog when a room is promoted.
+/// Rides the signed D2 `PromoteBody` (authenticated + shown in every consent prompt),
+/// so a member consents to a SPECIFIC retention contract. `from_u8` fails closed on
+/// an unknown tag; callers treat that (and `Fresh`) as "retain nothing".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RetentionMode {
+    /// Default-safe: the successor begins at the promotion boundary; the ephemeral
+    /// past stays ephemeral (nothing sealed). Strongest privacy.
+    Fresh,
+    /// Each consenting member seals its OWN already-received backlog (never sent to
+    /// anyone; no backfill to latecomers).
+    Carry,
+    /// Like `Carry`, but only messages at/after `carry_from_secs` are sealed.
+    CarryFromPoint,
+}
+impl RetentionMode {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(RetentionMode::Fresh),
+            1 => Some(RetentionMode::Carry),
+            2 => Some(RetentionMode::CarryFromPoint),
+            _ => None, // fail closed — unknown tag is treated as retain-nothing
+        }
+    }
+    pub fn as_u8(self) -> u8 {
+        match self {
+            RetentionMode::Fresh => 0,
+            RetentionMode::Carry => 1,
+            RetentionMode::CarryFromPoint => 2,
+        }
+    }
+}
+
 /// SUB-SPEC D2: the structured body of a promotion proposal, signed by the promoter.
 /// Flat/bounded (picked = a capped `Vec<[u8;48]>`) so its decoder is Kani-provable.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -422,6 +455,11 @@ pub struct PromoteBody {
     pub picked: Vec<[u8; 48]>,
     /// The successor's stable onion (empty = keep current).
     pub onion: String,
+    /// D3 CarryFromPoint marker: seal only messages with `ts >= carry_from_secs`
+    /// (unix seconds). Ignored by Fresh/Carry (set 0). A timestamp — not a message
+    /// id — so every member evaluates it deterministically against its own backlog,
+    /// regardless of which messages that member happens to hold.
+    pub carry_from_secs: u64,
     /// The group epoch this proposal binds to (replay/stale guard).
     pub epoch: u32,
 }
@@ -437,6 +475,7 @@ impl PromoteBody {
             w.put_bytes(fp);
         }
         w.put_bytes(self.onion.as_bytes());
+        w.put_u64(self.carry_from_secs);
         w.put_u32(self.epoch);
         w.into_vec()
     }
@@ -460,9 +499,10 @@ impl PromoteBody {
             picked.push(fp);
         }
         let onion = String::from_utf8(r.get_vec().ok()?).ok()?;
+        let carry_from_secs = r.get_u64().ok()?;
         let epoch = r.get_u32().ok()?;
         r.finish().ok()?;
-        Some(Self { target_tier, retention_mode, consent_rule, picked, onion, epoch })
+        Some(Self { target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch })
     }
     /// SHA-256 of the canonical body — binds a Consent to exactly this proposal.
     pub fn id(&self) -> [u8; 32] {
@@ -1824,6 +1864,7 @@ impl Core {
         consent_rule: u8,
         picked: Vec<[u8; 48]>,
         onion: String,
+        carry_from_secs: u64,
     ) -> Result<[u8; 32]> {
         let (payload, id, body) = {
             let g = self.inner.group.lock().await;
@@ -1834,6 +1875,7 @@ impl Core {
                 consent_rule,
                 picked,
                 onion,
+                carry_from_secs,
                 epoch: grp.epoch(),
             };
             let body_bytes = body.encode();
@@ -7051,6 +7093,7 @@ mod tests {
             consent_rule: 0,
             picked: vec![[1u8; 48], [2u8; 48]],
             onion: "abc.onion".into(),
+            carry_from_secs: 0,
             epoch: 3,
         };
         assert_eq!(PromoteBody::decode(&body.encode()).unwrap(), body);
@@ -7080,7 +7123,7 @@ mod tests {
         let (host, _hrx) = group_core(&fabric, "host", &desc, true);
         let picked = vec![host.fingerprint()];
         let id = host
-            .propose_promote(1, 0, 0, picked, String::new())
+            .propose_promote(1, 0, 0, picked, String::new(), 0)
             .await
             .unwrap();
         let st = host.inner.promote.lock().unwrap();
@@ -7107,7 +7150,7 @@ mod tests {
         m1.connect("host").await.unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let picked = vec![host.fingerprint(), m1.fingerprint()];
-        let id = host.propose_promote(1, 0, 0, picked, String::new()).await.unwrap();
+        let id = host.propose_promote(1, 0, 0, picked, String::new(), 0).await.unwrap();
         // m1 verifies + surfaces the proposal.
         let got = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -7148,7 +7191,7 @@ mod tests {
 
         // Promote picking host + m1 only (m2 un-picked); unanimous rule.
         let id = host
-            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
             .await
             .unwrap();
         // m1 consents.
@@ -7201,7 +7244,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(700)).await;
         let m2_fp = m2.fingerprint();
         // Rule 2 = HostMandate; picks host + m1.
-        host.propose_promote(1, 0, 2, vec![host.fingerprint(), m1.fingerprint()], String::new())
+        host.propose_promote(1, 0, 2, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
             .await
             .unwrap();
         assert!(host.is_persistent(), "host-mandate commits immediately");
@@ -7225,7 +7268,7 @@ mod tests {
         m1.connect("host").await.unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let id = host
-            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -7346,13 +7389,13 @@ mod d1_proofs {
     }
 
     /// D2 PromoteBody decode never panics (flat: fixed enums + capped [u8;48] picked
-    /// list + one length-prefixed onion string).
+    /// list + one length-prefixed onion string + the D3 `carry_from_secs` u64 marker).
     #[kani::proof]
     #[kani::unwind(6)]
     fn promote_body_decode_never_panics() {
         let len: usize = kani::any();
-        kani::assume(len <= 80);
-        let data: [u8; 80] = kani::any();
+        kani::assume(len <= 88);
+        let data: [u8; 88] = kani::any();
         let _ = PromoteBody::decode(&data[..len]);
     }
 

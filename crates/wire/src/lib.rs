@@ -52,6 +52,11 @@ impl Writer {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
 
+    /// Write a big-endian `u64`.
+    pub fn put_u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
+
     /// Write a `u32` length prefix followed by the bytes themselves.
     pub fn put_bytes(&mut self, bytes: &[u8]) {
         // Caller-side invariant: nothing we serialize approaches MAX_FRAME.
@@ -105,6 +110,13 @@ impl<'a> Reader<'a> {
     pub fn get_u32(&mut self) -> Result<u32, WireError> {
         let b = self.take(4)?;
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub fn get_u64(&mut self) -> Result<u64, WireError> {
+        let b = self.take(8)?;
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// Read a `u32`-length-prefixed byte field, enforcing `MAX_FRAME`.
