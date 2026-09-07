@@ -160,11 +160,17 @@ enum Frame {
     /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
     /// RouteDescriptor / UpdateProposal from the group-security hardening).
     Presence(Vec<u8>),
+    /// SUB-SPEC D2: a signed promotion proposal — an opaque `body ‖ leaf ‖ sig` blob;
+    /// the structured `PromoteBody` is decoded in core and the sig verified under
+    /// `leaf`'s bound key. Tag 13.
+    Promote(Vec<u8>),
+    /// SUB-SPEC D2: a signed consent response (opaque `body ‖ leaf ‖ sig` blob). Tag 14.
+    Consent(Vec<u8>),
     /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
     /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
     /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
     /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
-    /// so `GroupAuth.fst` is unaffected. Tag 15 (13/14 reserved for Sub-spec D2).
+    /// so `GroupAuth.fst` is unaffected. Tag 15.
     DeliveryAck(Vec<[u8; 32]>),
     /// D1 Layer-B (anchor mailbox): a sender deposits an OPAQUE (already-encrypted) frame
     /// at a recipient's always-on anchor for later pickup. `recipient` = who it's for;
@@ -249,6 +255,14 @@ impl Frame {
                 w.put_u8(12);
                 w.put_bytes(b);
             }
+            Frame::Promote(b) => {
+                w.put_u8(13);
+                w.put_bytes(b);
+            }
+            Frame::Consent(b) => {
+                w.put_u8(14);
+                w.put_bytes(b);
+            }
             Frame::DeliveryAck(ids) => {
                 w.put_u8(15);
                 w.put_u32(ids.len() as u32);
@@ -316,6 +330,8 @@ impl Frame {
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
             12 => Frame::Presence(r.get_vec().ok()?),
+            13 => Frame::Promote(r.get_vec().ok()?),
+            14 => Frame::Consent(r.get_vec().ok()?),
             15 => {
                 const MAX_ACK: usize = 64;
                 let n = r.get_u32().ok()? as usize;
@@ -375,6 +391,101 @@ impl Frame {
             _ => return None,
         };
         Some(frame)
+    }
+}
+
+/// SUB-SPEC D2: the structured body of a promotion proposal, signed by the promoter.
+/// Flat/bounded (picked = a capped `Vec<[u8;48]>`) so its decoder is Kani-provable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PromoteBody {
+    /// Target persistence tier (app-level: 0=PersistentLocal, 1=Shared, 2=AlwaysOn).
+    pub target_tier: u8,
+    /// D3 retention (0=Fresh, 1=Carry, 2=CarryFromPoint).
+    pub retention_mode: u8,
+    /// Consent rule (0=Unanimous, 1=OptInSuccessor, 2=HostMandate).
+    pub consent_rule: u8,
+    /// Account fingerprints of members carried into the persistent successor.
+    pub picked: Vec<[u8; 48]>,
+    /// The successor's stable onion (empty = keep current).
+    pub onion: String,
+    /// The group epoch this proposal binds to (replay/stale guard).
+    pub epoch: u32,
+}
+impl PromoteBody {
+    const MAX_PICKED: usize = 256;
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_u8(self.target_tier);
+        w.put_u8(self.retention_mode);
+        w.put_u8(self.consent_rule);
+        w.put_u32(self.picked.len() as u32);
+        for fp in &self.picked {
+            w.put_bytes(fp);
+        }
+        w.put_bytes(self.onion.as_bytes());
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(b);
+        let target_tier = r.get_u8().ok()?;
+        let retention_mode = r.get_u8().ok()?;
+        let consent_rule = r.get_u8().ok()?;
+        let n = r.get_u32().ok()? as usize;
+        if n > Self::MAX_PICKED {
+            return None;
+        }
+        let mut picked = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.get_bytes().ok()?;
+            if v.len() != 48 {
+                return None;
+            }
+            let mut fp = [0u8; 48];
+            fp.copy_from_slice(v);
+            picked.push(fp);
+        }
+        let onion = String::from_utf8(r.get_vec().ok()?).ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some(Self { target_tier, retention_mode, consent_rule, picked, onion, epoch })
+    }
+    /// SHA-256 of the canonical body — binds a Consent to exactly this proposal.
+    pub fn id(&self) -> [u8; 32] {
+        gossip_id(&self.encode())
+    }
+}
+
+/// SUB-SPEC D2: a member's signed consent (or decline) to a specific promotion.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConsentBody {
+    pub promote_id: [u8; 32],
+    pub accept: bool,
+    pub leaf: u32,
+    pub epoch: u32,
+}
+impl ConsentBody {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_bytes(&self.promote_id);
+        w.put_u8(self.accept as u8);
+        w.put_u32(self.leaf);
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(b);
+        let v = r.get_bytes().ok()?;
+        if v.len() != 32 {
+            return None;
+        }
+        let mut promote_id = [0u8; 32];
+        promote_id.copy_from_slice(v);
+        let accept = r.get_u8().ok()? != 0;
+        let leaf = r.get_u32().ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some(Self { promote_id, accept, leaf, epoch })
     }
 }
 
@@ -6635,6 +6746,30 @@ mod tests {
     }
 
     #[test]
+    fn promote_consent_frames_and_bodies_roundtrip() {
+        let body = PromoteBody {
+            target_tier: 1,
+            retention_mode: 0,
+            consent_rule: 0,
+            picked: vec![[1u8; 48], [2u8; 48]],
+            onion: "abc.onion".into(),
+            epoch: 3,
+        };
+        assert_eq!(PromoteBody::decode(&body.encode()).unwrap(), body);
+        assert!(matches!(Frame::decode(&Frame::Promote(body.encode()).encode()), Some(Frame::Promote(_))));
+        assert!(matches!(Frame::decode(&Frame::Consent(vec![1, 2, 3]).encode()), Some(Frame::Consent(_))));
+        // Over-cap picked list is rejected (no unbounded alloc).
+        let mut w = Writer::new();
+        w.put_u8(1);
+        w.put_u8(0);
+        w.put_u8(0);
+        w.put_u32(300); // n_picked > MAX_PICKED
+        assert!(PromoteBody::decode(&w.into_vec()).is_none());
+        let cb = ConsentBody { promote_id: [7u8; 32], accept: true, leaf: 2, epoch: 3 };
+        assert_eq!(ConsentBody::decode(&cb.encode()).unwrap(), cb);
+    }
+
+    #[test]
     fn mailbox_frames_roundtrip() {
         let put = Frame::MailboxPut { recipient: [9u8; 48], frame: b"sealed".to_vec() };
         match Frame::decode(&put.encode()) {
@@ -6727,5 +6862,26 @@ mod d1_proofs {
         kani::assume(len <= 96);
         let data: [u8; 96] = kani::any();
         let _ = Frame::decode(&data[..len]);
+    }
+
+    /// D2 PromoteBody decode never panics (flat: fixed enums + capped [u8;48] picked
+    /// list + one length-prefixed onion string).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn promote_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 80);
+        let data: [u8; 80] = kani::any();
+        let _ = PromoteBody::decode(&data[..len]);
+    }
+
+    /// D2 ConsentBody decode never panics (flat: fixed [u8;32] + u8 + u32 + u32).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn consent_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 48);
+        let data: [u8; 48] = kani::any();
+        let _ = ConsentBody::decode(&data[..len]);
     }
 }
