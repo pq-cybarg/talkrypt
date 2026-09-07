@@ -489,6 +489,33 @@ impl ConsentBody {
     }
 }
 
+/// SUB-SPEC D2: a promotion the host is coordinating — the signed body + the per-leaf
+/// accept/decline tally collected from consents.
+struct PromoteState {
+    body: PromoteBody,
+    /// leaf -> accepted?  (only DISTINCT, signature-verified consents recorded).
+    consents: std::collections::HashMap<u32, bool>,
+}
+
+/// Wire a signed D2 control blob: `body ‖ leaf ‖ sig`, so the receiver knows which leaf
+/// to verify under. Used for both `Promote` and `Consent` payloads.
+fn wrap_signed(body: &[u8], leaf: u32, sig: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.put_bytes(body);
+    w.put_u32(leaf);
+    w.put_bytes(sig);
+    w.into_vec()
+}
+/// Inverse of [`wrap_signed`]: `(body, leaf, sig)`.
+fn unwrap_signed(payload: &[u8]) -> Option<(Vec<u8>, u32, Vec<u8>)> {
+    let mut r = Reader::new(payload);
+    let body = r.get_vec().ok()?;
+    let leaf = r.get_u32().ok()?;
+    let sig = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((body, leaf, sig))
+}
+
 /// Who may participate in a (pairwise) channel. The host enforces this when a
 /// peer presents its account identity inside the encrypted session.
 ///
@@ -748,6 +775,9 @@ struct Inner {
     /// anti-entropy digest exchange terminates (the accepter replies exactly once, which
     /// is needed because the pairwise responder is mute until the initiator speaks).
     qs_sent: std::sync::Mutex<std::collections::HashSet<[u8; 48]>>,
+    /// SUB-SPEC D2: the in-flight promotion proposal we originated or are consenting to,
+    /// with the per-leaf consent tally. `None` when no promotion is pending.
+    promote: std::sync::Mutex<Option<PromoteState>>,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -1027,6 +1057,7 @@ impl Core {
             ),
             anchor_enabled: std::sync::atomic::AtomicBool::new(false),
             qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
+            promote: std::sync::Mutex::new(None),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1766,6 +1797,44 @@ impl Core {
                 route(&self.inner, frame, Route::Broadcast).await;
             }
         }
+    }
+
+    /// SUB-SPEC D2: propose promoting this ephemeral group to a persistent successor.
+    /// Builds a `PromoteBody` bound to the current group epoch, signs it under our leaf
+    /// key, broadcasts it, and tracks the proposal for consent tallying. Returns the
+    /// `promote_id` (SHA-256 of the body) that consents will reference. Group role only.
+    pub async fn propose_promote(
+        &self,
+        target_tier: u8,
+        retention_mode: u8,
+        consent_rule: u8,
+        picked: Vec<[u8; 48]>,
+        onion: String,
+    ) -> Result<[u8; 32]> {
+        let (payload, id, body) = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let body = PromoteBody {
+                target_tier,
+                retention_mode,
+                consent_rule,
+                picked,
+                onion,
+                epoch: grp.epoch(),
+            };
+            let body_bytes = body.encode();
+            let sig = grp
+                .sign_promote(&body_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            let payload = wrap_signed(&body_bytes, grp.my_leaf(), &sig);
+            (payload, body.id(), body)
+        };
+        *self.inner.promote.lock().unwrap() = Some(PromoteState {
+            body,
+            consents: std::collections::HashMap::new(),
+        });
+        route(&self.inner, Frame::Promote(payload), Route::Broadcast).await;
+        Ok(id)
     }
 
     /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
@@ -6767,6 +6836,28 @@ mod tests {
         assert!(PromoteBody::decode(&w.into_vec()).is_none());
         let cb = ConsentBody { promote_id: [7u8; 32], accept: true, leaf: 2, epoch: 3 };
         assert_eq!(ConsentBody::decode(&cb.encode()).unwrap(), cb);
+    }
+
+    #[tokio::test]
+    async fn propose_promote_broadcasts_and_tracks_state() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        let picked = vec![host.fingerprint()];
+        let id = host
+            .propose_promote(1, 0, 0, picked, String::new())
+            .await
+            .unwrap();
+        let st = host.inner.promote.lock().unwrap();
+        let state = st.as_ref().expect("pending promotion tracked");
+        assert_eq!(state.body.id(), id, "tracked body matches the returned promote_id");
+        assert!(state.consents.is_empty(), "no consents yet");
     }
 
     #[test]
