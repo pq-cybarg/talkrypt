@@ -2001,6 +2001,18 @@ impl Core {
     /// on reconnect so offline members catch up.
     pub fn set_persistence(&self, on: bool) {
         self.inner.persistent.store(on, std::sync::atomic::Ordering::Relaxed);
+        // SUB-SPEC D3 invariant 4 (recoverable): returning a chat to ephemeral erases its
+        // sealed history — the persistent copy no longer exists once persistence is off.
+        if !on {
+            self.purge_history();
+        }
+    }
+
+    /// SUB-SPEC D3: erase this chat's sealed history and drop the in-memory backlog. Backs
+    /// the Delete affordance and return-to-ephemeral (invariant 4). Idempotent.
+    pub fn purge_history(&self) {
+        self.inner.history.lock().unwrap().purge(&self.inner.descriptor.channel);
+        self.inner.backlog.lock().unwrap().clear();
     }
 
     /// Whether this chat's persistent outbox is on.
@@ -7602,6 +7614,25 @@ mod tests {
                 assert!(m1_hist.load("#rt").is_empty(), "Fresh: m1 sealed nothing");
             }
         }
+    }
+
+    /// D3 Task 5 (invariant 4, recoverable): returning a persistent chat to ephemeral
+    /// erases its sealed history (the Delete affordance). Uses the sealing store directly.
+    #[test]
+    fn return_to_ephemeral_purges_sealed_history() {
+        use crate::history::HistoryStore;
+        let (core, _rx) = test_core_pairwise();
+        let chat = core.descriptor().channel.clone();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        core.set_history_store(hist.clone());
+        // Seed a sealed record + a live persistent chat.
+        hist.put(&chat, [1u8; 32], &[0xAA]);
+        core.set_persistence(true);
+        assert_eq!(hist.load(&chat).len(), 1);
+        // Return to ephemeral → the sealed blob is erased.
+        core.set_persistence(false);
+        assert!(hist.load(&chat).is_empty(), "return-to-ephemeral purges sealed history");
+        assert!(!core.is_persistent());
     }
 
     /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
