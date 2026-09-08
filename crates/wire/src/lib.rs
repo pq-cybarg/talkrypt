@@ -140,6 +140,12 @@ impl<'a> Reader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// The as-yet-unconsumed tail of the input. Lets a dispatcher hand a self-contained
+    /// body slice to a chunked, independently-verifiable sub-decoder.
+    pub fn rest(&self) -> &'a [u8] {
+        &self.buf[self.pos..]
+    }
+
     /// Assert the input is fully consumed. Use after decoding a complete
     /// message to reject trailing garbage.
     pub fn finish(self) -> Result<(), WireError> {

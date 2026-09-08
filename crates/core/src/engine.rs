@@ -355,66 +355,95 @@ impl Frame {
             13 => Frame::Promote(r.get_vec().ok()?),
             14 => Frame::Consent(r.get_vec().ok()?),
             19 => Frame::PromoteCommit(r.get_vec().ok()?),
-            15 => {
-                const MAX_ACK: usize = 64;
-                let n = r.get_u32().ok()? as usize;
-                if n > MAX_ACK {
-                    return None;
-                }
-                let mut ids = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let b = r.get_bytes().ok()?;
-                    if b.len() != 32 {
-                        return None;
-                    }
-                    let mut id = [0u8; 32];
-                    id.copy_from_slice(b);
-                    ids.push(id);
-                }
-                r.finish().ok()?;
-                Frame::DeliveryAck(ids)
-            }
+            // D1 store-and-forward decoders are chunked into standalone, flat functions
+            // (below) so each is independently CBMC-provable in isolation — routing an
+            // arbitrary tag through this whole match would drag in the Marking-bearing
+            // arms, which are CBMC-intractable (SECURITY-AUDIT R-6).
+            15 => Frame::DeliveryAck(decode_delivery_ack(r.rest())?),
             16 => {
-                let rv = r.get_bytes().ok()?;
-                if rv.len() != 48 {
-                    return None;
-                }
-                let mut recipient = [0u8; 48];
-                recipient.copy_from_slice(rv);
-                let frame = r.get_vec().ok()?;
-                r.finish().ok()?;
+                let (recipient, frame) = decode_mailbox_put(r.rest())?;
                 Frame::MailboxPut { recipient, frame }
             }
             17 => Frame::MailboxFetch,
-            18 => {
-                const MAX_SYNC: usize = 512;
-                let n = r.get_u32().ok()? as usize;
-                if n > MAX_SYNC {
-                    return None;
-                }
-                let mut entries = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let gv = r.get_bytes().ok()?;
-                    if gv.len() != 32 {
-                        return None;
-                    }
-                    let fv = r.get_bytes().ok()?;
-                    if fv.len() != 48 {
-                        return None;
-                    }
-                    let mut gid = [0u8; 32];
-                    gid.copy_from_slice(gv);
-                    let mut fp = [0u8; 48];
-                    fp.copy_from_slice(fv);
-                    entries.push((gid, fp));
-                }
-                r.finish().ok()?;
-                Frame::QueueSync(entries)
-            }
+            18 => Frame::QueueSync(decode_queue_sync(r.rest())?),
             _ => return None,
         };
         Some(frame)
     }
+}
+
+// ---------------------------------------------------------------------------
+// D1 store-and-forward body decoders (chunked out of `Frame::decode`).
+//
+// Each takes ONLY its own frame body (the bytes after the tag), so it is a small,
+// flat, self-contained decoder that CBMC verifies as total in isolation (see the
+// `d1_proofs` harnesses). They are the single source of truth — `Frame::decode`
+// delegates to them, so the wire format is unchanged.
+// ---------------------------------------------------------------------------
+
+/// D1 `DeliveryAck` body: a count-capped list of 32-byte gossip-ids.
+fn decode_delivery_ack(body: &[u8]) -> Option<Vec<[u8; 32]>> {
+    const MAX_ACK: usize = 64;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_ACK {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b = r.get_bytes().ok()?;
+        if b.len() != 32 {
+            return None;
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(b);
+        ids.push(id);
+    }
+    r.finish().ok()?;
+    Some(ids)
+}
+
+/// D1 Layer-B `MailboxPut` body: a fixed [u8;48] recipient + one length-prefixed
+/// opaque (already-encrypted) frame blob.
+fn decode_mailbox_put(body: &[u8]) -> Option<([u8; 48], Vec<u8>)> {
+    let mut r = Reader::new(body);
+    let rv = r.get_bytes().ok()?;
+    if rv.len() != 48 {
+        return None;
+    }
+    let mut recipient = [0u8; 48];
+    recipient.copy_from_slice(rv);
+    let frame = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((recipient, frame))
+}
+
+/// D1 Layer-C `QueueSync` body: a count-capped list of (32-byte gossip-id, 48-byte fp) pairs.
+fn decode_queue_sync(body: &[u8]) -> Option<Vec<([u8; 32], [u8; 48])>> {
+    const MAX_SYNC: usize = 512;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_SYNC {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let gv = r.get_bytes().ok()?;
+        if gv.len() != 32 {
+            return None;
+        }
+        let fv = r.get_bytes().ok()?;
+        if fv.len() != 48 {
+            return None;
+        }
+        let mut gid = [0u8; 32];
+        gid.copy_from_slice(gv);
+        let mut fp = [0u8; 48];
+        fp.copy_from_slice(fv);
+        entries.push((gid, fp));
+    }
+    r.finish().ok()?;
+    Some(entries)
 }
 
 /// SUB-SPEC D3: what happens to the ephemeral backlog when a room is promoted.
@@ -7834,37 +7863,39 @@ mod tests {
 #[cfg(kani)]
 mod d1_proofs {
     use super::*;
-    /// D1 `DeliveryAck` decode never panics on arbitrary <=64-byte input (it runs on
-    /// bytes from a possibly-hostile peer). Flat/bounded => CBMC-tractable.
+    // Each harness targets the CHUNKED, standalone D1 body decoder directly — NOT the whole
+    // `Frame::decode` (whose arbitrary-tag dispatch drags in the CBMC-intractable Marking
+    // arms, SECURITY-AUDIT R-6). This keeps every proof small, flat, and fast.
+
+    /// D1 `decode_delivery_ack` never panics on any body — count-capped [u8;32] ids.
     #[kani::proof]
     #[kani::unwind(6)]
     fn delivery_ack_decode_never_panics() {
         let len: usize = kani::any();
         kani::assume(len <= 64);
         let data: [u8; 64] = kani::any();
-        let _ = Frame::decode(&data[..len]);
+        let _ = decode_delivery_ack(&data[..len]);
     }
 
-    /// D1 Layer-B MailboxPut/Fetch decode never panics on arbitrary <=80-byte input
-    /// (flat: fixed fp + one length-prefixed blob). Frame::decode covers both tags.
+    /// D1 Layer-B `decode_mailbox_put` never panics — fixed [u8;48] recipient + one
+    /// length-prefixed opaque blob. (`MailboxFetch`, tag 17, is field-less: trivially total.)
     #[kani::proof]
     #[kani::unwind(6)]
     fn mailbox_decode_never_panics() {
         let len: usize = kani::any();
         kani::assume(len <= 80);
         let data: [u8; 80] = kani::any();
-        let _ = Frame::decode(&data[..len]);
+        let _ = decode_mailbox_put(&data[..len]);
     }
 
-    /// D1 Layer-C QueueSync decode never panics on arbitrary <=96-byte input (flat:
-    /// count-capped [u8;32]+[u8;48] pairs).
+    /// D1 Layer-C `decode_queue_sync` never panics — count-capped [u8;32]+[u8;48] pairs.
     #[kani::proof]
     #[kani::unwind(6)]
     fn queue_sync_decode_never_panics() {
         let len: usize = kani::any();
         kani::assume(len <= 96);
         let data: [u8; 96] = kani::any();
-        let _ = Frame::decode(&data[..len]);
+        let _ = decode_queue_sync(&data[..len]);
     }
 
     /// D2 PromoteBody decode never panics (flat: fixed enums + capped [u8;48] picked
