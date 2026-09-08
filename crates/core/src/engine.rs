@@ -7876,6 +7876,7 @@ mod tests {
 #[cfg(kani)]
 mod d1_proofs {
     use super::*;
+
     // Each harness targets the CHUNKED, standalone D1 body decoder directly — NOT the whole
     // `Frame::decode` (whose arbitrary-tag dispatch drags in the CBMC-intractable Marking
     // arms, SECURITY-AUDIT R-6). This keeps every proof small, flat, and fast.
