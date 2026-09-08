@@ -1475,6 +1475,22 @@ async fn repl(
                 Event::OutboxDropped { count } => {
                     eprintln!("\r! outbox: {count} un-acked message(s) dropped (cap/TTL)");
                 }
+                Event::PromoteProposed { by, promote_id, target_tier, retention_mode, picked } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!(
+                        "\r* promotion proposed by {} (tier {target_tier}, retention {retention_mode}, {} members) — /consent {id} yes|no",
+                        short_fp(&by),
+                        picked.len()
+                    );
+                }
+                Event::Promoted { promote_id } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* promoted {id} — chat is now persistent");
+                }
+                Event::PromoteAborted { promote_id } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* promotion {id} aborted — chat stays ephemeral");
+                }
                 Event::Name { from, label, tier, caveat, .. } => {
                     if let Some(label) = label {
                         // Badge the trust tier so a verified (account-linked /

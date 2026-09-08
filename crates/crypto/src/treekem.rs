@@ -424,6 +424,33 @@ const SIG_CONTEXT: &[u8] = b"talkrypt-treekem-msg-v2";
 /// group-message signature or vice versa.
 const POP_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-pop-v2";
 
+/// SUB-SPEC D2 promotion/consent signature contexts. DISTINCT from `SIG_CONTEXT` and
+/// `POP_CONTEXT` (and each other) so a promote/consent signature can never be replayed
+/// as a group message, a PoP, or across the promote↔consent boundary (GroupAuth Thm 6).
+const PROMOTE_CONTEXT: &[u8] = b"talkrypt-treekem-promote-v1";
+const CONSENT_CONTEXT: &[u8] = b"talkrypt-treekem-consent-v1";
+
+/// Injective (length-prefixed) transcript a leaf signs to propose a promotion:
+/// `PROMOTE_CONTEXT | epoch | leaf | body`.
+fn promote_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(PROMOTE_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+/// Injective transcript a leaf signs to consent to a promotion:
+/// `CONSENT_CONTEXT | epoch | leaf | body`.
+fn consent_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(CONSENT_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+
 /// The bytes a joiner signs (with its leaf signing key) to prove possession of it:
 /// `POP_CONTEXT | sig_vk`. The KEM leaf key is NOT bound here — it rotates on every
 /// commit (`rekey_path`) and the leaf index isn't known at KeyPackage-creation
@@ -1355,6 +1382,41 @@ impl TreeKemGroup {
         self.pad_bucket
     }
 
+    /// SUB-SPEC D2: sign a promotion proposal `body` under our tree-bound leaf signing
+    /// key over the domain-separated `PROMOTE_CONTEXT` transcript. Mirrors the message
+    /// signing so GroupAuth's authenticity/no-cross-leaf-forgery/domain-separation
+    /// theorems extend to promotion signatures.
+    pub fn sign_promote(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&promote_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a promotion proposal signature under `leaf`'s bound key. Fail-closed on an
+    /// unknown leaf (GroupAuth Thm 1). Uses the current epoch's transcript.
+    pub fn verify_promote(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&promote_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+    /// SUB-SPEC D2: sign a consent `body` under our leaf key over `CONSENT_CONTEXT`.
+    pub fn sign_consent(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&consent_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a consent signature under `leaf`'s bound key. Fail-closed on unknown leaf.
+    pub fn verify_consent(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&consent_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+
     pub fn encrypt_signed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let my_sig = self
             .my_sig
@@ -1562,6 +1624,23 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SUB-SPEC D2: promote/consent signatures verify under the signer's leaf, reject a
+    /// tampered body and an unknown leaf, and are DOMAIN-SEPARATED (a promote sig must
+    /// not verify as a consent) — the property GroupAuth Thm 6 requires.
+    #[test]
+    fn promote_consent_sign_verify_and_domain_separation() {
+        let g = TreeKemGroup::create_with(KemProfile::pq_pure());
+        let body = b"promote-body";
+        let psig = g.sign_promote(body).unwrap();
+        assert!(g.verify_promote(0, body, &psig), "own leaf verifies its promote sig");
+        assert!(!g.verify_promote(0, b"tampered", &psig), "a different body must not verify");
+        assert!(!g.verify_consent(0, body, &psig), "promote sig must not verify under consent ctx");
+        assert!(!g.verify_promote(99, body, &psig), "unknown leaf fails closed");
+        let csig = g.sign_consent(body).unwrap();
+        assert!(g.verify_consent(0, body, &csig));
+        assert!(!g.verify_promote(0, body, &csig), "consent sig must not verify under promote ctx");
+    }
 
     /// Miri-verified: `TreeKemGroup::drop` zeroes its `epoch_secret`. Built with
     /// empty maps so it runs under Miri without PQ keygen. SECURITY-AUDIT F-3.

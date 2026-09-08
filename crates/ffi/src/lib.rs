@@ -263,6 +263,19 @@ fn parse_fp_hex(s: &str) -> Option<[u8; 48]> {
     Some(out)
 }
 
+/// Parse a 64-hex-char string into a 32-byte id (D2 promote_id).
+fn parse_id32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Parse 64 hex chars into a 32-byte seed.
 fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
     let s = s.trim();
@@ -382,6 +395,22 @@ pub enum FfiEvent {
     /// (cap or TTL) — surfaced so a capped drop is never silent.
     OutboxDropped {
         count: u32,
+    },
+    /// SUB-SPEC D2: a verified promotion was proposed — prompt the user to consent.
+    PromoteProposed {
+        by: String,
+        promote_id: String,
+        target_tier: u8,
+        retention_mode: u8,
+        picked: Vec<String>,
+    },
+    /// SUB-SPEC D2: the promotion committed — this chat is now persistent.
+    Promoted {
+        promote_id: String,
+    },
+    /// SUB-SPEC D2: the promotion was aborted; the chat stays ephemeral.
+    PromoteAborted {
+        promote_id: String,
     },
     /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
     /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
@@ -550,6 +579,21 @@ fn map_event(e: Event) -> FfiEvent {
             gossip_id: gossip_id.iter().map(|b| format!("{b:02x}")).collect(),
         },
         Event::OutboxDropped { count } => FfiEvent::OutboxDropped { count: count as u32 },
+        Event::PromoteProposed { by, promote_id, target_tier, retention_mode, picked } => {
+            FfiEvent::PromoteProposed {
+                by: hex_fp(&by),
+                promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+                target_tier,
+                retention_mode,
+                picked: picked.iter().map(|fp| hex_fp(fp)).collect(),
+            }
+        }
+        Event::Promoted { promote_id } => FfiEvent::Promoted {
+            promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::PromoteAborted { promote_id } => FfiEvent::PromoteAborted {
+            promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
         Event::Error(message) => FfiEvent::Error { message },
     }
 }
@@ -1076,6 +1120,32 @@ impl TalkryptClient {
         self.rt
             .block_on(self.core.self_update())
             .map_err(FfiError::from)
+    }
+
+    /// SUB-SPEC D2: propose promoting this ephemeral chat to persistent. `picked` are hex
+    /// account fingerprints to carry over; `consent_rule` 0=unanimous/1=opt-in/2=host-
+    /// mandate; `retention_mode` 0=fresh/1=carry/2=carry-from-point. Returns the hex
+    /// promote_id that consents reference.
+    pub fn propose_promote(
+        &self,
+        target_tier: u8,
+        retention_mode: u8,
+        consent_rule: u8,
+        picked: Vec<String>,
+        onion: String,
+    ) -> Option<String> {
+        let picked_fps: Vec<[u8; 48]> = picked.iter().filter_map(|s| parse_fp_hex(s)).collect();
+        self.rt
+            .block_on(self.core.propose_promote(target_tier, retention_mode, consent_rule, picked_fps, onion))
+            .ok()
+            .map(|id| id.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// SUB-SPEC D2: consent to (or decline) the pending promotion `promote_id` (hex).
+    pub fn respond_promote(&self, promote_id: String, accept: bool) {
+        if let Some(id) = parse_id32(&promote_id) {
+            let _ = self.rt.block_on(self.core.respond_promote(id, accept));
+        }
     }
 
     /// The account fingerprint (hex) cryptographically bound to a group `leaf`

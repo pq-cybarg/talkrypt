@@ -15,11 +15,19 @@ use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
 // v4 appended F-16 `message_padding` (SECURITY-AUDIT); v5 appends Sub-spec C
-// `vouch_policy`. Both are strictly append-only and read only when `version` is high
-// enough, so v1-v4 invites still parse.
-const DESCRIPTOR_VERSION: u16 = 5;
+// `vouch_policy`; v6 appends Sub-spec D2 `promotion`. All strictly append-only and read
+// only when `version` is high enough, so v1-v5 invites still parse.
+const DESCRIPTOR_VERSION: u16 = 6;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
+
+/// SUB-SPEC D2 (v6+): the persistent successor a promotion produced — its target tier
+/// (app-level) and stable onion, so a rejoining member reconnects to the right room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromotionMeta {
+    pub tier: u8,
+    pub onion: String,
+}
 
 /// An out-of-band **channel password**. Never serialized into the invite URI —
 /// it is shared separately (spoken, typed) and mixed into the session root via
@@ -149,6 +157,10 @@ pub struct ChatDescriptor {
     /// threshold + freshness window). Display-only — NEVER gates access (invariant 2).
     /// v1-v4 invites default to `VouchPolicy::default()` (vouching off → never tinted).
     pub vouch_policy: crate::vouch::VouchPolicy,
+    /// SUB-SPEC D2 (v6+): if this chat was promoted from ephemeral, the successor's
+    /// target tier + stable onion, so a rejoining member reconnects to the persistent
+    /// room. `None` for an un-promoted (or v1-v5) chat.
+    pub promotion: Option<PromotionMeta>,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -183,6 +195,7 @@ impl ChatDescriptor {
             access_predicate: None,
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
+            promotion: None,
             password: None,
         }
     }
@@ -291,6 +304,18 @@ impl ChatDescriptor {
         if self.version >= 5 {
             w.put_bytes(&self.vouch_policy.encode());
         }
+        // v6+: SUB-SPEC D2 promotion successor metadata (append-only after vouch_policy;
+        // MUST match the decode order below).
+        if self.version >= 6 {
+            match &self.promotion {
+                None => w.put_u8(0),
+                Some(m) => {
+                    w.put_u8(1);
+                    w.put_u8(m.tier);
+                    w.put_bytes(m.onion.as_bytes());
+                }
+            }
+        }
         w.into_vec()
     }
 
@@ -356,6 +381,20 @@ impl ChatDescriptor {
         } else {
             crate::vouch::VouchPolicy::default()
         };
+        // v6+: SUB-SPEC D2 promotion successor metadata (0 = none, 1 = present).
+        let promotion = if version >= 6 {
+            match r.get_u8()? {
+                0 => None,
+                1 => {
+                    let tier = r.get_u8()?;
+                    let onion = string(r.get_bytes()?)?;
+                    Some(PromotionMeta { tier, onion })
+                }
+                _ => return Err(CoreError::Malformed("promotion flag")),
+            }
+        } else {
+            None
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -374,6 +413,7 @@ impl ChatDescriptor {
             access_predicate,
             message_padding,
             vouch_policy,
+            promotion,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -544,6 +584,7 @@ mod kat {
             access_predicate: None,
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
+            promotion: None,
             password: None,
         };
         assert_eq!(
@@ -575,6 +616,7 @@ mod kat {
             access_predicate: None,
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
+            promotion: None,
             password: None,
         };
         let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
@@ -693,5 +735,21 @@ mod kat {
         let v3_reparsed = ChatDescriptor::from_uri(&v3.to_uri()).expect("v3 re-encode parses");
         assert_eq!(v3, v3_reparsed);
         assert_eq!(v3_reparsed.version, 3);
+    }
+
+    #[test]
+    fn v6_promotion_roundtrips_and_v5_defaults() {
+        let mut d = ChatDescriptor::new(TopologyKind::Hub, Persistence::Persistent, "tk.dr.kat", vec![], "#v6");
+        d.promotion = Some(PromotionMeta { tier: 2, onion: "successor.onion".into() });
+        let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
+        assert_eq!(back.promotion, Some(PromotionMeta { tier: 2, onion: "successor.onion".into() }));
+        assert_eq!(back, d, "v6 descriptor round-trips");
+        // A parsed v5 descriptor re-encodes equal (no trailing v6 bytes) + defaults promotion.
+        let mut v5 = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, "tk.dr.kat", vec![], "#v5");
+        v5.version = 5;
+        let v5_reparsed = ChatDescriptor::from_uri(&v5.to_uri()).expect("v5 re-encode parses");
+        assert_eq!(v5_reparsed.version, 5);
+        assert!(v5_reparsed.promotion.is_none());
+        assert_eq!(v5, v5_reparsed);
     }
 }

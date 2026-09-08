@@ -188,6 +188,9 @@ async fn run(
                     Some(CoreEvent::Vouch { .. }) => {}   // SUB-SPEC C (UI: Task 11)
                     Some(CoreEvent::Delivered { .. }) => {}    // D1 delivery receipt (UI later)
                     Some(CoreEvent::OutboxDropped { .. }) => {} // D1 outbox cap/TTL drop
+                    Some(CoreEvent::PromoteProposed { .. }) => app.push("* promotion proposed".to_string()),
+                    Some(CoreEvent::Promoted { .. }) => app.push("* promoted - chat is persistent".to_string()),
+                    Some(CoreEvent::PromoteAborted { .. }) => app.push("* promotion aborted".to_string()),
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }

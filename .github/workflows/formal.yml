@@ -69,6 +69,12 @@ jobs:
           cargo kani -p talkrypt-core --harness engine::d1_proofs::delivery_ack_decode_never_panics
           cargo kani -p talkrypt-core --harness engine::d1_proofs::mailbox_decode_never_panics
           cargo kani -p talkrypt-core --harness engine::d1_proofs::queue_sync_decode_never_panics
+      - name: Prove the D2 promotion decoders are total (core)
+        # Flat PromoteBody (capped picked list + onion string) / ConsentBody — no nested
+        # heap, so proven no-panic on all hostile inputs.
+        run: |
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::promote_body_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::consent_body_decode_never_panics
 
   fstar:
     name: "F* — auth theorems"

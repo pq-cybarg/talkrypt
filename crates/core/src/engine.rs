@@ -71,6 +71,20 @@ pub enum Event {
     /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted to
     /// stay within the cap — surfaced so a capped drop is never silent.
     OutboxDropped { count: usize },
+    /// SUB-SPEC D2: a (verified) promotion was proposed. The UI shows the target tier,
+    /// the retention contract being agreed to, and the picked membership, and prompts
+    /// the user to consent via `respond_promote`.
+    PromoteProposed {
+        by: [u8; 48],
+        promote_id: [u8; 32],
+        target_tier: u8,
+        retention_mode: u8,
+        picked: Vec<[u8; 48]>,
+    },
+    /// SUB-SPEC D2: the promotion committed — this chat is now persistent.
+    Promoted { promote_id: [u8; 32] },
+    /// SUB-SPEC D2: the promotion was aborted (declined / timed out); chat stays ephemeral.
+    PromoteAborted { promote_id: [u8; 32] },
     /// A peer's resolved self-declared name changed. `account_fingerprint` is set
     /// only for account-linked/registry tiers; `label` is `None` when suppressed by
     /// the chat's trust policy.
@@ -160,11 +174,17 @@ enum Frame {
     /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
     /// RouteDescriptor / UpdateProposal from the group-security hardening).
     Presence(Vec<u8>),
+    /// SUB-SPEC D2: a signed promotion proposal — an opaque `body ‖ leaf ‖ sig` blob;
+    /// the structured `PromoteBody` is decoded in core and the sig verified under
+    /// `leaf`'s bound key. Tag 13.
+    Promote(Vec<u8>),
+    /// SUB-SPEC D2: a signed consent response (opaque `body ‖ leaf ‖ sig` blob). Tag 14.
+    Consent(Vec<u8>),
     /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
     /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
     /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
     /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
-    /// so `GroupAuth.fst` is unaffected. Tag 15 (13/14 reserved for Sub-spec D2).
+    /// so `GroupAuth.fst` is unaffected. Tag 15.
     DeliveryAck(Vec<[u8; 32]>),
     /// D1 Layer-B (anchor mailbox): a sender deposits an OPAQUE (already-encrypted) frame
     /// at a recipient's always-on anchor for later pickup. `recipient` = who it's for;
@@ -249,6 +269,14 @@ impl Frame {
                 w.put_u8(12);
                 w.put_bytes(b);
             }
+            Frame::Promote(b) => {
+                w.put_u8(13);
+                w.put_bytes(b);
+            }
+            Frame::Consent(b) => {
+                w.put_u8(14);
+                w.put_bytes(b);
+            }
             Frame::DeliveryAck(ids) => {
                 w.put_u8(15);
                 w.put_u32(ids.len() as u32);
@@ -316,6 +344,8 @@ impl Frame {
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
             12 => Frame::Presence(r.get_vec().ok()?),
+            13 => Frame::Promote(r.get_vec().ok()?),
+            14 => Frame::Consent(r.get_vec().ok()?),
             // D1 store-and-forward decoders are chunked into standalone, flat functions
             // (below) so each is independently CBMC-provable in isolation — routing an
             // arbitrary tag through this whole match would drag in the Marking-bearing
@@ -331,6 +361,140 @@ impl Frame {
         };
         Some(frame)
     }
+}
+
+/// SUB-SPEC D2: the structured body of a promotion proposal, signed by the promoter.
+/// Flat/bounded (picked = a capped `Vec<[u8;48]>`) so its decoder is Kani-provable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PromoteBody {
+    /// Target persistence tier (app-level: 0=PersistentLocal, 1=Shared, 2=AlwaysOn).
+    pub target_tier: u8,
+    /// D3 retention (0=Fresh, 1=Carry, 2=CarryFromPoint).
+    pub retention_mode: u8,
+    /// Consent rule (0=Unanimous, 1=OptInSuccessor, 2=HostMandate).
+    pub consent_rule: u8,
+    /// Account fingerprints of members carried into the persistent successor.
+    pub picked: Vec<[u8; 48]>,
+    /// The successor's stable onion (empty = keep current).
+    pub onion: String,
+    /// The group epoch this proposal binds to (replay/stale guard).
+    pub epoch: u32,
+}
+impl PromoteBody {
+    const MAX_PICKED: usize = 256;
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_u8(self.target_tier);
+        w.put_u8(self.retention_mode);
+        w.put_u8(self.consent_rule);
+        w.put_u32(self.picked.len() as u32);
+        for fp in &self.picked {
+            w.put_bytes(fp);
+        }
+        w.put_bytes(self.onion.as_bytes());
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    /// Flat framing decode: the whole body EXCEPT converting the onion bytes to a
+    /// `String` (returned raw). No `String::from_utf8`, so — unlike the full `decode` —
+    /// this is CBMC-tractable and is what the Kani totality harness targets. `from_utf8`
+    /// is a std, panic-free boundary (returns `Result`), CBMC-INTRACTABLE for the same
+    /// reason `Marking` is (SECURITY-AUDIT R-6), so it is kept OUT of the proof surface.
+    #[allow(clippy::type_complexity)]
+    fn decode_flat(b: &[u8]) -> Option<(u8, u8, u8, Vec<[u8; 48]>, Vec<u8>, u32)> {
+        let mut r = Reader::new(b);
+        let target_tier = r.get_u8().ok()?;
+        let retention_mode = r.get_u8().ok()?;
+        let consent_rule = r.get_u8().ok()?;
+        let n = r.get_u32().ok()? as usize;
+        if n > Self::MAX_PICKED {
+            return None;
+        }
+        let mut picked = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.get_bytes().ok()?;
+            if v.len() != 48 {
+                return None;
+            }
+            let mut fp = [0u8; 48];
+            fp.copy_from_slice(v);
+            picked.push(fp);
+        }
+        let onion = r.get_vec().ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some((target_tier, retention_mode, consent_rule, picked, onion, epoch))
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let (target_tier, retention_mode, consent_rule, picked, onion, epoch) = Self::decode_flat(b)?;
+        let onion = String::from_utf8(onion).ok()?;
+        Some(Self { target_tier, retention_mode, consent_rule, picked, onion, epoch })
+    }
+    /// SHA-256 of the canonical body — binds a Consent to exactly this proposal.
+    pub fn id(&self) -> [u8; 32] {
+        gossip_id(&self.encode())
+    }
+}
+
+/// SUB-SPEC D2: a member's signed consent (or decline) to a specific promotion.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConsentBody {
+    pub promote_id: [u8; 32],
+    pub accept: bool,
+    pub leaf: u32,
+    pub epoch: u32,
+}
+impl ConsentBody {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_bytes(&self.promote_id);
+        w.put_u8(self.accept as u8);
+        w.put_u32(self.leaf);
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(b);
+        let v = r.get_bytes().ok()?;
+        if v.len() != 32 {
+            return None;
+        }
+        let mut promote_id = [0u8; 32];
+        promote_id.copy_from_slice(v);
+        let accept = r.get_u8().ok()? != 0;
+        let leaf = r.get_u32().ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some(Self { promote_id, accept, leaf, epoch })
+    }
+}
+
+/// SUB-SPEC D2: a promotion the host is coordinating — the signed body + the per-leaf
+/// accept/decline tally collected from consents.
+struct PromoteState {
+    body: PromoteBody,
+    /// leaf -> accepted?  (only DISTINCT, signature-verified consents recorded).
+    consents: std::collections::HashMap<u32, bool>,
+}
+
+/// Wire a signed D2 control blob: `body ‖ leaf ‖ sig`, so the receiver knows which leaf
+/// to verify under. Used for both `Promote` and `Consent` payloads.
+fn wrap_signed(body: &[u8], leaf: u32, sig: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.put_bytes(body);
+    w.put_u32(leaf);
+    w.put_bytes(sig);
+    w.into_vec()
+}
+/// Inverse of [`wrap_signed`]: `(body, leaf, sig)`.
+fn unwrap_signed(payload: &[u8]) -> Option<(Vec<u8>, u32, Vec<u8>)> {
+    let mut r = Reader::new(payload);
+    let body = r.get_vec().ok()?;
+    let leaf = r.get_u32().ok()?;
+    let sig = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((body, leaf, sig))
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +830,9 @@ struct Inner {
     /// anti-entropy digest exchange terminates (the accepter replies exactly once, which
     /// is needed because the pairwise responder is mute until the initiator speaks).
     qs_sent: std::sync::Mutex<std::collections::HashSet<[u8; 48]>>,
+    /// SUB-SPEC D2: the in-flight promotion proposal we originated or are consenting to,
+    /// with the per-leaf consent tally. `None` when no promotion is pending.
+    promote: std::sync::Mutex<Option<PromoteState>>,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -945,6 +1112,7 @@ impl Core {
             ),
             anchor_enabled: std::sync::atomic::AtomicBool::new(false),
             qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
+            promote: std::sync::Mutex::new(None),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1684,6 +1852,76 @@ impl Core {
                 route(&self.inner, frame, Route::Broadcast).await;
             }
         }
+    }
+
+    /// SUB-SPEC D2: propose promoting this ephemeral group to a persistent successor.
+    /// Builds a `PromoteBody` bound to the current group epoch, signs it under our leaf
+    /// key, broadcasts it, and tracks the proposal for consent tallying. Returns the
+    /// `promote_id` (SHA-256 of the body) that consents will reference. Group role only.
+    pub async fn propose_promote(
+        &self,
+        target_tier: u8,
+        retention_mode: u8,
+        consent_rule: u8,
+        picked: Vec<[u8; 48]>,
+        onion: String,
+    ) -> Result<[u8; 32]> {
+        let (payload, id, body) = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let body = PromoteBody {
+                target_tier,
+                retention_mode,
+                consent_rule,
+                picked,
+                onion,
+                epoch: grp.epoch(),
+            };
+            let body_bytes = body.encode();
+            let sig = grp
+                .sign_promote(&body_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            let payload = wrap_signed(&body_bytes, grp.my_leaf(), &sig);
+            (payload, body.id(), body)
+        };
+        *self.inner.promote.lock().unwrap() = Some(PromoteState {
+            body,
+            consents: std::collections::HashMap::new(),
+        });
+        route(&self.inner, Frame::Promote(payload), Route::Broadcast).await;
+        // HostMandate (rule 2): the host converts unilaterally — commit immediately,
+        // carrying every picked member (a member that later declines is out of scope for
+        // the MVP; unanimous/opt-in are the consent-gated paths).
+        if consent_rule == 2 {
+            let carried: Vec<[u8; 48]> = {
+                let roster = self.inner.roster.lock().unwrap();
+                let me = self.inner.identity.public().fingerprint();
+                let picked: std::collections::HashSet<[u8; 48]> =
+                    self.inner.promote.lock().unwrap().as_ref().map(|s| s.body.picked.iter().copied().collect()).unwrap_or_default();
+                std::iter::once(me)
+                    .chain(roster.values().copied().filter(|fp| picked.contains(fp) && *fp != me))
+                    .collect()
+            };
+            commit_promotion(&self.inner, id, &carried).await;
+        }
+        Ok(id)
+    }
+
+    /// SUB-SPEC D2: consent to (or decline) the pending promotion `promote_id`. Signs a
+    /// `ConsentBody` under our leaf key and sends it to the committer (host), who tallies.
+    pub async fn respond_promote(&self, promote_id: [u8; 32], accept: bool) -> Result<()> {
+        let payload = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let cb = ConsentBody { promote_id, accept, leaf: grp.my_leaf(), epoch: grp.epoch() };
+            let cb_bytes = cb.encode();
+            let sig = grp
+                .sign_consent(&cb_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            wrap_signed(&cb_bytes, grp.my_leaf(), &sig)
+        };
+        route(&self.inner, Frame::Consent(payload), Route::Committer).await;
+        Ok(())
     }
 
     /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
@@ -2720,6 +2958,14 @@ async fn reader_loop(
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
             }
+            Some(Frame::Promote(payload)) if inner.role != GroupRole::None => {
+                // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
+                handle_promote(&inner, from, payload).await;
+            }
+            Some(Frame::Consent(payload)) if inner.role == GroupRole::Host => {
+                // SUB-SPEC D2: a consent response — the host tallies + commits/aborts.
+                handle_consent(&inner, from, payload).await;
+            }
             Some(Frame::DeliveryAck(ids)) => {
                 // D1: the peer confirms it received these frames. Clear them from our
                 // outbox (we originated them) and from the keeper queue for that peer
@@ -3518,6 +3764,181 @@ async fn handle_update_proposal(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u
 }
 
 /// Decrypt a group message; the host also relays it to the other members.
+/// SUB-SPEC D2: a member received a promotion proposal. Verify the promoter's signature
+/// under its claimed leaf (fail-closed), check it binds the current epoch, record it as
+/// pending, and surface it for user consent. A forged/stale/malformed proposal is dropped.
+async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
+    let Some((body_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let ok = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => grp.verify_promote(leaf, &body_bytes, &sig) && {
+                // The proposal must bind the CURRENT epoch (anti replay/rollback).
+                PromoteBody::decode(&body_bytes).map(|b| b.epoch == grp.epoch()).unwrap_or(false)
+            },
+            None => false,
+        }
+    };
+    if !ok {
+        return; // forged, stale-epoch, or malformed — fail closed
+    }
+    let Some(body) = PromoteBody::decode(&body_bytes) else {
+        return;
+    };
+    let id = body.id();
+    let ev = Event::PromoteProposed {
+        by: from,
+        promote_id: id,
+        target_tier: body.target_tier,
+        retention_mode: body.retention_mode,
+        picked: body.picked.clone(),
+    };
+    *inner.promote.lock().unwrap() = Some(PromoteState {
+        body,
+        consents: std::collections::HashMap::new(),
+    });
+    let _ = inner.events_tx.send(ev);
+}
+
+/// SUB-SPEC D2: the tally decision. `Commit(carried)` names the fingerprints (incl. the
+/// host) to keep in the persistent successor; `Abort` cancels; `Wait` keeps collecting.
+enum PromoDecision {
+    Wait,
+    Abort,
+    Commit(Vec<[u8; 48]>),
+}
+
+/// Evaluate the pending promotion per its consent rule given the current tally. Picked
+/// members (other than the host) are resolved to their roster leaves.
+///   0 Unanimous     — any decline aborts; all-accept commits carrying every picked member.
+///   1 OptInSuccessor— once every picked member has responded, commit carrying the accepters.
+///   2 HostMandate   — decided at propose time (see `propose_promote`), never here.
+fn promotion_decision(
+    state: &PromoteState,
+    roster: &std::collections::HashMap<u32, [u8; 48]>,
+    me_fp: [u8; 48],
+) -> PromoDecision {
+    let picked: std::collections::HashSet<[u8; 48]> = state.body.picked.iter().copied().collect();
+    let picked_members: Vec<(u32, [u8; 48])> = roster
+        .iter()
+        .filter(|(_, fp)| picked.contains(*fp) && **fp != me_fp)
+        .map(|(l, fp)| (*l, *fp))
+        .collect();
+    let carried_all = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp).chain(picked_members.iter().map(|(_, fp)| *fp)).collect()
+    };
+    let carried_accepters = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp)
+            .chain(
+                picked_members
+                    .iter()
+                    .filter(|(l, _)| state.consents.get(l) == Some(&true))
+                    .map(|(_, fp)| *fp),
+            )
+            .collect()
+    };
+    match state.body.consent_rule {
+        0 => {
+            if picked_members.iter().any(|(l, _)| state.consents.get(l) == Some(&false)) {
+                PromoDecision::Abort
+            } else if picked_members.iter().all(|(l, _)| state.consents.get(l) == Some(&true)) {
+                PromoDecision::Commit(carried_all())
+            } else {
+                PromoDecision::Wait
+            }
+        }
+        1 => {
+            if picked_members.iter().all(|(l, _)| state.consents.contains_key(l)) {
+                PromoDecision::Commit(carried_accepters())
+            } else {
+                PromoDecision::Wait
+            }
+        }
+        _ => PromoDecision::Wait,
+    }
+}
+
+/// SUB-SPEC D2 (HOST): commit the promotion — evict every roster member NOT in `carried`
+/// (member picker + decliners), re-key the group at the PCS boundary (reusing the audited
+/// `self_update` path so GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and
+/// announce. Reuses the existing, tested Core operations rather than duplicating the
+/// commit machinery.
+async fn commit_promotion(inner: &Arc<Inner>, promote_id: [u8; 32], carried: &[[u8; 48]]) {
+    let core = Core { inner: inner.clone() };
+    let me = inner.identity.public().fingerprint();
+    let keep: std::collections::HashSet<[u8; 48]> = carried.iter().copied().collect();
+    let to_remove: Vec<[u8; 48]> = {
+        let roster = inner.roster.lock().unwrap();
+        roster
+            .values()
+            .copied()
+            .filter(|fp| *fp != me && !keep.contains(fp))
+            .collect()
+    };
+    for fp in to_remove {
+        let _ = core.remove_member(fp).await; // evict (commit + roster broadcast)
+    }
+    let _ = core.self_update().await; // PCS re-key boundary (Thms 7/8)
+    core.set_persistence(true); // D1: the successor is persistent
+    let _ = inner.events_tx.send(Event::Promoted { promote_id });
+    *inner.promote.lock().unwrap() = None;
+}
+
+/// SUB-SPEC D2 (HOST): a consent arrived. Verify it under the consenting leaf's key
+/// (fail-closed), bind it to the pending proposal (id + epoch), record it once per
+/// distinct leaf, then commit or abort per the consent rule.
+async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
+    let Some((cb_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let (verified, cur_epoch) = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => (grp.verify_consent(leaf, &cb_bytes, &sig), grp.epoch()),
+            None => (false, 0),
+        }
+    };
+    if !verified {
+        return; // forged / unknown leaf — fail closed
+    }
+    let Some(cb) = ConsentBody::decode(&cb_bytes) else {
+        return;
+    };
+    // The consent's declared leaf must equal the SIGNING leaf, and bind the live epoch.
+    if cb.leaf != leaf || cb.epoch != cur_epoch {
+        return;
+    }
+    let decided = {
+        let mut pend = inner.promote.lock().unwrap();
+        let Some(state) = pend.as_mut() else {
+            return;
+        };
+        if cb.promote_id != state.body.id() || cb.epoch != state.body.epoch {
+            return; // consent for a different / stale proposal
+        }
+        state.consents.insert(cb.leaf, cb.accept); // distinct-leaf dedup (overwrite)
+        promotion_decision(state, &inner.roster.lock().unwrap(), inner.identity.public().fingerprint())
+    };
+    match decided {
+        PromoDecision::Commit(carried) => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            if let Some(id) = id {
+                commit_promotion(inner, id, &carried).await;
+            }
+        }
+        PromoDecision::Abort => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            *inner.promote.lock().unwrap() = None;
+            if let Some(id) = id {
+                let _ = inner.events_tx.send(Event::PromoteAborted { promote_id: id });
+            }
+        }
+        PromoDecision::Wait => {}
+    }
+}
+
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
     // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
@@ -6664,6 +7085,213 @@ mod tests {
     }
 
     #[test]
+    fn promote_consent_frames_and_bodies_roundtrip() {
+        let body = PromoteBody {
+            target_tier: 1,
+            retention_mode: 0,
+            consent_rule: 0,
+            picked: vec![[1u8; 48], [2u8; 48]],
+            onion: "abc.onion".into(),
+            epoch: 3,
+        };
+        assert_eq!(PromoteBody::decode(&body.encode()).unwrap(), body);
+        assert!(matches!(Frame::decode(&Frame::Promote(body.encode()).encode()), Some(Frame::Promote(_))));
+        assert!(matches!(Frame::decode(&Frame::Consent(vec![1, 2, 3]).encode()), Some(Frame::Consent(_))));
+        // Over-cap picked list is rejected (no unbounded alloc).
+        let mut w = Writer::new();
+        w.put_u8(1);
+        w.put_u8(0);
+        w.put_u8(0);
+        w.put_u32(300); // n_picked > MAX_PICKED
+        assert!(PromoteBody::decode(&w.into_vec()).is_none());
+        let cb = ConsentBody { promote_id: [7u8; 32], accept: true, leaf: 2, epoch: 3 };
+        assert_eq!(ConsentBody::decode(&cb.encode()).unwrap(), cb);
+    }
+
+    #[tokio::test]
+    async fn propose_promote_broadcasts_and_tracks_state() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        let picked = vec![host.fingerprint()];
+        let id = host
+            .propose_promote(1, 0, 0, picked, String::new())
+            .await
+            .unwrap();
+        let st = host.inner.promote.lock().unwrap();
+        let state = st.as_ref().expect("pending promotion tracked");
+        assert_eq!(state.body.id(), id, "tracked body matches the returned promote_id");
+        assert!(state.consents.is_empty(), "no consents yet");
+    }
+
+    /// D2 Task 4: a member receives the host's promotion proposal, VERIFIES the signature
+    /// under the host's leaf, surfaces `PromoteProposed`, and can send a signed consent.
+    #[tokio::test]
+    async fn member_receives_verifies_promote_and_can_consent() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let picked = vec![host.fingerprint(), m1.fingerprint()];
+        let id = host.propose_promote(1, 0, 0, picked, String::new()).await.unwrap();
+        // m1 verifies + surfaces the proposal.
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, target_tier, .. } = next_event(&mut m1rx).await {
+                    break (promote_id, target_tier);
+                }
+            }
+        })
+        .await
+        .expect("PromoteProposed before timeout");
+        assert_eq!(got.0, id, "the surfaced promote_id matches the proposal");
+        assert_eq!(got.1, 1);
+        // m1 consents (signs + sends without error).
+        m1.respond_promote(id, true).await.unwrap();
+    }
+
+    /// D2 Task 5: unanimous consent over the picked set commits the promotion — the host
+    /// re-keys, marks the chat persistent, removes the un-picked member, and emits Promoted.
+    #[tokio::test]
+    async fn promotion_commits_on_unanimous_consent_and_removes_unpicked() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        assert!(host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp), "m2 joined");
+
+        // Promote picking host + m1 only (m2 un-picked); unanimous rule.
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        // m1 consents.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("m1 sees the proposal");
+        m1.respond_promote(id, true).await.unwrap();
+
+        // The host tallies + commits: Promoted fires.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::Promoted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("host commits the promotion");
+        assert!(host.is_persistent(), "chat is now persistent");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "the un-picked member m2 was removed by the re-key commit"
+        );
+    }
+
+    /// D2 Task 7 (HostMandate rule 2): the host converts unilaterally — the promotion
+    /// commits immediately at propose time with no consent, and un-picked members are removed.
+    #[tokio::test]
+    async fn host_mandate_commits_immediately() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        // Rule 2 = HostMandate; picks host + m1.
+        host.propose_promote(1, 0, 2, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        assert!(host.is_persistent(), "host-mandate commits immediately");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "un-picked m2 removed under host-mandate"
+        );
+    }
+
+    /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
+    /// stays ephemeral (nobody's expectation is overridden).
+    #[tokio::test]
+    async fn unanimous_decline_aborts() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        m1.respond_promote(id, false).await.unwrap(); // DECLINE
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteAborted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .expect("promotion aborts on decline");
+        assert!(!host.is_persistent(), "chat stays ephemeral after an abort");
+    }
+
+    #[test]
     fn mailbox_frames_roundtrip() {
         let put = Frame::MailboxPut { recipient: [9u8; 48], frame: b"sealed".to_vec() };
         match Frame::decode(&put.encode()) {
@@ -6759,5 +7387,29 @@ mod d1_proofs {
         kani::assume(len <= 96);
         let data: [u8; 96] = kani::any();
         let _ = decode_queue_sync(&data[..len]);
+    }
+
+    /// D2 PromoteBody FLAT framing decode never panics (fixed enums + capped [u8;48]
+    /// picked list + length-prefixed onion bytes + epoch). Targets `decode_flat`, which
+    /// excludes the onion `String::from_utf8` — a std, panic-free boundary CBMC-intractable
+    /// for the same reason `Marking` is (SECURITY-AUDIT R-6). Structurally identical to the
+    /// D1 count-capped-list decoders, so CBMC-tractable at the same `unwind`.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn promote_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 80);
+        let data: [u8; 80] = kani::any();
+        let _ = PromoteBody::decode_flat(&data[..len]);
+    }
+
+    /// D2 ConsentBody decode never panics (flat: fixed [u8;32] + u8 + u32 + u32).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn consent_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 48);
+        let data: [u8; 48] = kani::any();
+        let _ = ConsentBody::decode(&data[..len]);
     }
 }
