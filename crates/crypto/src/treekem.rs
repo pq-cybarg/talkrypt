@@ -429,6 +429,7 @@ const POP_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-pop-v2";
 /// as a group message, a PoP, or across the promote↔consent boundary (GroupAuth Thm 6).
 const PROMOTE_CONTEXT: &[u8] = b"talkrypt-treekem-promote-v1";
 const CONSENT_CONTEXT: &[u8] = b"talkrypt-treekem-consent-v1";
+const PROMO_COMMIT_CONTEXT: &[u8] = b"talkrypt-treekem-promo-commit-v1";
 
 /// Injective (length-prefixed) transcript a leaf signs to propose a promotion:
 /// `PROMOTE_CONTEXT | epoch | leaf | body`.
@@ -445,6 +446,18 @@ fn promote_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
 fn consent_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
     let mut w = talkrypt_wire::Writer::new();
     w.put_bytes(CONSENT_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+/// Injective transcript the committer (host) signs to announce a promotion has
+/// COMMITTED, so members can finalize locally (flip persistence, apply the D3
+/// retention contract): `PROMO_COMMIT_CONTEXT | epoch | leaf | body`. Distinct
+/// context ⇒ a commit signature can never be replayed as a promote/consent/message.
+fn promo_commit_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(PROMO_COMMIT_CONTEXT);
     w.put_u32(epoch);
     w.put_u32(leaf);
     w.put_bytes(body);
@@ -1413,6 +1426,24 @@ impl TreeKemGroup {
     pub fn verify_consent(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
         match self.leaf_sig_keys.get(&leaf) {
             Some(pk) => pk.verify(&consent_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+    /// SUB-SPEC D2/D3: sign a promotion-commit announcement `body` (the promote_id) under
+    /// our leaf key over `PROMO_COMMIT_CONTEXT` — the committer broadcasts this so members
+    /// finalize the promotion locally (persistence + retention).
+    pub fn sign_promo_commit(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&promo_commit_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a promotion-commit announcement under `leaf`'s bound key. Fail-closed on an
+    /// unknown leaf; uses the current epoch's transcript.
+    pub fn verify_promo_commit(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&promo_commit_transcript(self.epoch, leaf, body), sig).is_ok(),
             None => false,
         }
     }

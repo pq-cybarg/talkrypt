@@ -1124,7 +1124,8 @@ impl TalkryptClient {
 
     /// SUB-SPEC D2: propose promoting this ephemeral chat to persistent. `picked` are hex
     /// account fingerprints to carry over; `consent_rule` 0=unanimous/1=opt-in/2=host-
-    /// mandate; `retention_mode` 0=fresh/1=carry/2=carry-from-point. Returns the hex
+    /// mandate; `retention_mode` 0=fresh/1=carry/2=carry-from-point. `carry_from_secs` is
+    /// the D3 CarryFromPoint marker (unix seconds; 0 for fresh/carry). Returns the hex
     /// promote_id that consents reference.
     pub fn propose_promote(
         &self,
@@ -1133,10 +1134,11 @@ impl TalkryptClient {
         consent_rule: u8,
         picked: Vec<String>,
         onion: String,
+        carry_from_secs: u64,
     ) -> Option<String> {
         let picked_fps: Vec<[u8; 48]> = picked.iter().filter_map(|s| parse_fp_hex(s)).collect();
         self.rt
-            .block_on(self.core.propose_promote(target_tier, retention_mode, consent_rule, picked_fps, onion))
+            .block_on(self.core.propose_promote(target_tier, retention_mode, consent_rule, picked_fps, onion, carry_from_secs))
             .ok()
             .map(|id| id.iter().map(|b| format!("{b:02x}")).collect())
     }
@@ -1161,6 +1163,12 @@ impl TalkryptClient {
     /// reconnect, so a member that was offline catches up.
     pub fn set_persistence(&self, on: bool) {
         self.core.set_persistence(on);
+    }
+
+    /// SUB-SPEC D3: erase this chat's sealed history + drop the in-memory backlog. Backs
+    /// the Delete affordance and return-to-ephemeral (D3 invariant 4, recoverable).
+    pub fn purge_history(&self) {
+        self.core.purge_history();
     }
 
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
