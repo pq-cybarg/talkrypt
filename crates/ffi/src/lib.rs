@@ -1186,18 +1186,32 @@ impl TalkryptClient {
 
     /// SUB-SPEC D at-rest (restart survival): back this chat's outbox AND sealed history
     /// with an on-disk [`talkrypt_core::SealedFileStore`] rooted at `dir`, so un-acked
-    /// messages and consented history survive an app/phone restart. `passphrase` is the
-    /// SAME custody the host uses for the identity (reused to seal the store's key); it
-    /// must be non-empty. Rehydrates the outbox for this chat immediately. Call once, right
-    /// after opening the chat and before `set_persistence(true)`.
-    pub fn enable_at_rest(&self, dir: String, passphrase: String) -> Result<(), FfiError> {
-        if passphrase.is_empty() {
-            return Err(FfiError::Failed("at-rest custody requires a passphrase".into()));
+    /// messages and consented history survive an app/phone restart. Custody REUSES the
+    /// device's identity factors: a `passphrase` and/or a hardware `wrapper` (StrongBox /
+    /// Secure Enclave / Keystore). A passphrase alone is allowed (fully PQ-safe). A hardware
+    /// wrapper is device-binding but, being a NON-PQ secure element, may wrap the key with
+    /// quantum-breakable classical crypto — so per the QROM/L5 at-rest rule it must be PAIRED
+    /// WITH A PASSPHRASE (whose Argon2id key keeps the stored AES-256-GCM contents L5/QROM-safe
+    /// even if the hardware wrap is later broken). At least one factor is required; a wrapper
+    /// without a passphrase is refused. Rehydrates the outbox for this chat immediately. Call
+    /// once, right after opening the chat and before `set_persistence(true)`.
+    pub fn enable_at_rest(
+        &self,
+        dir: String,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<(), FfiError> {
+        let pass = passphrase.filter(|p| !p.is_empty());
+        if pass.is_none() && wrapper.is_none() {
+            return Err(FfiError::Failed(
+                "at-rest custody requires a passphrase and/or a hardware wrapper".into(),
+            ));
         }
+        let bridge = wrapper.map(WrapperBridge);
         let store = talkrypt_core::SealedFileStore::open(
             std::path::Path::new(&dir),
-            Some(passphrase.as_bytes()),
-            None,
+            pass.as_deref().map(|s| s.as_bytes()),
+            bridge.as_ref().map(|b| b as &dyn talkrypt_core::KeyWrapper),
         )
         .map_err(FfiError::from)?;
         let store = std::sync::Arc::new(store);
