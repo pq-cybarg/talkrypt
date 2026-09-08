@@ -6,6 +6,7 @@
 //! stack is testable over the in-memory loopback transport.
 
 pub mod advert;
+pub mod atrest;
 pub mod b32;
 pub mod csfc;
 pub mod custody;
@@ -38,4 +39,5 @@ pub use linking::{LinkClient, LinkHost, Linked};
 pub use registry::{resolve_across, RegistryClient, RegistryServer};
 pub use error::{CoreError, Result};
 pub use history::{HistoryRecord, HistoryStore, InMemoryHistory};
+pub use atrest::SealedFileStore;
 pub use relay::RelayHub;
