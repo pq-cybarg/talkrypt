@@ -517,7 +517,13 @@ impl PromoteBody {
         w.put_u32(self.epoch);
         w.into_vec()
     }
-    pub fn decode(b: &[u8]) -> Option<Self> {
+    /// Flat framing decode: the whole body EXCEPT converting the onion bytes to a
+    /// `String` (returned raw). No `String::from_utf8`, so — unlike the full `decode` —
+    /// this is CBMC-tractable and is what the Kani totality harness targets. `from_utf8`
+    /// is a std, panic-free boundary (returns `Result`), CBMC-INTRACTABLE for the same
+    /// reason `Marking` is (SECURITY-AUDIT R-6), so it is kept OUT of the proof surface.
+    #[allow(clippy::type_complexity)]
+    fn decode_flat(b: &[u8]) -> Option<(u8, u8, u8, Vec<[u8; 48]>, Vec<u8>, u64, u32)> {
         let mut r = Reader::new(b);
         let target_tier = r.get_u8().ok()?;
         let retention_mode = r.get_u8().ok()?;
@@ -536,10 +542,17 @@ impl PromoteBody {
             fp.copy_from_slice(v);
             picked.push(fp);
         }
-        let onion = String::from_utf8(r.get_vec().ok()?).ok()?;
+        let onion = r.get_vec().ok()?;
         let carry_from_secs = r.get_u64().ok()?;
         let epoch = r.get_u32().ok()?;
         r.finish().ok()?;
+        Some((target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch))
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let (target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch) =
+            Self::decode_flat(b)?;
+        let onion = String::from_utf8(onion).ok()?;
         Some(Self { target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch })
     }
     /// SHA-256 of the canonical body — binds a Consent to exactly this proposal.
@@ -7898,15 +7911,19 @@ mod d1_proofs {
         let _ = decode_queue_sync(&data[..len]);
     }
 
-    /// D2 PromoteBody decode never panics (flat: fixed enums + capped [u8;48] picked
-    /// list + one length-prefixed onion string + the D3 `carry_from_secs` u64 marker).
+    /// D2/D3 PromoteBody FLAT framing decode never panics (fixed enums + capped [u8;48]
+    /// picked list + length-prefixed onion bytes + the D3 `carry_from_secs` u64 marker +
+    /// epoch). Targets `decode_flat`, which excludes the onion `String::from_utf8` — a
+    /// std, panic-free boundary that is CBMC-intractable for the same reason `Marking` is
+    /// (SECURITY-AUDIT R-6). Structurally identical to the D1 count-capped-list decoders,
+    /// so it is CBMC-tractable at the same `unwind`.
     #[kani::proof]
     #[kani::unwind(6)]
     fn promote_body_decode_never_panics() {
         let len: usize = kani::any();
         kani::assume(len <= 88);
         let data: [u8; 88] = kani::any();
-        let _ = PromoteBody::decode(&data[..len]);
+        let _ = PromoteBody::decode_flat(&data[..len]);
     }
 
     /// D2 ConsentBody decode never panics (flat: fixed [u8;32] + u8 + u32 + u32).
