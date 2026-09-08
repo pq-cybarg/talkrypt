@@ -498,6 +498,19 @@ pub struct FfiRoute {
     pub endpoints: Vec<String>,
 }
 
+/// SUB-SPEC D at-rest: one retained chat message decoded from sealed history, for
+/// redisplay after a restart (see [`TalkryptClient::load_history`]).
+#[derive(uniffi::Record)]
+pub struct FfiHistoryRecord {
+    /// Sender account/leaf fingerprint (hex).
+    pub from_hex: String,
+    /// Unix seconds when this node sent/received it (sort key).
+    pub ts: u64,
+    pub text: String,
+    /// Classification banner if the message carried a marking, else `None`.
+    pub marking: Option<String>,
+}
+
 /// The result of a successful device link (the new-device side). Persist
 /// `chain_hex` (with this device's seed) and pass both to `join_linked` /
 /// `host_linked` to chat as this account on this device.
@@ -1169,6 +1182,44 @@ impl TalkryptClient {
     /// the Delete affordance and return-to-ephemeral (D3 invariant 4, recoverable).
     pub fn purge_history(&self) {
         self.core.purge_history();
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): back this chat's outbox AND sealed history
+    /// with an on-disk [`talkrypt_core::SealedFileStore`] rooted at `dir`, so un-acked
+    /// messages and consented history survive an app/phone restart. `passphrase` is the
+    /// SAME custody the host uses for the identity (reused to seal the store's key); it
+    /// must be non-empty. Rehydrates the outbox for this chat immediately. Call once, right
+    /// after opening the chat and before `set_persistence(true)`.
+    pub fn enable_at_rest(&self, dir: String, passphrase: String) -> Result<(), FfiError> {
+        if passphrase.is_empty() {
+            return Err(FfiError::Failed("at-rest custody requires a passphrase".into()));
+        }
+        let store = talkrypt_core::SealedFileStore::open(
+            std::path::Path::new(&dir),
+            Some(passphrase.as_bytes()),
+            None,
+        )
+        .map_err(FfiError::from)?;
+        let store = std::sync::Arc::new(store);
+        self.core.set_outbox_store(store.clone());
+        self.core.set_history_store(store);
+        Ok(())
+    }
+
+    /// SUB-SPEC D at-rest: the sealed history retained for this chat, decoded for redisplay
+    /// after a restart (empty unless a promotion carried history and `enable_at_rest` — or a
+    /// sealed history store — is set). Not ordered; sort by `ts` for display.
+    pub fn load_history(&self) -> Vec<FfiHistoryRecord> {
+        self.core
+            .load_history()
+            .into_iter()
+            .map(|r| FfiHistoryRecord {
+                from_hex: hex_fp(&r.from),
+                ts: r.ts,
+                text: r.text,
+                marking: r.marking.map(|m| m.banner()),
+            })
+            .collect()
     }
 
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline

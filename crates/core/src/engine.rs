@@ -2068,6 +2068,28 @@ impl Core {
         *self.inner.history.lock().unwrap() = store;
     }
 
+    /// SUB-SPEC D at-rest (restart survival): inject a host-provided [`crate::outbox::OutboxStore`]
+    /// (e.g. a [`crate::atrest::SealedFileStore`]) and rehydrate this chat's un-acked outbox
+    /// index from it, so a restarted client re-sends anything that was never delivered. Call
+    /// once at construction, before `host()`/`connect()`.
+    pub fn set_outbox_store(&self, store: Arc<dyn crate::outbox::OutboxStore>) {
+        self.inner.outbox.set_store(store);
+        self.inner.outbox.rehydrate(&self.inner.descriptor.channel, now_secs());
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): the sealed history retained for THIS chat,
+    /// decoded for redisplay after a restart. Empty unless a promotion sealed history and a
+    /// sealed [`crate::history::HistoryStore`] is injected. Newest-last ordering is not
+    /// guaranteed (records are keyed by gossip-id); callers sort by `ts` if needed.
+    pub fn load_history(&self) -> Vec<crate::history::HistoryRecord> {
+        let store = self.inner.history.lock().unwrap().clone();
+        store
+            .load(&self.inner.descriptor.channel)
+            .into_iter()
+            .filter_map(|(_gid, rec)| crate::history::HistoryRecord::decode(&rec))
+            .collect()
+    }
+
     /// SUB-SPEC D3 (test/inspection): number of messages in our own ephemeral backlog.
     #[doc(hidden)]
     pub fn backlog_len(&self) -> usize {
@@ -7675,6 +7697,22 @@ mod tests {
         core.set_persistence(false);
         assert!(hist.load(&chat).is_empty(), "return-to-ephemeral purges sealed history");
         assert!(!core.is_persistent());
+    }
+
+    /// SUB-SPEC D at-rest: `load_history` decodes what a sealed HistoryStore holds for this
+    /// chat (the restart-redisplay path). Uses the in-memory store as the trait stand-in.
+    #[test]
+    fn load_history_decodes_sealed_records() {
+        use crate::history::{HistoryRecord, HistoryStore};
+        let (core, _rx) = test_core_pairwise();
+        let chat = core.descriptor().channel.clone();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        core.set_history_store(hist.clone());
+        let rec = HistoryRecord { from: [4u8; 48], ts: 42, text: "carried".into(), marking: None };
+        hist.put(&chat, [1u8; 32], &rec.encode());
+        let loaded = core.load_history();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], rec, "load_history round-trips the sealed record");
     }
 
     /// D3 Task 6 (invariant 1, default-safe): the default retention (Fresh / any unknown
