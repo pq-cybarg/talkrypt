@@ -622,14 +622,27 @@ const BACKLOG_CAP: usize = 4096;
 
 /// SUB-SPEC D3: append a message this node saw to its own ephemeral backlog (idempotent by
 /// gossip-id, oldest dropped past [`BACKLOG_CAP`]). Purely local bookkeeping — never sent.
+///
+/// SUB-SPEC D at-rest: once the chat is PERSISTENT (a promotion already established, with
+/// consent, that this room retains), also seal each new message to the local `HistoryStore`
+/// as it arrives — so a persistent chat's history keeps growing on disk and survives a
+/// restart, not just the backlog captured at the promotion boundary. Still LOCAL (this
+/// node's own copy; never transmitted); a sealed-file store persists it, the in-memory
+/// default just holds it. Ephemeral chats seal nothing (the D3 default-safe posture).
 fn record_backlog(inner: &Arc<Inner>, gid: [u8; 32], record: Vec<u8>, ts: u64) {
-    let mut bl = inner.backlog.lock().unwrap();
-    if bl.iter().any(|e| e.gid == gid) {
-        return; // same message reached us twice (mesh dedup) — count it once
+    {
+        let mut bl = inner.backlog.lock().unwrap();
+        if bl.iter().any(|e| e.gid == gid) {
+            return; // same message reached us twice (mesh dedup) — count it once
+        }
+        bl.push(BacklogEntry { gid, ts, record: record.clone() });
+        while bl.len() > BACKLOG_CAP {
+            bl.remove(0);
+        }
     }
-    bl.push(BacklogEntry { gid, ts, record });
-    while bl.len() > BACKLOG_CAP {
-        bl.remove(0);
+    if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+        let history = inner.history.lock().unwrap().clone();
+        history.put(&inner.descriptor.channel, gid, &record);
     }
 }
 
@@ -7713,6 +7726,42 @@ mod tests {
         let loaded = core.load_history();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], rec, "load_history round-trips the sealed record");
+    }
+
+    /// SUB-SPEC D at-rest: once a chat is persistent, every new own+received message is
+    /// sealed to the HistoryStore as it arrives; an ephemeral chat seals nothing.
+    #[tokio::test]
+    async fn persistent_chat_seals_each_message_to_history() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#live",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        host.set_history_store(hist.clone());
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Ephemeral: a send seals nothing.
+        host.send("before").await.unwrap();
+        wait_for_message(&mut m1rx, "before").await;
+        assert!(hist.load("#live").is_empty(), "ephemeral chat seals nothing to history");
+
+        // Flip persistent: each new own-sent and received message is sealed live.
+        host.set_persistence(true);
+        host.send("after-own").await.unwrap();
+        m1.send("after-recv").await.unwrap();
+        wait_for_message(&mut hrx, "after-recv").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            hist.load("#live").len(),
+            2,
+            "persistent chat seals its own send + the received message"
+        );
     }
 
     /// D3 Task 6 (invariant 1, default-safe): the default retention (Fresh / any unknown
