@@ -52,7 +52,9 @@ impl OutboxStore for InMemoryOutbox {
 /// The outbox: an in-memory index of un-acked frames (gid -> enqueued-at secs),
 /// backed by an `OutboxStore` for at-rest persistence. Cap + TTL bounded.
 pub struct Outbox {
-    store: Arc<dyn OutboxStore>,
+    /// At-rest backend. Mutex-wrapped so a host can swap the in-memory default for a
+    /// sealed-file store after construction (see [`Outbox::set_store`]).
+    store: Mutex<Arc<dyn OutboxStore>>,
     /// chat -> [(gid, enqueued_at_secs)], insertion order kept for cap eviction.
     meta: Mutex<HashMap<String, Vec<([u8; 32], u64)>>>,
     cap: usize,
@@ -61,13 +63,41 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn new(store: Arc<dyn OutboxStore>, cap: usize, ttl_secs: u64) -> Self {
-        Self { store, meta: Mutex::new(HashMap::new()), cap, ttl_secs }
+        Self { store: Mutex::new(store), meta: Mutex::new(HashMap::new()), cap, ttl_secs }
+    }
+
+    /// Snapshot the current backend (clone the Arc so store I/O runs without holding the lock).
+    fn store(&self) -> Arc<dyn OutboxStore> {
+        self.store.lock().unwrap().clone()
+    }
+
+    /// SUB-SPEC D at-rest: swap in a host-provided [`OutboxStore`] (e.g. a sealed file).
+    /// Does NOT rehydrate — the caller then calls [`Outbox::rehydrate`] for its chat, since
+    /// only the owning `Core` knows which chat this outbox serves.
+    pub fn set_store(&self, store: Arc<dyn OutboxStore>) {
+        *self.store.lock().unwrap() = store;
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): repopulate the in-memory index for `chat` from
+    /// whatever the backing store already holds, so cap/TTL/flush operate after a restart.
+    /// Rehydrated entries are stamped `now_secs` (the pre-restart enqueue time isn't persisted;
+    /// the TTL is a generous backstop, so resetting it on restart is acceptable). Idempotent.
+    pub fn rehydrate(&self, chat: &str, now_secs: u64) {
+        let persisted = self.store().load(chat);
+        let mut meta = self.meta.lock().unwrap();
+        let v = meta.entry(chat.to_string()).or_default();
+        for (gid, _frame) in persisted {
+            if !v.iter().any(|(g, _)| *g == gid) {
+                v.push((gid, now_secs));
+            }
+        }
     }
 
     /// Persist a frame and index it. Returns the number of oldest frames evicted to
     /// stay within `cap` (0 normally). Re-enqueue of the same gid is idempotent.
     pub fn enqueue(&self, chat: &str, gid: [u8; 32], frame: &[u8], now_secs: u64) -> usize {
-        self.store.put(chat, gid, frame);
+        let store = self.store();
+        store.put(chat, gid, frame);
         let mut meta = self.meta.lock().unwrap();
         let v = meta.entry(chat.to_string()).or_default();
         if !v.iter().any(|(g, _)| *g == gid) {
@@ -76,7 +106,7 @@ impl Outbox {
         let mut dropped = 0;
         while v.len() > self.cap {
             let (old, _) = v.remove(0);
-            self.store.remove(chat, old);
+            store.remove(chat, old);
             dropped += 1;
         }
         dropped
@@ -84,7 +114,7 @@ impl Outbox {
 
     /// Clear a delivered frame.
     pub fn ack(&self, chat: &str, gid: [u8; 32]) {
-        self.store.remove(chat, gid);
+        self.store().remove(chat, gid);
         if let Some(v) = self.meta.lock().unwrap().get_mut(chat) {
             v.retain(|(g, _)| *g != gid);
         }
@@ -102,7 +132,7 @@ impl Outbox {
 
     /// (gid, sealed frame) still pending, for resend on reconnect.
     pub fn due_for_resend(&self, chat: &str) -> Vec<([u8; 32], Vec<u8>)> {
-        self.store.load(chat)
+        self.store().load(chat)
     }
 
     /// Evict frames older than the TTL. Returns how many were evicted.
@@ -117,8 +147,9 @@ impl Outbox {
             .filter(|(_, t)| now_secs.saturating_sub(*t) > ttl)
             .map(|(g, _)| *g)
             .collect();
+        let store = self.store.lock().unwrap().clone();
         for g in &expired {
-            self.store.remove(chat, *g);
+            store.remove(chat, *g);
         }
         v.retain(|(_, t)| now_secs.saturating_sub(*t) <= ttl);
         expired.len()
@@ -162,6 +193,41 @@ mod tests {
         let expired = ob.evict_expired("c", 118); // 118-100=18 > ttl 10
         assert_eq!(expired, 1);
         assert_eq!(ob.pending("c"), vec![[2u8; 32]]);
+    }
+
+    /// SUB-SPEC D at-rest: an un-acked frame written to a sealed store by one run is
+    /// recovered by a fresh Outbox on the next run via `rehydrate` — restart survival.
+    #[test]
+    fn rehydrate_recovers_unacked_frames_from_sealed_store() {
+        use crate::atrest::SealedFileStore;
+        let mut n = [0u8; 8];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut n);
+        let dir = std::env::temp_dir().join(format!(
+            "tk-ob-restart-{}",
+            n.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
+        let chat = "#restart";
+        let gid = [5u8; 32];
+        // Pre-restart: enqueue into a sealed-file-backed outbox.
+        {
+            let store = Arc::new(SealedFileStore::open(&dir, Some(b"pw"), None).unwrap());
+            let ob = Outbox::new(store, 16, 3600);
+            ob.enqueue(chat, gid, b"opaque-frame", 100);
+            assert_eq!(ob.pending(chat), vec![gid]);
+        }
+        // Restart: a fresh Outbox over the SAME sealed store starts empty, then rehydrates.
+        {
+            let store = Arc::new(SealedFileStore::open(&dir, Some(b"pw"), None).unwrap());
+            let ob = Outbox::new(store, 16, 3600);
+            assert!(ob.pending(chat).is_empty(), "fresh in-memory index is empty");
+            ob.rehydrate(chat, 200);
+            assert_eq!(ob.pending(chat), vec![gid], "rehydrate recovers the un-acked frame");
+            assert_eq!(ob.due_for_resend(chat).len(), 1, "frame bytes are available to resend");
+            // Rehydrate is idempotent.
+            ob.rehydrate(chat, 300);
+            assert_eq!(ob.pending(chat), vec![gid]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
