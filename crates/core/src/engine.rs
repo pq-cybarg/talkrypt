@@ -1808,8 +1808,20 @@ impl Core {
                 .unwrap()
                 .as_ref()
                 .map(|k| k.key_package().encode());
+            let sent_keypackage = kp_bytes.is_some();
             if let Some(kpb) = kp_bytes {
                 route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+            }
+            // D1 restart survival: on a RECONNECT the leaf key was already consumed at the
+            // first Welcome, so we send NO KeyPackage — which would leave the host's Double
+            // Ratchet (the responder on this freshly re-dialed session) MUTE, unable to push
+            // us the outbox/keeper replay we came back for. Send an empty keying Presence
+            // (a no-op in `handle_presence`) so decrypting it makes the host send-ready and
+            // flushes anything it queued for us (the pairwise responder keying invariant,
+            // here on the group-member reconnect path — mirrors the pairwise-initiator case
+            // in `register`). Harmless on initial join since the KeyPackage already keyed it.
+            if !sent_keypackage && !self.inner.relayed {
+                route(&self.inner, Frame::Presence(Vec::new()), Route::Committer).await;
             }
             // If we present an account (linked mode), bind our leaf signing key to
             // it: extend our account->device chain with device->leaf_sig_key and
@@ -2854,31 +2866,32 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     let session = Arc::new(AsyncMutex::new(hs.session));
     let writer = Arc::new(AsyncMutex::new(writer));
 
+    let pending: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     inner.peers.lock().unwrap().push(Peer {
         fingerprint,
         writer: writer.clone(),
         session: session.clone(),
-        pending: Arc::new(Mutex::new(Vec::new())),
+        pending: pending.clone(),
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
-    // D1 Layer-A keeper: if we buffered frames for this peer while it was offline,
-    // replay them now that it is back (holds ciphertext only). Spawned because
-    // `register` is synchronous; the peer's own writer/session carry the re-sends.
+    // D1 Layer-A keeper: if we buffered frames for this peer while it was offline, replay
+    // them now that it is back (holds ciphertext only), then advertise our digest so a peer
+    // keeper can reconcile gaps (Layer-C anti-entropy). We QUEUE these into the peer's
+    // `pending` (rather than sending immediately) because when the returning peer re-dials
+    // WE are the Double-Ratchet responder — mute until it sends its first (keying) frame.
+    // The reader loop flushes `pending` in order the moment the session becomes send-ready,
+    // so the replay actually reaches a member whose reconnect sends no KeyPackage. Filling
+    // `pending` synchronously here (before the reader loop is spawned) avoids a race with
+    // that flush.
     if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-        let buffered = inner.keeper.drain(fingerprint);
-        // D1 Layer-C: advertise our digest to the newly-connected peer so a peer keeper
-        // can reconcile any entries it is missing (anti-entropy).
-        let digest = inner.keeper.digest();
-        let (rs, rw) = (session.clone(), writer.clone());
-        tokio::spawn(async move {
-            for (_gid, bytes) in buffered {
-                let _ = send_payload(&rs, &rw, &bytes).await;
-            }
-            // Always advertise our digest (even empty) so a peer keeper that HOLDS
-            // entries we lack sees the gap and pushes them (anti-entropy).
-            let _ = send_payload(&rs, &rw, &Frame::QueueSync(digest).encode()).await;
-        });
+        let mut q = pending.lock().unwrap();
+        for (_gid, bytes) in inner.keeper.drain(fingerprint) {
+            q.push(bytes);
+        }
+        // Always advertise our digest (even empty) so a peer keeper that HOLDS entries we
+        // lack sees the gap and pushes them.
+        q.push(Frame::QueueSync(inner.keeper.digest()).encode());
     }
 
     // Identity presentation rides as the first frame *inside* the encrypted
@@ -5066,6 +5079,99 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!k1.inner.keeper.drain(b_fp).is_empty(), "keeper k1 buffered for offline B");
         assert!(!k2.inner.keeper.drain(b_fp).is_empty(), "keeper k2 also buffered (replicated)");
+    }
+
+    /// Wait until `m1rx` has surfaced a `Message` for EACH expected text (order-independent,
+    /// ignoring Connected/other events), or panic on timeout. Proves the frames were not just
+    /// delivered but DECRYPTED into messages.
+    async fn expect_decrypted(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &[&str],
+    ) {
+        let mut need: std::collections::HashSet<String> =
+            want.iter().map(|s| s.to_string()).collect();
+        timeout(Duration::from_secs(6), async {
+            while !need.is_empty() {
+                if let Event::Message { text, .. } = next_event(rx).await {
+                    need.remove(&text);
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("returning member did not decrypt {need:?}"));
+    }
+
+    /// D1 Layer-0 (outbox) replay-WITH-DECRYPT e2e: the host sends to an offline member; the
+    /// frames queue in the outbox; when the member returns and the host flushes, the member
+    /// DECRYPTS them. This is the epoch-safety proof: the member's group session persists
+    /// across the transport reconnect — `connect()` sends no KeyPackage once the leaf key was
+    /// consumed at the first Welcome, so no re-join rotates the epoch and the buffered
+    /// (same-epoch) ciphertext still opens.
+    #[tokio::test]
+    async fn outbox_replay_decrypts_on_returning_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Persistent, DEFAULT_SUITE_ID, vec!["host".into()], "#rd",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let (host_fp, m1_fp) = (host.fingerprint(), m1.fingerprint());
+
+        // m1 goes offline: a clean link-down on both sides. Its Core (and group session at
+        // the current epoch) stays alive — modelling a phone that lost connectivity.
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m1_fp);
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != host_fp);
+
+        // Host sends while m1 is away → queued in the outbox (never acked by m1).
+        host.send("missed-1").await.unwrap();
+        host.send("missed-2").await.unwrap();
+        assert_eq!(host.inner.outbox.pending("#rd").len(), 2, "both queued for the offline member");
+
+        // m1 returns (transport reconnect, no re-join) and the host flushes the outbox.
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        host.flush_outbox().await;
+
+        expect_decrypted(&mut m1rx, &["missed-1", "missed-2"]).await;
+    }
+
+    /// D1 Layer-A (keeper) replay-WITH-DECRYPT e2e: a THIRD member sends while `m1` is offline;
+    /// the keeper-enabled host relays + buffers the opaque frame; when `m1` returns, the host
+    /// replays it and `m1` DECRYPTS it. Same epoch-safety property as above, on the keeper
+    /// path. (No commit happens while m1 is away, so the buffered frames are all at m1's epoch.)
+    #[tokio::test]
+    async fn keeper_replay_decrypts_on_returning_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Persistent, DEFAULT_SUITE_ID, vec!["host".into()], "#kd",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.keeper_mode(true);
+        let (a2, _a2rx) = group_core(&fabric, "a2", &desc, false);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        a2.connect("host").await.unwrap();
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let (host_fp, m1_fp) = (host.fingerprint(), m1.fingerprint());
+
+        // m1 offline (both sides); its session persists at the current epoch.
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m1_fp);
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != host_fp);
+
+        // a2 sends while m1 is away → host relays to connected peers (m1 gone) and, as keeper,
+        // buffers the opaque frame for offline m1.
+        a2.send("k-1").await.unwrap();
+        a2.send("k-2").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // m1 returns → host's register() replays the keeper buffer over the new stream.
+        m1.connect("host").await.unwrap();
+        expect_decrypted(&mut m1rx, &["k-1", "k-2"]).await;
     }
 
     /// D1 Layer-C (anti-entropy): a keeper that missed a frame reconciles it from a peer
