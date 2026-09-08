@@ -65,6 +65,12 @@ pub enum Event {
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
+    /// D1 store-and-forward: an outbox frame was delivered (its `DeliveryAck`
+    /// arrived) — a delivery receipt keyed by the ciphertext gossip-id.
+    Delivered { gossip_id: [u8; 32] },
+    /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted to
+    /// stay within the cap — surfaced so a capped drop is never silent.
+    OutboxDropped { count: usize },
     /// A peer's resolved self-declared name changed. `account_fingerprint` is set
     /// only for account-linked/registry tiers; `label` is `None` when suppressed by
     /// the chat's trust policy.
@@ -154,6 +160,26 @@ enum Frame {
     /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
     /// RouteDescriptor / UpdateProposal from the group-security hardening).
     Presence(Vec<u8>),
+    /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
+    /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
+    /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
+    /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
+    /// so `GroupAuth.fst` is unaffected. Tag 15 (13/14 reserved for Sub-spec D2).
+    DeliveryAck(Vec<[u8; 32]>),
+    /// D1 Layer-B (anchor mailbox): a sender deposits an OPAQUE (already-encrypted) frame
+    /// at a recipient's always-on anchor for later pickup. `recipient` = who it's for;
+    /// the anchor stores it keyed by that fp. Flat: fixed fp + one length-prefixed blob.
+    /// Tag 16.
+    MailboxPut { recipient: [u8; 48], frame: Vec<u8> },
+    /// D1 Layer-B: a phone asks its anchor for any frames buffered for it. The anchor
+    /// replies (only) with frames stored for the AUTHENTICATED requester's fingerprint —
+    /// the pairwise session proves the fetcher is the recipient. No payload. Tag 17.
+    MailboxFetch,
+    /// D1 Layer-C (replicated queue anti-entropy): a keeper advertises a DIGEST of what
+    /// it holds — `(gossip_id, recipient)` pairs — so a peer keeper can reconcile gaps.
+    /// Flat: count + fixed `[u8;32]`‖`[u8;48]` pairs (capped, no nested heap →
+    /// Kani-provable). Frame transfer of a missing entry rides `MailboxPut`. Tag 18.
+    QueueSync(Vec<([u8; 32], [u8; 48])>),
 }
 
 impl Frame {
@@ -223,6 +249,29 @@ impl Frame {
                 w.put_u8(12);
                 w.put_bytes(b);
             }
+            Frame::DeliveryAck(ids) => {
+                w.put_u8(15);
+                w.put_u32(ids.len() as u32);
+                for id in ids {
+                    w.put_bytes(id);
+                }
+            }
+            Frame::MailboxPut { recipient, frame } => {
+                w.put_u8(16);
+                w.put_bytes(recipient);
+                w.put_bytes(frame);
+            }
+            Frame::MailboxFetch => {
+                w.put_u8(17);
+            }
+            Frame::QueueSync(entries) => {
+                w.put_u8(18);
+                w.put_u32(entries.len() as u32);
+                for (gid, fp) in entries {
+                    w.put_bytes(gid);
+                    w.put_bytes(fp);
+                }
+            }
         }
         w.into_vec()
     }
@@ -267,10 +316,95 @@ impl Frame {
             10 => Frame::RouteDescriptor(r.get_vec().ok()?),
             11 => Frame::UpdateProposal(r.get_vec().ok()?),
             12 => Frame::Presence(r.get_vec().ok()?),
+            // D1 store-and-forward decoders are chunked into standalone, flat functions
+            // (below) so each is independently CBMC-provable in isolation — routing an
+            // arbitrary tag through this whole match would drag in the Marking-bearing
+            // arms, which are CBMC-intractable (SECURITY-AUDIT R-6).
+            15 => Frame::DeliveryAck(decode_delivery_ack(r.rest())?),
+            16 => {
+                let (recipient, frame) = decode_mailbox_put(r.rest())?;
+                Frame::MailboxPut { recipient, frame }
+            }
+            17 => Frame::MailboxFetch,
+            18 => Frame::QueueSync(decode_queue_sync(r.rest())?),
             _ => return None,
         };
         Some(frame)
     }
+}
+
+// ---------------------------------------------------------------------------
+// D1 store-and-forward body decoders (chunked out of `Frame::decode`).
+//
+// Each takes ONLY its own frame body (the bytes after the tag), so it is a small,
+// flat, self-contained decoder that CBMC verifies as total in isolation (see the
+// `d1_proofs` harnesses). They are the single source of truth — `Frame::decode`
+// delegates to them, so the wire format is unchanged.
+// ---------------------------------------------------------------------------
+
+/// D1 `DeliveryAck` body: a count-capped list of 32-byte gossip-ids.
+fn decode_delivery_ack(body: &[u8]) -> Option<Vec<[u8; 32]>> {
+    const MAX_ACK: usize = 64;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_ACK {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b = r.get_bytes().ok()?;
+        if b.len() != 32 {
+            return None;
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(b);
+        ids.push(id);
+    }
+    r.finish().ok()?;
+    Some(ids)
+}
+
+/// D1 Layer-B `MailboxPut` body: a fixed [u8;48] recipient + one length-prefixed
+/// opaque (already-encrypted) frame blob.
+fn decode_mailbox_put(body: &[u8]) -> Option<([u8; 48], Vec<u8>)> {
+    let mut r = Reader::new(body);
+    let rv = r.get_bytes().ok()?;
+    if rv.len() != 48 {
+        return None;
+    }
+    let mut recipient = [0u8; 48];
+    recipient.copy_from_slice(rv);
+    let frame = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((recipient, frame))
+}
+
+/// D1 Layer-C `QueueSync` body: a count-capped list of (32-byte gossip-id, 48-byte fp) pairs.
+fn decode_queue_sync(body: &[u8]) -> Option<Vec<([u8; 32], [u8; 48])>> {
+    const MAX_SYNC: usize = 512;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_SYNC {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let gv = r.get_bytes().ok()?;
+        if gv.len() != 32 {
+            return None;
+        }
+        let fv = r.get_bytes().ok()?;
+        if fv.len() != 48 {
+            return None;
+        }
+        let mut gid = [0u8; 32];
+        gid.copy_from_slice(gv);
+        let mut fp = [0u8; 48];
+        fp.copy_from_slice(fv);
+        entries.push((gid, fp));
+    }
+    r.finish().ok()?;
+    Some(entries)
 }
 
 /// Who may participate in a (pairwise) channel. The host enforces this when a
@@ -512,6 +646,26 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
+    /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
+    /// on reconnect so an offline member catches up. Default off (ephemeral).
+    persistent: std::sync::atomic::AtomicBool,
+    /// D1 Layer-0 outbox: un-acked outgoing group frames (opaque, already-encrypted),
+    /// keyed by ciphertext gossip-id. Persistence delegated to an `OutboxStore`.
+    outbox: crate::outbox::Outbox,
+    /// D1 Layer-A keeper: when enabled, buffer opaque frames for offline peers and
+    /// replay on their reconnect. Holds ciphertext only (no group key).
+    keeper: crate::keeper::KeeperQueue,
+    keeper_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-B (anchor mailbox): when this node is someone's always-on anchor,
+    /// `MailboxPut` deposits are stored here per recipient fp (opaque ciphertext), and
+    /// a `MailboxFetch` from the authenticated recipient drains + replays them.
+    mailbox: crate::keeper::KeeperQueue,
+    anchor_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-C: peers we've already sent our keeper digest to this session, so the
+    /// anti-entropy digest exchange terminates (the accepter replies exactly once, which
+    /// is needed because the pairwise responder is mute until the initiator speaks).
+    qs_sent: std::sync::Mutex<std::collections::HashSet<[u8; 48]>>,
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
@@ -769,6 +923,28 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            // D1 store-and-forward. Default in-memory stores (delivery across
+            // reconnects within a run); a host injects a sealed-file `OutboxStore`
+            // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
+            persistent: std::sync::atomic::AtomicBool::new(false),
+            outbox: crate::outbox::Outbox::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper_enabled: std::sync::atomic::AtomicBool::new(false),
+            mailbox: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            anchor_enabled: std::sync::atomic::AtomicBool::new(false),
+            qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
             names: Mutex::new(std::collections::HashMap::new()),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1127,6 +1303,9 @@ impl Core {
         for ep in endpoints {
             if let Ok(fp) = self.connect(&ep).await {
                 if expected.contains(&fp) {
+                    // D1: healed the link — flush any un-acked outbox backlog so a peer
+                    // that was offline while we sent now catches up.
+                    self.flush_outbox().await;
                     return Some(fp);
                 }
                 // Answered, but not an expected member — drop it and keep trying.
@@ -1450,21 +1629,98 @@ impl Core {
             }
             GroupRole::Host | GroupRole::Member => {
                 let payload = marking::encode_payload(&marking, text);
-                let frame = {
+                let ct = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
                         // Sign every group message with our per-membership leaf
                         // signature key so receivers can bind it to our leaf and
                         // reject impersonation or relay restamping, without exposing
                         // a long-term identity (SECURITY-AUDIT G1/G2).
-                        Some(grp) => Frame::GroupMsg(grp.encrypt_signed(&payload)?),
+                        Some(grp) => grp.encrypt_signed(&payload)?,
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
+                // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
+                // outbox (keyed by ciphertext gossip-id, which the receiver dedups +
+                // acks on) so an offline member catches up on reconnect. Re-encrypting
+                // later would advance the ratchet, so we store these exact bytes.
+                let frame = Frame::GroupMsg(ct.clone());
+                if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+                    let gid = gossip_id(&ct);
+                    let dropped = self.inner.outbox.enqueue(
+                        &self.inner.descriptor.channel,
+                        gid,
+                        &frame.encode(),
+                        now_secs(),
+                    );
+                    if dropped > 0 {
+                        let _ = self.inner.events_tx.send(Event::OutboxDropped { count: dropped });
+                    }
+                }
                 route(&self.inner, frame, Route::Broadcast).await;
             }
         }
         Ok(())
+    }
+
+    /// D1: re-send every un-acked outbox frame to currently-connected peers. Idempotent
+    /// — a receiver that already has a frame dedups it by gossip-id (SeenSet); a receiver
+    /// that missed it (was offline) surfaces + acks it, clearing our outbox. Called at the
+    /// end of `reconnect()` and safe to call opportunistically when a peer connects. Also
+    /// evicts TTL-expired frames first (surfacing the count).
+    pub async fn flush_outbox(&self) {
+        if !self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let chat = self.inner.descriptor.channel.clone();
+        let expired = self.inner.outbox.evict_expired(&chat, now_secs());
+        if expired > 0 {
+            let _ = self.inner.events_tx.send(Event::OutboxDropped { count: expired });
+        }
+        for (_gid, bytes) in self.inner.outbox.due_for_resend(&chat) {
+            // Stored bytes are a complete `Frame::GroupMsg(ct)` encoding; re-broadcast
+            // the SAME ciphertext (re-encrypting would advance the group ratchet).
+            if let Some(frame) = Frame::decode(&bytes) {
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
+        }
+    }
+
+    /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
+    /// promotion). When on, outgoing group frames are queued until acked and re-sent
+    /// on reconnect so offline members catch up.
+    pub fn set_persistence(&self, on: bool) {
+        self.inner.persistent.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this chat's persistent outbox is on.
+    pub fn is_persistent(&self) -> bool {
+        self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
+    /// replay on their reconnect (holds ciphertext only, never a group key).
+    pub fn keeper_mode(&self, on: bool) {
+        self.inner.keeper_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: run as an anchor mailbox — accept `MailboxPut` deposits for offline
+    /// recipients and serve them on `MailboxFetch`. Holds opaque ciphertext only.
+    pub fn anchor_mode(&self, on: bool) {
+        self.inner.anchor_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: deposit an opaque `frame` at a connected anchor for `recipient` to
+    /// pick up later (used when the recipient's own device is offline but its anchor is
+    /// reachable). Sent to whichever connected peer is acting as the anchor.
+    pub async fn deposit_to_anchor(&self, recipient: [u8; 48], frame: Vec<u8>) {
+        route(&self.inner, Frame::MailboxPut { recipient, frame }, Route::Broadcast).await;
+    }
+
+    /// D1 Layer-B: ask connected anchors for any mail buffered for us (call on wake).
+    /// The anchor replies with the stored frames, which arrive as normal group frames.
+    pub async fn fetch_mailbox(&self) {
+        route(&self.inner, Frame::MailboxFetch, Route::Broadcast).await;
     }
 
     /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
@@ -2195,6 +2451,25 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
 
+    // D1 Layer-A keeper: if we buffered frames for this peer while it was offline,
+    // replay them now that it is back (holds ciphertext only). Spawned because
+    // `register` is synchronous; the peer's own writer/session carry the re-sends.
+    if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let buffered = inner.keeper.drain(fingerprint);
+        // D1 Layer-C: advertise our digest to the newly-connected peer so a peer keeper
+        // can reconcile any entries it is missing (anti-entropy).
+        let digest = inner.keeper.digest();
+        let (rs, rw) = (session.clone(), writer.clone());
+        tokio::spawn(async move {
+            for (_gid, bytes) in buffered {
+                let _ = send_payload(&rs, &rw, &bytes).await;
+            }
+            // Always advertise our digest (even empty) so a peer keeper that HOLDS
+            // entries we lack sees the gap and pushes them (anti-entropy).
+            let _ = send_payload(&rs, &rw, &Frame::QueueSync(digest).encode()).await;
+        });
+    }
+
     // Identity presentation rides as the first frame *inside* the encrypted
     // session (never in the plaintext handshake), so the sensitive
     // account↔device linkage is AEAD-protected. Only in plain pairwise mode —
@@ -2444,6 +2719,66 @@ async fn reader_loop(
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
+            }
+            Some(Frame::DeliveryAck(ids)) => {
+                // D1: the peer confirms it received these frames. Clear them from our
+                // outbox (we originated them) and from the keeper queue for that peer
+                // (we buffered them for it). Emit a delivery receipt. An ack for an
+                // unknown gid is a harmless no-op.
+                for gid in ids {
+                    inner.outbox.ack(&inner.descriptor.channel, gid);
+                    inner.keeper.ack(from, gid);
+                    let _ = inner.events_tx.send(Event::Delivered { gossip_id: gid });
+                }
+            }
+            Some(Frame::MailboxPut { recipient, frame })
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    || inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                let gid = gossip_id(&frame);
+                // D1 Layer-B: as an anchor, store for pull-on-fetch.
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.mailbox.buffer(recipient, gid, &frame, now_secs());
+                }
+                // D1 Layer-C: as a keeper (anti-entropy replica), store for
+                // push-on-reconnect so a replicated frame survives other keepers dropping.
+                if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.keeper.buffer(recipient, gid, &frame, now_secs());
+                }
+            }
+            Some(Frame::QueueSync(peer_digest)) if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-C anti-entropy: push the peer any entry we hold that its digest
+                // lacks, as an opaque MailboxPut it will buffer (keeper). Bounded by our
+                // own queue size + the peer's digest cap.
+                let have: std::collections::HashSet<([u8; 32], [u8; 48])> = peer_digest.into_iter().collect();
+                let mine = inner.keeper.digest();
+                for (gid, recipient) in &mine {
+                    if !have.contains(&(*gid, *recipient)) {
+                        if let Some(frame) = inner.keeper.frame_for(*recipient, *gid) {
+                            route(&inner, Frame::MailboxPut { recipient: *recipient, frame }, Route::Peer(from)).await;
+                        }
+                    }
+                }
+                // Reply with OUR digest exactly once, so the peer (which may have been
+                // mute as the pairwise responder until now) learns what WE hold and can
+                // push us anything we lack. The `qs_sent` guard prevents a reply loop.
+                let should_reply = inner.qs_sent.lock().unwrap().insert(from);
+                if should_reply {
+                    route(&inner, Frame::QueueSync(inner.keeper.digest()), Route::Peer(from)).await;
+                }
+            }
+            Some(Frame::MailboxFetch) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-B: serve the authenticated requester (`from`) its buffered
+                // mail — only frames stored for its own fingerprint. Re-send each raw
+                // (they are already-encoded frames); the requester dedups via SeenSet.
+                let mail = inner.mailbox.drain(from);
+                if let Some((s, w)) = peer_handles(&inner, from) {
+                    for (gid, bytes) in mail {
+                        if send_payload(&s, &w, &bytes).await.is_ok() {
+                            inner.mailbox.ack(from, gid);
+                        }
+                    }
+                }
             }
             Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
                 if bytes.first() == Some(&LINKAGE_SENTINEL) {
@@ -3228,17 +3563,52 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
             text,
             marking,
         });
+        // D1: in a persistent chat, acknowledge receipt to the peer we got it from so
+        // that node can clear this frame from its outbox. Keyed by the ciphertext
+        // gossip-id — the same key the sender's outbox used. Idempotent: a re-sent
+        // frame is dropped by the dedup above yet still re-acked here would not fire
+        // (dedup returns early), so a lost ack is recovered only by a fresh delivery;
+        // the outbox TTL bounds the worst case.
+        if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            route(inner, Frame::DeliveryAck(vec![gossip_id(&gct)]), Route::Peer(from)).await;
+        }
     }
     // Fan out to other members. In host-coordinated mode the host relays; a
     // gossip bridge re-floods regardless of role (that's what bridges transport
     // islands). Both only apply to direct peer links — in relayed mode the
     // non-member relay does the fan-out (Routed envelopes), so we never re-relay.
+    let frame_bytes = Frame::GroupMsg(gct.clone()).encode();
+    let connected: std::collections::HashSet<[u8; 48]> =
+        collect_peers(inner).iter().map(|(_, _, fp)| *fp).collect();
     let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    // Fan out to other members. In host-coordinated mode the host relays; a gossip
+    // bridge re-floods regardless of role (that's what bridges transport islands). Both
+    // only apply to direct peer links — in relayed mode the non-member relay does the
+    // fan-out (Routed envelopes), so we never re-relay.
     if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
-                let _ = send_payload(&s, &w, &Frame::GroupMsg(gct.clone()).encode()).await;
+                let _ = send_payload(&s, &w, &frame_bytes).await;
             }
+        }
+    }
+    // D1 Layer-A/C keeper: ANY keeper-enabled node (not just the relaying host) buffers
+    // the opaque frame for roster members that are NOT currently connected, so an
+    // offline member catches up on reconnect — and multiple keepers replicate it. Holds
+    // ciphertext only; skips the original sender and ourselves.
+    if !inner.relayed && inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let me = inner.identity.public().fingerprint();
+        let gid = gossip_id(&gct);
+        let offline: Vec<[u8; 48]> = {
+            let roster = inner.roster.lock().unwrap();
+            roster
+                .values()
+                .copied()
+                .filter(|fp| *fp != from && *fp != me && !connected.contains(fp))
+                .collect()
+        };
+        for fp in offline {
+            inner.keeper.buffer(fp, gid, &frame_bytes, now_secs());
         }
     }
 }
@@ -3754,6 +4124,227 @@ mod tests {
             attributed,
             Some(m1.fingerprint()),
             "the group name must be attributed to m1's verified leaf, not the relaying host"
+        );
+    }
+
+    /// D1 Task 5: a member's persistent-chat send is queued in its outbox, and the
+    /// host's auto-ack (on receipt) clears it — the delivery-confirmation round-trip.
+    #[tokio::test]
+    async fn ack_clears_sender_outbox_after_delivery() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        m1.send("hi").await.unwrap();
+        assert_eq!(m1.inner.outbox.pending("#p").len(), 1, "member queues its send");
+        // Host receives + surfaces the message, then auto-acks m1; m1 clears its outbox.
+        let _ = next_message(&mut host_rx).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            m1.inner.outbox.pending("#p").is_empty(),
+            "sender outbox cleared once the host acks receipt"
+        );
+    }
+
+    /// D1 Task 6 (the headline "phone was off" scenario): while a member is OFFLINE the
+    /// host's send is queued (not lost); when the member returns, `flush_outbox` delivers
+    /// the backlog over the same link and the member's ack drains the host's outbox.
+    #[tokio::test]
+    async fn offline_member_receives_backlog_on_flush() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true); // so it auto-acks on receipt
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // m1's phone goes off: the host's send is queued, m1 never receives it.
+        fabric.go_offline("m1");
+        host.send("while-you-were-out").await.unwrap();
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "host queued the send while m1 was offline"
+        );
+
+        // m1 comes back; the host flushes the backlog over the still-open link.
+        fabric.come_online("m1");
+        host.flush_outbox().await;
+        let (text, _) = next_message(&mut m1rx).await;
+        assert_eq!(text, "while-you-were-out", "the offline member catches up on return");
+
+        // m1's auto-ack drains the host outbox.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            host.inner.outbox.pending("#p").is_empty(),
+            "backlog cleared once the returned member acks"
+        );
+    }
+
+    /// D1 Task 7 (group keeper): a keeper-enabled host relaying member A's message
+    /// BUFFERS it (opaque) for roster member B who is offline, so B can catch up on
+    /// return. Proves the buffer-for-offline-roster-member production path.
+    #[tokio::test]
+    async fn keeper_buffers_relayed_frame_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.keeper_mode(true);
+        let (a, _arx) = group_core(&fabric, "a", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        a.connect("host").await.unwrap();
+        b.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let b_fp = b.fingerprint();
+        assert!(
+            host.inner.roster.lock().unwrap().values().any(|fp| *fp == b_fp),
+            "B joined the group (in the host roster)"
+        );
+        // B goes offline: drop the host's peer entry for B (B is no longer connected).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        // A sends; the host relays to connected peers (B is gone) and, as keeper,
+        // buffers the opaque frame for offline roster member B.
+        a.send("for-b").await.unwrap();
+        let _ = next_message(&mut host_rx).await; // host surfaces A's message
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !host.inner.keeper.drain(b_fp).is_empty(),
+            "keeper buffered A's relayed frame for offline member B"
+        );
+    }
+
+    /// D1 Layer-B (anchor mailbox): a sender deposits an opaque frame at an anchor for a
+    /// recipient; the anchor stores it; when the recipient fetches, the anchor serves +
+    /// clears it (only the authenticated recipient can pull its own mail).
+    #[tokio::test]
+    async fn anchor_mailbox_stores_and_serves() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["anchor".into()],
+            "#m",
+        );
+        let (anchor, _arx) = core_on(&fabric, "anchor", &desc);
+        anchor.anchor_mode(true);
+        anchor.host().await.unwrap();
+        let (sender, _srx) = core_on(&fabric, "sender", &desc);
+        sender.connect("anchor").await.unwrap();
+        let (r, _rrx) = core_on(&fabric, "r", &desc);
+        r.connect("anchor").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Sender deposits a frame for R at the anchor.
+        let r_fp = r.fingerprint();
+        sender
+            .deposit_to_anchor(r_fp, Frame::MailboxFetch.encode())
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor stored the deposited frame for R"
+        );
+
+        // R pulls its mail; the anchor serves + clears it.
+        r.fetch_mailbox().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor cleared R's mail after serving the fetch"
+        );
+    }
+
+    /// D1 Layer-C (replication): TWO keepers each independently buffer for an offline
+    /// member from one fan-out — so the offline member catches up from EITHER keeper,
+    /// surviving one of them dropping (the survive-node-loss guarantee).
+    #[tokio::test]
+    async fn multi_keeper_replicates_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (k1, _k1rx) = group_core(&fabric, "k1", &desc, false);
+        let (k2, _k2rx) = group_core(&fabric, "k2", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        k1.keeper_mode(true);
+        k2.keeper_mode(true);
+        for m in ["k1", "k2", "b"] {
+            let c = match m { "k1" => &k1, "k2" => &k2, _ => &b };
+            c.connect("host").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let b_fp = b.fingerprint();
+        // B goes offline (drop the host's peer entry for B).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        host.send("broadcast-to-all").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!k1.inner.keeper.drain(b_fp).is_empty(), "keeper k1 buffered for offline B");
+        assert!(!k2.inner.keeper.drain(b_fp).is_empty(), "keeper k2 also buffered (replicated)");
+    }
+
+    /// D1 Layer-C (anti-entropy): a keeper that missed a frame reconciles it from a peer
+    /// keeper on connect — the peer's QueueSync digest reveals the gap and the holder
+    /// pushes the opaque frame (via MailboxPut), which the keeper buffers.
+    #[tokio::test]
+    async fn keeper_anti_entropy_pushes_missing_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["k2".into()],
+            "#ae",
+        );
+        // k2 listens; k1 will dial it. Both are keepers.
+        let (k2, _k2rx) = core_on(&fabric, "k2", &desc);
+        k2.keeper_mode(true);
+        k2.host().await.unwrap();
+        let (k1, _k1rx) = core_on(&fabric, "k1", &desc);
+        k1.keeper_mode(true);
+        // Preload k1 with a frame for offline recipient B that k2 lacks.
+        let b_fp = [0x55u8; 48];
+        k1.inner.keeper.buffer(b_fp, gossip_id(b"held-for-b"), b"held-for-b", now_secs());
+        k1.connect("k2").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // k2 received k1's digest gap-fill: it now holds the frame for B too.
+        assert!(
+            !k2.inner.keeper.drain(b_fp).is_empty(),
+            "k2 reconciled the missing frame from k1 via QueueSync anti-entropy"
         );
     }
 
@@ -6050,5 +6641,123 @@ mod tests {
         );
         assert_ne!(leaf_vk(&e1), leaf_vk(&e2), "ephemeral leaf keys differ per construction");
         assert_ne!(leaf_vk(&m1), leaf_vk(&e1), "ephemeral differs from the derived key");
+    }
+
+    #[test]
+    fn delivery_ack_frame_roundtrips_and_caps() {
+        let ids = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let bytes = Frame::DeliveryAck(ids.clone()).encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::DeliveryAck(got)) => assert_eq!(got, ids),
+            _ => panic!("expected DeliveryAck"),
+        }
+        // Empty batch round-trips.
+        assert!(matches!(
+            Frame::decode(&Frame::DeliveryAck(vec![]).encode()),
+            Some(Frame::DeliveryAck(v)) if v.is_empty()
+        ));
+        // A count over MAX_ACK is rejected (never allocates unboundedly).
+        let mut hostile = Writer::new();
+        hostile.put_u8(15);
+        hostile.put_u32(70); // > MAX_ACK (64)
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
+    #[test]
+    fn mailbox_frames_roundtrip() {
+        let put = Frame::MailboxPut { recipient: [9u8; 48], frame: b"sealed".to_vec() };
+        match Frame::decode(&put.encode()) {
+            Some(Frame::MailboxPut { recipient, frame }) => {
+                assert_eq!(recipient, [9u8; 48]);
+                assert_eq!(frame, b"sealed");
+            }
+            _ => panic!("expected MailboxPut"),
+        }
+        assert!(matches!(Frame::decode(&Frame::MailboxFetch.encode()), Some(Frame::MailboxFetch)));
+    }
+
+    #[test]
+    fn queue_sync_frame_roundtrips_and_caps() {
+        let entries = vec![([1u8; 32], [2u8; 48]), ([3u8; 32], [4u8; 48])];
+        match Frame::decode(&Frame::QueueSync(entries.clone()).encode()) {
+            Some(Frame::QueueSync(got)) => assert_eq!(got, entries),
+            _ => panic!("expected QueueSync"),
+        }
+        let mut hostile = Writer::new();
+        hostile.put_u8(18);
+        hostile.put_u32(1000); // > MAX_SYNC
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
+    #[tokio::test]
+    async fn persistent_chat_enqueues_outgoing_group_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#p",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let (host, _rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("h")),
+            desc,
+            true,
+        );
+        assert!(!host.is_persistent());
+        host.set_persistence(true);
+        host.send("hello").await.unwrap();
+        // The frame is now recoverable from the outbox for resend (keyed by channel).
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "a persistent-chat send is queued in the outbox"
+        );
+        // A second send adds a distinct entry.
+        host.send("world").await.unwrap();
+        assert_eq!(host.inner.outbox.pending("#p").len(), 2);
+    }
+}
+
+#[cfg(kani)]
+mod d1_proofs {
+    use super::*;
+
+    // Each harness targets the CHUNKED, standalone D1 body decoder directly — NOT the whole
+    // `Frame::decode` (whose arbitrary-tag dispatch drags in the CBMC-intractable Marking
+    // arms, SECURITY-AUDIT R-6). This keeps every proof small, flat, and fast.
+
+    /// D1 `decode_delivery_ack` never panics on any body — count-capped [u8;32] ids.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn delivery_ack_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64);
+        let data: [u8; 64] = kani::any();
+        let _ = decode_delivery_ack(&data[..len]);
+    }
+
+    /// D1 Layer-B `decode_mailbox_put` never panics — fixed [u8;48] recipient + one
+    /// length-prefixed opaque blob. (`MailboxFetch`, tag 17, is field-less: trivially total.)
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn mailbox_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 80);
+        let data: [u8; 80] = kani::any();
+        let _ = decode_mailbox_put(&data[..len]);
+    }
+
+    /// D1 Layer-C `decode_queue_sync` never panics — count-capped [u8;32]+[u8;48] pairs.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn queue_sync_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 96);
+        let data: [u8; 96] = kani::any();
+        let _ = decode_queue_sync(&data[..len]);
     }
 }

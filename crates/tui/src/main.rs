@@ -186,6 +186,8 @@ async fn run(
                     Some(CoreEvent::Name { .. }) => {}
                     Some(CoreEvent::Linkage { .. }) => {} // SUB-SPEC B (UI: Task 13)
                     Some(CoreEvent::Vouch { .. }) => {}   // SUB-SPEC C (UI: Task 11)
+                    Some(CoreEvent::Delivered { .. }) => {}    // D1 delivery receipt (UI later)
+                    Some(CoreEvent::OutboxDropped { .. }) => {} // D1 outbox cap/TTL drop
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }

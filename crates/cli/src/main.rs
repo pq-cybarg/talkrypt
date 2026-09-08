@@ -1468,6 +1468,13 @@ async fn repl(
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
                 }
+                Event::Delivered { gossip_id } => {
+                    let id: String = gossip_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* delivered {id}");
+                }
+                Event::OutboxDropped { count } => {
+                    eprintln!("\r! outbox: {count} un-acked message(s) dropped (cap/TTL)");
+                }
                 Event::Name { from, label, tier, caveat, .. } => {
                     if let Some(label) = label {
                         // Badge the trust tier so a verified (account-linked /
