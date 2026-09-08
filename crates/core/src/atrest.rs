@@ -62,6 +62,19 @@ impl SealedFileStore {
         passphrase: Option<&[u8]>,
         wrapper: Option<&dyn KeyWrapper>,
     ) -> Result<Self> {
+        // QROM / L5 at-rest rule: a non-PQ hardware wrapper (StrongBox/SE/Keystore) may
+        // protect the KEK with a CLASSICAL, quantum-breakable asymmetric wrap — so it must
+        // NOT be the sole factor for data at rest. Require a passphrase alongside it: the
+        // Argon2id-derived 256-bit key is mixed into the KEK (see seal::derive_kek), so the
+        // stored contents stay L5/QROM-safe (AES-256-GCM under a key that ALSO depends on a
+        // PQ-safe secret) even if a quantum adversary later breaks the hardware wrap. A
+        // passphrase alone is fine (fully symmetric/PQ-safe); a wrapper alone is refused.
+        if wrapper.is_some() && passphrase.is_none() {
+            return Err(CoreError::Seal(
+                "at-rest hardware custody must be paired with a passphrase (QROM/L5): a \
+                 classical secure element may wrap the key with quantum-breakable crypto",
+            ));
+        }
         fs::create_dir_all(dir).map_err(|_| CoreError::Seal("cannot create store dir"))?;
         let keyfile = dir.join(KEYFILE);
         let dek = if keyfile.exists() {
@@ -263,6 +276,56 @@ mod tests {
         }
         // A different passphrase cannot unseal the DEK.
         assert!(SealedFileStore::open(&dir, Some(b"wrong passphrase"), None).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hardware_wrapper_custody_roundtrips_and_wrong_device_fails() {
+        use crate::seal::{KeyWrapper, WrapError};
+        // A toy "secure element": device-bound because only a wrapper with the same key
+        // byte reverses the wrap (a real SE binds to hardware). Wraps a SYMMETRIC DEK —
+        // permitted even though the SE cannot custody the PQ identity key (R-8 / §3b).
+        struct Se(u8);
+        impl KeyWrapper for Se {
+            fn wrap(&self, k: &[u8]) -> std::result::Result<Vec<u8>, WrapError> {
+                Ok(k.iter().map(|b| b ^ self.0).collect())
+            }
+            fn unwrap(&self, w: &[u8]) -> std::result::Result<Vec<u8>, WrapError> {
+                Ok(w.iter().map(|b| b ^ self.0).collect())
+            }
+        }
+        let dir = tmpdir("hw");
+        let gid = [2u8; 32];
+        // Two-factor: hardware wrapper + passphrase (device-bound AND QROM/L5-safe at rest).
+        {
+            let s = SealedFileStore::open(&dir, Some(PW), Some(&Se(0x5a))).unwrap();
+            <SealedFileStore as OutboxStore>::put(&s, "#c", gid, b"hw-sealed");
+        }
+        // Reopen on the SAME device with both factors: the DEK unwraps and the record decrypts.
+        {
+            let s = SealedFileStore::open(&dir, Some(PW), Some(&Se(0x5a))).unwrap();
+            let loaded = <SealedFileStore as OutboxStore>::load(&s, "#c");
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].1, b"hw-sealed");
+        }
+        // A DIFFERENT device (different wrapper), even with the right passphrase, fails closed.
+        assert!(SealedFileStore::open(&dir, Some(PW), Some(&Se(0x33))).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hardware_wrapper_alone_is_refused_for_qrom_l5() {
+        use crate::seal::{KeyWrapper, WrapError};
+        struct Se;
+        impl KeyWrapper for Se {
+            fn wrap(&self, k: &[u8]) -> std::result::Result<Vec<u8>, WrapError> { Ok(k.to_vec()) }
+            fn unwrap(&self, w: &[u8]) -> std::result::Result<Vec<u8>, WrapError> { Ok(w.to_vec()) }
+        }
+        let dir = tmpdir("hwonly");
+        // A classical hardware wrapper alone could be quantum-breakable at rest → refused.
+        assert!(SealedFileStore::open(&dir, None, Some(&Se)).is_err());
+        // A passphrase alone is fully PQ-safe → allowed.
+        assert!(SealedFileStore::open(&dir, Some(PW), None).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 
