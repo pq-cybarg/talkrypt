@@ -412,6 +412,12 @@ pub enum FfiEvent {
     PromoteAborted {
         promote_id: String,
     },
+    /// SUB-SPEC A / #68: a nearby device is beaconing this chat over local radio and we
+    /// decrypted it (pre-session discovery). `source` is a coarse backend handle or empty.
+    BeaconSeen {
+        channel: String,
+        source: String,
+    },
     /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
     /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
     /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
@@ -606,6 +612,10 @@ fn map_event(e: Event) -> FfiEvent {
         },
         Event::PromoteAborted { promote_id } => FfiEvent::PromoteAborted {
             promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::BeaconSeen { channel, source } => FfiEvent::BeaconSeen {
+            channel,
+            source: source.unwrap_or_default(),
         },
         Event::Error(message) => FfiEvent::Error { message },
     }
