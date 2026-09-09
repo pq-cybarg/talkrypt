@@ -10,6 +10,7 @@
 //!   * `ArtiTransport` (crate `tor` feature, Phase 7) — real Tor circuits and
 //!     ephemeral/persistent onion services.
 
+pub mod beacon;
 pub mod framing;
 pub mod loopback;
 pub mod multi;
@@ -21,6 +22,7 @@ pub mod arti;
 #[cfg(feature = "nym")]
 pub mod nym;
 
+pub use beacon::{BeaconScan, LocalBeacon, LoopbackBeacon, LoopbackBeaconFabric, Seen};
 pub use loopback::{LoopbackFabric, LoopbackTransport};
 pub use multi::{endpoint_scheme, select_endpoint, split_endpoints, MultiTransport, Scheme};
 pub use tcp::TcpTransport;
