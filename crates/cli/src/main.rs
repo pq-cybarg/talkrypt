@@ -1491,6 +1491,10 @@ async fn repl(
                     let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
                     println!("\r* promotion {id} aborted — chat stays ephemeral");
                 }
+                Event::BeaconSeen { channel, source } => {
+                    let via = source.map(|s| format!(" ({s})")).unwrap_or_default();
+                    println!("\r* nearby: a device on {channel} is beaconing{via}");
+                }
                 Event::Name { from, label, tier, caveat, .. } => {
                     if let Some(label) = label {
                         // Badge the trust tier so a verified (account-linked /

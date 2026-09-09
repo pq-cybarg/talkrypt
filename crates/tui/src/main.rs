@@ -191,6 +191,10 @@ async fn run(
                     Some(CoreEvent::PromoteProposed { .. }) => app.push("* promotion proposed".to_string()),
                     Some(CoreEvent::Promoted { .. }) => app.push("* promoted - chat is persistent".to_string()),
                     Some(CoreEvent::PromoteAborted { .. }) => app.push("* promotion aborted".to_string()),
+                    Some(CoreEvent::BeaconSeen { source, .. }) => app.push(format!(
+                        "* nearby: a device on this channel is beaconing{}",
+                        source.map(|s| format!(" ({s})")).unwrap_or_default()
+                    )),
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }

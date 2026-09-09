@@ -581,6 +581,7 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                 Event::PromoteProposed { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion proposed".into() }); }
                 Event::Promoted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promoted — chat is persistent".into() }); }
                 Event::PromoteAborted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion aborted".into() }); }
+                Event::BeaconSeen { source, .. } => { let via = source.map(|s| format!(" ({s})")).unwrap_or_default(); let _ = ui_tx.send(UiEvt::Status { id, text: format!("nearby device beaconing this channel{via}") }); }
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();

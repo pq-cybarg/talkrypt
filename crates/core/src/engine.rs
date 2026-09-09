@@ -85,6 +85,13 @@ pub enum Event {
     Promoted { promote_id: [u8; 32] },
     /// SUB-SPEC D2: the promotion was aborted (declined / timed out); chat stays ephemeral.
     PromoteAborted { promote_id: [u8; 32] },
+    /// SUB-SPEC A / #68: a nearby device is advertising THIS chat over a local-radio
+    /// beacon and we (holding the invite) decrypted it — pre-session discovery. `source`
+    /// is a coarse backend handle (BLE MAC / adv-id) for the UI, never an identity.
+    BeaconSeen {
+        channel: String,
+        source: Option<String>,
+    },
     /// A peer's resolved self-declared name changed. `account_fingerprint` is set
     /// only for account-linked/registry tiers; `label` is `None` when suppressed by
     /// the chat's trust policy.
@@ -2113,6 +2120,42 @@ impl Core {
             .into_iter()
             .filter_map(|(_gid, rec)| crate::history::HistoryRecord::decode(&rec))
             .collect()
+    }
+
+    /// SUB-SPEC A / #68: drive pre-session presence over a local-radio [`LocalBeacon`]
+    /// backend (or a [`talkrypt_transport::MultiBeacon`] of host plugins). Under `policy`
+    /// (default `Off`) we advertise THIS chat's sealed beacon so nearby invite-holders can
+    /// find us; concurrently we scan and, for every nearby beacon we can decrypt with our
+    /// invite, emit [`Event::BeaconSeen`]. Opaque ciphertext only — a scanner without the
+    /// invite learns nothing. The scan runs in a background task until `beacon` is dropped;
+    /// duplicate identical beacons are surfaced once.
+    pub async fn start_local_presence(
+        &self,
+        beacon: std::sync::Arc<dyn talkrypt_transport::LocalBeacon>,
+        policy: crate::advert::AdvertisePolicy,
+    ) {
+        if let Ok(Some(blob)) = crate::advert::build_advertisement(&self.inner.descriptor, policy) {
+            let _ = beacon.advertise(blob).await;
+        }
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let Ok(mut scan) = beacon.scan().await else {
+                return;
+            };
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            while let Some(s) = scan.next().await {
+                if !seen.insert(s.blob.clone()) {
+                    continue; // same beacon on another radio / re-advertised — surface once
+                }
+                // Only beacons for OUR chat (openable with our invite) become an event.
+                if crate::advert::open_advertisement(&inner.descriptor, &s.blob).is_ok() {
+                    let _ = inner.events_tx.send(Event::BeaconSeen {
+                        channel: inner.descriptor.channel.clone(),
+                        source: s.source,
+                    });
+                }
+            }
+        });
     }
 
     /// SUB-SPEC D3 (test/inspection): number of messages in our own ephemeral backlog.
@@ -7832,6 +7875,39 @@ mod tests {
         let loaded = core.load_history();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], rec, "load_history round-trips the sealed record");
+    }
+
+    /// SUB-SPEC A / #68 (engine wiring): one Core advertises this chat over a local-radio
+    /// LocalBeacon; another Core holding the SAME invite, scanning, decrypts it and emits
+    /// Event::BeaconSeen — pre-session discovery, end to end over the loopback beacon fabric.
+    #[tokio::test]
+    async fn start_local_presence_advertises_and_surfaces_beacon_seen() {
+        use crate::advert::AdvertisePolicy;
+        use talkrypt_transport::LoopbackBeaconFabric;
+        let net = LoopbackFabric::new();
+        // Two invite-holders share the SAME descriptor (same invite token / chat root).
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["a".into()], "#cq",
+        );
+        let (a, _arx) = core_on(&net, "a", &desc);
+        let (b, mut brx) = core_on(&net, "b", &desc);
+
+        let radio = LoopbackBeaconFabric::new();
+        // B only scans; A advertises the chat's sealed beacon.
+        b.start_local_presence(std::sync::Arc::new(radio.node("b")), AdvertisePolicy::Off).await;
+        a.start_local_presence(std::sync::Arc::new(radio.node("a")), AdvertisePolicy::Full).await;
+
+        // B decrypts A's beacon (same invite) and surfaces a BeaconSeen for the shared chat.
+        let channel = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::BeaconSeen { channel, .. } = next_event(&mut brx).await {
+                    return channel;
+                }
+            }
+        })
+        .await
+        .expect("BeaconSeen before timeout");
+        assert_eq!(channel, "#cq");
     }
 
     /// SUB-SPEC D at-rest: once a chat is persistent, every new own+received message is
