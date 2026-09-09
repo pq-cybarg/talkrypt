@@ -7,7 +7,11 @@
 
 use talkrypt_helper::{CustodyTier, KeyStore};
 
+// Needs a live Secret Service daemon on a session D-Bus, which a stock CI runner lacks — so
+// it is ignored by default (the `cargo test --workspace` gate skips it). Run it in the
+// provisioned harness with `cargo test -- --ignored` (see docs/linux-secretservice-test.md).
 #[tokio::test]
+#[ignore = "requires a live Secret Service daemon; run via the Docker harness with --ignored"]
 async fn os_keystore_tier_round_trips_through_secret_service() {
     let dir = std::env::temp_dir().join(format!("tk-helper-ss-{}", std::process::id()));
     let store = KeyStore::new(&dir);
