@@ -87,6 +87,18 @@ pub trait KeyWrapper {
 
     /// Unwrap a blob previously produced by [`KeyWrapper::wrap`] on this device.
     fn unwrap(&self, wrapped: &[u8]) -> std::result::Result<Vec<u8>, WrapError>;
+
+    /// Whether this wrapper's `wrap` is **QROM-safe** at rest: it protects the KEK with a
+    /// SYMMETRIC ≥256-bit primitive (e.g. an AES-256 secure-element key), so the stored
+    /// wrapped-KEK is not recoverable by a quantum adversary. Default `false` (conservative):
+    /// most secure elements wrap with a CLASSICAL asymmetric key (RSA/ECC), which a quantum
+    /// attacker breaks — such a wrapper may only be used hardware-ONLY if the caller
+    /// explicitly opts into the weak tier (see [`SealOptions::allow_weak_hardware_only`]);
+    /// otherwise it must be paired with a passphrase. A host overrides this to `true` ONLY
+    /// when it can guarantee a symmetric wrap.
+    fn qrom_safe(&self) -> bool {
+        false
+    }
 }
 
 /// An opaque hardware-wrap failure (e.g. user cancelled biometric, key evicted,
@@ -118,6 +130,12 @@ pub struct SealOptions<'a> {
     /// A secure-element key-wrapper. `Some` ⇒ the blob is `HardwareBacked` and
     /// cannot be opened off this device; `None` ⇒ software-sealed.
     pub wrapper: Option<&'a dyn KeyWrapper>,
+    /// Explicit opt-out from the QROM/L5 baseline: permit a hardware-ONLY seal whose wrapper
+    /// is NOT [`KeyWrapper::qrom_safe`] (a classical secure element). The resulting blob is
+    /// hardware-bound but NOT quantum-safe at rest. Default `false` — the baseline refuses
+    /// it; a passphrase or a QROM-safe wrapper is required. Set `true` only for a knowingly
+    /// hardware-bound classical tier (mirrors the `set_floor(Weak)` escape hatch).
+    pub allow_weak_hardware_only: bool,
 }
 
 /// Seal `plaintext` (e.g. a 32-byte ML-DSA-87 identity seed) at rest. Returns the
@@ -132,19 +150,25 @@ pub fn seal(plaintext: &[u8], opts: SealOptions) -> Result<Vec<u8>> {
             "at least one of passphrase or hardware wrapper is required",
         ));
     }
-    // QROM / L5 rule: a non-PQ secure element may wrap the KEK with CLASSICAL,
-    // quantum-breakable asymmetric crypto, so a hardware wrapper must NOT be the sole
-    // factor — its wrapped-KEK, stored at rest, would be quantum-recoverable. Require a
-    // passphrase alongside it: the Argon2id-derived 256-bit key is mixed into the KEK
-    // (see `derive_kek`), keeping the sealed AES-256-GCM contents L5/QROM-safe even if
-    // the hardware wrap is later broken. A passphrase alone is fully PQ-safe (symmetric
-    // only); hardware alone is refused. `unseal` stays permissive so a pre-existing
-    // hardware-only blob can still be read and re-sealed with a passphrase (migration).
+    // QROM / L5 baseline: a non-PQ secure element may wrap the KEK with CLASSICAL,
+    // quantum-breakable asymmetric crypto, so its wrapped-KEK stored at rest would be
+    // quantum-recoverable. A HARDWARE-ONLY seal is therefore allowed only when it is
+    // QROM-safe by construction — i.e. the wrapper attests a symmetric ≥256-bit wrap
+    // (`qrom_safe`) — OR the caller explicitly accepts the weak, hardware-bound-but-classical
+    // tier (`allow_weak_hardware_only`). Otherwise a passphrase is required: its Argon2id
+    // 256-bit key is mixed into the KEK (see `derive_kek`), keeping the sealed AES-256-GCM
+    // contents L5/QROM-safe even if the hardware wrap is later broken. A passphrase alone is
+    // fully PQ-safe. `unseal` stays permissive so a pre-existing hardware-only blob can still
+    // be read and (re-)sealed to a safe tier (migration).
     if has_hw && !has_pw {
-        return Err(CoreError::Seal(
-            "hardware custody must be paired with a passphrase (QROM/L5): a classical \
-             secure element may wrap the key with quantum-breakable crypto",
-        ));
+        let hw_qrom_safe = opts.wrapper.map(|w| w.qrom_safe()).unwrap_or(false);
+        if !hw_qrom_safe && !opts.allow_weak_hardware_only {
+            return Err(CoreError::Seal(
+                "hardware-only custody is not QROM/L5-safe unless the wrapper attests a \
+                 symmetric wrap (qrom_safe) — pair it with a passphrase, or explicitly set \
+                 allow_weak_hardware_only for a classical hardware-bound tier",
+            ));
+        }
     }
 
     let mut flags = 0u8;
@@ -360,10 +384,16 @@ mod tests {
     /// exercise the seam.
     struct MockSE {
         pad: [u8; 32],
+        qrom: bool,
     }
     impl MockSE {
+        /// A classical (NOT QROM-safe) secure element — the conservative default.
         fn new(seed: u8) -> Self {
-            MockSE { pad: [seed; 32] }
+            MockSE { pad: [seed; 32], qrom: false }
+        }
+        /// A secure element that attests a symmetric ≥256-bit (QROM-safe) wrap.
+        fn new_qrom_safe(seed: u8) -> Self {
+            MockSE { pad: [seed; 32], qrom: true }
         }
     }
     impl KeyWrapper for MockSE {
@@ -382,6 +412,9 @@ mod tests {
                 .map(|(a, b)| a ^ b)
                 .collect())
         }
+        fn qrom_safe(&self) -> bool {
+            self.qrom
+        }
     }
 
     const SEED: &[u8] = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20";
@@ -392,8 +425,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: Some(b"correct horse"),
-                wrapper: None,
-            },
+                wrapper: None, ..Default::default() },
         )
         .unwrap();
         assert_eq!(tier_of(&blob).unwrap(), CustodyTier::SoftwareSealed);
@@ -402,22 +434,44 @@ mod tests {
     }
 
     #[test]
-    fn hardware_only_is_refused_qrom_l5() {
-        // QROM/L5: a classical secure element alone is quantum-breakable at rest, so
-        // sealing with a hardware wrapper and NO passphrase is refused.
-        let se = MockSE::new(0x42);
+    fn qrom_l5_hardware_only_rule_all_modes() {
+        // Baseline: a CLASSICAL secure element (not qrom_safe) alone is refused — its
+        // wrapped-KEK at rest is quantum-recoverable.
+        let classical = MockSE::new(0x42);
         assert!(matches!(
-            seal(SEED, SealOptions { passphrase: None, wrapper: Some(&se) }),
+            seal(SEED, SealOptions { passphrase: None, wrapper: Some(&classical), ..Default::default() }),
             Err(CoreError::Seal(_))
         ));
-        // Pairing it with a passphrase (two-factor) is allowed and round-trips.
+
+        // Mode 1 — pair the classical wrapper with a passphrase (two-factor): allowed, QROM-safe.
         let blob = seal(
             SEED,
-            SealOptions { passphrase: Some(b"pw"), wrapper: Some(&se) },
+            SealOptions { passphrase: Some(b"pw"), wrapper: Some(&classical), ..Default::default() },
         )
         .unwrap();
         assert_eq!(tier_of(&blob).unwrap(), CustodyTier::HardwareBacked);
-        assert_eq!(unseal(&blob, Some(b"pw"), Some(&se)).unwrap(), SEED);
+        assert_eq!(unseal(&blob, Some(b"pw"), Some(&classical)).unwrap(), SEED);
+
+        // Mode 2 — a wrapper that ATTESTS a symmetric (QROM-safe) wrap: hardware-only allowed.
+        let symmetric = MockSE::new_qrom_safe(0x42);
+        let blob = seal(
+            SEED,
+            SealOptions { passphrase: None, wrapper: Some(&symmetric), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(unseal(&blob, None, Some(&symmetric)).unwrap(), SEED);
+
+        // Mode 3 — explicit opt-out into the classical hardware-bound (NOT QROM-safe) tier.
+        let blob = seal(
+            SEED,
+            SealOptions {
+                passphrase: None,
+                wrapper: Some(&classical),
+                allow_weak_hardware_only: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(unseal(&blob, None, Some(&classical)).unwrap(), SEED);
     }
 
     #[test]
@@ -427,8 +481,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: Some(b"pw"),
-                wrapper: Some(&se),
-            },
+                wrapper: Some(&se), ..Default::default() },
         )
         .unwrap();
         assert_eq!(tier_of(&blob).unwrap(), CustodyTier::HardwareBacked);
@@ -457,8 +510,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: Some(b"pw"),
-                wrapper: Some(&device_a),
-            },
+                wrapper: Some(&device_a), ..Default::default() },
         )
         .unwrap();
         // device_b unwraps to a different KEK → AEAD open fails, even with the right passphrase.
@@ -471,8 +523,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: None,
-                wrapper: None,
-            },
+                wrapper: None, ..Default::default() },
         );
         assert!(matches!(err, Err(CoreError::Seal(_))));
     }
@@ -484,8 +535,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: Some(b"pw"),
-                wrapper: Some(&se),
-            },
+                wrapper: Some(&se), ..Default::default() },
         )
         .unwrap();
         // Flip a byte in the wrapped-KEK / header region.
@@ -507,8 +557,7 @@ mod tests {
             SEED,
             SealOptions {
                 passphrase: Some(b"pw"),
-                wrapper: Some(&se),
-            },
+                wrapper: Some(&se), ..Default::default() },
         )
         .unwrap();
         // The raw seed must not appear anywhere in the sealed bytes.
@@ -522,8 +571,7 @@ mod tests {
         let se = MockSE::new(0x42);
         let opts = || SealOptions {
             passphrase: Some(b"pw"),
-            wrapper: Some(&se),
-        };
+            wrapper: Some(&se), ..Default::default() };
         let a = seal(SEED, opts()).unwrap();
         let b = seal(SEED, opts()).unwrap();
         // Fresh salt + nonce + KEK every time.
@@ -535,7 +583,7 @@ mod tests {
         assert!(tier_of(b"not a seal").is_err());
         let se = MockSE::new(1);
         let mut blob =
-            seal(SEED, SealOptions { passphrase: Some(b"pw"), wrapper: Some(&se) }).unwrap();
+            seal(SEED, SealOptions { passphrase: Some(b"pw"), wrapper: Some(&se), ..Default::default() }).unwrap();
         // Corrupt the version byte (index 4, just after the 4-byte length-prefixed
         // magic? magic is length-prefixed so layout differs) — use tier_of to
         // confirm a truncated blob is rejected instead.
