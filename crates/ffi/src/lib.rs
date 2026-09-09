@@ -1634,10 +1634,13 @@ impl From<talkrypt_core::CustodyTier> for CustodyTier {
     }
 }
 
-/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase`,
-/// a hardware `wrapper`, or both (two-factor). With a wrapper the blob is
-/// `HardwareBacked` and cannot be opened off this device; with only a passphrase
-/// it is `SoftwareSealed`. At least one factor is required.
+/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase`, or a
+/// passphrase **and** a hardware `wrapper` (two-factor, `HardwareBacked` + device-bound).
+/// A hardware wrapper ALONE is refused (QROM/L5): a non-PQ secure element may wrap the key
+/// with quantum-breakable classical crypto, so a passphrase is required to keep the sealed
+/// AES-256-GCM contents L5/QROM-safe even if the hardware wrap is later broken. A passphrase
+/// alone is fully PQ-safe (`SoftwareSealed`). `unseal_secret` stays permissive so a
+/// pre-existing hardware-only blob can still be read and re-sealed with a passphrase.
 #[uniffi::export]
 pub fn seal_secret(
     secret: Vec<u8>,
@@ -1773,10 +1776,13 @@ impl Account {
     }
 
     /// Seal this account's seed at rest into a portable envelope, **without**
-    /// exposing the seed to the host. Prefer this over persisting `seed_hex()`:
-    /// pass a hardware `wrapper` (Android StrongBox / Secure Enclave) for a
-    /// `HardwareBacked` blob bound to this device, and/or a `passphrase` for
-    /// two-factor custody. Reload with [`Account::from_sealed`].
+    /// exposing the seed to the host. Prefer this over persisting `seed_hex()`.
+    /// Pass a `passphrase` (fully PQ-safe), optionally WITH a hardware `wrapper`
+    /// (Android StrongBox / Secure Enclave) for a `HardwareBacked`, device-bound
+    /// blob. Per the QROM/L5 rule a hardware wrapper ALONE is refused (a non-PQ
+    /// secure element may wrap the seed with quantum-breakable classical crypto),
+    /// so a passphrase is required whenever a wrapper is used. Reload with
+    /// [`Account::from_sealed`].
     pub fn seal(
         &self,
         passphrase: Option<String>,
