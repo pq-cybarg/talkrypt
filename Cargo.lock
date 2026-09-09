@@ -10441,6 +10441,7 @@ dependencies = [
 name = "talkrypt-ffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "jni",
  "rustls-platform-verifier",
  "talkrypt-core",

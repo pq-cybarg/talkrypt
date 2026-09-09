@@ -51,6 +51,15 @@ pub struct BeaconScan {
 }
 
 impl BeaconScan {
+    /// A push-fed scan: returns the scan and a sender a backend feeds observed beacons into.
+    /// Lets a PUSH-style backend (e.g. an FFI host that receives BLE callbacks, or any radio
+    /// that hands us scans out-of-band) drive a `BeaconScan` without owning the channel type.
+    /// Dropping the scan makes the sender's `send` fail, so the backend can stop.
+    pub fn channel() -> (BeaconScan, mpsc::UnboundedSender<Seen>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (BeaconScan { rx }, tx)
+    }
+
     /// The next nearby beacon, or `None` when the backend is closed.
     pub async fn next(&mut self) -> Option<Seen> {
         self.rx.recv().await
