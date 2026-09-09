@@ -58,6 +58,20 @@ impl LocalBeacon for MyBleBeacon {
 `talkrypt_core::advert::open_advertisement(&descriptor, &blob)` — an invite-holder recovers
 the scheme, anyone else gets only "a device is beaconing".
 
+### Beacon backends from a host language (Kotlin / Swift, over the FFI)
+
+A radio backend usually lives in the host app (Android BLE, CoreBluetooth), not in Rust.
+The FFI exposes a callback interface so the host implements the backend in its own language:
+
+- Implement `LocalBeaconBackend` (`advertise(blob)`, `stop()`) in Kotlin/Swift.
+- Call `client.startLocalPresence(backend, policy)` → returns an `FfiBeacon` handle. talkrypt
+  now advertises this chat's sealed beacon via your `advertise` and scans.
+- From your radio's scan callback, push each observed beacon in with
+  `ffiBeacon.deliverBeacon(blob, source)`. talkrypt decrypts those matching the chat invite
+  and emits `BeaconSeen`. (Scan is push-style because a callback can't return a stream.)
+
+Same opaque-bytes invariant: the host backend never sees plaintext or keys.
+
 ## Writing a data-transport backend (`Transport`)
 
 Implement `talkrypt_transport::Transport` (`listen` → `Listener`, `dial` → `Stream`,

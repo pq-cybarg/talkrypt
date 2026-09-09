@@ -1248,6 +1248,26 @@ impl TalkryptClient {
             .collect()
     }
 
+    /// SUB-SPEC A / #68: drive pre-session presence over a host radio `backend` (BLE /
+    /// Wi-Fi / any custom link). Under `policy` we advertise this chat's sealed beacon and
+    /// scan for nearby ones — decrypting only those matching our invite and surfacing them as
+    /// `FfiEvent::BeaconSeen`. Returns the [`FfiBeacon`] handle: keep it, and call
+    /// `deliver_beacon` on it from your radio's scan callback. Call once per chat.
+    pub fn start_local_presence(
+        &self,
+        backend: Box<dyn LocalBeaconBackend>,
+        policy: AdvertisePolicy,
+    ) -> std::sync::Arc<FfiBeacon> {
+        let bridge = std::sync::Arc::new(FfiBeacon {
+            backend,
+            feed: std::sync::Mutex::new(None),
+        });
+        let beacon: std::sync::Arc<dyn talkrypt_transport::LocalBeacon> = bridge.clone();
+        self.rt
+            .block_on(self.core.start_local_presence(beacon, policy.into()));
+        bridge
+    }
+
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
     /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
     pub fn keeper_mode(&self, on: bool) {
@@ -1651,6 +1671,81 @@ impl From<talkrypt_core::CustodyTier> for CustodyTier {
             talkrypt_core::CustodyTier::SoftwareSealed => CustodyTier::SoftwareSealed,
             talkrypt_core::CustodyTier::OsKeystore => CustodyTier::OsKeystore,
             talkrypt_core::CustodyTier::HardwareBacked => CustodyTier::HardwareBacked,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SUB-SPEC A / #68 — host-supplied local-radio beacon backend (BLE / Wi-Fi / etc.).
+// ---------------------------------------------------------------------------
+
+/// Granularity of the pre-session presence beacon (mirrors
+/// [`talkrypt_core::advert::AdvertisePolicy`]). `Off` = do not advertise (scan only).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdvertisePolicy {
+    Off,
+    Fingerprint,
+    Full,
+}
+
+impl From<AdvertisePolicy> for talkrypt_core::advert::AdvertisePolicy {
+    fn from(p: AdvertisePolicy) -> Self {
+        match p {
+            AdvertisePolicy::Off => talkrypt_core::advert::AdvertisePolicy::Off,
+            AdvertisePolicy::Fingerprint => talkrypt_core::advert::AdvertisePolicy::Fingerprint,
+            AdvertisePolicy::Full => talkrypt_core::advert::AdvertisePolicy::Full,
+        }
+    }
+}
+
+/// A host radio backend (Android/Apple BLE, Linux BlueZ, Wi-Fi Aware, a USB-C link,
+/// anything). The host implements this; talkrypt drives it. It only ever moves OPAQUE,
+/// pre-sealed beacon bytes — never keys or plaintext. `advertise` starts/replaces the
+/// broadcast; `stop` goes dark. Observed nearby beacons are pushed back IN via
+/// [`FfiBeacon::deliver_beacon`] (a push model, since a callback can't return a stream).
+#[uniffi::export(callback_interface)]
+pub trait LocalBeaconBackend: Send + Sync {
+    fn advertise(&self, blob: Vec<u8>) -> Result<(), FfiError>;
+    fn stop(&self) -> Result<(), FfiError>;
+}
+
+/// The engine-side handle for a host beacon backend, returned by
+/// [`TalkryptClient::start_local_presence`]. Bridges the host [`LocalBeaconBackend`] to the
+/// core [`talkrypt_transport::LocalBeacon`] seam, and gives the host `deliver_beacon` to feed
+/// in what its radio observes.
+#[derive(uniffi::Object)]
+pub struct FfiBeacon {
+    backend: Box<dyn LocalBeaconBackend>,
+    feed: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<talkrypt_transport::Seen>>>,
+}
+
+#[async_trait::async_trait]
+impl talkrypt_transport::LocalBeacon for FfiBeacon {
+    async fn advertise(&self, blob: Vec<u8>) -> talkrypt_transport::Result<()> {
+        self.backend
+            .advertise(blob)
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn stop(&self) -> talkrypt_transport::Result<()> {
+        self.backend
+            .stop()
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn scan(&self) -> talkrypt_transport::Result<talkrypt_transport::BeaconScan> {
+        let (scan, tx) = talkrypt_transport::BeaconScan::channel();
+        *self.feed.lock().unwrap() = Some(tx);
+        Ok(scan)
+    }
+}
+
+#[uniffi::export]
+impl FfiBeacon {
+    /// The host calls this from its radio's scan callback with an observed OPAQUE beacon
+    /// (and an optional coarse source handle). talkrypt tries to decrypt it with the chat
+    /// invite and, on success, emits `Event::BeaconSeen`. No-op before scanning has started.
+    pub fn deliver_beacon(&self, blob: Vec<u8>, source: Option<String>) {
+        if let Some(tx) = self.feed.lock().unwrap().as_ref() {
+            let _ = tx.send(talkrypt_transport::Seen { blob, source });
         }
     }
 }
@@ -2248,6 +2343,40 @@ pub fn anchor_resolve(uri: String, username: String) -> Result<Option<String>, F
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The FFI beacon bridge forwards advertise/stop to the host backend and feeds
+    /// `deliver_beacon` pushes into the scan stream the core drives.
+    #[tokio::test]
+    async fn ffi_beacon_bridge_forwards_and_feeds_scan() {
+        use talkrypt_transport::LocalBeacon;
+        struct Fake(std::sync::Arc<std::sync::Mutex<(Vec<Vec<u8>>, bool)>>);
+        impl LocalBeaconBackend for Fake {
+            fn advertise(&self, blob: Vec<u8>) -> Result<(), FfiError> {
+                self.0.lock().unwrap().0.push(blob);
+                Ok(())
+            }
+            fn stop(&self) -> Result<(), FfiError> {
+                self.0.lock().unwrap().1 = true;
+                Ok(())
+            }
+        }
+        let state = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), false)));
+        let bridge = FfiBeacon {
+            backend: Box::new(Fake(state.clone())),
+            feed: std::sync::Mutex::new(None),
+        };
+        // advertise + stop forward to the host backend.
+        LocalBeacon::advertise(&bridge, b"blob".to_vec()).await.unwrap();
+        LocalBeacon::stop(&bridge).await.unwrap();
+        assert_eq!(state.lock().unwrap().0, vec![b"blob".to_vec()]);
+        assert!(state.lock().unwrap().1);
+        // scan opens a channel; deliver_beacon (host radio callback) feeds it.
+        let mut scan = LocalBeacon::scan(&bridge).await.unwrap();
+        bridge.deliver_beacon(b"seen".to_vec(), Some("mac:1".into()));
+        let s = scan.next().await.unwrap();
+        assert_eq!(s.blob, b"seen");
+        assert_eq!(s.source.as_deref(), Some("mac:1"));
+    }
 
     /// Two segments of one account both resolve to that account (a contact who
     /// pinned it recognizes both), yet they authenticate with distinct leaf keys
