@@ -1189,11 +1189,13 @@ impl TalkryptClient {
     /// messages and consented history survive an app/phone restart. Custody REUSES the
     /// device's identity factors: a `passphrase` and/or a hardware `wrapper` (StrongBox /
     /// Secure Enclave / Keystore). A passphrase alone is allowed (fully PQ-safe). A hardware
-    /// wrapper is device-binding but, being a NON-PQ secure element, may wrap the key with
-    /// quantum-breakable classical crypto — so per the QROM/L5 at-rest rule it must be PAIRED
-    /// WITH A PASSPHRASE (whose Argon2id key keeps the stored AES-256-GCM contents L5/QROM-safe
-    /// even if the hardware wrap is later broken). At least one factor is required; a wrapper
-    /// without a passphrase is refused. Rehydrates the outbox for this chat immediately. Call
+    /// wrapper is device-binding; per the QROM/L5 at-rest rule a hardware-ONLY store is
+    /// allowed only if the wrapper attests a symmetric ≥256-bit wrap (`HardwareKeyWrapper::
+    /// qrom_safe`) — a classical (RSA/ECC) secure element must be PAIRED WITH A PASSPHRASE,
+    /// whose Argon2id key keeps the stored AES-256-GCM contents L5/QROM-safe even if the
+    /// hardware wrap is later broken. At least one factor is required. (This message-data
+    /// store does not offer the classical weak-tier opt-out; use a passphrase or a symmetric
+    /// wrapper.) Rehydrates the outbox for this chat immediately. Call
     /// once, right after opening the chat and before `set_persistence(true)`.
     pub fn enable_at_rest(
         &self,
@@ -1605,6 +1607,12 @@ pub trait HardwareKeyWrapper: Send + Sync {
     fn wrap(&self, kek: Vec<u8>) -> Result<Vec<u8>, FfiError>;
     /// Unwrap a blob previously produced by [`HardwareKeyWrapper::wrap`].
     fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError>;
+    /// QROM/L5 attestation: return `true` ONLY if this secure element wraps with a symmetric
+    /// ≥256-bit key (e.g. an AES-256 Keystore/StrongBox/SE key), so the stored wrapped-KEK is
+    /// quantum-safe at rest and a hardware-ONLY seal is permitted. Return `false` (the safe
+    /// default) for a classical RSA/ECC wrap — then a passphrase is required (or the caller
+    /// must explicitly accept the weak tier).
+    fn qrom_safe(&self) -> bool;
 }
 
 /// Bridges a host [`HardwareKeyWrapper`] to the core [`talkrypt_core::KeyWrapper`]
@@ -1622,6 +1630,9 @@ impl talkrypt_core::KeyWrapper for WrapperBridge {
             .unwrap(wrapped.to_vec())
             .map_err(|e| talkrypt_core::WrapError(e.to_string()))
     }
+    fn qrom_safe(&self) -> bool {
+        self.0.qrom_safe()
+    }
 }
 
 impl From<talkrypt_core::CustodyTier> for CustodyTier {
@@ -1634,12 +1645,12 @@ impl From<talkrypt_core::CustodyTier> for CustodyTier {
     }
 }
 
-/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase`, or a
-/// passphrase **and** a hardware `wrapper` (two-factor, `HardwareBacked` + device-bound).
-/// A hardware wrapper ALONE is refused (QROM/L5): a non-PQ secure element may wrap the key
-/// with quantum-breakable classical crypto, so a passphrase is required to keep the sealed
-/// AES-256-GCM contents L5/QROM-safe even if the hardware wrap is later broken. A passphrase
-/// alone is fully PQ-safe (`SoftwareSealed`). `unseal_secret` stays permissive so a
+/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase` (fully
+/// PQ-safe, `SoftwareSealed`), or a hardware `wrapper` for a `HardwareBacked`, device-bound
+/// blob. Per the QROM/L5 baseline a CLASSICAL hardware wrapper alone is refused (its
+/// wrapped-KEK is quantum-recoverable at rest) — pair it with a passphrase, unless the
+/// wrapper attests a symmetric ≥256-bit wrap via `HardwareKeyWrapper::qrom_safe`, in which
+/// case hardware-only is QROM-safe and allowed. `unseal_secret` stays permissive so a
 /// pre-existing hardware-only blob can still be read and re-sealed with a passphrase.
 #[uniffi::export]
 pub fn seal_secret(
@@ -1686,6 +1697,10 @@ fn seal_bytes(
         wrapper: bridge
             .as_ref()
             .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+        // Baseline QROM-safe: no weak opt-out here. A host whose secure element does a
+        // symmetric (QROM-safe) wrap attests it via HardwareKeyWrapper::qrom_safe, which
+        // lets hardware-only sealing through; otherwise a passphrase is required.
+        ..Default::default()
     };
     talkrypt_core::seal(secret, opts).map_err(FfiError::from)
 }
@@ -2539,36 +2554,48 @@ mod tests {
         fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError> {
             Ok(wrapped.iter().map(|b| b ^ self.pad).collect())
         }
+        fn qrom_safe(&self) -> bool {
+            // Models a CLASSICAL secure element (the conservative default): hardware-only
+            // sealing through it therefore requires a passphrase.
+            false
+        }
     }
 
     #[test]
-    fn account_hardware_seal_roundtrip_via_callback() {
+    fn account_hardware_seal_via_callback_requires_passphrase_qrom_l5() {
         let account = Account::generate();
         let seed = account.seed_hex();
 
-        // Seal hardware-backed (device wrapper, no passphrase).
-        let blob = account
-            .seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A })))
-            .expect("seal");
-        assert_eq!(
-            sealed_tier(blob.clone()).unwrap(),
-            CustodyTier::HardwareBacked
+        // QROM/L5: a classical secure element alone is quantum-breakable at rest, so a
+        // hardware-wrapper-ONLY seal is refused — a passphrase is required alongside it.
+        assert!(
+            account.seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A }))).is_err(),
+            "hardware-only account seal must be refused (QROM/L5)"
         );
 
-        // Reload on the same "device" → same seed, same identity.
+        // Two-factor (passphrase + device wrapper) is HardwareBacked and round-trips.
+        let blob = account
+            .seal(Some("pass".into()), Some(Box::new(FakeSecureElement { pad: 0x5A })))
+            .expect("seal");
+        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::HardwareBacked);
+
+        // Reload on the same "device" with the passphrase → same seed, same identity.
         let reloaded = Account::from_sealed(
             blob.clone(),
-            None,
+            Some("pass".into()),
             Some(Box::new(FakeSecureElement { pad: 0x5A })),
         )
         .expect("from_sealed");
         assert_eq!(reloaded.seed_hex(), seed);
         assert_eq!(reloaded.public_hex(), account.public_hex());
 
-        // A different "device" cannot open it.
-        assert!(
-            Account::from_sealed(blob, None, Some(Box::new(FakeSecureElement { pad: 0x11 }))).is_err()
-        );
+        // A different "device" cannot open it, even with the right passphrase.
+        assert!(Account::from_sealed(
+            blob,
+            Some("pass".into()),
+            Some(Box::new(FakeSecureElement { pad: 0x11 }))
+        )
+        .is_err());
     }
 
     #[test]

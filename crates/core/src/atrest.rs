@@ -62,17 +62,21 @@ impl SealedFileStore {
         passphrase: Option<&[u8]>,
         wrapper: Option<&dyn KeyWrapper>,
     ) -> Result<Self> {
-        // QROM / L5 at-rest rule: a non-PQ hardware wrapper (StrongBox/SE/Keystore) may
-        // protect the KEK with a CLASSICAL, quantum-breakable asymmetric wrap — so it must
-        // NOT be the sole factor for data at rest. Require a passphrase alongside it: the
-        // Argon2id-derived 256-bit key is mixed into the KEK (see seal::derive_kek), so the
-        // stored contents stay L5/QROM-safe (AES-256-GCM under a key that ALSO depends on a
-        // PQ-safe secret) even if a quantum adversary later breaks the hardware wrap. A
-        // passphrase alone is fine (fully symmetric/PQ-safe); a wrapper alone is refused.
-        if wrapper.is_some() && passphrase.is_none() {
+        // QROM / L5 at-rest rule (message data stays baseline-safe — no weak opt-out here):
+        // a non-PQ hardware wrapper may protect the KEK with a CLASSICAL, quantum-breakable
+        // wrap, so a hardware-ONLY store is refused UNLESS the wrapper attests a symmetric
+        // (QROM-safe) wrap. Otherwise pair it with a passphrase, whose Argon2id 256-bit key
+        // is mixed into the KEK (seal::derive_kek) so the stored AES-256-GCM contents stay
+        // L5/QROM-safe even if the hardware wrap is later broken. Fail fast with a clear
+        // message before touching the fs (`seal` enforces the same rule regardless).
+        if wrapper.is_some()
+            && passphrase.is_none()
+            && !wrapper.map(|w| w.qrom_safe()).unwrap_or(false)
+        {
             return Err(CoreError::Seal(
-                "at-rest hardware custody must be paired with a passphrase (QROM/L5): a \
-                 classical secure element may wrap the key with quantum-breakable crypto",
+                "at-rest hardware custody must be QROM-safe (a symmetric wrapper) or paired \
+                 with a passphrase (QROM/L5): a classical secure element may wrap the key \
+                 with quantum-breakable crypto",
             ));
         }
         fs::create_dir_all(dir).map_err(|_| CoreError::Seal("cannot create store dir"))?;
@@ -91,7 +95,7 @@ impl SealedFileStore {
         } else {
             let mut dek = [0u8; DEK_LEN];
             rand::rngs::OsRng.fill_bytes(&mut dek);
-            let blob = seal(&dek, SealOptions { passphrase, wrapper })?;
+            let blob = seal(&dek, SealOptions { passphrase, wrapper, ..Default::default() })?;
             write_atomic(&keyfile, &blob).map_err(|_| CoreError::Seal("cannot write keyfile"))?;
             dek
         };

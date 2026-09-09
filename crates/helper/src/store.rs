@@ -63,6 +63,12 @@ impl KeyStore {
                 talkrypt_core::SealOptions {
                     passphrase: None,
                     wrapper: Some(hw.as_ref()),
+                    // This helper's HardwareBacked tier is deliberately the hardware-BOUND
+                    // classical tier (a TPM/SE SRK is RSA/ECC, so the blob is device-bound but
+                    // NOT quantum-safe at rest). Explicitly opt into the QROM weak tier — the
+                    // core baseline refuses a classical hardware-only seal otherwise. Callers
+                    // wanting QROM-safe at rest add a passphrase (or use a symmetric wrapper).
+                    allow_weak_hardware_only: true,
                 },
             )
             .map_err(HelperError::from)
