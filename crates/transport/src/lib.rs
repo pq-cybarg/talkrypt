@@ -22,7 +22,9 @@ pub mod arti;
 #[cfg(feature = "nym")]
 pub mod nym;
 
-pub use beacon::{BeaconScan, LocalBeacon, LoopbackBeacon, LoopbackBeaconFabric, Seen};
+pub use beacon::{
+    BeaconScan, LocalBeacon, LoopbackBeacon, LoopbackBeaconFabric, MultiBeacon, Seen,
+};
 pub use loopback::{LoopbackFabric, LoopbackTransport};
 pub use multi::{endpoint_scheme, select_endpoint, split_endpoints, MultiTransport, Scheme};
 pub use tcp::TcpTransport;

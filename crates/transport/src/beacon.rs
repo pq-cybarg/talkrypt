@@ -140,6 +140,83 @@ impl LocalBeacon for LoopbackBeacon {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plugin composition: run ANY set of host-supplied beacon backends at once.
+// ---------------------------------------------------------------------------
+
+/// Composes multiple [`LocalBeacon`] backends into one — the plugin bag. A build packages
+/// exactly the radios it wants (Android/Apple BLE, Linux BlueZ, Wi-Fi Direct/Aware, a
+/// radio-over-USB-C link, or any custom TX/RX protocol), each a `LocalBeacon` impl, and adds
+/// them here. `advertise`/`stop` fan out to every backend; `scan` MERGES all backends into a
+/// single stream and de-duplicates the same beacon heard on more than one radio. Mirrors
+/// [`crate::MultiTransport`] for data transports — the two seams together let a self-built
+/// Talkrypt speak over whatever backends its builder plugs in.
+#[derive(Default)]
+pub struct MultiBeacon {
+    backends: Vec<Arc<dyn LocalBeacon>>,
+}
+
+impl MultiBeacon {
+    pub fn new() -> Self {
+        Self { backends: Vec::new() }
+    }
+
+    /// Add a backend plugin (builder style). Order is irrelevant.
+    pub fn with(mut self, backend: Arc<dyn LocalBeacon>) -> Self {
+        self.backends.push(backend);
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.backends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+}
+
+#[async_trait]
+impl LocalBeacon for MultiBeacon {
+    async fn advertise(&self, blob: Vec<u8>) -> Result<()> {
+        // Best-effort: broadcast on every radio; one backend being down (e.g. BLE off)
+        // must not stop the others. Succeeds as long as the call completes.
+        for b in &self.backends {
+            let _ = b.advertise(blob.clone()).await;
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        for b in &self.backends {
+            let _ = b.stop().await;
+        }
+        Ok(())
+    }
+
+    async fn scan(&self) -> Result<BeaconScan> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        // De-dup the SAME opaque beacon arriving on multiple radios (one `advertise` yields
+        // one blob broadcast on all backends). Shared across the per-backend forwarders.
+        let seen: Arc<Mutex<std::collections::HashSet<Vec<u8>>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        for backend in &self.backends {
+            let mut sub = backend.scan().await?;
+            let tx = tx.clone();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                while let Some(s) = sub.next().await {
+                    let fresh = seen.lock().unwrap().insert(s.blob.clone());
+                    if fresh && tx.send(s).is_err() {
+                        break; // merged scan dropped by the caller → stop forwarding
+                    }
+                }
+            });
+        }
+        Ok(BeaconScan { rx })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +272,42 @@ mod tests {
         let mut scan_b = b.scan().await.unwrap();
         let got = tokio::time::timeout(std::time::Duration::from_millis(200), scan_b.next()).await;
         assert!(got.is_err(), "a stopped advertiser is not replayed");
+    }
+
+    #[tokio::test]
+    async fn multibeacon_fans_out_advertise_and_merges_deduped_scan() {
+        // Two independent radios (plugins). Our node advertises on BOTH via a MultiBeacon;
+        // a peer with the SAME two radios scans a merged, de-duplicated stream.
+        let radio1 = LoopbackBeaconFabric::new();
+        let radio2 = LoopbackBeaconFabric::new();
+        let me = MultiBeacon::new()
+            .with(Arc::new(radio1.node("me")))
+            .with(Arc::new(radio2.node("me")));
+        let peer = MultiBeacon::new()
+            .with(Arc::new(radio1.node("peer")))
+            .with(Arc::new(radio2.node("peer")));
+        assert_eq!(me.len(), 2);
+
+        let mut scan = peer.scan().await.unwrap();
+        me.advertise(b"same-beacon".to_vec()).await.unwrap();
+
+        // The beacon arrives on both radios but is surfaced ONCE (dedup by opaque blob).
+        assert_eq!(recv_blob(&mut scan).await, b"same-beacon");
+        let dup = tokio::time::timeout(std::time::Duration::from_millis(200), scan.next()).await;
+        assert!(dup.is_err(), "the same beacon on a second radio is de-duplicated");
+    }
+
+    #[tokio::test]
+    async fn multibeacon_surfaces_a_beacon_from_any_single_radio() {
+        // A beacon reachable on only ONE of the composed radios is still discovered.
+        let ble = LoopbackBeaconFabric::new();
+        let wifi = LoopbackBeaconFabric::new();
+        let peer = MultiBeacon::new()
+            .with(Arc::new(ble.node("peer")))
+            .with(Arc::new(wifi.node("peer")));
+        let mut scan = peer.scan().await.unwrap();
+        // An advertiser present only on Wi-Fi.
+        wifi.node("wifi-only").advertise(b"wifi-beacon".to_vec()).await.unwrap();
+        assert_eq!(recv_blob(&mut scan).await, b"wifi-beacon");
     }
 }
