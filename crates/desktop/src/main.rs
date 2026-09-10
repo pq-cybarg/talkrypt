@@ -289,6 +289,11 @@ enum Cmd {
         id: u64,
         label: String,
     },
+    /// Toggle the periodic CQ re-beacon (SUB-SPEC A). `secs == 0` disables it.
+    SetCadence {
+        id: u64,
+        secs: u64,
+    },
     /// Re-dial a joined session whose transport dropped (the host stays listening
     /// on its onion/port, so the joiner just re-runs the initiator handshake).
     Reconnect {
@@ -528,6 +533,21 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     }
                 }
             }
+            Cmd::SetCadence { id, secs } => {
+                if let Some(c) = cores.get(&id) {
+                    let cur = c.presence_cadence();
+                    c.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                        periodic_secs: (secs > 0).then_some(secs),
+                        on_message_id: cur.on_message_id,
+                    });
+                    let text = if secs > 0 {
+                        format!("CQ every {secs}s")
+                    } else {
+                        "CQ periodic off".into()
+                    };
+                    let _ = ui_tx.send(UiEvt::Status { id, text });
+                }
+            }
             Cmd::Reconnect { id } => {
                 // A joined session re-dials its host (which is still listening on
                 // the same onion/port). A host has nothing to re-dial — it just
@@ -567,10 +587,25 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let who = username.unwrap_or_else(|| short(&account_fingerprint));
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
                 }
-                Event::Name { from, label: Some(label), .. } => {
-                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("{} is calling as \"{label}\"", short(&from)) });
+                Event::Name { from, label, tier, caveat, safety_number, .. } => {
+                    // SUB-SPEC A NameRender: honest tier badge, always-available safety
+                    // number, and any collision caveat. A suppressed name (label None)
+                    // still surfaces via its safety number + the caveat.
+                    let badge = match tier {
+                        talkrypt_core::nametrust::NameTier::Linked => "\u{1F517} ", // 🔗
+                        talkrypt_core::nametrust::NameTier::RegistryConfirmed => "\u{2713} ", // ✓
+                        talkrypt_core::nametrust::NameTier::Bare => "",
+                    };
+                    let head = match label {
+                        Some(l) => format!("{badge}{} is calling as \"{l}\" [{safety_number}]", short(&from)),
+                        None => format!("{} [{safety_number}]", short(&from)),
+                    };
+                    let text = match caveat {
+                        Some(c) => format!("{head} \u{26a0} {c}"), // ⚠
+                        None => head,
+                    };
+                    let _ = ui_tx.send(UiEvt::Status { id, text });
                 }
-                Event::Name { .. } => {}
                 Event::Linkage { .. } => {} // SUB-SPEC B (UI: Task 13)
                 Event::Vouch { subject, vouched, .. } if vouched => {
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
@@ -670,6 +705,7 @@ struct App {
     // ----- chat screen -----
     msg_input: String,
     name_input: String, // SUB-SPEC A: leading self-declared name draft
+    cq_periodic: bool,  // SUB-SPEC A: periodic CQ re-beacon toggle (active session)
     show_invite: bool, // toggles the invite/QR panel inside a chat
     notice: String,    // transient form message on the new-chat screen
     tor_progress: Option<f32>, // global Tor bootstrap fraction while < 1.0
@@ -690,6 +726,7 @@ impl App {
             posture: "pq-pure".into(),
             access: "open".into(),
             name_input: String::new(),
+            cq_periodic: false,
             persistence: "Persistent".into(), // default Persistent, matching mobile
             // Tor on by default whenever this build can do Tor; a LAN-only
             // (--no-default-features) build starts unchecked.
@@ -1054,6 +1091,14 @@ impl App {
                 let _ = self.cmd_tx.send(Cmd::SetName {
                     id,
                     label: self.name_input.trim().to_string(),
+                });
+            }
+            // Periodic CQ toggle: re-beacon the name every 5 min so late joiners /
+            // reconnects resolve us without a fresh roster-grow (SUB-SPEC A §4).
+            if ui.checkbox(&mut self.cq_periodic, "CQ 5m").changed() {
+                let _ = self.cmd_tx.send(Cmd::SetCadence {
+                    id,
+                    secs: if self.cq_periodic { 300 } else { 0 },
                 });
             }
         });
