@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("malformed data: {0}")]
     Malformed(&'static str),
+    #[error("no saved name with id '{0}'")]
+    NoSuchName(String),
     #[error("unsupported descriptor version: {0}")]
     UnsupportedVersion(u16),
     #[error("handshake failed: {0}")]

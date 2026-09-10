@@ -962,6 +962,10 @@ struct Inner {
     /// Our own leading name to announce (if any), and a monotonic presence sequence
     /// number so peers can drop stale/replayed announcements.
     leading_name: Mutex<Option<crate::presence::NameEntry>>,
+    /// SUB-SPEC A: the user's saved name book (multiple callsigns; the leading name is
+    /// selected from it by id via `use_name`). Persistence is a client concern — the
+    /// client loads/saves it via `name_book`/`load_name_book` (encode/decode).
+    name_book: Mutex<crate::presence::NameBook>,
     presence_seq: std::sync::atomic::AtomicU64,
     /// How often/when we re-announce our name (manual, on-join, periodic).
     cadence: Mutex<crate::presence::PresenceCadence>,
@@ -1243,6 +1247,7 @@ impl Core {
             presence_rate: Mutex::new(std::collections::HashMap::new()),
             presence_grow_gen: std::sync::atomic::AtomicU64::new(0),
             leading_name: Mutex::new(None),
+            name_book: Mutex::new(crate::presence::NameBook::default()),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
             cadence: Mutex::new(crate::presence::PresenceCadence::default()),
             opsec_mode: Mutex::new(crate::linkage::OpsecMode::default()),
@@ -2210,6 +2215,61 @@ impl Core {
     /// Does not send; call [`announce_presence`](Core::announce_presence) to broadcast.
     pub fn set_leading_name(&self, entry: Option<crate::presence::NameEntry>) {
         *self.inner.leading_name.lock().unwrap() = entry;
+    }
+
+    // ----- SUB-SPEC A: name book (multiple callsigns, select the leading one by id) --
+
+    /// A snapshot of the user's saved name book. Persistence is a client concern —
+    /// encode this and store it (see [`load_name_book`](Core::load_name_book)).
+    pub fn name_book(&self) -> crate::presence::NameBook {
+        self.inner.name_book.lock().unwrap().clone()
+    }
+
+    /// The id of the currently active leading name, if one is set.
+    pub fn leading_name_id(&self) -> Option<String> {
+        self.inner.leading_name.lock().unwrap().as_ref().map(|e| e.id.clone())
+    }
+
+    /// Replace the saved name book (e.g. restored from client persistence at startup).
+    /// Does not change the active leading name; call [`use_name`](Core::use_name).
+    pub fn load_name_book(&self, book: crate::presence::NameBook) {
+        *self.inner.name_book.lock().unwrap() = book;
+    }
+
+    /// Add or replace a saved name in the book (keyed by `entry.id`). Does not change
+    /// the active leading name.
+    pub fn add_name(&self, entry: crate::presence::NameEntry) {
+        self.inner.name_book.lock().unwrap().upsert(entry);
+    }
+
+    /// Remove a saved name from the book. Returns whether one was removed. If it was
+    /// the active leading name, the leading name is also cleared (so we stop beaconing
+    /// a name the user just deleted).
+    pub fn remove_name(&self, id: &str) -> bool {
+        let removed = self.inner.name_book.lock().unwrap().remove(id);
+        if removed {
+            let mut lead = self.inner.leading_name.lock().unwrap();
+            if lead.as_ref().map(|e| e.id.as_str()) == Some(id) {
+                *lead = None;
+            }
+        }
+        removed
+    }
+
+    /// Select a saved name (by id) as this chat's leading name and announce it. Errors
+    /// if no entry with that id exists. This is the mid-chat name switch (fires a fresh
+    /// CQ with a bumped seq so peers supersede the previous name).
+    pub async fn use_name(&self, id: &str) -> Result<()> {
+        let entry = self
+            .inner
+            .name_book
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| crate::error::CoreError::NoSuchName(id.to_string()))?;
+        *self.inner.leading_name.lock().unwrap() = Some(entry);
+        self.announce_presence().await
     }
 
     // ----- SUB-SPEC B: opsec modes + groupings (disclosure is user-controlled) -----
@@ -6367,6 +6427,90 @@ mod tests {
         // The generation counter is unchanged (no new grows), confirming the coalesce
         // logic keyed on a stable final generation.
         assert_eq!(core.inner.presence_grow_gen.load(Ordering::SeqCst), 5);
+    }
+
+    /// SUB-SPEC A (§6 name book): multiple saved names, select the leading one by id
+    /// (mid-chat switch), and deleting the active name stops us beaconing it.
+    #[tokio::test]
+    async fn name_book_use_switches_leading_and_remove_clears_it() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#book",
+        );
+        let (core, _rx) = core_on(&fabric, "r", &desc);
+        let e = |id: &str, label: &str| NameEntry {
+            id: id.into(),
+            label: label.into(),
+            backing: NameBacking::Bare,
+        };
+        core.add_name(e("1", "Alpha"));
+        core.add_name(e("2", "Bravo"));
+        assert_eq!(core.name_book().entries.len(), 2);
+        // Selecting a saved name by id makes it the active leading name (a CQ fires).
+        core.use_name("2").await.unwrap();
+        assert_eq!(
+            core.inner.leading_name.lock().unwrap().as_ref().unwrap().label,
+            "Bravo"
+        );
+        // An unknown id is a clean error, not a panic or a silent clear.
+        assert!(core.use_name("nope").await.is_err());
+        assert_eq!(
+            core.inner.leading_name.lock().unwrap().as_ref().unwrap().label,
+            "Bravo",
+            "a failed switch leaves the leading name untouched"
+        );
+        // Deleting the ACTIVE name clears the leading name so we stop beaconing it.
+        assert!(core.remove_name("2"));
+        assert!(core.inner.leading_name.lock().unwrap().is_none());
+        assert_eq!(core.name_book().entries.len(), 1);
+    }
+
+    /// SUB-SPEC A (§6): the name book survives a client persistence round-trip
+    /// (encode → load) and a peer resolves the reloaded, switched-to name.
+    #[tokio::test]
+    async fn name_book_persists_and_reloaded_name_reaches_peer() {
+        use crate::presence::{NameBacking, NameBook, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#bookp",
+        );
+        // Simulate a saved book restored from client storage.
+        let saved = NameBook {
+            entries: vec![NameEntry {
+                id: "call".into(),
+                label: "Sierra".into(),
+                backing: NameBacking::Bare,
+            }],
+            default: Some("call".into()),
+        };
+        let restored = NameBook::decode(&saved.encode()).unwrap();
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jrx) = core_on(&fabric, "joiner", &desc);
+        joiner.load_name_book(restored);
+        joiner.use_name("call").await.unwrap();
+        joiner.connect("host").await.unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { label: Some(l), .. }) if l == "Sierra" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(seen, "the host resolves the joiner's reloaded, selected name");
     }
 
     /// Full TreeKEM group chat through the engine over loopback: a host and two
