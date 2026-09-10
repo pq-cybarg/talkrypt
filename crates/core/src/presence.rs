@@ -334,6 +334,23 @@ mod tests {
         assert_eq!(NamePresence::decode(&bytes).unwrap().seq(), 7);
     }
 
+    /// Locked wire KAT for a `Bare` presence (spec §7). Guards the on-the-wire byte
+    /// layout against silent drift: tag(1) ‖ seq(u64, big-endian) ‖ len(u32, BE) ‖
+    /// label bytes. A change here is a wire-compatibility break and must be deliberate.
+    #[test]
+    fn bare_name_presence_kat() {
+        let np = NamePresence::Bare { seq: 5, label: "Whiskey".into() };
+        let expected: &[u8] = &[
+            0x00, // tag = Bare
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // seq = 5 (u64 BE)
+            0x00, 0x00, 0x00, 0x07, // label length = 7 (u32 BE)
+            b'W', b'h', b'i', b's', b'k', b'e', b'y',
+        ];
+        assert_eq!(np.encode(), expected, "presence Bare wire format drifted");
+        // The frozen bytes decode back to the same value.
+        assert_eq!(NamePresence::decode(expected).unwrap(), np);
+    }
+
     #[test]
     fn u64_helpers_roundtrip() {
         let mut w = Writer::new();
