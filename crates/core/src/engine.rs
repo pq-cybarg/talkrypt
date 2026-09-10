@@ -102,6 +102,10 @@ pub enum Event {
         tier: crate::nametrust::NameTier,
         seq: u64,
         caveat: Option<String>,
+        /// Short, always-available safety number for this peer (derived from the
+        /// render key). A UI shows it on tap/hover and when the name is suppressed —
+        /// the honest fallback that a spoofable label can never override.
+        safety_number: String,
     },
     /// SUB-SPEC B: a peer disclosed grouping linkage — `subject` (a leaf fp) is a
     /// member of the grouping identified by `grouping_pub` (per-chat `G_c`). Viewers
@@ -3786,7 +3790,7 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
             (false, None)
         }
     };
-    let (label, caveat, tier, account_fp) = {
+    let (label, caveat, tier, account_fp, safety_number) = {
         let names = inner.names.lock().unwrap();
         // Effective policy = chat baseline, tightened (never loosened) by any
         // viewer-local override (spec §5).
@@ -3796,7 +3800,7 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
         };
         let sn = short_hex6(&key);
         let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated, vouched, vouch_badge);
-        (r.label, r.caveat, r.tier, rec.account_fp)
+        (r.label, r.caveat, r.tier, rec.account_fp, r.safety_number)
     };
     let _ = inner.events_tx.send(Event::Name {
         from: key,
@@ -3804,6 +3808,7 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
         label,
         tier,
         seq: rec.seq,
+        safety_number,
         caveat,
     });
 }
@@ -5012,6 +5017,55 @@ mod tests {
         let older = NamePresence::Bare { seq: 4, label: "Nope".into() };
         handle_presence(&inner, [7u8; 48], older.encode());
         assert_eq!(inner.names.lock().unwrap().get(&[7u8; 48]).unwrap().label, "Whiskey");
+    }
+
+    /// SUB-SPEC A (§6 NameRender): even when the chat policy SUPPRESSES a colliding
+    /// bare name (label None), the emitted event still carries a non-empty safety
+    /// number — the honest fallback a spoofable label can never override.
+    #[tokio::test]
+    async fn suppressed_name_event_still_carries_safety_number() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#sn",
+        );
+        desc.name_trust_policy = NameTrustPolicy::SuppressColliding;
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        // A verified "Alice".
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain = IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+        let ctx = chat_context(
+            &core.inner.descriptor.invite_token,
+            &core.inner.descriptor.channel,
+        );
+        let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+        handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+        // A bare homoglyph impostor — suppressed under the policy.
+        let impostor = [9u8; 48];
+        handle_presence(
+            &core.inner,
+            impostor,
+            NamePresence::Bare { seq: 1, label: "Аlice".into() }.encode(), // Cyrillic А
+        );
+        let mut found = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { from, label, safety_number, .. } = ev {
+                if from == impostor {
+                    found = Some((label, safety_number));
+                }
+            }
+        }
+        let (label, sn) = found.expect("the impostor still emits a name event");
+        assert!(label.is_none(), "a colliding bare name is suppressed under the policy");
+        assert!(!sn.is_empty(), "the safety number is always present, even when suppressed");
     }
 
     async fn wait_for_name(

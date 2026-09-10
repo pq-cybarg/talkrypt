@@ -428,6 +428,9 @@ pub enum FfiEvent {
         tier: String,
         seq: u64,
         caveat: String,
+        /// Short safety number for this peer — always shown on tap and whenever the
+        /// label is empty (suppressed). The honest fallback a spoofable name can't hide.
+        safety_number: String,
     },
     /// SUB-SPEC B: a peer disclosed grouping linkage. `subject` is a leaf fp hex;
     /// `grouping` is a short id for the grouping (hosts aggregate subjects sharing it).
@@ -584,6 +587,7 @@ fn map_event(e: Event) -> FfiEvent {
             tier,
             seq,
             caveat,
+            safety_number,
         } => FfiEvent::Name {
             from: hex_fp(&from),
             account_fingerprint: account_fingerprint.map(|f| hex_fp(&f)).unwrap_or_default(),
@@ -591,6 +595,7 @@ fn map_event(e: Event) -> FfiEvent {
             tier: format!("{tier:?}"),
             seq,
             caveat: caveat.unwrap_or_default(),
+            safety_number,
         },
         Event::Linkage { subject, grouping_pub, verdict } => FfiEvent::Linkage {
             subject: hex_fp(&subject),
@@ -1411,6 +1416,22 @@ impl TalkryptClient {
                 periodic_secs: periodic,
                 on_message_id,
             });
+    }
+
+    /// Viewer-local name-trust policy override (SUB-SPEC A §5): "signal" | "warn" |
+    /// "suppress" tightens how homoglyph/collision names render; "" (empty) drops the
+    /// override and follows the chat baseline. A viewer can only TIGHTEN the chat
+    /// policy, never loosen it. Unknown non-empty values are ignored.
+    pub fn set_name_trust_policy(&self, policy: String) {
+        use talkrypt_core::nametrust::NameTrustPolicy;
+        let p = match policy.as_str() {
+            "" => None,
+            "signal" => Some(NameTrustPolicy::SignalStyle),
+            "warn" => Some(NameTrustPolicy::WarnOnCollision),
+            "suppress" => Some(NameTrustPolicy::SuppressColliding),
+            _ => return,
+        };
+        self.core.set_name_trust_policy(p);
     }
 
     // ----- SUB-SPEC B: linkage disclosure + opsec (Task 11) -----
