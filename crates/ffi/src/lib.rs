@@ -2659,7 +2659,7 @@ mod tests {
     /// round-trip through the FFI, as an Android/iOS picker would drive it.
     #[test]
     fn ffi_name_book_add_list_select_and_persist() {
-        let c = TalkryptClient::host("127.0.0.1:19933".into(), "#nb".into(), "pq-pure".into(), None)
+        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None)
             .expect("host");
         c.add_bare_name("home".into(), "Tango".into());
         c.add_bare_name("work".into(), "Foxtrot".into());
@@ -2676,7 +2676,7 @@ mod tests {
         // Persist and restore into a fresh client.
         let blob = c.name_book_blob();
         let c2 =
-            TalkryptClient::host("127.0.0.1:19934".into(), "#nb2".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None)
                 .expect("host2");
         assert!(c2.list_names().is_empty());
         c2.load_name_book(blob);
