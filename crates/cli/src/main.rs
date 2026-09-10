@@ -1388,6 +1388,9 @@ commands:
   names + CQ beacon (self-declared display names):
   /name <callsign>               set a bare self-declared name and announce it
   /name link <callsign>          set an account-linked (verified) name (needs /account)
+  /name new <callsign>           save a name to your book without switching to it
+  /name list                     list saved names (* = active)
+  /name use <id>                 switch your leading name to a saved one and announce
   /name off                      clear your leading name
   /opsec clean|selective|transparent [hide]   linkage-disclosure policy (SUB-SPEC B)
   /grouping new <name-id...>      define + disclose a grouping of your names (account-hidden)
@@ -1803,13 +1806,17 @@ fn parse_name_policy(s: &str) -> Result<talkrypt_core::nametrust::NameTrustPolic
     }
 }
 
-/// `/name <callsign>` (bare) | `/name link <callsign>` (account-linked) | `/name off`.
-/// Sets the leading self-declared name for this chat and announces it (SUB-SPEC A).
+/// `/name <callsign>` (bare) | `/name link <callsign>` (account-linked) |
+/// `/name new <callsign>` (save without switching) | `/name list` |
+/// `/name use <id>` (switch to a saved name) | `/name off`.
+/// Manages the self-declared name book and the leading name for this chat (SUB-SPEC A).
 async fn cmd_name(core: &Core, state: &ReplState, arg: &str) {
     use talkrypt_core::presence::{NameBacking, NameEntry};
     let arg = arg.trim();
     if arg.is_empty() {
-        println!("usage: /name <callsign>   |   /name link <callsign>   |   /name off");
+        println!(
+            "usage: /name <callsign> | /name link <callsign> | /name new <callsign> | /name list | /name use <id> | /name off"
+        );
         return;
     }
     if arg == "off" {
@@ -1817,7 +1824,38 @@ async fn cmd_name(core: &Core, state: &ReplState, arg: &str) {
         println!("leading name cleared");
         return;
     }
-    let (label, backing) = if let Some(label) = arg.strip_prefix("link ") {
+    if arg == "list" {
+        let book = core.name_book();
+        if book.entries.is_empty() {
+            println!("(name book empty — /name <callsign> to add one)");
+            return;
+        }
+        let active = core.leading_name_id();
+        for e in &book.entries {
+            let tier = match e.backing {
+                NameBacking::Account { .. } => "account-linked",
+                NameBacking::Bare => "bare",
+            };
+            let mark = if active.as_deref() == Some(e.id.as_str()) { "* " } else { "  " };
+            println!("{mark}{}  \"{}\"  ({tier})", e.id, e.label);
+        }
+        return;
+    }
+    if let Some(id) = arg.strip_prefix("use ") {
+        let id = id.trim();
+        match core.use_name(id).await {
+            Ok(()) => println!("switched leading name to \"{id}\" and announced"),
+            Err(e) => println!("! {e}"),
+        }
+        return;
+    }
+    // The remaining forms all define a name. `new` saves it to the book WITHOUT
+    // switching; `link` makes it account-backed; a bare callsign sets + announces.
+    let (save_only, rest) = match arg.strip_prefix("new ") {
+        Some(rest) => (true, rest.trim()),
+        None => (false, arg),
+    };
+    let (label, backing) = if let Some(label) = rest.strip_prefix("link ") {
         let label = label.trim().to_string();
         match &state.account {
             Some(acct) => {
@@ -1836,19 +1874,29 @@ async fn cmd_name(core: &Core, state: &ReplState, arg: &str) {
             }
         }
     } else {
-        (arg.to_string(), NameBacking::Bare)
+        (rest.to_string(), NameBacking::Bare)
     };
+    if label.is_empty() {
+        println!("usage: /name <callsign> | /name new <callsign> | /name [new] link <callsign>");
+        return;
+    }
     let linked = matches!(backing, NameBacking::Account { .. });
-    core.set_leading_name(Some(NameEntry {
-        id: label.clone(),
-        label: label.clone(),
-        backing,
-    }));
-    core.announce_presence().await.ok();
-    println!(
-        "name set to \"{label}\" ({}) and announced",
-        if linked { "account-linked" } else { "bare" }
-    );
+    let entry = NameEntry { id: label.clone(), label: label.clone(), backing };
+    // Always save to the book so it shows in `/name list` and can be re-selected.
+    core.add_name(entry.clone());
+    if save_only {
+        println!(
+            "saved \"{label}\" to the name book ({}); /name use {label} to switch",
+            if linked { "account-linked" } else { "bare" }
+        );
+    } else {
+        core.set_leading_name(Some(entry));
+        core.announce_presence().await.ok();
+        println!(
+            "name set to \"{label}\" ({}) and announced",
+            if linked { "account-linked" } else { "bare" }
+        );
+    }
 }
 
 /// `/account new|load|save`.

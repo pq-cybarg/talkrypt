@@ -233,6 +233,27 @@ impl NameBook {
         self.entries.iter().find(|e| e.id == id)
     }
 
+    /// Insert `entry`, replacing any existing entry with the same id (a rename/
+    /// re-back of a saved name keeps its slot rather than duplicating it).
+    pub fn upsert(&mut self, entry: NameEntry) {
+        if let Some(slot) = self.entries.iter_mut().find(|e| e.id == entry.id) {
+            *slot = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// Remove the entry with `id` (and clear `default` if it pointed there).
+    /// Returns whether an entry was removed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.id != id);
+        if self.default.as_deref() == Some(id) {
+            self.default = None;
+        }
+        self.entries.len() != before
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         w.put_u32(self.entries.len() as u32);
@@ -411,6 +432,40 @@ mod tests {
         };
         let bytes = book.encode();
         assert_eq!(NameBook::decode(&bytes).unwrap(), book);
+    }
+
+    #[test]
+    fn namebook_upsert_replaces_by_id_and_appends_new() {
+        let mut book = NameBook::default();
+        let e = |id: &str, label: &str| NameEntry {
+            id: id.into(),
+            label: label.into(),
+            backing: NameBacking::Bare,
+        };
+        book.upsert(e("1", "Alpha"));
+        book.upsert(e("2", "Bravo"));
+        assert_eq!(book.entries.len(), 2);
+        // Same id replaces in place (no duplicate), keeping order.
+        book.upsert(e("1", "Alpha-Renamed"));
+        assert_eq!(book.entries.len(), 2);
+        assert_eq!(book.get("1").unwrap().label, "Alpha-Renamed");
+        assert_eq!(book.entries[0].id, "1", "the replaced entry keeps its slot");
+    }
+
+    #[test]
+    fn namebook_remove_clears_default_pointer() {
+        let mut book = NameBook {
+            entries: vec![NameEntry {
+                id: "1".into(),
+                label: "Alpha".into(),
+                backing: NameBacking::Bare,
+            }],
+            default: Some("1".into()),
+        };
+        assert!(book.remove("1"));
+        assert!(book.entries.is_empty());
+        assert_eq!(book.default, None, "removing the default name clears the pointer");
+        assert!(!book.remove("nope"), "removing an absent id is a no-op");
     }
 
     #[test]

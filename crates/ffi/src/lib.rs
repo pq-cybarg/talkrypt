@@ -506,6 +506,17 @@ pub struct FfiRoute {
 
 /// SUB-SPEC D at-rest: one retained chat message decoded from sealed history, for
 /// redisplay after a restart (see [`TalkryptClient::load_history`]).
+/// One saved name from the user's name book (SUB-SPEC A), for a picker UI.
+#[derive(uniffi::Record)]
+pub struct FfiNameEntry {
+    /// Stable local handle used with `use_name` / `remove_name`.
+    pub id: String,
+    /// The callsign shown to peers.
+    pub label: String,
+    /// True if this name is account-linked (verified), false if bare.
+    pub linked: bool,
+}
+
 #[derive(uniffi::Record)]
 pub struct FfiHistoryRecord {
     /// Sender account/leaf fingerprint (hex).
@@ -1326,6 +1337,65 @@ impl TalkryptClient {
         self.rt.block_on(async {
             let _ = self.core.announce_presence().await;
         });
+    }
+
+    // ----- SUB-SPEC A: name book (multiple callsigns; persistence is the host's job) --
+
+    /// Save a bare name to the book WITHOUT switching to it (`id` is a stable local
+    /// handle; reusing an id replaces that entry). Account-linked names are added via
+    /// the link flow, not here.
+    pub fn add_bare_name(&self, id: String, label: String) {
+        self.core.add_name(talkrypt_core::presence::NameEntry {
+            id,
+            label,
+            backing: talkrypt_core::presence::NameBacking::Bare,
+        });
+    }
+
+    /// Switch the leading name to a saved book entry (by id) and announce it. Returns
+    /// false if no entry with that id exists.
+    pub fn use_name(&self, id: String) -> bool {
+        self.rt.block_on(async { self.core.use_name(&id).await.is_ok() })
+    }
+
+    /// Remove a saved name from the book. If it was the active leading name, the
+    /// leading name is also cleared. Returns whether an entry was removed.
+    pub fn remove_name(&self, id: String) -> bool {
+        self.core.remove_name(&id)
+    }
+
+    /// The id of the active leading name, or empty string if none is set.
+    pub fn leading_name_id(&self) -> String {
+        self.core.leading_name_id().unwrap_or_default()
+    }
+
+    /// List the saved names (id, label, whether account-linked) for a picker UI.
+    pub fn list_names(&self) -> Vec<FfiNameEntry> {
+        self.core
+            .name_book()
+            .entries
+            .into_iter()
+            .map(|e| FfiNameEntry {
+                id: e.id,
+                label: e.label,
+                linked: matches!(e.backing, talkrypt_core::presence::NameBacking::Account { .. }),
+            })
+            .collect()
+    }
+
+    /// Opaque, encoded snapshot of the name book for the host to persist. Pair with
+    /// [`load_name_book`](Self::load_name_book) at startup.
+    pub fn name_book_blob(&self) -> Vec<u8> {
+        self.core.name_book().encode()
+    }
+
+    /// Restore a name book previously saved via [`name_book_blob`](Self::name_book_blob).
+    /// Ignores a malformed blob (leaves the book unchanged). Does not switch the
+    /// leading name; call [`use_name`](Self::use_name).
+    pub fn load_name_book(&self, blob: Vec<u8>) {
+        if let Ok(book) = talkrypt_core::presence::NameBook::decode(&blob) {
+            self.core.load_name_book(book);
+        }
     }
 
     /// Configure the CQ auto re-beacon (SUB-SPEC A): `periodic_secs == 0` disables the
@@ -2583,6 +2653,41 @@ mod tests {
         }
         assert_eq!(got.as_deref(), Some("hello via ffi"));
         assert_eq!(joiner.peer_count(), 1);
+    }
+
+    /// SUB-SPEC A (§6 FFI): the name book add/list/select/remove + persistence blob
+    /// round-trip through the FFI, as an Android/iOS picker would drive it.
+    #[test]
+    fn ffi_name_book_add_list_select_and_persist() {
+        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None)
+            .expect("host");
+        c.add_bare_name("home".into(), "Tango".into());
+        c.add_bare_name("work".into(), "Foxtrot".into());
+        let names = c.list_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|e| !e.linked));
+        assert_eq!(c.leading_name_id(), "", "nothing active until we pick one");
+
+        // Select one → it becomes the active leading name.
+        assert!(c.use_name("work".into()));
+        assert_eq!(c.leading_name_id(), "work");
+        assert!(!c.use_name("ghost".into()), "unknown id is a clean false");
+
+        // Persist and restore into a fresh client.
+        let blob = c.name_book_blob();
+        let c2 =
+            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None)
+                .expect("host2");
+        assert!(c2.list_names().is_empty());
+        c2.load_name_book(blob);
+        assert_eq!(c2.list_names().len(), 2);
+        assert!(c2.use_name("home".into()));
+        assert_eq!(c2.leading_name_id(), "home");
+
+        // Removing the active name clears the leading pointer.
+        assert!(c2.remove_name("home".into()));
+        assert_eq!(c2.leading_name_id(), "");
+        assert_eq!(c2.list_names().len(), 1);
     }
 
     /// Multi-session foundation: two independent chats run at once and don't
