@@ -56,6 +56,21 @@ impl NameTrustPolicy {
             _ => None,
         }
     }
+    /// Ordinal strictness — higher is stricter (SignalStyle < WarnOnCollision <
+    /// SuppressColliding). A viewer may tighten the chat baseline, never loosen it
+    /// (spec §5: "user policy trumps group, in the protective direction").
+    pub fn strictness(self) -> u8 {
+        self.tag()
+    }
+    /// The stricter of two policies. Used to clamp a viewer-local override so it can
+    /// only ever be at least as strict as the chat's baseline policy.
+    pub fn max_strictness(self, other: Self) -> Self {
+        if other.strictness() > self.strictness() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Colour slot. `Default`/`Verified` are set by Sub-spec A; `Isolated` (B) and
@@ -139,9 +154,18 @@ pub fn resolve_render(
 ) -> NameRender {
     let folded = confusable_fold(&rec.label);
     // A collision: some OTHER peer holds a HIGHER-tier name that folds the same.
-    let collides = others.iter().any(|(fp, o)| {
-        *fp != subject_fp && o.tier.rank() > rec.tier.rank() && confusable_fold(&o.label) == folded
-    });
+    // Capture that genuine holder (the highest-tier one, if several) so a warning
+    // can name it honestly instead of echoing the impostor's own label.
+    let collision: Option<&NameRecord> = others
+        .iter()
+        .filter(|(fp, o)| {
+            **fp != subject_fp
+                && o.tier.rank() > rec.tier.rank()
+                && confusable_fold(&o.label) == folded
+        })
+        .map(|(_, o)| o)
+        .max_by_key(|o| o.tier.rank());
+    let collides = collision.is_some();
     // Precedence: a Verified name is NEVER downgraded to Isolated; a bare, unlinked
     // subject gets the subtle isolated tint (a possible sybil).
     let tint = match rec.tier {
@@ -152,13 +176,19 @@ pub fn resolve_render(
     let (label, caveat) = match (collides, policy) {
         (false, _) => (Some(rec.label.clone()), None),
         (true, NameTrustPolicy::SignalStyle) => (Some(rec.label.clone()), None),
-        (true, NameTrustPolicy::WarnOnCollision) => (
-            Some(rec.label.clone()),
-            Some(format!(
-                "claims to be “{}” — unverified, does not match the verified “{}”",
-                rec.label, rec.label
-            )),
-        ),
+        (true, NameTrustPolicy::WarnOnCollision) => {
+            // Name the genuine verified holder, not the impostor's own label.
+            let verified = collision
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| rec.label.clone());
+            (
+                Some(rec.label.clone()),
+                Some(format!(
+                    "claims to be “{}” — unverified, does not match the verified “{}”",
+                    rec.label, verified
+                )),
+            )
+        }
         (true, NameTrustPolicy::SuppressColliding) => (
             None,
             Some(format!(
@@ -231,11 +261,14 @@ mod tests {
 
     #[test]
     fn warn_flags_bare_collision_with_verified() {
+        // Impostor uses a Cyrillic homoglyph "Аlice"; the verified holder is Latin
+        // "Alice". The warning must echo the impostor's raw label AND name the
+        // genuine verified holder — not repeat the impostor's own spelling.
         let mut others = HashMap::new();
         others.insert([1u8; 48], rec("Alice", NameTier::RegistryConfirmed, 1));
         let r = resolve_render(
             [2u8; 48],
-            &rec("Alice", NameTier::Bare, 2),
+            &rec("Аlice", NameTier::Bare, 2), // Cyrillic А
             &others,
             NameTrustPolicy::WarnOnCollision,
             "SN".into(),
@@ -244,8 +277,12 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(r.label.as_deref(), Some("Alice"));
-        assert!(r.caveat.as_deref().unwrap().contains("does not match"));
+        assert_eq!(r.label.as_deref(), Some("Аlice"));
+        let caveat = r.caveat.as_deref().unwrap();
+        assert!(caveat.contains("does not match"));
+        // Honestly names the genuine holder ("Alice"), not the impostor ("Аlice").
+        assert!(caveat.contains("the verified “Alice”"), "caveat was: {caveat}");
+        assert!(caveat.contains("claims to be “Аlice”"), "caveat was: {caveat}");
     }
 
     #[test]

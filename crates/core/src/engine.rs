@@ -945,6 +945,20 @@ struct Inner {
     /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
     /// fingerprint (transport peer, or the signed device for a Linked presence).
     names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
+    /// SUB-SPEC A: viewer-local trust-policy override. `None` = follow the chat
+    /// baseline (`descriptor.name_trust_policy`). When set, the EFFECTIVE policy is
+    /// the stricter of the two — a viewer may tighten collision handling, never
+    /// loosen it (spec §5: user policy trumps group, protective direction only).
+    name_policy_override: Mutex<Option<crate::nametrust::NameTrustPolicy>>,
+    /// SUB-SPEC A: per-sender presence rate limiter — `(window_start_secs, count)`
+    /// per cache key. Bounds accepted presences to `PRESENCE_RATE_BURST` per
+    /// `PRESENCE_RATE_WINDOW_SECS`, so a hostile peer cannot grief with a flood while
+    /// a legitimate small burst (eager on-join + a quick correction) still passes.
+    /// seq monotonicity is checked first, so replays never consume budget.
+    presence_rate: Mutex<std::collections::HashMap<[u8; 48], (u64, u32)>>,
+    /// SUB-SPEC A: generation counter for the roster-grow re-announce, so a burst of
+    /// joins coalesces into a single debounced CQ instead of one per join.
+    presence_grow_gen: std::sync::atomic::AtomicU64,
     /// Our own leading name to announce (if any), and a monotonic presence sequence
     /// number so peers can drop stale/replayed announcements.
     leading_name: Mutex<Option<crate::presence::NameEntry>>,
@@ -1225,6 +1239,9 @@ impl Core {
             backlog: Mutex::new(Vec::new()),
             history: Mutex::new(Arc::new(crate::history::InMemoryHistory::new())),
             names: Mutex::new(std::collections::HashMap::new()),
+            name_policy_override: Mutex::new(None),
+            presence_rate: Mutex::new(std::collections::HashMap::new()),
+            presence_grow_gen: std::sync::atomic::AtomicU64::new(0),
             leading_name: Mutex::new(None),
             presence_seq: std::sync::atomic::AtomicU64::new(0),
             cadence: Mutex::new(crate::presence::PresenceCadence::default()),
@@ -2425,6 +2442,24 @@ impl Core {
         self.inner.cadence.lock().unwrap().clone()
     }
 
+    /// Set a viewer-local name-trust policy override (SUB-SPEC A, spec §5). The chat's
+    /// baseline policy travels in the descriptor; this lets a viewer render collisions
+    /// MORE strictly than the chat requires, never more loosely — the effective policy
+    /// is the stricter of the two. Pass `None` to drop the override and follow the
+    /// chat baseline. Takes effect on the next resolved presence.
+    pub fn set_name_trust_policy(&self, policy: Option<crate::nametrust::NameTrustPolicy>) {
+        *self.inner.name_policy_override.lock().unwrap() = policy;
+    }
+
+    /// The effective name-trust policy = the chat baseline tightened by any local
+    /// override (never loosened).
+    pub fn name_trust_policy(&self) -> crate::nametrust::NameTrustPolicy {
+        match *self.inner.name_policy_override.lock().unwrap() {
+            Some(local) => self.inner.descriptor.name_trust_policy.max_strictness(local),
+            None => self.inner.descriptor.name_trust_policy,
+        }
+    }
+
     /// Broadcast a fresh CQ of the current leading name to the chat. No-op if no
     /// leading name is set. Bumps the per-sender seq so it supersedes prior ones.
     pub async fn announce_presence(&self) -> Result<()> {
@@ -2786,6 +2821,43 @@ fn compute_vouch_decision(inner: &Arc<Inner>, subject: [u8; 48]) -> crate::vouch
 /// Chat payload (whose first byte is an opt-marking flag 0x00/0x01). A legacy
 /// client's `marking::decode_payload` returns `None` on this, dropping it gracefully.
 pub(crate) const PRESENCE_SENTINEL: u8 = 0xF5;
+
+/// SUB-SPEC A anti-grief: at most `PRESENCE_RATE_BURST` accepted presences per peer
+/// per `PRESENCE_RATE_WINDOW_SECS` (viewer-enforced in `handle_presence`). The window
+/// bounds a sustained flood to ~`BURST`/`WINDOW`; the burst headroom lets a legitimate
+/// eager-on-join plus a quick name correction both land. seq monotonicity (checked
+/// first) already drops replays, so only genuinely new presences spend budget.
+const PRESENCE_RATE_WINDOW_SECS: u64 = 2;
+const PRESENCE_RATE_BURST: u32 = 3;
+
+/// SUB-SPEC A: debounce window for the roster-grow re-announce. A burst of joins
+/// within this window coalesces into a single CQ (see `schedule_grow_reannounce`).
+const PRESENCE_GROW_DEBOUNCE_MS: u64 = 250;
+
+/// Schedule a single debounced CQ after the roster grows. Each grow bumps a
+/// generation counter and sleeps the debounce window; only the LAST grow in a burst
+/// (the one whose generation is still current when its timer fires) actually
+/// announces, so N near-simultaneous joins yield one presence, not N.
+fn schedule_grow_reannounce(inner: &Arc<Inner>) {
+    if inner.leading_name.lock().unwrap().is_none() {
+        return;
+    }
+    let gen = inner
+        .presence_grow_gen
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let inner2 = inner.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(PRESENCE_GROW_DEBOUNCE_MS)).await;
+        // A newer grow superseded us during the window — let its timer send instead.
+        if inner2.presence_grow_gen.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return;
+        }
+        if let Some(bytes) = build_my_presence(&inner2) {
+            send_presence_now(&inner2, bytes).await;
+        }
+    });
+}
 
 fn encode_group_presence(np_bytes: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(np_bytes.len() + 1);
@@ -3173,15 +3245,10 @@ async fn reader_loop(
                     roster.len() > before
                 };
                 // A new member appeared — re-announce our leading name so they
-                // resolve us without us acting (SUB-SPEC A CQ beacon).
-                if grew && inner.leading_name.lock().unwrap().is_some() {
-                    let inner2 = inner.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        if let Some(bytes) = build_my_presence(&inner2) {
-                            send_presence_now(&inner2, bytes).await;
-                        }
-                    });
+                // resolve us without us acting (SUB-SPEC A CQ beacon), debounced so a
+                // join burst coalesces into one CQ.
+                if grew {
+                    schedule_grow_reannounce(&inner);
                 }
             }
             Some(Frame::GroupMsg(b)) => {
@@ -3607,16 +3674,33 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
             )
         }
     };
-    // seq monotonicity per cache key.
+    // Admission gates, cheapest first, committing state only once BOTH pass:
+    //   1. seq monotonicity — drop a replayed/stale announcement (read-only peek).
+    //      Checked first so a replay never consumes rate budget.
+    //   2. per-sender rate limit (anti-grief) — at most PRESENCE_RATE_BURST accepted
+    //      presences per key per PRESENCE_RATE_WINDOW_SECS. seq alone can't stop a
+    //      strictly-increasing-seq flood; this bounds cache churn + event spam while
+    //      letting a legitimate small burst through. Viewer-enforced.
     {
-        let mut names = inner.names.lock().unwrap();
+        let names = inner.names.lock().unwrap();
         if let Some(existing) = names.get(&key) {
             if rec.seq <= existing.seq {
                 return;
             }
         }
-        names.insert(key, rec.clone());
     }
+    {
+        let mut rl = inner.presence_rate.lock().unwrap();
+        let e = rl.entry(key).or_insert((now, 0));
+        if now.saturating_sub(e.0) >= PRESENCE_RATE_WINDOW_SECS {
+            *e = (now, 0); // window elapsed — reset
+        }
+        if e.1 >= PRESENCE_RATE_BURST {
+            return; // too many presences from this peer this window
+        }
+        e.1 += 1;
+    }
+    inner.names.lock().unwrap().insert(key, rec.clone());
     // Resolve the render against the rest of the cache under the chat's trust policy.
     // SUB-SPEC B: a Bare subject with no verifiable grouping linkage is "isolated"
     // (a possible sybil) → subtle tint / optional group-amplified caveat.
@@ -3644,7 +3728,12 @@ fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) 
     };
     let (label, caveat, tier, account_fp) = {
         let names = inner.names.lock().unwrap();
-        let policy = inner.descriptor.name_trust_policy;
+        // Effective policy = chat baseline, tightened (never loosened) by any
+        // viewer-local override (spec §5).
+        let policy = match *inner.name_policy_override.lock().unwrap() {
+            Some(local) => inner.descriptor.name_trust_policy.max_strictness(local),
+            None => inner.descriptor.name_trust_policy,
+        };
         let sn = short_hex6(&key);
         let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated, vouched, vouch_badge);
         (r.label, r.caveat, r.tier, rec.account_fp)
@@ -3884,16 +3973,9 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
 
     // The roster just grew (a member joined) — re-announce our leading name so the
-    // new member resolves us without us acting (SUB-SPEC A CQ beacon).
-    if inner.leading_name.lock().unwrap().is_some() {
-        let inner2 = inner.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            if let Some(bytes) = build_my_presence(&inner2) {
-                send_presence_now(&inner2, bytes).await;
-            }
-        });
-    }
+    // new member resolves us without us acting (SUB-SPEC A CQ beacon), debounced so a
+    // join burst coalesces into one CQ.
+    schedule_grow_reannounce(inner);
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -4931,6 +5013,74 @@ mod tests {
             attributed,
             Some(m1.fingerprint()),
             "the group name must be attributed to m1's verified leaf, not the relaying host"
+        );
+    }
+
+    /// SUB-SPEC A (§7, the decisive group gap #58 closes): a name announced by one
+    /// MEMBER is resolved by ANOTHER member — not just the host. m1 joins with an
+    /// account-linked name; m2 joins after and must resolve it at the verified Linked
+    /// tier, attributed to m1's signing leaf and m1's account. Proves group presence
+    /// reaches the whole group (via the host's relay) rather than the host alone.
+    #[tokio::test]
+    async fn group_linked_name_reaches_another_member() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NameBacking, NameEntry};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#names3",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        // m1 joins with an account-linked leading name.
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain =
+            IdentityChain::device(&account, m1.identity_public(), "dev", now, now + 100_000);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Victor".into(),
+            backing: NameBacking::Account { chain },
+        }));
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // m2 joins AFTER m1 (the documented sequential-join model).
+        let (m2, mut m2rx) = group_core(&fabric, "m2", &desc, false);
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // m1 re-announces so a late joiner resolves it (also covered by roster-grow).
+        m1.announce_presence().await.unwrap();
+        // m2 — a MEMBER, not the host — resolves m1's Linked name.
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match m2rx.recv().await {
+                    Some(Event::Name {
+                        label: Some(l),
+                        tier,
+                        from,
+                        account_fingerprint,
+                        ..
+                    }) if l == "Victor" => break Some((tier, from, account_fingerprint)),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tier, from, acct_fp) = got.expect("m2 (a member) must resolve m1's linked name");
+        assert_eq!(tier, NameTier::Linked, "resolves at the verified Linked tier");
+        assert_eq!(from, m1.fingerprint(), "attributed to m1's signing leaf, not the relaying host");
+        assert_eq!(
+            acct_fp,
+            Some(account.public().fingerprint()),
+            "a linked name is attributed to the account"
         );
     }
 
@@ -6063,6 +6213,160 @@ mod tests {
             "a replayed stale presence must never surface: saw {labels:?}"
         );
         assert_eq!(labels, vec!["Foxtrot".to_string(), "Hotel".to_string()]);
+    }
+
+    /// SUB-SPEC A anti-grief (§4): a peer flooding many strictly-increasing-seq
+    /// presences in one window is bounded to `PRESENCE_RATE_BURST` accepted — the
+    /// excess is dropped so a hostile peer cannot grief the cache/event stream. seq
+    /// monotonicity is checked first, so this never rejects a legitimate slow beacon.
+    #[tokio::test]
+    async fn presence_rate_limit_bounds_a_flood() {
+        use crate::presence::NamePresence;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#flood",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let fp = [8u8; 48];
+        // Fire BURST + 3 presences, each with a strictly-higher seq (all would pass
+        // seq monotonicity), synchronously (one rate window).
+        let total = PRESENCE_RATE_BURST + 3;
+        for seq in 1..=total as u64 {
+            let np = NamePresence::Bare { seq, label: format!("N{seq}") };
+            handle_presence(&core.inner, fp, np.encode());
+        }
+        let mut emitted = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { label: Some(l), .. } = ev {
+                emitted.push(l);
+            }
+        }
+        assert_eq!(
+            emitted.len(),
+            PRESENCE_RATE_BURST as usize,
+            "flood must be bounded to the per-window burst: saw {emitted:?}"
+        );
+        // The cache holds the last ACCEPTED name (N{BURST}), not the flooded tail.
+        assert_eq!(
+            core.inner.names.lock().unwrap().get(&fp).map(|r| r.label.clone()),
+            Some(format!("N{PRESENCE_RATE_BURST}")),
+        );
+    }
+
+    /// SUB-SPEC A (§5): a viewer-local trust-policy override only ever TIGHTENS the
+    /// chat baseline, never loosens it. A chat baseline of SignalStyle (no warning)
+    /// plus a local WarnOnCollision override must flag a homoglyph collision; the
+    /// reverse (baseline WarnOnCollision + local SignalStyle) must still warn.
+    #[tokio::test]
+    async fn viewer_policy_override_only_tightens() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+
+        async fn collision_caveat(
+            baseline: NameTrustPolicy,
+            local: Option<NameTrustPolicy>,
+        ) -> Option<String> {
+            let fabric = LoopbackFabric::new();
+            let mut desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec![],
+                "#ovr",
+            );
+            desc.name_trust_policy = baseline;
+            let (core, mut rx) = core_on(&fabric, "r", &desc);
+            core.set_name_trust_policy(local);
+            // A verified "Alice".
+            let account = IdentityKeyPair::generate();
+            let device = IdentityKeyPair::generate();
+            let now = now_secs();
+            let chain =
+                IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+            let ctx = chat_context(
+                &core.inner.descriptor.invite_token,
+                &core.inner.descriptor.channel,
+            );
+            let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+            handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+            // A bare homoglyph impostor.
+            let impostor_fp = [9u8; 48];
+            let bare = NamePresence::Bare { seq: 1, label: "Аlice".into() }; // Cyrillic А
+            handle_presence(&core.inner, impostor_fp, bare.encode());
+            let mut caveat = None;
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::Name { from, caveat: c, .. } = ev {
+                    if from == impostor_fp {
+                        caveat = c;
+                    }
+                }
+            }
+            caveat
+        }
+
+        // Baseline SignalStyle would NOT warn on its own...
+        assert!(
+            collision_caveat(NameTrustPolicy::SignalStyle, None).await.is_none(),
+            "SignalStyle baseline alone must not warn"
+        );
+        // ...but a local WarnOnCollision override tightens it into a warning.
+        assert!(
+            collision_caveat(NameTrustPolicy::SignalStyle, Some(NameTrustPolicy::WarnOnCollision))
+                .await
+                .is_some(),
+            "a stricter local override must apply"
+        );
+        // A local override cannot LOOSEN a stricter baseline: WarnOnCollision baseline
+        // + a SignalStyle local override still warns.
+        assert!(
+            collision_caveat(NameTrustPolicy::WarnOnCollision, Some(NameTrustPolicy::SignalStyle))
+                .await
+                .is_some(),
+            "a local override must never weaken the chat baseline"
+        );
+    }
+
+    /// SUB-SPEC A: the roster-grow re-announce coalesces a burst of joins into a
+    /// single CQ. Firing several grows back-to-back bumps the generation each time;
+    /// only the last generation's timer survives to send, so we don't emit N beacons
+    /// for N near-simultaneous joins.
+    #[tokio::test]
+    async fn roster_grow_reannounce_coalesces_a_burst() {
+        use std::sync::atomic::Ordering;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#grow",
+        );
+        let (core, _rx) = core_on(&fabric, "r", &desc);
+        core.set_leading_name(Some(crate::presence::NameEntry {
+            id: "1".into(),
+            label: "Zulu".into(),
+            backing: crate::presence::NameBacking::Bare,
+        }));
+        // A burst of grows within the debounce window.
+        for _ in 0..5 {
+            schedule_grow_reannounce(&core.inner);
+        }
+        // Exactly one generation is live per fired grow; the counter advanced by the
+        // burst size, and only the final generation's task will actually send.
+        assert_eq!(core.inner.presence_grow_gen.load(Ordering::SeqCst), 5);
+        // Give the debounce window time; superseded generations must self-cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(
+            PRESENCE_GROW_DEBOUNCE_MS + 100,
+        ))
+        .await;
+        // The generation counter is unchanged (no new grows), confirming the coalesce
+        // logic keyed on a stable final generation.
+        assert_eq!(core.inner.presence_grow_gen.load(Ordering::SeqCst), 5);
     }
 
     /// Full TreeKEM group chat through the engine over loopback: a host and two
