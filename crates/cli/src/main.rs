@@ -1401,6 +1401,7 @@ commands:
   /vouches                       list heard vouches (subject, score, standing)
   /cq                            re-announce your name to the chat now
   /cq periodic <mins>|off        auto re-beacon your name on a timer
+  /cq onmsg on|off               stamp a name-id on each message (rename detection)
   registry (username discovery):
   /register <registry-uri>       publish username->account to a registry
   /resolve <name> <uri>[ <uri>…] [add]
@@ -1637,16 +1638,27 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
                 } else {
                     rest.parse::<u64>().ok().map(|m| m * 60)
                 };
+                let cur = core.presence_cadence();
                 core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
                     periodic_secs: secs,
-                    on_message_id: false,
+                    on_message_id: cur.on_message_id,
                 });
                 match secs {
                     Some(s) => println!("CQ cadence: every {} min", s / 60),
                     None => println!("CQ cadence: off (manual /cq only)"),
                 }
+            } else if let Some(rest) = a.strip_prefix("onmsg") {
+                // Stamp a name-id on every outgoing message so peers detect a rename
+                // they missed and drop the stale name (SUB-SPEC A §4 mode 3).
+                let on = matches!(rest.trim(), "on" | "" | "true");
+                let cur = core.presence_cadence();
+                core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                    periodic_secs: cur.periodic_secs,
+                    on_message_id: on,
+                });
+                println!("CQ on-message name-id: {}", if on { "on" } else { "off" });
             } else {
-                println!("usage: /cq   |   /cq periodic <minutes>|off");
+                println!("usage: /cq   |   /cq periodic <minutes>|off   |   /cq onmsg on|off");
             }
         }
         "opsec" => cmd_opsec(core, arg),

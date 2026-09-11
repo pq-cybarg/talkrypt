@@ -1945,7 +1945,24 @@ impl Core {
                 }
             }
             GroupRole::Host | GroupRole::Member => {
-                let payload = marking::encode_payload(&marking, text);
+                // SUB-SPEC A §4 mode 3: when the on-message-id cadence is on and we
+                // have a leading name, stamp a stable name-id (label ‖ context) so a
+                // viewer can confirm our name is current or detect a rename it missed.
+                let name_tag = {
+                    let on = self.inner.cadence.lock().unwrap().on_message_id;
+                    if on {
+                        self.inner.leading_name.lock().unwrap().as_ref().map(|e| {
+                            let ctx = crate::presence::chat_context(
+                                &self.inner.descriptor.invite_token,
+                                &self.inner.descriptor.channel,
+                            );
+                            crate::presence::name_id_tag(&e.label, &ctx)
+                        })
+                    } else {
+                        None
+                    }
+                };
+                let payload = marking::encode_payload_tagged(&marking, text, name_tag);
                 let ct = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
@@ -3691,6 +3708,36 @@ fn now_secs() -> u64 {
 /// A presentation that fails to decode, doesn't bind to this peer, or carries a
 /// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
 /// never be mistaken for a verified friend.
+/// SUB-SPEC A §4 mode 3: reconcile a sender's on-message name-id against our cached
+/// name for them. If we have no cached name, do nothing (the tag is a one-way hash —
+/// it can confirm or refute, never deliver an unseen name). If the cached name's id
+/// matches, it is current (no-op). If it MISMATCHES, the sender renamed and we missed
+/// the presence: drop the stale name and emit an `Event::Name` with `label: None` so
+/// the UI falls back to the safety number until a fresh presence arrives. Only fires
+/// once per stale entry (we remove it), so it does not spam on subsequent messages.
+fn reconcile_name_tag(inner: &Arc<Inner>, sender: [u8; 48], tag: [u8; 8]) {
+    let ctx = crate::presence::chat_context(
+        &inner.descriptor.invite_token,
+        &inner.descriptor.channel,
+    );
+    let cached = inner.names.lock().unwrap().get(&sender).cloned();
+    let Some(rec) = cached else { return };
+    if crate::presence::name_id_tag(&rec.label, &ctx) == tag {
+        return; // cached name is current
+    }
+    // Stale: the sender's current name is not what we have cached. Invalidate it.
+    inner.names.lock().unwrap().remove(&sender);
+    let _ = inner.events_tx.send(Event::Name {
+        from: sender,
+        account_fingerprint: rec.account_fp,
+        label: None,
+        tier: rec.tier,
+        seq: rec.seq,
+        caveat: Some("this peer's name changed — awaiting confirmation".to_string()),
+        safety_number: short_hex6(&sender),
+    });
+}
+
 /// A peer announced a self-declared name (pairwise `Frame::Presence`, or a group
 /// sentinel payload). Verify (Linked only), enforce seq monotonicity, cache the
 /// record, and emit `Event::Name` with the policy-resolved label/caveat/tier.
@@ -4456,7 +4503,7 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     } else if pt.first() == Some(&VOUCH_SENTINEL) {
         // SUB-SPEC C: a vouch on the signed group path (attributed to the leaf sender).
         handle_vouch(&inner, sender, pt[1..].to_vec());
-    } else if let Some((marking, text)) = marking::decode_payload(&pt) {
+    } else if let Some((marking, text, name_tag)) = marking::decode_payload_tagged(&pt) {
         // D3: record the received message in our OWN ephemeral backlog (before the text is
         // moved into the event) so a later Carry/CarryFromPoint promotion can seal exactly
         // what we already received — never anyone else's copy, never a transmission.
@@ -4469,6 +4516,12 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
                 marking: marking.clone(),
             };
             record_backlog(inner, gossip_id(&gct), rec.encode(), ts);
+        }
+        // SUB-SPEC A §4 mode 3: reconcile the sender's on-message name-id against the
+        // name we have cached for them. A mismatch means they renamed and we missed
+        // the presence — drop the stale name so we don't attribute the wrong callsign.
+        if let Some(tag) = name_tag {
+            reconcile_name_tag(inner, sender, tag);
         }
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
@@ -5066,6 +5119,109 @@ mod tests {
         let (label, sn) = found.expect("the impostor still emits a name event");
         assert!(label.is_none(), "a colliding bare name is suppressed under the policy");
         assert!(!sn.is_empty(), "the safety number is always present, even when suppressed");
+    }
+
+    /// SUB-SPEC A §4 mode 3: the on-message name-id reconciler confirms a current name
+    /// (matching tag → no-op), suppresses a stale one (mismatching tag → drop + emit
+    /// label:None), and does not spam once a stale entry is invalidated.
+    #[tokio::test]
+    async fn on_message_name_id_reconciles_stale_name() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{chat_context, name_id_tag, NameRecord};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#mid",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let sender = [3u8; 48];
+        core.inner.names.lock().unwrap().insert(
+            sender,
+            NameRecord { label: "Alpha".into(), tier: NameTier::Bare, seq: 1, account_fp: None },
+        );
+        let ctx = chat_context(
+            &core.inner.descriptor.invite_token,
+            &core.inner.descriptor.channel,
+        );
+        // A message stamped with the CURRENT name's id → the name stays cached.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Alpha", &ctx));
+        assert!(core.inner.names.lock().unwrap().contains_key(&sender), "matching tag keeps it");
+        // A message stamped for a DIFFERENT name (a rename we missed) → invalidate it.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Beta", &ctx));
+        assert!(!core.inner.names.lock().unwrap().contains_key(&sender), "stale name dropped");
+        let mut ev = None;
+        while let Ok(e) = rx.try_recv() {
+            if let Event::Name { from, label, safety_number, .. } = e {
+                if from == sender {
+                    ev = Some((label, safety_number));
+                }
+            }
+        }
+        let (label, sn) = ev.expect("a staleness event fired");
+        assert!(label.is_none(), "the stale name is dropped (label None)");
+        assert!(!sn.is_empty(), "the safety-number fallback is present");
+        // A subsequent stale-tagged message no longer fires — no spam once invalidated.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Beta", &ctx));
+        let mut more = 0;
+        while rx.try_recv().is_ok() {
+            more += 1;
+        }
+        assert_eq!(more, 0, "no repeat staleness event after invalidation");
+    }
+
+    /// SUB-SPEC A §4 mode 3 (end-to-end, no-false-positive): with the on-message-id
+    /// cadence on, a member's normal messages carry a name-id that MATCHES the name it
+    /// announced — so the host keeps showing that name and never spuriously flags it.
+    #[tokio::test]
+    async fn on_message_name_id_does_not_false_flag_current_name() {
+        use crate::presence::{NameBacking, NameEntry, PresenceCadence};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mid2",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Whiskey".into(),
+            backing: NameBacking::Bare,
+        }));
+        m1.set_presence_cadence(PresenceCadence { periodic_secs: None, on_message_id: true });
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.announce_presence().await.unwrap();
+        // Host resolves the name.
+        assert!(wait_for_name(&mut host_rx, "Whiskey").await, "host resolves the name");
+        // m1 sends normal messages (each stamped with the matching name-id).
+        m1.send("one").await.unwrap();
+        m1.send("two").await.unwrap();
+        // The host must NOT emit a staleness drop (label None) for m1 — the tags match.
+        let mut stale = false;
+        for _ in 0..15 {
+            match tokio::time::timeout(Duration::from_millis(100), host_rx.recv()).await {
+                Ok(Some(Event::Name { from, label: None, .. })) if from == m1.fingerprint() => {
+                    stale = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(!stale, "a current name must never be flagged stale by its own messages");
+        // And the host still has the name cached.
+        assert_eq!(
+            host.inner.names.lock().unwrap().get(&m1.fingerprint()).map(|r| r.label.clone()),
+            Some("Whiskey".into()),
+        );
     }
 
     async fn wait_for_name(
