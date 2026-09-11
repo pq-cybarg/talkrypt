@@ -1337,6 +1337,28 @@ impl TalkryptClient {
         }
     }
 
+    /// Set an ACCOUNT-LINKED (verified) leading name (SUB-SPEC A). Builds an
+    /// account→this-device certificate so peers resolve this callsign at the Linked
+    /// tier — insider-unforgeable, unlike a bare name. Also saved to the name book
+    /// (id = label). Call [`announce_presence`](Self::announce_presence) to broadcast.
+    /// Mirrors [`present_account`](Self::present_account) but for the CQ name path.
+    pub fn set_linked_leading_name(&self, account: Arc<Account>, label: String) {
+        let chain = IdentityChain::device(
+            &account.kp,
+            self.core.identity_public(),
+            "device:app",
+            now_secs(),
+            self_present_expiry(),
+        );
+        let entry = talkrypt_core::presence::NameEntry {
+            id: label.clone(),
+            label,
+            backing: talkrypt_core::presence::NameBacking::Account { chain },
+        };
+        self.core.add_name(entry.clone());
+        self.core.set_leading_name(Some(entry));
+    }
+
     /// Broadcast a fresh CQ of the current leading name to the chat now.
     pub fn announce_presence(&self) {
         self.rt.block_on(async {
@@ -2709,6 +2731,44 @@ mod tests {
         assert!(c2.remove_name("home".into()));
         assert_eq!(c2.leading_name_id(), "");
         assert_eq!(c2.list_names().len(), 1);
+    }
+
+    /// SUB-SPEC A (§6 FFI): an account-linked leading name set over the FFI resolves
+    /// at the verified Linked tier on the peer, and is saved to the name book.
+    #[test]
+    fn ffi_linked_leading_name_resolves_at_linked_tier() {
+        let host =
+            TalkryptClient::host("127.0.0.1:19942".into(), "#lname".into(), "pq-pure".into(), None)
+                .expect("host");
+        let joiner = TalkryptClient::join(host.invite_uri()).expect("join");
+        let account = Account::generate();
+        joiner.set_linked_leading_name(account, "Victor".into());
+        joiner.announce_presence();
+        // The host resolves the joiner's name at the verified Linked tier.
+        let mut tier = None;
+        for _ in 0..50 {
+            while let Some(ev) = host.poll_event() {
+                if let FfiEvent::Name { label, tier: t, .. } = ev {
+                    if label == "Victor" {
+                        tier = Some(t);
+                    }
+                }
+            }
+            if tier.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            tier.as_deref(),
+            Some("Linked"),
+            "an account-linked leading name resolves at the Linked tier"
+        );
+        // It is saved to the book, flagged as linked.
+        assert!(joiner
+            .list_names()
+            .iter()
+            .any(|e| e.label == "Victor" && e.linked));
     }
 
     /// Multi-session foundation: two independent chats run at once and don't
