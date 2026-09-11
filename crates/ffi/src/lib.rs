@@ -1433,11 +1433,26 @@ impl TalkryptClient {
         } else {
             Some(periodic_secs)
         };
+        // A periodic cadence spawns a timer task, which needs a Tokio runtime in
+        // context. uniffi calls arrive on arbitrary host threads, so enter the
+        // runtime explicitly (else the spawn panics off-runtime).
+        let _guard = self.rt.enter();
         self.core
             .set_presence_cadence(talkrypt_core::presence::PresenceCadence {
                 periodic_secs: periodic,
                 on_message_id,
             });
+    }
+
+    /// Current periodic CQ interval in seconds (0 = periodic off). Lets a UI toggle
+    /// one cadence field without clobbering the other.
+    pub fn presence_cadence_secs(&self) -> u64 {
+        self.core.presence_cadence().periodic_secs.unwrap_or(0)
+    }
+
+    /// Whether the on-message name-id (mode 3) is enabled.
+    pub fn presence_cadence_on_message_id(&self) -> bool {
+        self.core.presence_cadence().on_message_id
     }
 
     /// Viewer-local name-trust policy override (SUB-SPEC A §5): "signal" | "warn" |
@@ -2769,6 +2784,24 @@ mod tests {
             .list_names()
             .iter()
             .any(|e| e.label == "Victor" && e.linked));
+    }
+
+    /// SUB-SPEC A (§6 FFI): the CQ cadence getters let a UI toggle one field without
+    /// clobbering the other (round-trips through set_presence_cadence).
+    #[test]
+    fn ffi_presence_cadence_getters_roundtrip() {
+        let c = TalkryptClient::host("127.0.0.1:19943".into(), "#cad".into(), "pq-pure".into(), None)
+            .expect("host");
+        assert_eq!(c.presence_cadence_secs(), 0);
+        assert!(!c.presence_cadence_on_message_id());
+        // Turn on the on-message id while leaving periodic off.
+        c.set_presence_cadence(0, true);
+        assert_eq!(c.presence_cadence_secs(), 0);
+        assert!(c.presence_cadence_on_message_id());
+        // Turn on periodic (clamped to the 60s floor) while preserving on-message.
+        c.set_presence_cadence(300, c.presence_cadence_on_message_id());
+        assert_eq!(c.presence_cadence_secs(), 300);
+        assert!(c.presence_cadence_on_message_id());
     }
 
     /// Multi-session foundation: two independent chats run at once and don't
