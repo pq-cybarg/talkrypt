@@ -115,4 +115,9 @@ data class Member(
     var grouped: Boolean = false,
     /** SUB-SPEC C: this subject cleared the vouch threshold (display-only tint). */
     var vouched: Boolean = false,
+    /** SUB-SPEC A: trust tier of the resolved name — "", "Linked", "RegistryConfirmed". */
+    var nameTier: String = "",
+    /** SUB-SPEC A: short safety number — always shown on tap and whenever the name is
+     * suppressed (the honest fallback a spoofable label can never override). */
+    var safetyNumber: String = "",
 )
