@@ -196,21 +196,52 @@ pub(crate) fn get_opt(r: &mut talkrypt_wire::Reader) -> Result<Option<Marking>> 
 /// plaintext that gets sealed under the group epoch (so the marking is
 /// authenticated and confidential, just like the body).
 pub(crate) fn encode_payload(marking: &Option<Marking>, text: &str) -> Vec<u8> {
+    encode_payload_tagged(marking, text, None)
+}
+
+/// As [`encode_payload`], plus an optional 8-byte on-message name-id trailer
+/// (SUB-SPEC A §4 mode 3). The trailer is length-prefixed so it is self-describing:
+/// a payload without it decodes exactly as before, and a decoder that ignores the tag
+/// still reads the marking + text. The whole payload is sealed under the group epoch,
+/// so the tag is authenticated and confidential like the body.
+pub(crate) fn encode_payload_tagged(
+    marking: &Option<Marking>,
+    text: &str,
+    name_tag: Option<[u8; 8]>,
+) -> Vec<u8> {
     let mut w = talkrypt_wire::Writer::new();
     put_opt(&mut w, marking);
     w.put_bytes(text.as_bytes());
+    if let Some(t) = name_tag {
+        w.put_bytes(&t);
+    }
     w.into_vec()
 }
 
-/// Decode a group-message payload written by [`encode_payload`]. Returns the
-/// marking and text. Falls back to treating the whole blob as raw text if it
-/// doesn't parse (for forward-compatibility with unmarked legacy payloads).
+/// Decode a group-message payload written by [`encode_payload`] /
+/// [`encode_payload_tagged`]. Returns the marking and text, tolerating (and ignoring)
+/// an optional on-message name-id trailer. Use [`decode_payload_tagged`] when the tag
+/// is needed.
 pub(crate) fn decode_payload(bytes: &[u8]) -> Option<(Option<Marking>, String)> {
+    decode_payload_tagged(bytes).map(|(m, t, _)| (m, t))
+}
+
+/// As [`decode_payload`], additionally returning the optional on-message name-id
+/// (SUB-SPEC A §4 mode 3). `None` for a payload without a trailer.
+pub(crate) fn decode_payload_tagged(
+    bytes: &[u8],
+) -> Option<(Option<Marking>, String, Option<[u8; 8]>)> {
     let mut r = talkrypt_wire::Reader::new(bytes);
     let marking = get_opt(&mut r).ok()?;
     let text = String::from_utf8(r.get_bytes().ok()?.to_vec()).ok()?;
+    let name_tag = if r.remaining() > 0 {
+        let t: [u8; 8] = r.get_bytes().ok()?.try_into().ok()?;
+        Some(t)
+    } else {
+        None
+    };
     r.finish().ok()?;
-    Some((marking, text))
+    Some((marking, text, name_tag))
 }
 
 // NB: a Kani no-panic proof of `Marking::decode` is intentionally NOT included —
@@ -221,6 +252,31 @@ pub(crate) fn decode_payload(bytes: &[u8]) -> Option<(Option<Marking>, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_without_tag_roundtrips_and_back_compat() {
+        // A payload with no name-id trailer decodes the same via both decoders — the
+        // trailer is optional, so the pre-mode-3 format is unchanged.
+        let bytes = encode_payload(&None, "hello");
+        assert_eq!(decode_payload(&bytes), Some((None, "hello".to_string())));
+        assert_eq!(
+            decode_payload_tagged(&bytes),
+            Some((None, "hello".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn payload_with_tag_roundtrips_and_tag_is_ignorable() {
+        let tag = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let bytes = encode_payload_tagged(&None, "hi", Some(tag));
+        // The tag-aware decoder recovers it...
+        assert_eq!(
+            decode_payload_tagged(&bytes),
+            Some((None, "hi".to_string(), Some(tag)))
+        );
+        // ...and the plain decoder still reads marking+text, tolerating the trailer.
+        assert_eq!(decode_payload(&bytes), Some((None, "hi".to_string())));
+    }
 
     #[test]
     fn levels_are_ordered() {

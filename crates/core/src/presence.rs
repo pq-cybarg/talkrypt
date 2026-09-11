@@ -197,6 +197,24 @@ pub fn name_tag(label: &str, context: &[u8; 32], seq: u64) -> [u8; 8] {
     out
 }
 
+/// Truncated SHA-256(len-prefixed label ‖ context) — the on-message name-id stamped
+/// on outgoing group messages (SUB-SPEC A §4 mode 3). A viewer compares it against its
+/// cached name for the sender: a MATCH confirms the cached name is current; a MISMATCH
+/// means the sender renamed and we missed the presence, so the stale name is dropped
+/// until a fresh one arrives. Unlike [`name_tag`] this deliberately EXCLUDES `seq`, so
+/// a periodic re-announce of the SAME label never reads as stale — staleness tracks a
+/// change of the label itself, not the announcement counter.
+pub fn name_id_tag(label: &str, context: &[u8; 32]) -> [u8; 8] {
+    let mut h = Sha256::new();
+    h.update((label.len() as u32).to_be_bytes());
+    h.update(label.as_bytes());
+    h.update(context);
+    let d = h.finalize();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&d[..8]);
+    out
+}
+
 /// A verified account-linked name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedName {
@@ -484,6 +502,21 @@ mod tests {
         assert_eq!(name_tag("Alice", &ctx, 1), name_tag("Alice", &ctx, 1));
         assert_ne!(name_tag("Alice", &ctx, 1), name_tag("Alice", &ctx, 2));
         assert_ne!(name_tag("Alice", &ctx, 1), name_tag("Bob", &ctx, 1));
+    }
+
+    #[test]
+    fn name_id_tag_tracks_label_and_context_not_seq() {
+        let ctx = chat_context(b"t", "#c");
+        let other = chat_context(b"t", "#other");
+        // Stable for the same (label, context) — a periodic re-announce (a new seq)
+        // does not change it, so it never reads as a false rename.
+        assert_eq!(name_id_tag("Alice", &ctx), name_id_tag("Alice", &ctx));
+        // Changes when the label changes (the real rename signal)...
+        assert_ne!(name_id_tag("Alice", &ctx), name_id_tag("Bob", &ctx));
+        // ...and is bound to the chat context (no cross-chat confusion).
+        assert_ne!(name_id_tag("Alice", &ctx), name_id_tag("Alice", &other));
+        // A prefix ambiguity guard: length-prefixing means "AB"+"C" != "A"+"BC".
+        assert_ne!(name_id_tag("AB", &ctx), name_id_tag("A", &chat_context(b"t", "#c")));
     }
 
     // Hardening: the presence beacon decoder parses untrusted bytes (attacker-chosen,
