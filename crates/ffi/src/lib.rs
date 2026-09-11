@@ -647,6 +647,18 @@ fn posture_from(s: &str) -> Option<KemProfile> {
     }
 }
 
+/// Parse a host-baseline name-trust policy string (SUB-SPEC A §5). `None`/empty/
+/// unknown falls back to the SignalStyle default. Set at chat creation, it travels
+/// in the descriptor/invite so joiners inherit it (a viewer may still tighten it).
+fn name_policy_from(s: Option<&str>) -> talkrypt_core::nametrust::NameTrustPolicy {
+    use talkrypt_core::nametrust::NameTrustPolicy;
+    match s.map(|v| v.to_ascii_lowercase()).as_deref() {
+        Some("warn") => NameTrustPolicy::WarnOnCollision,
+        Some("suppress") => NameTrustPolicy::SuppressColliding,
+        _ => NameTrustPolicy::SignalStyle,
+    }
+}
+
 /// A talkrypt chat client, exported to other languages.
 #[derive(uniffi::Object)]
 pub struct TalkryptClient {
@@ -678,6 +690,7 @@ impl TalkryptClient {
         channel: String,
         posture: String,
         endpoint: Option<String>,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         let rt = rt();
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
@@ -685,13 +698,15 @@ impl TalkryptClient {
         let suite = SuiteRegistry::with_defaults()
             .get(&suite_id)
             .map_err(FfiError::from)?;
-        let desc = ChatDescriptor::new(
+        let mut desc = ChatDescriptor::new(
             TopologyKind::P2P,
             Persistence::Ephemeral,
             &suite_id,
             vec![listen.clone()],
             channel,
         );
+        // Host-baseline name-trust policy (travels in the invite; joiners inherit it).
+        desc.name_trust_policy = name_policy_from(name_policy.as_deref());
         let transport = Arc::new(TcpTransport::new(&listen));
         let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc);
         rt.block_on(core.host()).map_err(FfiError::from)?;
@@ -718,10 +733,11 @@ impl TalkryptClient {
         channel: String,
         posture: String,
         state_dir: String,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (channel, posture, state_dir);
+            let _ = (channel, posture, state_dir, name_policy);
             Err(FfiError::Failed(
                 "this build has Tor disabled; rebuild the FFI with --features tor".into(),
             ))
@@ -738,13 +754,14 @@ impl TalkryptClient {
             // a fresh onion service. Arti needs a writable state dir; on Android
             // the app passes a persistent path (its filesDir).
             let arti = shared_tor(&state_dir)?;
-            let desc = ChatDescriptor::new(
+            let mut desc = ChatDescriptor::new(
                 TopologyKind::P2P,
                 Persistence::Ephemeral,
                 &suite_id,
                 vec![],
                 channel,
             );
+            desc.name_trust_policy = name_policy_from(name_policy.as_deref());
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti.clone(), desc);
             rt.block_on(core.host()).map_err(FfiError::from)?;
             // Put the published .onion into the invite so peers can dial it.
@@ -838,10 +855,11 @@ impl TalkryptClient {
         posture: String,
         state_dir: String,
         mnemonic: String,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "nym"))]
         {
-            let _ = (channel, posture, state_dir, mnemonic);
+            let _ = (channel, posture, state_dir, mnemonic, name_policy);
             Err(FfiError::Failed(
                 "this build has Nym disabled; rebuild the FFI with --features nym".into(),
             ))
@@ -868,13 +886,14 @@ impl TalkryptClient {
             // node bridge transports: as committer it fans out group ciphertext to
             // every member across Nym AND Tor, and gossip re-floods so several
             // interconnected bridges merge into one chat without duplicates.
-            let desc = ChatDescriptor::new(
+            let mut desc = ChatDescriptor::new(
                 TopologyKind::Hub,
                 Persistence::Ephemeral,
                 &suite_id,
                 vec![],
                 channel,
             );
+            desc.name_trust_policy = name_policy_from(name_policy.as_deref());
             let (core, rx) =
                 Core::new_group(IdentityKeyPair::generate(), suite, Arc::new(multi), desc, true);
             core.enable_gossip();
@@ -2532,7 +2551,7 @@ mod tests {
         // A host pins the account; the "work" segment joins and resolves AS the
         // account (contact = true), proving the segment belongs to the account.
         let host =
-            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None, None)
                 .expect("host");
         host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
         let joiner =
@@ -2621,7 +2640,7 @@ mod tests {
         // host→joiner identity travels the reactive responder path (the exact
         // on-device scenario that surfaced "identity chain did not bind").
         let host =
-            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None, None)
                 .expect("host");
         let host_account = Account::generate();
         host.present_account(host_account.clone(), Some("bob".into()));
@@ -2688,7 +2707,7 @@ mod tests {
     #[test]
     fn ffi_host_join_send_receive() {
         let addr = "127.0.0.1:19922".to_string();
-        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None).expect("host");
+        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None, None).expect("host");
         let uri = host.invite_uri();
         assert!(uri.starts_with("talkrypt://"));
         assert!(!host.safety_number().is_empty());
@@ -2717,7 +2736,7 @@ mod tests {
     /// round-trip through the FFI, as an Android/iOS picker would drive it.
     #[test]
     fn ffi_name_book_add_list_select_and_persist() {
-        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None)
+        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None, None)
             .expect("host");
         c.add_bare_name("home".into(), "Tango".into());
         c.add_bare_name("work".into(), "Foxtrot".into());
@@ -2734,7 +2753,7 @@ mod tests {
         // Persist and restore into a fresh client.
         let blob = c.name_book_blob();
         let c2 =
-            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None, None)
                 .expect("host2");
         assert!(c2.list_names().is_empty());
         c2.load_name_book(blob);
@@ -2753,7 +2772,7 @@ mod tests {
     #[test]
     fn ffi_linked_leading_name_resolves_at_linked_tier() {
         let host =
-            TalkryptClient::host("127.0.0.1:19942".into(), "#lname".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19942".into(), "#lname".into(), "pq-pure".into(), None, None)
                 .expect("host");
         let joiner = TalkryptClient::join(host.invite_uri()).expect("join");
         let account = Account::generate();
@@ -2790,7 +2809,7 @@ mod tests {
     /// clobbering the other (round-trips through set_presence_cadence).
     #[test]
     fn ffi_presence_cadence_getters_roundtrip() {
-        let c = TalkryptClient::host("127.0.0.1:19943".into(), "#cad".into(), "pq-pure".into(), None)
+        let c = TalkryptClient::host("127.0.0.1:19943".into(), "#cad".into(), "pq-pure".into(), None, None)
             .expect("host");
         assert_eq!(c.presence_cadence_secs(), 0);
         assert!(!c.presence_cadence_on_message_id());
@@ -2804,12 +2823,30 @@ mod tests {
         assert!(c.presence_cadence_on_message_id());
     }
 
+    /// SUB-SPEC A (§5): a host-baseline name-trust policy set at creation travels in
+    /// the invite/descriptor, so joiners inherit it (they may still tighten locally).
+    #[test]
+    fn ffi_host_baseline_name_policy_travels_in_invite() {
+        use talkrypt_core::nametrust::NameTrustPolicy;
+        let warn = TalkryptClient::host(
+            "127.0.0.1:19945".into(), "#pol".into(), "pq-pure".into(), None, Some("warn".into()),
+        ).expect("host");
+        let d = ChatDescriptor::from_uri(&warn.invite_uri()).expect("decode invite");
+        assert_eq!(d.name_trust_policy, NameTrustPolicy::WarnOnCollision);
+        // Default (None) stays SignalStyle.
+        let dflt = TalkryptClient::host(
+            "127.0.0.1:19946".into(), "#pol2".into(), "pq-pure".into(), None, None,
+        ).expect("host");
+        let d2 = ChatDescriptor::from_uri(&dflt.invite_uri()).expect("decode invite");
+        assert_eq!(d2.name_trust_policy, NameTrustPolicy::SignalStyle);
+    }
+
     /// Multi-session foundation: two independent chats run at once and don't
     /// cross-talk — the assumption the Android session manager relies on.
     #[test]
     fn two_concurrent_chats_are_independent() {
-        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None).expect("host a");
-        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None).expect("host b");
+        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None, None).expect("host a");
+        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None, None).expect("host b");
         let ja = TalkryptClient::join(a.invite_uri()).expect("join a");
         let jb = TalkryptClient::join(b.invite_uri()).expect("join b");
         ja.send("alpha".into()).expect("send a");
@@ -2848,6 +2885,7 @@ mod tests {
             "#ep".into(),
             "pq-pure".into(),
             Some("127.0.0.1:19933".into()),
+            None,
         )
         .expect("host");
         // The invite carries the advertised endpoint, not the 0.0.0.0 bind addr.
@@ -2879,7 +2917,7 @@ mod tests {
     /// never in the URI text, so a substring check on the URI always fails).
     #[test]
     fn invite_is_onion_detects_endpoint_kind() {
-        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None)
+        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None, None)
             .expect("lan host");
         assert!(!invite_is_onion(lan.invite_uri()), "LAN invite is not onion");
         // A naive substring check on the URI text wrongly reports false even for onions.
@@ -2890,6 +2928,7 @@ mod tests {
             "#x".into(),
             "pq-pure".into(),
             Some("abcdefghij234567.onion:9779".into()),
+            None,
         )
         .expect("onion-advertised host");
         assert!(invite_is_onion(onionish.invite_uri()), "onion endpoint detected");
