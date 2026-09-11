@@ -446,6 +446,7 @@ class MainActivity : Activity() {
         val id = lc.meta.id
         val connected = lc.client != null
         val items = buildList {
+            add("Manage callsigns")
             add("Re-share invite")
             if (!connected) add("Reconnect")
             add("Leave (disconnect, keep history)")
@@ -455,12 +456,109 @@ class MainActivity : Activity() {
             .setTitle(lc.meta.title)
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
+                    "Manage callsigns" -> setContentView(nameBookScreen(id))
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
                     "Reconnect" -> reconnect(id)
                     "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
                     "Delete (erase)" -> { sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen()) }
                 }
             }.show()
+    }
+
+    /** SUB-SPEC A: manage your self-declared callsigns for this chat — a name book
+     *  (add / switch / remove), the CQ cadence toggles (periodic + on-message name-id),
+     *  a viewer name-trust control, and a roster view surfacing each peer's tier badge
+     *  and always-available safety number. Reached from the chat overflow menu. */
+    private fun nameBookScreen(chatId: String): View {
+        val lc = sessions.get(chatId) ?: return chatListScreen()
+        val c = lc.client
+        val col = column(bg).apply { setPadding(dp(20), dp(20), dp(20), dp(20)) }
+        col.addView(text("Callsigns", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(4)) })
+        col.addView(text("Names you broadcast over your messages in this chat.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)))
+
+        if (c == null) {
+            col.addView(text("Connect to this chat to manage names.", 14f, muted), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+            col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+            return ScrollView(this).apply { setBackgroundColor(bg); addView(col); applyInsets(this) }
+        }
+
+        // ----- your saved names -----
+        col.addView(label("YOUR NAMES").also { it.setPadding(0, dp(12), 0, dp(8)) })
+        val names = runCatching { c.listNames() }.getOrDefault(emptyList())
+        val active = runCatching { c.leadingNameId() }.getOrDefault("")
+        if (names.isEmpty()) {
+            col.addView(text("None yet — add one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT))
+        }
+        for (n in names) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val badge = if (n.linked) "🔗 " else ""
+            val star = if (n.id == active) "★ " else ""
+            row.addView(text("$star$badge${n.label}", 16f, if (n.id == active) accent else fg), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            if (n.id != active) row.addView(pillButton("Use", accent, Color.WHITE) {
+                thread { val ok = runCatching { c.useName(n.id) }.getOrDefault(false)
+                    ui.post { toast(if (ok) "calling as “${n.label}”" else "failed"); setContentView(nameBookScreen(chatId)) } }
+            }.apply { setPadding(dp(16), dp(8), dp(16), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
+            row.addView(pillButton("✕", panel, muted) {
+                c.removeName(n.id); toast("removed"); setContentView(nameBookScreen(chatId))
+            }.apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            col.addView(row, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+        }
+
+        // ----- add a name -----
+        val add = inputField("New callsign")
+        col.addView(add, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(14)))
+        col.addView(pillButton("Save to name book", panel, fg) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) { c.addBareName(v, v); add.setText(""); setContentView(nameBookScreen(chatId)) }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton("Set + announce now", accent, Color.WHITE) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) { c.setLeadingName(v); thread { runCatching { c.announcePresence() } }
+                add.setText(""); toast("calling as “$v”"); setContentView(nameBookScreen(chatId)) }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+
+        // ----- CQ cadence -----
+        col.addView(label("CQ BEACON").also { it.setPadding(0, dp(24), 0, dp(8)) })
+        val periodicOn = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL) > 0uL
+        val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
+        col.addView(pillButton(if (periodicOn) "Periodic re-beacon: ON (5 min)" else "Periodic re-beacon: off", if (periodicOn) accent else panel, if (periodicOn) Color.WHITE else fg) {
+            c.setPresenceCadence(if (periodicOn) 0uL else 300uL, onMsg); setContentView(nameBookScreen(chatId))
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton(if (onMsg) "On-message name-id: ON" else "On-message name-id: off", if (onMsg) accent else panel, if (onMsg) Color.WHITE else fg) {
+            c.setPresenceCadence(if (periodicOn) 300uL else 0uL, !onMsg); setContentView(nameBookScreen(chatId))
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("On-message name-id lets peers notice if you rename and drop your stale callsign.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        // ----- viewer name-trust policy (how strictly to show OTHERS' names) -----
+        col.addView(label("SHOW OTHERS' NAMES").also { it.setPadding(0, dp(24), 0, dp(8)) })
+        val policy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
+        col.addView(policy, lp(MATCH_PARENT, WRAP_CONTENT))
+        col.addView(pillButton("Apply name-trust setting", panel, fg) {
+            val v = when (policy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "signal" }
+            c.setNameTrustPolicy(v); toast("name-trust: $v")
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("You can only tighten the chat's baseline, never loosen it.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        // ----- who's here (resolved names + safety numbers) -----
+        if (lc.roster.isNotEmpty()) {
+            col.addView(label("WHO'S HERE").also { it.setPadding(0, dp(24), 0, dp(8)) })
+            for (m in lc.roster.values) {
+                val badge = when (m.nameTier) { "Linked" -> "🔗 "; "RegistryConfirmed" -> "✓ "; else -> "" }
+                val shown = m.display ?: m.fp.take(8)
+                val sn = if (m.safetyNumber.isNotEmpty()) "  ·  safety ${m.safetyNumber}" else ""
+                col.addView(text("$badge$shown$sn", 14f, fg).apply {
+                    setOnClickListener { toast("safety number: ${m.safetyNumber.ifEmpty { m.fp.take(16) }}") }
+                }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+            }
+        }
+
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
     }
 
     private fun openChat(id: String) {
@@ -1608,9 +1706,34 @@ class MainActivity : Activity() {
     }
 
     /** SUB-SPEC A slash commands (self-declared name + CQ beacon), mirroring the CLI:
-     *  `/name <callsign>` | `/name off` | `/cq` | `/cq periodic <mins>|off`. */
+     *  `/name <callsign>` | `/name off` | `/name new <cs>` | `/name list` |
+     *  `/name use <id>` | `/cq` | `/cq periodic <mins>|off` | `/cq onmsg on|off`.
+     *  The name book is also editable in the "Manage callsigns" screen. */
     private fun handleNameCommand(chatId: String, c: TalkryptClient, t: String) {
         when {
+            t == "/name list" -> {
+                val names = runCatching { c.listNames() }.getOrDefault(emptyList())
+                if (names.isEmpty()) sysLine(chatId, "name book empty — /name <callsign> to add one")
+                else {
+                    val active = runCatching { c.leadingNameId() }.getOrDefault("")
+                    names.forEach {
+                        val mark = if (it.id == active) "* " else "  "
+                        val tier = if (it.linked) "account-linked" else "bare"
+                        sysLine(chatId, "$mark${it.id}  “${it.label}”  ($tier)")
+                    }
+                }
+            }
+            t.startsWith("/name new ") -> {
+                val label = t.removePrefix("/name new ").trim()
+                if (label.isNotEmpty()) { c.addBareName(label, label); sysLine(chatId, "saved “$label” to the name book") }
+            }
+            t.startsWith("/name use ") -> {
+                val id = t.removePrefix("/name use ").trim()
+                thread {
+                    val ok = runCatching { c.useName(id) }.getOrDefault(false)
+                    ui.post { sysLine(chatId, if (ok) "switched to “$id” and announced" else "no saved name “$id”") }
+                }
+            }
             t.startsWith("/name ") -> {
                 val label = t.removePrefix("/name ").trim()
                 if (label == "off") { c.setLeadingName(""); sysLine(chatId, "name cleared") }
@@ -1624,10 +1747,18 @@ class MainActivity : Activity() {
             t.startsWith("/cq periodic") -> {
                 val rest = t.removePrefix("/cq periodic").trim()
                 val secs = if (rest == "off" || rest.isEmpty()) 0L else (rest.toLongOrNull()?.times(60) ?: 0L)
-                c.setPresenceCadence(secs.toULong(), false)
+                // Preserve the on-message-id flag when changing the periodic interval.
+                val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
+                c.setPresenceCadence(secs.toULong(), onMsg)
                 sysLine(chatId, if (secs == 0L) "CQ cadence off" else "CQ cadence: every ${secs / 60} min")
             }
-            else -> sysLine(chatId, "usage: /name <callsign> | /name off | /cq | /cq periodic <mins>|off")
+            t.startsWith("/cq onmsg") -> {
+                val on = t.removePrefix("/cq onmsg").trim().let { it == "on" || it.isEmpty() }
+                val secs = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL)
+                c.setPresenceCadence(secs, on)
+                sysLine(chatId, "CQ on-message name-id: ${if (on) "on" else "off"}")
+            }
+            else -> sysLine(chatId, "usage: /name <callsign>|new <cs>|list|use <id>|off  ·  /cq [periodic <mins>|off] [onmsg on|off]")
         }
     }
 
