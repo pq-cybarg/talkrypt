@@ -38,15 +38,27 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
             sysMsg(identityLine(e.contact, e.friend, mem.display!!), now)
         }
         is FfiEvent.Name -> {
-            // SUB-SPEC A: a peer's resolved self-declared name. Update its roster
-            // display and note the change; `tier` badges verified (account-linked)
-            // names, `caveat` carries a collision warning.
+            // SUB-SPEC A: a peer's resolved self-declared name. `tier` badges verified
+            // (account-linked) names, `caveat` carries a collision warning, and
+            // `safetyNumber` is the always-available honest fallback. An EMPTY label
+            // means the name was suppressed or went stale (policy/rename): we drop the
+            // displayed name and fall back to the safety number, never showing a name
+            // we can't trust.
             val mem = lc.roster.getOrPut(e.from) { Member(e.from) }
-            if (e.label.isNotEmpty()) mem.display = e.label
+            mem.nameTier = e.tier
+            mem.safetyNumber = e.safetyNumber
             val badge = when (e.tier) { "Linked" -> "🔗 "; "RegistryConfirmed" -> "✓ "; else -> "" }
             val cav = if (e.caveat.isNotEmpty()) " ⚠ ${e.caveat}" else ""
-            val shown = e.label.ifEmpty { e.from.take(8) }
-            sysMsg("$badge${e.from.take(8)} is “$shown”$cav", now)
+            if (e.label.isNotEmpty()) {
+                mem.display = e.label
+                sysMsg("$badge${e.from.take(8)} is “${e.label}”$cav", now)
+            } else {
+                // Suppressed / stale: forget any prior displayed name for this peer so
+                // bubbles fall back to the safety number, not a stale/spoofed callsign.
+                mem.display = null
+                val sn = e.safetyNumber.ifEmpty { e.from.take(8) }
+                sysMsg("${e.from.take(8)} — no verified name ($sn)$cav", now)
+            }
         }
         is FfiEvent.Linkage -> {
             // SUB-SPEC B: a peer disclosed grouping linkage (account-hidden). Mark it
@@ -73,6 +85,22 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
                     sysMsg("${e.subject.take(8)} vouch below threshold", now)
             }
         }
+        is FfiEvent.Delivered ->
+            // D1 delivery receipt — the peer acked our message; note it quietly.
+            sysMsg("✓ delivered", now)
+        is FfiEvent.OutboxDropped ->
+            // D1: a capped/expired outbox drop is never silent (data-loss honesty).
+            sysMsg("⚠ ${e.count} queued message(s) dropped (outbox full)", now)
+        is FfiEvent.BeaconSeen ->
+            // SUB-SPEC A / #68: a nearby device is beaconing this chat over local radio.
+            sysMsg("📡 a nearby device is beaconing this chat", now)
+        is FfiEvent.PromoteProposed ->
+            // SUB-SPEC D2: someone proposed making this chat persistent.
+            sysMsg("${e.by.take(8)} proposed making this chat persistent", now)
+        is FfiEvent.Promoted ->
+            sysMsg("this chat is now persistent", now)
+        is FfiEvent.PromoteAborted ->
+            sysMsg("promotion aborted — this chat stays ephemeral", now)
         is FfiEvent.Error -> sysMsg("! ${e.message}", now)
     }
     sessions.recordIncoming(id, msg)

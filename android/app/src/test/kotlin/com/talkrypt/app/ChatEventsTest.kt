@@ -58,10 +58,12 @@ class ChatEventsTest {
     @Test fun name_updates_roster_display_and_notes() {
         val s = Sessions()
         val a = s.open(meta("a"), null)
-        val m = applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        val m = applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, "", "sn12ab"))
         assertEquals(MsgKind.SYSTEM, m.kind)
         assertTrue(m.text.contains("Whiskey"))
         assertEquals("Whiskey", a.roster["peerfp123456"]!!.display)
+        // SUB-SPEC A: the safety number is always captured on the roster member.
+        assertEquals("sn12ab", a.roster["peerfp123456"]!!.safetyNumber)
     }
 
     @Test fun message_bubble_shows_resolved_cq_name_when_known() {
@@ -71,9 +73,30 @@ class ChatEventsTest {
         val bare = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "one", ""))
         assertEquals("peerfp12", bare.display)
         // After the peer announces its name, later messages carry the resolved name.
-        applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, ""))
+        applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, "", "sn12ab"))
         val named = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "two", ""))
         assertEquals("Whiskey", named.display)
+    }
+
+    @Test fun suppressed_or_stale_name_drops_display_and_falls_back_to_safety_number() {
+        val s = Sessions()
+        val a = s.open(meta("a"), null)
+        // A name is resolved and shown...
+        applyEvent(s, "a", a, FfiEvent.Name("peerfp123456", "", "Whiskey", "Bare", 1uL, "", "sn12ab"))
+        assertEquals("Whiskey", a.roster["peerfp123456"]!!.display)
+        // ...then it's suppressed / goes stale (empty label) — the displayed name is
+        // dropped and the honest safety-number fallback is surfaced, never a stale name.
+        val m = applyEvent(
+            s, "a", a,
+            FfiEvent.Name("peerfp123456", "", "", "Bare", 2uL, "name changed", "sn99zz"),
+        )
+        assertEquals(null, a.roster["peerfp123456"]!!.display)
+        assertEquals("sn99zz", a.roster["peerfp123456"]!!.safetyNumber)
+        assertTrue(m.text.contains("sn99zz"))
+        assertTrue(m.text.contains("no verified name"))
+        // A later message from that peer no longer shows the stale callsign.
+        val msg = applyEvent(s, "a", a, FfiEvent.Message("peerfp123456", "#a", "hi", ""))
+        assertEquals("peerfp12", msg.display)
     }
 
     @Test fun linkage_marks_peer_as_grouped_and_notes_it() {
