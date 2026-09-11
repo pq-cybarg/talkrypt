@@ -107,9 +107,11 @@ object ChatNet {
     fun connect(ctx: Context, meta: ChatMeta): TalkryptClient {
         val pst = meta.posture.ifEmpty { "pq-pure" }
         val c = when (reconnectPlan(meta)) {
-            ReconnectPlan.HOST_NYM -> TalkryptClient.hostNym(meta.title, pst, sharedTorDir(ctx), nymMnemonic(ctx))
-            ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, sharedTorDir(ctx))
-            ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p)) }
+            // Reconnect re-hosts with the default name-trust baseline; joiners still
+            // hold the original policy from the first invite (SUB-SPEC A §5).
+            ReconnectPlan.HOST_NYM -> TalkryptClient.hostNym(meta.title, pst, sharedTorDir(ctx), nymMnemonic(ctx), null)
+            ReconnectPlan.HOST_TOR -> TalkryptClient.hostTor(meta.title, pst, sharedTorDir(ctx), null)
+            ReconnectPlan.HOST_LAN -> { val p = allocLanPort(); TalkryptClient.host(lanBind(p), meta.title, pst, lanAdvertise(p), null) }
             ReconnectPlan.JOIN_NYM -> TalkryptClient.joinNym(meta.inviteUri!!, sharedTorDir(ctx), nymMnemonic(ctx))
             ReconnectPlan.JOIN_TOR -> TalkryptClient.joinTor(meta.inviteUri!!, sharedTorDir(ctx))
             ReconnectPlan.JOIN_LAN -> TalkryptClient.join(meta.inviteUri!!)

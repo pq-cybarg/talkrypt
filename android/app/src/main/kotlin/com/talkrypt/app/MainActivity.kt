@@ -245,6 +245,13 @@ class MainActivity : Activity() {
         val access = darkSpinner(listOf("open", "contacts", "friends"))
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
 
+        // SUB-SPEC A §5: the chat's baseline for how look-alike (homoglyph) names
+        // are shown — travels in the invite so joiners inherit it (any viewer may
+        // tighten it locally later, never loosen).
+        col.addView(label("NAME DISPLAY").also { it.setPadding(0, dp(20), 0, dp(8)) })
+        val namePolicy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
+        col.addView(namePolicy, lp(MATCH_PARENT, WRAP_CONTENT))
+
         col.addView(label("PERSISTENCE").also { it.setPadding(0, dp(20), 0, dp(8)) })
         val persistence = darkSpinner(listOf("Ephemeral (memory only)", "Persistent (saved, reconnectable)", "Always-on (Phase 2)"))
         // Default to Persistent (matches pendingTier's default): a real chat is
@@ -302,6 +309,7 @@ class MainActivity : Activity() {
                 posture.selectedItem.toString(),
                 access.selectedItem.toString(),
                 tierOf(persistence),
+                when (namePolicy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "" },
             )
         }, lp(MATCH_PARENT, dp(54), top = dp(32)))
         col.addView(pillButton("Registry-restricted chat", panel, fg) {
@@ -517,6 +525,17 @@ class MainActivity : Activity() {
             if (v.isNotEmpty()) { c.setLeadingName(v); thread { runCatching { c.announcePresence() } }
                 add.setText(""); toast("calling as “$v”"); setContentView(nameBookScreen(chatId)) }
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton("Set as VERIFIED (🔗 account-linked)", panel, fg) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) {
+                // Our account certifies this device → peers resolve it at the Linked
+                // tier (insider-unforgeable), unlike a bare callsign.
+                c.setLinkedLeadingName(account(), v); thread { runCatching { c.announcePresence() } }
+                add.setText(""); toast("verified name “$v”"); setContentView(nameBookScreen(chatId))
+            }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("Verified uses your account key so a name can't be spoofed by another member.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
 
         // ----- CQ cadence -----
         col.addView(label("CQ BEACON").also { it.setPadding(0, dp(24), 0, dp(8)) })
@@ -1355,7 +1374,7 @@ class MainActivity : Activity() {
         thread {
             try {
                 val port = ChatNet.allocLanPort()
-                val c = TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
+                val c = TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port), null)
                 runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
                 val members = c.restrictToAnchor(anchorUri)
@@ -1410,7 +1429,8 @@ class MainActivity : Activity() {
 
         // replay this chat's stored history into the view
         for (m in lc.history) when (m.kind) {
-            MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking)
+            MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking,
+                tier = if (m.mine) "" else (m.sender?.let { lc.roster[it]?.nameTier } ?: ""))
             MsgKind.SYSTEM, MsgKind.ACTION -> system(m.text)
         }
 
@@ -1437,7 +1457,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- bubbles ----------
-    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null) {
+    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null, tier: String = "") {
         val list = messages ?: return
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1450,7 +1470,18 @@ class MainActivity : Activity() {
         if (!marking.isNullOrEmpty()) {
             bubble.addView(text(marking, 10f, Color.parseColor("#FFD166"), bold = true))
         }
-        if (sender != null) bubble.addView(text(sender, 11f, accent, bold = true))
+        if (sender != null) {
+            // SUB-SPEC A: tint the sender label by trust tier — a verified (account-
+            // linked / registry-confirmed) callsign gets a badge + verified-green,
+            // a bare/unverified one stays the neutral accent so it can't pass for
+            // verified at a glance.
+            val (badge, color) = when (tier) {
+                "Linked" -> "🔗 " to Color.parseColor("#7FD1A6")
+                "RegistryConfirmed" -> "✓ " to Color.parseColor("#7FD1A6")
+                else -> "" to accent
+            }
+            bubble.addView(text("$badge$sender", 11f, color, bold = true))
+        }
         bubble.addView(text(body, 15f, if (mine) Color.WHITE else fg).apply {
             // cap long messages at ~76% of screen width so bubbles don't span edge-to-edge
             maxWidth = (resources.displayMetrics.widthPixels * 0.76f).toInt()
@@ -1480,7 +1511,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
-    private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL) {
+    private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL, namePolicy: String = "") {
         toast("creating chat…")
         thread {
             try {
@@ -1490,15 +1521,18 @@ class MainActivity : Activity() {
                 // ChatNet.sharedTorDir); the onion service is per-chat within it.
                 // Nym multi-homes over Tor too, so it also uses the shared Tor dir.
                 val torSub = if (useTor || useNym) "shared" else null
+                // SUB-SPEC A §5: the chosen name-trust baseline (empty = default) is
+                // set at creation so it travels in the invite and joiners inherit it.
+                val pol = namePolicy.ifEmpty { null }
                 val c = if (useNym) {
-                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this))
+                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this), pol)
                 } else if (useTor) {
-                    TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this))
+                    TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this), pol)
                 } else {
                     // Bind a free port (so multiple chats can host at once); advertise
                     // the address peers dial.
                     val port = ChatNet.allocLanPort()
-                    TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
+                    TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port), pol)
                 }
                 runCatching { c.presentAccount(account(), null) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1734,6 +1768,16 @@ class MainActivity : Activity() {
                     ui.post { sysLine(chatId, if (ok) "switched to “$id” and announced" else "no saved name “$id”") }
                 }
             }
+            t.startsWith("/name link ") -> {
+                // Account-LINKED (verified) name: our account certifies this device key,
+                // so peers resolve it at the insider-unforgeable Linked tier.
+                val label = t.removePrefix("/name link ").trim()
+                if (label.isNotEmpty()) {
+                    c.setLinkedLeadingName(account(), label)
+                    thread { runCatching { c.announcePresence() } }
+                    sysLine(chatId, "🔗 calling as verified “$label”")
+                }
+            }
             t.startsWith("/name ") -> {
                 val label = t.removePrefix("/name ").trim()
                 if (label == "off") { c.setLeadingName(""); sysLine(chatId, "name cleared") }
@@ -1758,7 +1802,7 @@ class MainActivity : Activity() {
                 c.setPresenceCadence(secs, on)
                 sysLine(chatId, "CQ on-message name-id: ${if (on) "on" else "off"}")
             }
-            else -> sysLine(chatId, "usage: /name <callsign>|new <cs>|list|use <id>|off  ·  /cq [periodic <mins>|off] [onmsg on|off]")
+            else -> sysLine(chatId, "usage: /name <callsign>|link <cs>|new <cs>|list|use <id>|off  ·  /cq [periodic <mins>|off] [onmsg on|off]")
         }
     }
 
@@ -1795,7 +1839,8 @@ class MainActivity : Activity() {
             when {
                 // Re-render so the header connection indicator reflects the change.
                 e is FfiEvent.Connected || e is FfiEvent.Disconnected -> setContentView(chatScreen(id))
-                msg.kind == MsgKind.MESSAGE -> addBubble(msg.text, mine = false, sender = msg.display, marking = msg.marking)
+                msg.kind == MsgKind.MESSAGE -> addBubble(msg.text, mine = false, sender = msg.display, marking = msg.marking,
+                    tier = msg.sender?.let { lc.roster[it]?.nameTier } ?: "")
                 else -> system(msg.text)
             }
             if (e is FfiEvent.Identity && !e.contact) {
