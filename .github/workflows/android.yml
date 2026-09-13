@@ -1,0 +1,83 @@
+# Android app compile + JVM-unit gate (SECURITY-AUDIT F-10).
+#
+# The Rust core + FFI have CI (test/fuzz/formal/miri/audit), but the GUI bundles
+# that depend on them did NOT — so an FFI API change could silently break the
+# Android app (its uniffi bindings drift, a `when` over `FfiEvent` stops being
+# exhaustive, a callback interface gains a method the Kotlin impl lacks) and merge
+# green. This job closes that gap: it regenerates the uniffi Kotlin bindings from
+# the CURRENT FFI and compiles the whole Android module + runs its JVM unit tests.
+#
+# It is a COMPILE + UNIT gate, not a device test: it needs neither the Android NDK
+# nor the cross-compiled `.so` (those are only required to package/run the APK).
+# `settings.gradle` runs `cargo metadata --filter-platform aarch64-linux-android`
+# at configuration time, so the job installs Rust + that target.
+name: android
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - "crates/ffi/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "crates/ffi/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  compile-and-test:
+    name: gradle testDebugUnitTest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install stable Rust + Android target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          # settings.gradle resolves the rustls-platform-verifier maven repo via
+          # `cargo metadata --filter-platform aarch64-linux-android`; the target
+          # must be known to the toolchain for that filter to resolve.
+          rustup target add aarch64-linux-android
+
+      - name: Cache cargo + gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'android/**/*.gradle') }}
+
+      - name: Generate uniffi Kotlin bindings
+        run: |
+          # Bindings come from the UNSTRIPPED host debug lib (carries the uniffi
+          # metadata). On Linux the host cdylib is `.so` (macOS build-apk.sh uses
+          # `.dylib`). Generate straight into the app source tree (gitignored).
+          cargo build -p talkrypt-ffi
+          cargo run -q -p talkrypt-ffi --bin uniffi-bindgen -- generate \
+            --library target/debug/libtalkrypt_ffi.so --language kotlin \
+            --out-dir android/app/src/main/kotlin --no-format
+
+      - name: Compile Android app + run JVM unit tests
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          android/gradlew -p android --no-daemon testDebugUnitTest
