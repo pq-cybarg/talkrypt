@@ -29,7 +29,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use rand::RngCore;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{open as aead_open, seal as aead_seal};
@@ -198,7 +197,7 @@ impl LeafKeyPair {
     /// [`generate_derived`](LeafKeyPair::generate_derived) for the stable default.
     pub fn generate_with(profile: KemProfile) -> LeafKeyPair {
         let mut secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
+        crate::rng::fill_secure(&mut secret); // F-4: health-gated keygen entropy
         LeafKeyPair { profile, secret, sig: IdentityKeyPair::generate() }
     }
 
@@ -214,7 +213,7 @@ impl LeafKeyPair {
         group_id: &[u8],
     ) -> LeafKeyPair {
         let mut secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
+        crate::rng::fill_secure(&mut secret); // F-4: health-gated keygen entropy
         let sig = IdentityKeyPair::from_secret_bytes(derive_leaf_sig_seed(identity_root, group_id));
         LeafKeyPair { profile, secret, sig }
     }
@@ -818,7 +817,7 @@ impl TreeKemGroup {
     pub fn create_with_sig(profile: KemProfile, my_sig: IdentityKeyPair) -> TreeKemGroup {
         let capacity = 2;
         let mut leaf_secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
+        crate::rng::fill_secure(&mut leaf_secret); // F-4: health-gated keygen entropy
 
         // The founder's per-membership leaf signature key (its group alias).
         let mut leaf_sig_keys = HashMap::new();
@@ -1174,7 +1173,7 @@ impl TreeKemGroup {
     fn rekey_path(&mut self, proposals: Vec<Proposal>) -> Result<Commit> {
         let path = self.path_to_root(self.me);
         let mut path_secrets = vec![[0u8; 32]; path.len()];
-        rand::rngs::OsRng.fill_bytes(&mut path_secrets[0]);
+        crate::rng::fill_secure(&mut path_secrets[0]); // F-4: health-gated keygen entropy
         for i in 1..path.len() {
             path_secrets[i] = derive_parent_secret(&path_secrets[i - 1]);
         }

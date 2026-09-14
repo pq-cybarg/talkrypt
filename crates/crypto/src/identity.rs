@@ -16,7 +16,6 @@ use ml_dsa::Keypair;
 use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, MlDsa87, Signature, SigningKey, VerifyingKey, B32,
 };
-use rand::RngCore;
 use sha3::Digest;
 
 use crate::error::{CryptoError, Result};

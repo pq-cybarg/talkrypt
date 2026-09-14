@@ -107,6 +107,48 @@ pub fn fill_secure(dest: &mut [u8]) {
     OsRng.fill_bytes(dest);
 }
 
+/// A health-gated [`RngCore`] for KEY generation. Constructing one via [`new`] runs
+/// the power-on self-test (including the SP 800-90B entropy health check, F-4) once,
+/// then every draw delegates to the OS CSPRNG. Use it wherever a keygen API wants
+/// `&mut impl RngCore` (e.g. ML-KEM / X25519 keypair generation, KEM encapsulation)
+/// so no long-term or session key is minted from an unchecked source.
+///
+/// [`new`]: SecureRng::new
+#[derive(Clone, Copy)]
+pub struct SecureRng;
+
+impl SecureRng {
+    /// Create a health-gated RNG, ensuring the entropy self-test has passed.
+    pub fn new() -> Self {
+        crate::selftest::ensure_self_tested();
+        SecureRng
+    }
+}
+
+impl Default for SecureRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl rand::RngCore for SecureRng {
+    fn next_u32(&mut self) -> u32 {
+        OsRng.next_u32()
+    }
+    fn next_u64(&mut self) -> u64 {
+        OsRng.next_u64()
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        OsRng.fill_bytes(dest)
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), rand::Error> {
+        OsRng.try_fill_bytes(dest)
+    }
+}
+
+// The OS CSPRNG is cryptographically secure; the wrapper only adds the health gate.
+impl rand::CryptoRng for SecureRng {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +213,17 @@ mod tests {
         fill_secure(&mut b);
         assert_ne!(a, b, "two secure draws must differ");
         assert_ne!(a, [0u8; 32], "must not be all-zero");
+    }
+
+    #[test]
+    fn secure_rng_is_a_usable_rngcore() {
+        use rand::RngCore;
+        let mut rng = SecureRng::new();
+        // Fills, u32, u64 all work and produce non-trivial output.
+        let mut buf = [0u8; 48];
+        rng.fill_bytes(&mut buf);
+        assert_ne!(buf, [0u8; 48]);
+        assert!(rng.next_u32() != 0 || rng.next_u64() != 0);
+        assert!(rng.try_fill_bytes(&mut buf).is_ok());
     }
 }
