@@ -194,13 +194,17 @@ fn dsa_kat() -> Result<()> {
     Ok(())
 }
 
-/// Run every primitive known-answer test. Returns the first failure, if any.
+/// Run every primitive known-answer test, plus the SP 800-90B entropy-source
+/// startup health tests (F-4). Returns the first failure, if any.
 pub fn self_test() -> Result<()> {
     aead_kat()?;
     hash_kat()?;
     kdf_kat()?;
     kem_kat()?;
     dsa_kat()?;
+    // SP 800-90B §4.4 startup health tests over the OS CSPRNG — catch a
+    // catastrophically broken entropy source before any key is generated.
+    crate::rng::health_check_entropy()?;
     Ok(())
 }
 
