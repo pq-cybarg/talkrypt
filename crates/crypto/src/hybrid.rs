@@ -146,9 +146,10 @@ pub struct RatchetPublic {
 }
 
 impl RatchetSecret {
-    /// Generate a fresh ratchet key for `profile` from the OS CSPRNG.
+    /// Generate a fresh ratchet key for `profile` from the health-gated OS CSPRNG
+    /// (SP 800-90B entropy check enforced before keygen, F-4).
     pub fn generate(profile: KemProfile) -> (RatchetSecret, RatchetPublic) {
-        let mut rng = OsRng;
+        let mut rng = crate::rng::SecureRng::new();
         let (kem_dk, kem_ek) = MlKem1024::generate(&mut rng);
         let (x, x_pub, pad) = match profile.posture {
             KemPosture::Hybrid => {
@@ -345,7 +346,7 @@ impl RatchetPublic {
             .map_err(|_| CryptoError::Malformed("ml-kem encapsulation key length"))?;
         let ek = KemEk::from_bytes(&enc);
         let (ct, ss) = ek
-            .encapsulate(&mut OsRng)
+            .encapsulate(&mut crate::rng::SecureRng::new())
             .map_err(|_| CryptoError::Malformed("ml-kem encapsulation failed"))?;
         Ok((ct.as_slice().to_vec(), to_32(ss.as_slice())))
     }

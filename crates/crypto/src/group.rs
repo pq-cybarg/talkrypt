@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 
-use rand::RngCore;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{open as aead_open, seal as aead_seal};
@@ -37,7 +36,7 @@ impl SenderKey {
     /// distribute (privately) to the other members.
     pub fn new() -> (SenderKey, [u8; KEY_LEN]) {
         let mut chain = [0u8; KEY_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut chain);
+        crate::rng::fill_secure(&mut chain); // F-4: health-gated keygen entropy
         (SenderKey { chain, n: 0 }, chain)
     }
 
