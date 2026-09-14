@@ -27,6 +27,7 @@ pub mod mem;
 pub mod mls;
 pub mod noise;
 pub mod ratchet;
+pub mod rng;
 pub mod selftest;
 pub mod suite;
 pub mod treekem;
@@ -44,6 +45,7 @@ pub use identity::{IdentityKeyPair, IdentityPublic, FINGERPRINT_LEN};
 pub use mem::{ensure_hardened, harden_process, HardeningReport, LockedBox};
 pub use noise::NoiseSession;
 pub use ratchet::{Session, MAX_SKIP};
+pub use rng::{fill_secure, health_check_entropy};
 pub use selftest::{ensure_self_tested, self_test};
 pub use suite::{
     dr_suite_id, noise_suite_id, offered_profiles, scheme_hash, CryptoSuite, DoubleRatchetSuite,

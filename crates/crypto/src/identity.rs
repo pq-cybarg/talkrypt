@@ -68,10 +68,13 @@ impl IdentityPublic {
 impl IdentityKeyPair {
     /// Generate a fresh identity from the OS CSPRNG. The seed is drawn directly
     /// into page-locked memory ([`LockedBox`]) so it never lands in an unpinned
-    /// temporary that could be swapped or dumped.
+    /// temporary that could be swapped or dumped. Entropy is drawn via
+    /// [`crate::rng::fill_secure`], which ensures the power-on self-test — including
+    /// the SP 800-90B entropy health check (F-4) — has passed before this root key
+    /// is minted.
     pub fn generate() -> Self {
         let mut seed = LockedBox::<32>::zeroed();
-        rand::rngs::OsRng.fill_bytes(seed.as_mut_array());
+        crate::rng::fill_secure(seed.as_mut_array());
         let kp = Self::from_locked_seed(seed);
         kp.pairwise_consistency_check();
         kp
