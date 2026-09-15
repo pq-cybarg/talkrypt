@@ -94,10 +94,44 @@ else
   echo "  (no SHA3-256 backend — install openssl 3.x, python3, or rhash to check the second digest)"
 fi
 
+# --- optional PQ signature check (SECURITY-AUDIT F-8) ---
+# The checksum files above bind artifacts to hashes; the signature binds the hash
+# manifest to a SIGNER's ML-DSA-87 key. The signer may be the project (its release
+# key) OR any user who signed their own copy — the mechanism is identical; you just
+# verify against whichever public key you trust for the source you got this from.
+# Checking needs the `talkrypt-relsign` tool (a pure-shell ML-DSA verifier isn't
+# possible) plus that signer's public key: provide it via $TALKRYPT_RELEASE_PUBKEY
+# or a RELEASE_PUBKEY.hex file (which may carry `#` comment lines — only the hex is
+# used). Trust anchor: a copy you obtained out of band, NOT one bundled by an
+# untrusted mirror. If the tool or a real key is absent, this step is advisory.
+SIG_FAIL=0
+if [[ -f "SHA256SUMS.sig" ]]; then
+  RELSIGN_BIN="$(command -v talkrypt-relsign || true)"
+  [[ -z "$RELSIGN_BIN" && -x "./talkrypt-relsign" ]] && RELSIGN_BIN="./talkrypt-relsign"
+  PUBKEY="${TALKRYPT_RELEASE_PUBKEY:-}"
+  # Comment-aware: strip `#` lines + whitespace so a placeholder/annotated key file
+  # yields an empty (→ advisory) rather than a garbage pubkey.
+  [[ -z "$PUBKEY" && -f "RELEASE_PUBKEY.hex" ]] && PUBKEY="$(grep -vE '^[[:space:]]*#' RELEASE_PUBKEY.hex | tr -d '[:space:]')"
+  echo
+  echo "PQ signature (ML-DSA-87):"
+  if [[ -n "$RELSIGN_BIN" && -n "$PUBKEY" ]]; then
+    if "$RELSIGN_BIN" verify SHA256SUMS SHA256SUMS.sig "$PUBKEY" >/dev/null 2>&1; then
+      echo "  $(green OK)    SHA256SUMS is signed by the trusted key"
+    else
+      echo "  $(red FAIL)  SHA256SUMS signature did NOT verify under that key"
+      SIG_FAIL=1
+    fi
+  elif [[ -z "$RELSIGN_BIN" ]]; then
+    echo "  ($(yellow advisory): SHA256SUMS.sig present but talkrypt-relsign not on PATH — signature NOT checked)"
+  else
+    echo "  ($(yellow advisory): SHA256SUMS.sig present but no signer pubkey — set TALKRYPT_RELEASE_PUBKEY — signature NOT checked)"
+  fi
+fi
+
 echo
 echo "----"
 printf "OK: %d   FAIL: %d   MISSING: %d\n" "$PASS" "$FAIL" "$MISS"
-if [[ "$FAIL" -gt 0 || "$MISS" -gt 0 ]]; then
+if [[ "$FAIL" -gt 0 || "$MISS" -gt 0 || "$SIG_FAIL" -gt 0 ]]; then
   echo "$(red "VERIFICATION FAILED") — do NOT trust these artifacts."
   exit 1
 fi
