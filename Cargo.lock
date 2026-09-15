@@ -10471,6 +10471,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "talkrypt-relsign"
+version = "0.1.0"
+dependencies = [
+ "talkrypt-crypto",
+]
+
+[[package]]
 name = "talkrypt-server"
 version = "0.1.0"
 dependencies = [
