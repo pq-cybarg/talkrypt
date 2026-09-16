@@ -44,8 +44,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses (preinstalled SDK)
+        # The ubuntu runner ships an Android SDK at $ANDROID_SDK_ROOT. We do NOT use
+        # android-actions/setup-android: its strict license step fails whenever
+        # Google adds a new license (e.g. googletv → "N of M licenses not accepted").
+        # Force-accept every license against the preinstalled sdkmanager; the AGP
+        # then auto-downloads the compileSdk 35 platform + build-tools it needs.
+        run: |
+          SDKMGR="$(ls "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          echo "sdkmanager: $SDKMGR"
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
 
       - name: Install stable Rust + Android target
         run: |

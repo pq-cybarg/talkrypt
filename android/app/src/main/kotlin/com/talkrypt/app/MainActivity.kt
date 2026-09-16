@@ -31,7 +31,9 @@ import android.widget.Toast
 import com.talkrypt.custody.CustodyBridge
 import kotlin.concurrent.thread
 import uniffi.talkrypt_ffi.Account
+import uniffi.talkrypt_ffi.AdvertisePolicy
 import uniffi.talkrypt_ffi.AnchorNode
+import uniffi.talkrypt_ffi.FfiBeacon
 import uniffi.talkrypt_ffi.DeviceKey
 import uniffi.talkrypt_ffi.FfiEvent
 import uniffi.talkrypt_ffi.LinkOffer
@@ -68,6 +70,9 @@ class MainActivity : Activity() {
     private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
     private val pendingSaves = HashSet<String>()
     private var polling = false   // guards a single foreground drain+render loop
+    // SUB-SPEC A / #68: the active BLE beacon (radio backend + FFI handle), if running.
+    private var beaconBackend: BleBeaconBackend? = null
+    private var beacon: FfiBeacon? = null
 
     /** Currently rendered chat id, or null on the list/other screens. */
     private val activeId: String? get() = sessions.active
@@ -177,6 +182,7 @@ class MainActivity : Activity() {
         private const val REQ_SCAN = 0x5343
         private const val REQ_NOTIF = 0x4E54  // "NT" — POST_NOTIFICATIONS for the always-on service
         private const val REQ_TICKETBOOK = 0x544B // "TK" — pick a Nym ticketbook file to import
+        private const val REQ_BLE = 0x424C // "BL" — BLE advertise/scan/connect for the beacon
         private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
     }
 
@@ -453,8 +459,11 @@ class MainActivity : Activity() {
     private fun chatRowMenu(lc: LiveChat) {
         val id = lc.meta.id
         val connected = lc.client != null
+        val beaconOn = beacon != null
         val items = buildList {
             add("Manage callsigns")
+            add(if (beaconOn) "Stop nearby beacon (BLE)" else "Beacon nearby (BLE)")
+            if (beaconOn) add("Beacon self-test (spoof)")
             add("Re-share invite")
             if (!connected) add("Reconnect")
             add("Leave (disconnect, keep history)")
@@ -465,12 +474,67 @@ class MainActivity : Activity() {
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
                     "Manage callsigns" -> setContentView(nameBookScreen(id))
+                    "Beacon nearby (BLE)" -> startBeacon(id)
+                    "Stop nearby beacon (BLE)" -> stopBeacon(id)
+                    "Beacon self-test (spoof)" -> beaconSpoofSelfTest(id)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
                     "Reconnect" -> reconnect(id)
                     "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
                     "Delete (erase)" -> { sessions.disconnect(id); sessions.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen()) }
                 }
             }.show()
+    }
+
+    /** SUB-SPEC A / #68: start the pre-session CQ beacon over BLE. Core seals THIS
+     *  chat's beacon under the chat root and hands the opaque blob to the BLE backend
+     *  ([BleBeaconBackend.advertise]); the scan side reads nearby beacons and feeds
+     *  them back via `deliverBeacon`, so an invite-holder resolves them into a
+     *  `BeaconSeen` event. One active beacon at a time (matches the single-active-chat
+     *  UI); requires the BLE permissions the app already requests for nearby discovery. */
+    private fun startBeacon(id: String) {
+        val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
+        stopBeacon(id) // replace any prior beacon
+        ensureBlePermissions()
+        val backend = BleBeaconBackend(this)
+        val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
+        // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
+        backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
+            { msg -> ui.post { sysLine(id, "beacon: $msg") } })
+        beaconBackend = backend
+        beacon = fb
+        sysLine(id, "📡 beaconing this chat nearby (BLE) + scanning")
+    }
+
+    private fun stopBeacon(id: String) {
+        beacon?.let { runCatching { it.close() } }   // stops core's advertise/scan task
+        beaconBackend?.let { runCatching { it.stop() } }
+        if (beacon != null) sysLine(id, "nearby beacon stopped")
+        beacon = null
+        beaconBackend = null
+    }
+
+    /** Emulator/QEMU spoof self-test (no real radio): feed the exact opaque blob core
+     *  asked the backend to advertise straight back through `deliverBeacon`, exercising
+     *  the full core round-trip (seal -> advertise -> open -> `Event::BeaconSeen`). On
+     *  real hardware the BLE scan path delivers this over the air instead. */
+    private fun beaconSpoofSelfTest(id: String) {
+        val fb = beacon ?: run { toast("start the beacon first"); return }
+        val blob = beaconBackend?.lastAdvertised()
+            ?: run { toast("no advertised blob yet — try again in a moment"); return }
+        runCatching { fb.deliverBeacon(blob, "spoof-self") }
+        sysLine(id, "beacon self-test: fed our own sealed beacon back (expect a 📡 sighting)")
+    }
+
+    /** Request the BLE runtime permissions (API 31+) the beacon/nearby features need. */
+    private fun ensureBlePermissions() {
+        if (Build.VERSION.SDK_INT >= 31) {
+            val perms = arrayOf(
+                android.Manifest.permission.BLUETOOTH_ADVERTISE,
+                android.Manifest.permission.BLUETOOTH_SCAN,
+                android.Manifest.permission.BLUETOOTH_CONNECT,
+            ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (perms.isNotEmpty()) runCatching { requestPermissions(perms.toTypedArray(), REQ_BLE) }
+        }
     }
 
     /** SUB-SPEC A: manage your self-declared callsigns for this chat — a name book
