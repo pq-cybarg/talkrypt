@@ -47,6 +47,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept all Android SDK licenses
+        # setup-android accepts the licenses it knows about, but a newly-added
+        # Google license (e.g. googletv) can leave "N of M licenses not accepted"
+        # and fail the run. Force-accept every license so a new one never breaks CI.
+        run: yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
       - name: Install stable Rust + Android target
         run: |
           rustup toolchain install stable --profile minimal
