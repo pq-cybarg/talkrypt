@@ -70,8 +70,8 @@ class MainActivity : Activity() {
     private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
     private val pendingSaves = HashSet<String>()
     private var polling = false   // guards a single foreground drain+render loop
-    // SUB-SPEC A / #68: the active BLE beacon (radio backend + FFI handle), if running.
-    private var beaconBackend: BleBeaconBackend? = null
+    // SUB-SPEC A / #68: the active beacon (radio backend + FFI handle), if running.
+    private var beaconBackend: RadioBeacon? = null
     private var beacon: FfiBeacon? = null
 
     /** Currently rendered chat id, or null on the list/other screens. */
@@ -462,7 +462,7 @@ class MainActivity : Activity() {
         val beaconOn = beacon != null
         val items = buildList {
             add("Manage callsigns")
-            add(if (beaconOn) "Stop nearby beacon (BLE)" else "Beacon nearby (BLE)")
+            add(if (beaconOn) "Stop nearby beacon" else "Beacon nearby (BLE + Wi-Fi)")
             if (beaconOn) add("Beacon self-test (spoof)")
             add("Re-share invite")
             if (!connected) add("Reconnect")
@@ -474,8 +474,8 @@ class MainActivity : Activity() {
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
                     "Manage callsigns" -> setContentView(nameBookScreen(id))
-                    "Beacon nearby (BLE)" -> startBeacon(id)
-                    "Stop nearby beacon (BLE)" -> stopBeacon(id)
+                    "Beacon nearby (BLE + Wi-Fi)" -> startBeacon(id)
+                    "Stop nearby beacon" -> stopBeacon(id)
                     "Beacon self-test (spoof)" -> beaconSpoofSelfTest(id)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
                     "Reconnect" -> reconnect(id)
@@ -495,14 +495,16 @@ class MainActivity : Activity() {
         val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
         stopBeacon(id) // replace any prior beacon
         ensureBlePermissions()
-        val backend = BleBeaconBackend(this)
+        // Both radios at once (Rust MultiBeacon's Kotlin peer): BLE short-range +
+        // Wi-Fi/NSD for larger payloads/range. Each is best-effort; a dead radio is fine.
+        val backend = MultiLocalBeacon(listOf(BleBeaconBackend(this), WifiBeaconBackend(this)))
         val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
         // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
         backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
             { msg -> ui.post { sysLine(id, "beacon: $msg") } })
         beaconBackend = backend
         beacon = fb
-        sysLine(id, "📡 beaconing this chat nearby (BLE) + scanning")
+        sysLine(id, "📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning")
     }
 
     private fun stopBeacon(id: String) {

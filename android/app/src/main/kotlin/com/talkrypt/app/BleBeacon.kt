@@ -23,7 +23,6 @@ import android.os.Looper
 import android.os.ParcelUuid
 import java.io.ByteArrayOutputStream
 import java.util.Collections
-import uniffi.talkrypt_ffi.LocalBeaconBackend
 
 /**
  * SUB-SPEC A / #68: a Bluetooth LE radio backend for the pre-session CQ **beacon**.
@@ -49,7 +48,7 @@ import uniffi.talkrypt_ffi.LocalBeaconBackend
  * the full core round-trip (advertise -> open -> `Event::BeaconSeen`) with the radio
  * spoofed. On real hardware the scan path above delivers it over the air instead.
  */
-class BleBeaconBackend(private val context: Context) : LocalBeaconBackend {
+class BleBeaconBackend(private val context: Context) : RadioBeacon {
     private val main = Handler(Looper.getMainLooper())
     private val mgr = context.getSystemService(BluetoothManager::class.java)
 
@@ -64,7 +63,7 @@ class BleBeaconBackend(private val context: Context) : LocalBeaconBackend {
     @Volatile private var blob: ByteArray = ByteArray(0)
 
     /** The most recent blob passed to [advertise] (for the emulator spoof self-test). */
-    fun lastAdvertised(): ByteArray? = blob.takeIf { it.isNotEmpty() }
+    override fun lastAdvertised(): ByteArray? = blob.takeIf { it.isNotEmpty() }
 
     @SuppressLint("MissingPermission")
     override fun advertise(blob: ByteArray) {
@@ -135,7 +134,7 @@ class BleBeaconBackend(private val context: Context) : LocalBeaconBackend {
      * `FfiBeacon.deliverBeacon(blob, source)`.
      */
     @SuppressLint("MissingPermission")
-    fun startScanning(onBlob: (ByteArray, String) -> Unit, onError: (String) -> Unit = {}) {
+    override fun startScanning(onBlob: (ByteArray, String) -> Unit, onError: (String) -> Unit) {
         val adapter = mgr?.adapter
         if (adapter == null || !adapter.isEnabled) {
             onError("Bluetooth is off"); return
