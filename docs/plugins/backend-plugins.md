@@ -114,3 +114,12 @@ Drive it with the in-memory references — `LoopbackBeaconFabric` (presence) and
 `LoopbackFabric` (transport) — which implement the same seams, so your integration tests run
 with zero hardware. See `crates/transport/src/beacon.rs` tests for the pattern, including
 `MultiBeacon` fan-out/merge/dedup.
+
+## A worked example: the LoRa mesh backend
+
+`talkrypt_transport::mesh` is a full worked backend for Meshtastic / Meshcore LoRa mesh: a
+`MeshNode` seam for the radio, a Kani-proven fragment/reassembly codec for the ~200-byte
+mesh MTU, a `MeshBeacon` (drop-in `LocalBeacon`), and a classifier that recognises other
+talkrypt nodes vs. foreign/plaintext traffic with a consented downgrade gate. It is built and
+tested over an in-memory `MockMeshNode` today, with device-gated real adapters. See
+[`docs/mesh-lora-backend.md`](../mesh-lora-backend.md).

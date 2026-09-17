@@ -60,3 +60,8 @@ nym = ["dep:nym-sdk", "dep:nym-credentials-interface", "dep:nym-credentials"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints.rust]
+# `cfg(kani)` is set by the Kani verifier (see mesh::frag proofs); declare it so
+# normal builds don't warn.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

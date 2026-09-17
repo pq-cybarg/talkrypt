@@ -13,6 +13,7 @@
 pub mod beacon;
 pub mod framing;
 pub mod loopback;
+pub mod mesh;
 pub mod multi;
 pub mod tcp;
 
@@ -26,6 +27,10 @@ pub use beacon::{
     BeaconScan, LocalBeacon, LoopbackBeacon, LoopbackBeaconFabric, MultiBeacon, Seen,
 };
 pub use loopback::{LoopbackFabric, LoopbackTransport};
+pub use mesh::{
+    MeshBeacon, MeshHeard, MeshIngest, MeshInbox, MeshNode, MeshPacket, MeshPolicy, MockMeshFabric,
+    MockMeshNode, NativeSend,
+};
 pub use multi::{endpoint_scheme, select_endpoint, split_endpoints, MultiTransport, Scheme};
 pub use tcp::TcpTransport;
 
