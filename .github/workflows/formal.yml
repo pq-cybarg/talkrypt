@@ -15,12 +15,14 @@ on:
     paths:
       - "crates/crypto/**"
       - "crates/wire/**"
+      - "crates/transport/**"
       - "formal/**"
       - ".github/workflows/formal.yml"
   pull_request:
     paths:
       - "crates/crypto/**"
       - "crates/wire/**"
+      - "crates/transport/**"
       - "formal/**"
   workflow_dispatch: {}
 
