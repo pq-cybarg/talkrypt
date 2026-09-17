@@ -15,12 +15,14 @@ on:
     paths:
       - "crates/crypto/**"
       - "crates/wire/**"
+      - "crates/transport/**"
       - "formal/**"
       - ".github/workflows/formal.yml"
   pull_request:
     paths:
       - "crates/crypto/**"
       - "crates/wire/**"
+      - "crates/transport/**"
       - "formal/**"
   workflow_dispatch: {}
 
@@ -80,6 +82,12 @@ jobs:
         run: |
           cargo kani -p talkrypt-core --harness engine::d1_proofs::promote_body_decode_never_panics
           cargo kani -p talkrypt-core --harness engine::d1_proofs::consent_body_decode_never_panics
+      - name: Prove the mesh (LoRa) fragment decoder is total (transport)
+        # The talkrypt-over-mesh fragment header is flat + fixed-offset (10-byte header,
+        # then a chunk slice) — CBMC-tractable, proven no-panic and in-bounds on all
+        # hostile mesh input. The bounded Reassembler (nested HashMap) is covered by the
+        # unit tests, not Kani, per the FV posture (chunk flat decoders only).
+        run: cargo kani -p talkrypt-transport --harness mesh::frag::proofs::parse_fragment_never_panics_and_is_bounded
 
   fstar:
     name: "F* — auth theorems"
