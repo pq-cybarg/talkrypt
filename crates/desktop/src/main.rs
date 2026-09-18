@@ -82,7 +82,7 @@ async fn init_tor<R: Fn() + Clone + Send + 'static>(
         .map_err(|e| format!("tor bootstrap failed: {e}"))
     })
     .await
-    .map(|t| t.clone())
+    .cloned()
 }
 
 /// Connect the shared Nym mixnet transport at most once and reuse it for every
@@ -123,7 +123,7 @@ async fn init_nym(
             .map_err(|e| format!("nym connect failed: {e}"))
     })
     .await
-    .map(|t| t.clone())
+    .cloned()
 }
 
 /// Build the network transport for a host/join action.
@@ -138,6 +138,10 @@ async fn init_nym(
 /// * Otherwise a fresh TCP transport bound to `listen` is used (same-Wi-Fi fast
 ///   path).
 #[allow(unused_variables)]
+// Eight distinct dependencies (id, two transport toggles, listen addr, UI sender,
+// two shared-transport cells, repaint callback); bundling them into a struct would
+// add indirection for this single internal call site with no clarity gain.
+#[allow(clippy::too_many_arguments)]
 async fn make_transport<R: Fn() + Clone + Send + 'static>(
     id: u64,
     use_tor: bool,
@@ -205,7 +209,7 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.inactive.bg_fill = FIELD;
     v.widgets.inactive.weak_bg_fill = FIELD;
     v.widgets.inactive.corner_radius = r;
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, FG);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, FG);
     v.widgets.hovered.bg_fill = PEER_BUBBLE;
     v.widgets.hovered.weak_bg_fill = PEER_BUBBLE;
     v.widgets.hovered.corner_radius = r;

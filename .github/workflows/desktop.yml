@@ -1,0 +1,90 @@
+# Desktop GUI build + lint gate (SECURITY-AUDIT F-10).
+#
+# The workspace `cargo test` job builds + logic-tests the desktop crate with its
+# DEFAULT features only (Tor). That leaves the actual release GUI binary, the
+# cfg-gated LAN-only (`--no-default-features`) windowing path, and clippy on the
+# GUI code ungated — so a change that breaks the release build, the non-Tor
+# variant, or introduces a GUI lint could merge green. This job closes that gap:
+# it builds the release binary, builds the LAN-only variant, and runs clippy (deny
+# warnings) on the desktop crate.
+#
+# It is a BUILD + LINT gate, not an on-screen/instrumented test: eframe/egui link a
+# GL/windowing stack that a headless runner cannot render, so we compile it (which
+# exercises the whole GUI + transport wiring) without opening a window.
+name: desktop
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "crates/desktop/**"
+      - "crates/core/**"
+      - "crates/crypto/**"
+      - "crates/transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "crates/desktop/**"
+      - "crates/core/**"
+      - "crates/crypto/**"
+      - "crates/transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-lint:
+    name: build GUI + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux GUI build deps
+        # eframe/egui (winit + glow) link against the X11/Wayland + GL + xkbcommon
+        # stack on Linux. Install the -dev packages so the release build links.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      - name: Install stable Rust + clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-desktop-
+
+      - name: Clippy the desktop GUI (deny clippy lints)
+        # --no-deps: gate only the desktop crate's own lints, not pre-existing
+        # dependency lint debt. Deny clippy's own lint set (`clippy::all`) rather
+        # than bare `-D warnings`: the runner's stable toolchain is unpinned, so
+        # `-D warnings` would fail on any NEW rustc future-compat lint (e.g.
+        # float-literal-f32-fallback) and block unrelated PRs; `clippy::all` is the
+        # intentional, stable lint set this gate is actually meant to enforce. Genuine
+        # rustc future-compat warnings still surface (non-fatal) in the build steps.
+        run: cargo clippy -p talkrypt-desktop --no-deps --locked -- -D clippy::all
+
+      - name: Build the release GUI binary (default = Tor)
+        run: cargo build -p talkrypt-desktop --release --locked
+
+      - name: Build the LAN-only variant (no default features)
+        # Exercises the cfg-gated non-Tor / X11+Wayland windowing path so a
+        # `--no-default-features` build can't silently break.
+        run: cargo build -p talkrypt-desktop --no-default-features --locked
