@@ -25,3 +25,8 @@ unicode-normalization = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints.rust]
+# `cfg(kani)` is set by the Kani verifier (linkage/vouch/engine decoder proofs);
+# declare it so normal builds/clippy don't warn (matches wire/crypto/transport).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
