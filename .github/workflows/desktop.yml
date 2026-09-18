@@ -71,10 +71,15 @@ jobs:
           key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-desktop-
 
-      - name: Clippy the desktop GUI (deny warnings)
+      - name: Clippy the desktop GUI (deny clippy lints)
         # --no-deps: gate only the desktop crate's own lints, not pre-existing
-        # dependency lint debt.
-        run: cargo clippy -p talkrypt-desktop --no-deps --locked -- -D warnings
+        # dependency lint debt. Deny clippy's own lint set (`clippy::all`) rather
+        # than bare `-D warnings`: the runner's stable toolchain is unpinned, so
+        # `-D warnings` would fail on any NEW rustc future-compat lint (e.g.
+        # float-literal-f32-fallback) and block unrelated PRs; `clippy::all` is the
+        # intentional, stable lint set this gate is actually meant to enforce. Genuine
+        # rustc future-compat warnings still surface (non-fatal) in the build steps.
+        run: cargo clippy -p talkrypt-desktop --no-deps --locked -- -D clippy::all
 
       - name: Build the release GUI binary (default = Tor)
         run: cargo build -p talkrypt-desktop --release --locked

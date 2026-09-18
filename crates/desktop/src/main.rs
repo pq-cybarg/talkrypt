@@ -209,7 +209,7 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.inactive.bg_fill = FIELD;
     v.widgets.inactive.weak_bg_fill = FIELD;
     v.widgets.inactive.corner_radius = r;
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, FG);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, FG);
     v.widgets.hovered.bg_fill = PEER_BUBBLE;
     v.widgets.hovered.weak_bg_fill = PEER_BUBBLE;
     v.widgets.hovered.corner_radius = r;
