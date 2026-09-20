@@ -1303,6 +1303,34 @@ impl TalkryptClient {
         bridge
     }
 
+    /// Carry this group's chat messages over a LoRa mesh node (Meshtastic /
+    /// Meshcore) reached through a host `backend` (BLE / USB-serial), in ADDITION
+    /// to the primary transport. `channel` is the mesh channel index our
+    /// encapsulated frames are transmitted on. Returns the [`FfiMeshNode`] handle:
+    /// keep it, and call `deliver_packet` on it from your radio's receive callback
+    /// so inbound frames reach the engine. Received group frames surface as the
+    /// usual `FfiEvent::Message` (self-authenticating; no new trust). Call once per
+    /// chat. Foreign-traffic classification and native "downgrade" send are not yet
+    /// exposed here (see docs/mesh-lora-backend.md).
+    pub fn start_mesh_messaging(
+        &self,
+        backend: Box<dyn MeshNodeBackend>,
+        channel: u8,
+    ) -> std::sync::Arc<FfiMeshNode> {
+        let bridge = std::sync::Arc::new(FfiMeshNode {
+            backend,
+            feed: std::sync::Mutex::new(None),
+        });
+        let node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode> = bridge.clone();
+        let policy = talkrypt_transport::mesh::MeshPolicy {
+            channel,
+            ..Default::default()
+        };
+        self.rt
+            .block_on(self.core.start_mesh_messaging(node, policy));
+        bridge
+    }
+
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
     /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
     pub fn keeper_mode(&self, on: bool) {
@@ -1893,6 +1921,67 @@ impl FfiBeacon {
     pub fn deliver_beacon(&self, blob: Vec<u8>, source: Option<String>) {
         if let Some(tx) = self.feed.lock().unwrap().as_ref() {
             let _ = tx.send(talkrypt_transport::Seen { blob, source });
+        }
+    }
+}
+
+/// A host LoRa-mesh node backend (a phone talking to a T-Deck / node over BLE, a
+/// desktop over USB-serial, etc.). The host implements this; talkrypt drives it.
+/// It only ever moves OPAQUE, already-sealed fragment bytes — never keys or
+/// plaintext. `mtu` is the usable application-payload bytes per packet (talkrypt
+/// sizes its fragments to fit); `send` transmits one packet on a channel. Inbound
+/// packets are pushed back IN via [`FfiMeshNode::deliver_packet`] (a push model,
+/// since a callback can't return a stream).
+#[uniffi::export(callback_interface)]
+pub trait MeshNodeBackend: Send + Sync {
+    fn mtu(&self) -> u32;
+    fn send(&self, channel: u8, payload: Vec<u8>) -> Result<(), FfiError>;
+}
+
+/// The engine-side handle for a host mesh backend, returned by
+/// [`TalkryptClient::start_mesh_messaging`]. Bridges the host [`MeshNodeBackend`]
+/// to the core [`talkrypt_transport::mesh::MeshNode`] seam, and gives the host
+/// `deliver_packet` to feed in what its radio receives.
+#[derive(uniffi::Object)]
+pub struct FfiMeshNode {
+    backend: Box<dyn MeshNodeBackend>,
+    feed: std::sync::Mutex<
+        Option<tokio::sync::mpsc::UnboundedSender<talkrypt_transport::mesh::MeshPacket>>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl talkrypt_transport::mesh::MeshNode for FfiMeshNode {
+    fn mtu(&self) -> usize {
+        self.backend.mtu() as usize
+    }
+    async fn send(&self, channel: u8, payload: &[u8]) -> talkrypt_transport::Result<()> {
+        self.backend
+            .send(channel, payload.to_vec())
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn subscribe(&self) -> talkrypt_transport::Result<talkrypt_transport::mesh::MeshInbox> {
+        let (inbox, tx) = talkrypt_transport::mesh::MeshInbox::channel();
+        *self.feed.lock().unwrap() = Some(tx);
+        Ok(inbox)
+    }
+}
+
+#[uniffi::export]
+impl FfiMeshNode {
+    /// The host calls this from its radio's receive callback with one inbound mesh
+    /// packet: the `channel` it arrived on, the OPAQUE `payload` bytes, and an
+    /// optional coarse `from` node id (indicative only, never an identity).
+    /// talkrypt reassembles talkrypt fragments and processes each recovered group
+    /// frame through the self-authenticating path (surfacing `Event::Message`);
+    /// non-talkrypt bytes are dropped. No-op before messaging has started.
+    pub fn deliver_packet(&self, channel: u8, payload: Vec<u8>, from: Option<u32>) {
+        if let Some(tx) = self.feed.lock().unwrap().as_ref() {
+            let _ = tx.send(talkrypt_transport::mesh::MeshPacket {
+                channel,
+                payload,
+                from,
+            });
         }
     }
 }
@@ -2523,6 +2612,39 @@ mod tests {
         let s = scan.next().await.unwrap();
         assert_eq!(s.blob, b"seen");
         assert_eq!(s.source.as_deref(), Some("mac:1"));
+    }
+
+    /// The FFI mesh bridge reports the backend MTU, forwards `send` to the host
+    /// backend, and feeds `deliver_packet` pushes into the inbox the core drives.
+    #[tokio::test]
+    async fn ffi_mesh_node_bridge_forwards_and_feeds_inbox() {
+        use talkrypt_transport::mesh::MeshNode;
+        struct Fake(std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u8>)>>>);
+        impl MeshNodeBackend for Fake {
+            fn mtu(&self) -> u32 {
+                233
+            }
+            fn send(&self, channel: u8, payload: Vec<u8>) -> Result<(), FfiError> {
+                self.0.lock().unwrap().push((channel, payload));
+                Ok(())
+            }
+        }
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bridge = FfiMeshNode {
+            backend: Box::new(Fake(sent.clone())),
+            feed: std::sync::Mutex::new(None),
+        };
+        // mtu + send forward to the host backend.
+        assert_eq!(MeshNode::mtu(&bridge), 233);
+        MeshNode::send(&bridge, 2, b"frag".to_vec().as_slice()).await.unwrap();
+        assert_eq!(sent.lock().unwrap().as_slice(), &[(2u8, b"frag".to_vec())]);
+        // subscribe opens the inbox; deliver_packet (host radio callback) feeds it.
+        let mut inbox = MeshNode::subscribe(&bridge).await.unwrap();
+        bridge.deliver_packet(2, b"inbound".to_vec(), Some(0xabcd));
+        let p = inbox.next().await.unwrap();
+        assert_eq!(p.channel, 2);
+        assert_eq!(p.payload, b"inbound");
+        assert_eq!(p.from, Some(0xabcd));
     }
 
     /// Two segments of one account both resolve to that account (a contact who
