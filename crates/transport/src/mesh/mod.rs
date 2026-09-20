@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn talkrypt_fragments_reassemble_into_talkrypt_heard() {
         let sealed: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
-        let frags = frag::fragment(1, &sealed, 64).unwrap();
+        let frags = frag::fragment(frag::KIND_FRAME, 1, &sealed, 64).unwrap();
         let mut ingest = MeshIngest::new(&MeshPolicy::default());
         let mut heard = None;
         for f in &frags {
@@ -270,7 +270,10 @@ mod tests {
             native_send: NativeSend::AskEachTime,
             ..Default::default()
         };
-        assert!(!ask.native_send_allowed(), "AskEachTime is not silently allowed");
+        assert!(
+            !ask.native_send_allowed(),
+            "AskEachTime is not silently allowed"
+        );
         let allowed = MeshPolicy {
             native_send: NativeSend::Allowed,
             ..Default::default()
@@ -281,7 +284,7 @@ mod tests {
     #[test]
     fn partial_talkrypt_message_yields_nothing() {
         let sealed: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
-        let frags = frag::fragment(1, &sealed, 64).unwrap();
+        let frags = frag::fragment(frag::KIND_FRAME, 1, &sealed, 64).unwrap();
         let mut ingest = MeshIngest::new(&MeshPolicy::default());
         // Feed all but the last fragment → never completes.
         for f in &frags[..frags.len() - 1] {

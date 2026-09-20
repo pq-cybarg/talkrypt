@@ -55,7 +55,7 @@ impl LocalBeacon for MeshBeacon {
         // Fragment the opaque sealed CQ; if it is too large for the mesh (over
         // MAX_FRAGMENTS at this MTU), we simply cannot beacon it here — a beacon
         // that big does not belong on LoRa. Best-effort, like the other radios.
-        if let Some(frags) = frag::fragment(id, &blob, mtu) {
+        if let Some(frags) = frag::fragment(frag::KIND_ADVERT, id, &blob, mtu) {
             for f in frags {
                 let _ = self.node.send(self.channel, &f).await;
             }
@@ -78,7 +78,9 @@ impl LocalBeacon for MeshBeacon {
         // Reassemble talkrypt fragments off the mesh; emit each completed beacon
         // once. Foreign packets are ignored at the beacon layer.
         tokio::spawn(async move {
-            let mut reasm = Reassembler::default();
+            // Only reassemble beacon adverts; ignore message-frame fragments that
+            // share this mesh channel (they are handled by mesh messaging).
+            let mut reasm = Reassembler::for_kind(frag::KIND_ADVERT);
             while let Some(pkt) = inbox.next().await {
                 if pkt.channel != want_channel {
                     continue;
@@ -147,7 +149,10 @@ mod tests {
         let scanner = MeshBeacon::new(Arc::new(fabric.node(2)), MeshPolicy::default());
         let foreigner = fabric.node(3);
         let mut scan = scanner.scan().await.unwrap();
-        foreigner.send(0, b"hello from a plain meshtastic node").await.unwrap();
+        foreigner
+            .send(0, b"hello from a plain meshtastic node")
+            .await
+            .unwrap();
         let got = tokio::time::timeout(std::time::Duration::from_millis(300), scan.next()).await;
         assert!(got.is_err(), "foreign traffic must not be a beacon");
     }
