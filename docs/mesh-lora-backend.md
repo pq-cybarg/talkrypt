@@ -125,14 +125,52 @@ is in the loop). They are documented ports, not yet compiled/run here:
   messages; MTU ≈ 184-230. Baseline AES-128 shared key (treated as an untrusted
   outer wrapper).
 
-Once either adapter is implemented, the rest of talkrypt — beacon, fragmentation,
-classification — works unchanged. That is the point of the seam.
+Once either adapter is implemented, the rest of talkrypt — beacon, messaging,
+fragmentation, classification — works unchanged. That is the point of the seam.
+
+## Messaging: chat frames over the mesh
+
+Beyond the CQ beacon, an established group's **chat messages** can ride the mesh
+as an additional broadcast path (off-grid or resilience):
+
+```rust
+core.start_mesh_messaging(node /* Arc<dyn MeshNode> */, MeshPolicy::default()).await;
+```
+
+This carries the *same* self-authenticating group frames the engine already
+produces — `Frame::GroupMsg`, sealed under the group epoch and signed with a
+per-sender ML-DSA-87 leaf key. Because a group frame validates (group AEAD +
+signature) and dedups (`gossip_id`/`SeenSet`) independently of its source, a frame
+received from an anonymous mesh broadcast is processed exactly like a peer frame —
+no new trust, no dependency on a connected peer. It mirrors `start_local_presence`:
+
+- **Outbound:** every `Route::Broadcast` `Frame::GroupMsg` is fragmented
+  (`kind = Frame`) and transmitted on `policy.channel`, in addition to the normal
+  peer fan-out. Only chat content is teed — control-plane frames (commits, roster)
+  stay on the primary transport to conserve LoRa airtime.
+- **Inbound:** a task reassembles `Frame`-kind fragments and feeds each recovered
+  `GroupMsg` into the engine's self-authenticating group path → `Event::Message`.
+- **Bridging for free:** a node on both mesh and Tor/LAN re-forwards a
+  mesh-received frame to its connected peers (and vice versa), bridging the two
+  islands; `SeenSet` prevents loops and re-processing of the broadcast echoes.
+
+The beacon (`kind = Advert`) and messaging (`kind = Frame`) share one mesh channel
+and ignore each other's fragments via the header `kind` byte.
+
+**Scope:** this carries chat CONTENT for an already-established group; group
+**membership/commits** ride the primary transport (mesh-native membership is a
+future slice). Airtime reality: a signed group frame is a few KB, so it fragments
+into ~20-30 mesh packets — usable for text, not a Tor-speed experience.
 
 ## Out of scope (next slices)
 
-- A connection-oriented `Transport` over broadcast LoRa (the datagram carry built
-  here is the substrate; the `Stream`/`Listener` model maps poorly onto a
-  connectionless ~200-byte, seconds-latency medium).
+- **FFI host-callback surface** for messaging (`MeshNodeBackend` +
+  `FfiMeshNode.deliverPacket`, `TalkryptClient::start_mesh_messaging`) — mirrors
+  the `FfiBeacon` staging; no host has a real `MeshNode` backend yet.
+- **Mesh-native membership/commits** (control plane over broadcast).
+- A connection-oriented `Transport` over broadcast LoRa (the datagram carry is the
+  substrate; the `Stream`/`Listener` model maps poorly onto a connectionless
+  ~200-byte, seconds-latency medium).
 - Meshtastic MQTT-gateway ingest and region/duty-cycle-aware airtime pacing.
 
 See also [`docs/plugins/backend-plugins.md`](plugins/backend-plugins.md) for the

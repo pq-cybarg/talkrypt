@@ -18,12 +18,19 @@
 //! byte 0     MAGIC0 = 0xA7          two-byte magic marks a talkrypt fragment
 //! byte 1     MAGIC1 = 0x6D ('m')     apart from arbitrary foreign mesh bytes
 //! byte 2     version = 1
-//! byte 3     flags   (reserved = 0)
+//! byte 3     kind                   0 = Advert (beacon CQ), 1 = Frame (chat message)
 //! bytes 4-5  msg_id      (u16 BE)    per-sender rolling id grouping one message
 //! bytes 6-7  frag_index  (u16 BE)    0-based
 //! bytes 8-9  frag_count  (u16 BE)    total fragments (>=1); index < count
 //! bytes 10.. chunk                   payload slice (<= mtu - 10)
 //! ```
+//!
+//! Byte 3 is the `kind` discriminator so a beacon advert and a chat-message frame
+//! can share one mesh channel + magic without cross-feeding each other's
+//! reassembly. It was the reserved `flags` byte (always 0), so existing beacon
+//! fragments are already [`KIND_ADVERT`] — backward-compatible on the wire. Unknown
+//! `kind` values parse fine and are simply filtered out by a kind-scoped
+//! [`Reassembler`], leaving room for future kinds.
 
 use std::collections::HashMap;
 
@@ -35,6 +42,11 @@ pub const MAGIC1: u8 = 0x6D; // 'm'
 pub const FRAG_VERSION: u8 = 1;
 /// Fixed header length that precedes every fragment's chunk.
 pub const HEADER_LEN: usize = 10;
+
+/// Fragment `kind` (header byte 3): a pre-session presence beacon (CQ) blob.
+pub const KIND_ADVERT: u8 = 0;
+/// Fragment `kind` (header byte 3): a chat-message `Frame` (mesh messaging).
+pub const KIND_FRAME: u8 = 1;
 
 /// The smallest MTU we will fragment for: must leave at least one payload byte
 /// after the header. Real LoRa MTUs (~184-240) are far above this.
@@ -51,6 +63,7 @@ pub const MAX_FRAGMENTS: usize = 256;
 /// decode with no nested allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fragment<'a> {
+    pub kind: u8,
     pub msg_id: u16,
     pub frag_index: u16,
     pub frag_count: u16,
@@ -69,7 +82,7 @@ pub fn parse_fragment(packet: &[u8]) -> Option<Fragment<'_>> {
     if packet[0] != MAGIC0 || packet[1] != MAGIC1 || packet[2] != FRAG_VERSION {
         return None;
     }
-    // packet[3] is reserved flags — ignored (must be 0 by producers; tolerated on read).
+    let kind = packet[3]; // 0 = Advert, 1 = Frame; unknown kinds tolerated (filtered later).
     let msg_id = u16::from_be_bytes([packet[4], packet[5]]);
     let frag_index = u16::from_be_bytes([packet[6], packet[7]]);
     let frag_count = u16::from_be_bytes([packet[8], packet[9]]);
@@ -78,6 +91,7 @@ pub fn parse_fragment(packet: &[u8]) -> Option<Fragment<'_>> {
         return None;
     }
     Some(Fragment {
+        kind,
         msg_id,
         frag_index,
         frag_count,
@@ -85,12 +99,13 @@ pub fn parse_fragment(packet: &[u8]) -> Option<Fragment<'_>> {
     })
 }
 
-/// Split a sealed `payload` into mesh fragments for the given `mtu` (bytes usable
-/// per packet). Returns one `Vec<u8>` per fragment, each header-prefixed and
+/// Split a sealed `payload` into mesh fragments of the given `kind`
+/// ([`KIND_ADVERT`] / [`KIND_FRAME`]) for the given `mtu` (bytes usable per
+/// packet). Returns one `Vec<u8>` per fragment, each header-prefixed and
 /// `<= mtu`. `msg_id` groups this message's fragments (the caller rolls it per
 /// send). Returns `None` if `mtu` is too small, the payload is empty, or it would
 /// need more than [`MAX_FRAGMENTS`] fragments.
-pub fn fragment(msg_id: u16, payload: &[u8], mtu: usize) -> Option<Vec<Vec<u8>>> {
+pub fn fragment(kind: u8, msg_id: u16, payload: &[u8], mtu: usize) -> Option<Vec<Vec<u8>>> {
     if mtu < MIN_MTU || payload.is_empty() {
         return None;
     }
@@ -106,7 +121,7 @@ pub fn fragment(msg_id: u16, payload: &[u8], mtu: usize) -> Option<Vec<Vec<u8>>>
         pkt.push(MAGIC0);
         pkt.push(MAGIC1);
         pkt.push(FRAG_VERSION);
-        pkt.push(0); // flags
+        pkt.push(kind);
         pkt.extend_from_slice(&msg_id.to_be_bytes());
         pkt.extend_from_slice(&(i as u16).to_be_bytes());
         pkt.extend_from_slice(&frag_count.to_be_bytes());
@@ -125,7 +140,14 @@ struct Partial {
     bytes: usize,
 }
 
-/// Bounded reassembly of talkrypt-over-mesh fragments, keyed by `(source, msg_id)`.
+/// Bounded reassembly of talkrypt-over-mesh fragments, keyed by
+/// `(source, msg_id, kind)`.
+///
+/// Including `kind` in the key means an Advert and a Frame from the same source
+/// that happen to share a `msg_id` (the two carries roll independent counters)
+/// never collide. An optional [`Reassembler::for_kind`] filter additionally drops
+/// fragments of other kinds up front, so a carry only spends memory on its own
+/// traffic.
 ///
 /// Hard caps (anti-DoS): at most [`Reassembler::max_messages`] partial messages in
 /// flight and [`Reassembler::max_bytes`] buffered across all of them; the oldest
@@ -133,9 +155,11 @@ struct Partial {
 /// `frag_count` is dropped. Runtime-only — NOT a Kani target (nested heap); the
 /// per-fragment decode it consumes ([`parse_fragment`]) is the proven part.
 pub struct Reassembler {
-    partials: HashMap<(String, u16), Partial>,
+    partials: HashMap<(String, u16, u8), Partial>,
     /// Insertion order of keys, for oldest-first eviction.
-    order: Vec<(String, u16)>,
+    order: Vec<(String, u16, u8)>,
+    /// If set, only fragments of this `kind` are accepted (others are ignored).
+    only_kind: Option<u8>,
     max_messages: usize,
     max_bytes: usize,
     buffered: usize,
@@ -144,7 +168,7 @@ pub struct Reassembler {
 impl Default for Reassembler {
     fn default() -> Self {
         // Defaults sized for a handful of concurrent multi-KB frames on a slow
-        // link: 32 in-flight messages, 1 MiB total buffered.
+        // link: 32 in-flight messages, 1 MiB total buffered. Accepts any kind.
         Self::with_limits(32, 1024 * 1024)
     }
 }
@@ -154,18 +178,34 @@ impl Reassembler {
         Self {
             partials: HashMap::new(),
             order: Vec::new(),
+            only_kind: None,
             max_messages: max_messages.max(1),
             max_bytes: max_bytes.max(1),
             buffered: 0,
         }
     }
 
+    /// A reassembler that only accepts fragments of `kind` ([`KIND_ADVERT`] /
+    /// [`KIND_FRAME`]) — so a beacon carry and a messaging carry can share one mesh
+    /// channel and each ignore the other's fragments.
+    pub fn for_kind(kind: u8) -> Self {
+        let mut r = Self::default();
+        r.only_kind = Some(kind);
+        r
+    }
+
     /// Feed one raw mesh packet from `source`. Returns `Some(reassembled)` when a
-    /// packet completes a message, else `None`. Non-fragment (foreign) packets and
-    /// malformed fragments return `None` without disturbing state.
+    /// packet completes a message, else `None`. Non-fragment (foreign) packets,
+    /// malformed fragments, and (if a kind filter is set) other-kind fragments
+    /// return `None` without disturbing state.
     pub fn accept(&mut self, source: &str, packet: &[u8]) -> Option<Vec<u8>> {
         let frag = parse_fragment(packet)?;
-        let key = (source.to_string(), frag.msg_id);
+        if let Some(want) = self.only_kind {
+            if frag.kind != want {
+                return None;
+            }
+        }
+        let key = (source.to_string(), frag.msg_id, frag.kind);
         let idx = frag.frag_index as usize;
         let count = frag.frag_count as usize;
 
@@ -238,7 +278,7 @@ mod tests {
     use super::*;
 
     fn reassemble_all(msg_id: u16, payload: &[u8], mtu: usize) -> Vec<u8> {
-        let frags = fragment(msg_id, payload, mtu).expect("fragmentable");
+        let frags = fragment(KIND_FRAME, msg_id, payload, mtu).expect("fragmentable");
         let mut r = Reassembler::default();
         let mut done = None;
         for f in &frags {
@@ -252,7 +292,7 @@ mod tests {
     #[test]
     fn single_fragment_round_trips() {
         let payload = b"CQ CQ short beacon";
-        let frags = fragment(7, payload, 240).unwrap();
+        let frags = fragment(KIND_FRAME, 7, payload, 240).unwrap();
         assert_eq!(frags.len(), 1);
         assert_eq!(reassemble_all(7, payload, 240), payload);
     }
@@ -261,7 +301,7 @@ mod tests {
     fn multi_fragment_round_trips_across_small_mtu() {
         let payload: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
         let mtu = 64;
-        let frags = fragment(1, &payload, mtu).unwrap();
+        let frags = fragment(KIND_FRAME, 1, &payload, mtu).unwrap();
         assert!(frags.len() > 40, "3000B over MTU 64 needs many fragments");
         for f in &frags {
             assert!(f.len() <= mtu, "no fragment exceeds the MTU");
@@ -282,7 +322,7 @@ mod tests {
     #[test]
     fn out_of_order_reassembly() {
         let payload: Vec<u8> = (0..500u32).map(|i| i as u8).collect();
-        let mut frags = fragment(3, &payload, 64).unwrap();
+        let mut frags = fragment(KIND_FRAME, 3, &payload, 64).unwrap();
         frags.reverse(); // deliver last-to-first
         let mut r = Reassembler::default();
         let mut done = None;
@@ -297,7 +337,7 @@ mod tests {
     #[test]
     fn duplicate_fragment_is_idempotent() {
         let payload: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
-        let frags = fragment(4, &payload, 64).unwrap();
+        let frags = fragment(KIND_FRAME, 4, &payload, 64).unwrap();
         let mut r = Reassembler::default();
         let mut done = None;
         // Feed every fragment twice, interleaved.
@@ -311,8 +351,8 @@ mod tests {
 
     #[test]
     fn rejects_bad_mtu_and_empty_payload() {
-        assert!(fragment(0, b"x", MIN_MTU - 1).is_none());
-        assert!(fragment(0, b"", 240).is_none());
+        assert!(fragment(KIND_FRAME, 0, b"x", MIN_MTU - 1).is_none());
+        assert!(fragment(KIND_FRAME, 0, b"", 240).is_none());
     }
 
     #[test]
@@ -320,10 +360,13 @@ mod tests {
         // With MTU MIN_MTU (1 payload byte/frag), a payload longer than
         // MAX_FRAGMENTS bytes cannot be fragmented.
         let payload = vec![0u8; MAX_FRAGMENTS + 1];
-        assert!(fragment(0, &payload, MIN_MTU).is_none());
+        assert!(fragment(KIND_FRAME, 0, &payload, MIN_MTU).is_none());
         // ...but exactly MAX_FRAGMENTS bytes fits.
         let ok = vec![0u8; MAX_FRAGMENTS];
-        assert_eq!(fragment(0, &ok, MIN_MTU).unwrap().len(), MAX_FRAGMENTS);
+        assert_eq!(
+            fragment(KIND_FRAME, 0, &ok, MIN_MTU).unwrap().len(),
+            MAX_FRAGMENTS
+        );
     }
 
     #[test]
@@ -331,28 +374,52 @@ mod tests {
         assert!(parse_fragment(b"").is_none());
         assert!(parse_fragment(b"hello mesh world").is_none()); // wrong magic
         assert!(parse_fragment(&[MAGIC0, MAGIC1]).is_none()); // too short
-        // right magic, bad version
+                                                              // right magic, bad version
         assert!(parse_fragment(&[MAGIC0, MAGIC1, 99, 0, 0, 0, 0, 0, 0, 1, 42]).is_none());
         // right magic/version, count=0
         assert!(parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 0, 0, 0, 0, 0, 0, 0]).is_none());
         // index >= count (index 1, count 1)
-        assert!(
-            parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 0, 0, 0, 0, 1, 0, 1, 42]).is_none()
-        );
-        // well-formed
-        let f = parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 0, 0, 5, 0, 0, 0, 2, 0xAA]).unwrap();
+        assert!(parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 0, 0, 0, 0, 1, 0, 1, 42]).is_none());
+        // well-formed (byte 3 = kind = 1 = Frame)
+        let f = parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 1, 0, 5, 0, 0, 0, 2, 0xAA]).unwrap();
+        assert_eq!(f.kind, KIND_FRAME);
         assert_eq!(f.msg_id, 5);
         assert_eq!(f.frag_index, 0);
         assert_eq!(f.frag_count, 2);
         assert_eq!(f.chunk, &[0xAA]);
+        // byte 3 = 0 parses as an Advert.
+        let a = parse_fragment(&[MAGIC0, MAGIC1, FRAG_VERSION, 0, 0, 5, 0, 0, 0, 2, 0xAA]).unwrap();
+        assert_eq!(a.kind, KIND_ADVERT);
+    }
+
+    #[test]
+    fn kind_filtered_reassembler_ignores_other_kinds() {
+        // An advert and a frame from the same source with the SAME msg_id must not
+        // cross-feed a kind-scoped reassembler (and would not collide even in an
+        // unscoped one, since kind is part of the key).
+        let payload: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
+        let adverts = fragment(KIND_ADVERT, 0, &payload, 64).unwrap();
+        let frames = fragment(KIND_FRAME, 0, &payload, 64).unwrap();
+
+        let mut only_frames = Reassembler::for_kind(KIND_FRAME);
+        for f in &adverts {
+            assert!(only_frames.accept("peer", f).is_none(), "advert ignored");
+        }
+        let mut done = None;
+        for f in &frames {
+            if let Some(out) = only_frames.accept("peer", f) {
+                done = Some(out);
+            }
+        }
+        assert_eq!(done.unwrap(), payload, "frames still reassemble");
     }
 
     #[test]
     fn distinct_msg_ids_and_sources_do_not_collide() {
         let a: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
         let b: Vec<u8> = (0..200u32).map(|i| (i + 7) as u8).collect();
-        let fa = fragment(1, &a, 64).unwrap();
-        let fb = fragment(2, &b, 64).unwrap();
+        let fa = fragment(KIND_FRAME, 1, &a, 64).unwrap();
+        let fb = fragment(KIND_FRAME, 2, &b, 64).unwrap();
         let mut r = Reassembler::default();
         // Interleave two different messages from two different sources.
         let mut out_a = None;
@@ -380,7 +447,7 @@ mod tests {
         // Start 3 different partial messages (each 2 fragments, only feed the first).
         for msg in 0..3u16 {
             let payload: Vec<u8> = (0..100u32).map(|i| i as u8).collect();
-            let frags = fragment(msg, &payload, 64).unwrap();
+            let frags = fragment(KIND_FRAME, msg, &payload, 64).unwrap();
             assert!(frags.len() >= 2);
             r.accept(&format!("peer{msg}"), &frags[0]); // only first fragment
         }
@@ -394,7 +461,7 @@ mod tests {
         let mut r = Reassembler::with_limits(100, 150);
         for msg in 0..3u16 {
             let payload: Vec<u8> = (0..100u32).map(|i| i as u8).collect();
-            let frags = fragment(msg, &payload, 64).unwrap();
+            let frags = fragment(KIND_FRAME, msg, &payload, 64).unwrap();
             r.accept(&format!("peer{msg}"), &frags[0]);
         }
         assert!(r.in_flight() <= 2, "byte cap forces eviction of oldest");

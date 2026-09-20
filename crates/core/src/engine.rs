@@ -846,6 +846,10 @@ struct Inner {
     root0: [u8; 32],
     peers: Mutex<Vec<Peer>>,
     events_tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    /// Optional LoRa-mesh message carry (set by `start_mesh_messaging`). When
+    /// present, `Route::Broadcast` group messages are ALSO fragmented and
+    /// transmitted over the mesh, in addition to the peer fan-out.
+    mesh_tx: Mutex<Option<MeshTx>>,
     // --- TreeKEM group state (GroupRole::None for plain pairwise chats) ---
     role: GroupRole,
     group: AsyncMutex<Option<TreeKemGroup>>,
@@ -1204,6 +1208,7 @@ impl Core {
             root0,
             peers: Mutex::new(Vec::new()),
             events_tx,
+            mesh_tx: Mutex::new(None),
             role,
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
@@ -2201,6 +2206,66 @@ impl Core {
         });
     }
 
+    /// Carry this group's chat messages over a LoRa mesh node (Meshtastic /
+    /// Meshcore), in ADDITION to the primary transport — for off-grid reach or
+    /// resilience. Mirrors [`Core::start_local_presence`]:
+    ///
+    /// * **Outbound:** every `Route::Broadcast` `Frame::GroupMsg` is fragmented and
+    ///   transmitted on `policy.channel` (see [`mesh_tee`]). The frame is already
+    ///   the opaque, self-authenticating group ciphertext — the mesh moves only
+    ///   sealed bytes (encapsulation; never keys or plaintext).
+    /// * **Inbound:** a spawned task reassembles `Frame`-kind fragments and feeds
+    ///   each recovered `Frame::GroupMsg` into [`handle_group_msg`] — the SAME
+    ///   self-authenticating path (group AEAD + per-sender ML-DSA) and the SAME
+    ///   `gossip_id`/`SeenSet` dedup as a peer frame, which is essential because a
+    ///   broadcast mesh redelivers every frame many times.
+    ///
+    /// A node on both mesh and a peer transport bridges the two: a mesh-received
+    /// frame is re-forwarded to connected peers by `handle_group_msg`'s gossip
+    /// loop, and vice versa, with `SeenSet` preventing loops. This slice carries
+    /// chat CONTENT only; group membership/commits ride the primary transport.
+    pub async fn start_mesh_messaging(
+        &self,
+        node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
+        policy: talkrypt_transport::mesh::MeshPolicy,
+    ) {
+        // Outbound: register the carry so `route` tees broadcasts to the mesh.
+        {
+            let mut g = self.inner.mesh_tx.lock().unwrap();
+            *g = Some(MeshTx {
+                node: node.clone(),
+                channel: policy.channel,
+                msg_id: std::sync::atomic::AtomicU16::new(0),
+            });
+        }
+        // Inbound: reassemble Frame-kind fragments and process each recovered
+        // GroupMsg through the self-authenticating group path.
+        let inner = self.inner.clone();
+        let channel = policy.channel;
+        tokio::spawn(async move {
+            let Ok(mut inbox) = node.subscribe().await else {
+                return;
+            };
+            let mut reasm = talkrypt_transport::mesh::frag::Reassembler::for_kind(
+                talkrypt_transport::mesh::frag::KIND_FRAME,
+            );
+            while let Some(pkt) = inbox.next().await {
+                if pkt.channel != channel {
+                    continue;
+                }
+                let src = pkt
+                    .from
+                    .map(|id| format!("{id:08x}"))
+                    .unwrap_or_else(|| "mesh".to_string());
+                if let Some(bytes) = reasm.accept(&src, &pkt.payload) {
+                    if let Some(Frame::GroupMsg(ct)) = Frame::decode(&bytes) {
+                        handle_group_msg(&inner, MESH_SOURCE_FP, ct).await;
+                    }
+                }
+            }
+        });
+    }
+
     /// SUB-SPEC D3 (test/inspection): number of messages in our own ephemeral backlog.
     #[doc(hidden)]
     pub fn backlog_len(&self) -> usize {
@@ -3015,10 +3080,66 @@ async fn send_payload(
     Ok(())
 }
 
+/// Outbound LoRa-mesh message carry, set by [`Core::start_mesh_messaging`]. Holds
+/// the node handle, the transmit channel, and a rolling per-message id so each
+/// mesh transmission's fragments group correctly.
+struct MeshTx {
+    node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
+    channel: u8,
+    msg_id: std::sync::atomic::AtomicU16,
+}
+
+/// The `from` handle stamped on a frame received over the mesh. The mesh is a
+/// broadcast medium with no per-peer session, so there is no real connected-peer
+/// fingerprint. This sentinel is only ever used by [`handle_group_msg`] for the
+/// echo-skip (`fp != from`, so we correctly forward to every real peer), as the
+/// no-op target of an optional `DeliveryAck` (`Route::Peer(sentinel)` matches no
+/// peer), and as an attribution fallback that never fires for a validly-signed
+/// frame — NONE of which is a trust decision (the frame self-authenticates via
+/// group AEAD + per-sender ML-DSA before any of this).
+const MESH_SOURCE_FP: [u8; 48] = [0xED; 48];
+
+/// If a mesh carry is active, also fragment + transmit a `Route::Broadcast`
+/// **`Frame::GroupMsg`** over the mesh (chat content only — control-plane frames
+/// stay on the primary transport to conserve scarce LoRa airtime). The frame is
+/// already the opaque, self-authenticating group ciphertext, so the mesh moves
+/// only sealed bytes.
+async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame) {
+    if !matches!(frame, Frame::GroupMsg(_)) {
+        return;
+    }
+    let (node, channel, id) = {
+        let guard = inner.mesh_tx.lock().unwrap();
+        let Some(tx) = guard.as_ref() else { return };
+        (
+            tx.node.clone(),
+            tx.channel,
+            tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    };
+    let bytes = frame.encode();
+    let mtu = node.mtu();
+    if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
+        talkrypt_transport::mesh::frag::KIND_FRAME,
+        id,
+        &bytes,
+        mtu,
+    ) {
+        for f in frags {
+            let _ = node.send(channel, &f).await;
+        }
+    }
+}
+
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
 /// in a [`Routed`] envelope and sent to the single relay peer, which fans it
 /// out. In host-coordinated mode it is sent directly to the resolved peers.
 async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
+    // Tee broadcast chat content onto the mesh (if active), in addition to the
+    // normal peer fan-out below. Works in both relayed and host-coordinated modes.
+    if matches!(to, Route::Broadcast) {
+        mesh_tee(inner, &frame).await;
+    }
     if inner.relayed {
         let routed = Routed {
             to,
@@ -5284,6 +5405,116 @@ mod tests {
             Some(m1.fingerprint()),
             "the group name must be attributed to m1's verified leaf, not the relaying host"
         );
+    }
+
+    /// Mesh messaging: a group chat message reaches another member purely over a
+    /// LoRa mesh, with the primary (loopback) transport SEVERED — proving the mesh
+    /// carry actually delivers, not the peer fan-out. The group is formed over
+    /// loopback (to share keys/roster), both members attach `start_mesh_messaging`
+    /// on a shared mock mesh, then the loopback peers are cleared so the only path
+    /// left is the mesh. The received frame must decrypt+verify and be attributed
+    /// to the SENDER's signing leaf (self-authenticating; the mesh source is a
+    /// non-identity sentinel).
+    #[tokio::test]
+    async fn group_message_travels_over_mesh_only() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mesh",
+        );
+        // Form the group over loopback so both sides share the epoch + roster.
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Attach both to a shared mock mesh (MTU 200 → a ~5 KB signed group frame
+        // fragments into ~25 packets, exercising the real fragment/reassembly path).
+        let mesh = MockMeshFabric::new(200);
+        host.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default())
+            .await;
+        m1.start_mesh_messaging(Arc::new(mesh.node(2)), MeshPolicy::default())
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await; // let subscribe() register
+
+        // SEVER the loopback link on both sides: the mesh is now the ONLY path.
+        host.inner.peers.lock().unwrap().clear();
+        m1.inner.peers.lock().unwrap().clear();
+
+        m1.send("over the air, no internet").await.unwrap();
+
+        let (text, from) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, from, .. }) => break (text, from),
+                    Some(_) => continue,
+                    None => break (String::new(), [0u8; 48]),
+                }
+            }
+        })
+        .await
+        .expect("a mesh-delivered message before timeout");
+
+        assert_eq!(text, "over the air, no internet");
+        assert_eq!(
+            from,
+            m1.fingerprint(),
+            "the mesh-delivered frame is attributed to the sender's verified leaf, \
+             not the mesh source sentinel"
+        );
+    }
+
+    /// Mesh messaging robustness: foreign / junk traffic on the mesh channel is
+    /// ignored — no `Event::Message`, no panic. A non-talkrypt node blasts random
+    /// bytes; the receiver's mesh task must drop them at `parse_fragment` and never
+    /// reach the group path.
+    #[tokio::test]
+    async fn foreign_mesh_traffic_does_not_produce_a_message() {
+        use talkrypt_transport::mesh::{MeshNode, MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mesh2",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        let mesh = MockMeshFabric::new(200);
+        host.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default())
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A foreign (non-talkrypt) node sends junk on the same channel.
+        let foreign = mesh.node(9);
+        for _ in 0..8 {
+            foreign
+                .send(0, b"hello from a plain meshtastic node")
+                .await
+                .unwrap();
+        }
+
+        // No Event::Message should surface within a short window.
+        let got = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await;
+        assert!(got.is_err(), "foreign mesh traffic must not produce a message");
     }
 
     /// SUB-SPEC A (§7, the decisive group gap #58 closes): a name announced by one
