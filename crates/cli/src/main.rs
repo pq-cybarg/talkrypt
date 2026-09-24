@@ -164,6 +164,8 @@ enum Cmd {
         /// `suppress` (hide a later collider's label, show its fingerprint).
         #[arg(long)]
         name_policy: Option<String>,
+        #[command(flatten)]
+        mesh: MeshArgs,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -198,6 +200,8 @@ enum Cmd {
         /// account-linked); use `/name link` in-session for a linked name.
         #[arg(long)]
         name: Option<String>,
+        #[command(flatten)]
+        mesh: MeshArgs,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -402,6 +406,7 @@ async fn main() {
             endpoint,
             name,
             name_policy,
+            mesh,
         } => {
             run_host(HostArgs {
                 listen,
@@ -424,6 +429,7 @@ async fn main() {
                 endpoint,
                 name,
                 name_policy,
+                mesh,
             })
             .await
         }
@@ -437,7 +443,8 @@ async fn main() {
             password,
             tor,
             name,
-        } => run_join(&uri, group, account, username, device, chain, password, tor, name).await,
+            mesh,
+        } => run_join(&uri, group, account, username, device, chain, password, tor, name, mesh).await,
         Cmd::Registry { listen, channel, tor } => run_registry(listen, channel, tor).await,
         Cmd::LinkOffer {
             listen,
@@ -585,6 +592,68 @@ struct HostArgs {
     endpoint: Option<String>,
     name: Option<String>,
     name_policy: Option<String>,
+    mesh: MeshArgs,
+}
+
+/// Shared `--mesh-*` flags for `host` / `join`: optionally carry messages over a
+/// LoRa mesh via a USB-serial Meshtastic / Meshcore node (feature `mesh-radio`).
+#[derive(clap::Args, Clone)]
+struct MeshArgs {
+    /// Also carry this chat's messages over a LoRa mesh via a USB-serial node at
+    /// this port (e.g. /dev/tty.usbserial-0001). Off unless set. Requires a build
+    /// with `--features mesh-radio`.
+    #[arg(long)]
+    mesh_serial: Option<String>,
+    /// Mesh firmware on the node: meshtastic (default) | meshcore.
+    #[arg(long, default_value = "meshtastic")]
+    mesh_kind: String,
+    /// Serial baud for the mesh node (Meshtastic uses 115200).
+    #[arg(long, default_value_t = 115200)]
+    mesh_baud: u32,
+    /// Mesh channel index to transmit talkrypt fragments on.
+    #[arg(long, default_value_t = 0)]
+    mesh_channel: u8,
+}
+
+/// If `--mesh-serial` was given, open the serial mesh node and start carrying this
+/// chat's messages over it (in addition to the primary transport). A no-op when
+/// unset; errors clearly when set in a build without the `mesh-radio` feature.
+async fn maybe_start_mesh(core: &Core, mesh: &MeshArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(port) = mesh.mesh_serial.clone() else {
+        return Ok(());
+    };
+    #[cfg(feature = "mesh-radio")]
+    {
+        use talkrypt_transport::mesh::{MeshNode, MeshPolicy, MeshcoreSerial, MeshtasticSerial};
+        let node: std::sync::Arc<dyn MeshNode> = match mesh.mesh_kind.as_str() {
+            "meshcore" => MeshcoreSerial::open(&port, mesh.mesh_baud).await?,
+            "meshtastic" => MeshtasticSerial::open(&port, mesh.mesh_baud).await?,
+            other => {
+                return Err(format!("unknown --mesh-kind '{other}' (meshtastic|meshcore)").into())
+            }
+        };
+        core.start_mesh_messaging(
+            node,
+            MeshPolicy {
+                channel: mesh.mesh_channel,
+                ..Default::default()
+            },
+        )
+        .await;
+        println!(
+            "mesh: {} on {port} @ {} baud (channel {}) — messages also ride the LoRa mesh",
+            mesh.mesh_kind, mesh.mesh_baud, mesh.mesh_channel
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "mesh-radio"))]
+    {
+        let _ = core;
+        Err(format!(
+            "--mesh-serial {port} requires a build with `--features mesh-radio`"
+        )
+        .into())
+    }
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -980,6 +1049,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         endpoint,
         name,
         name_policy,
+        mesh,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -1102,6 +1172,9 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
             hex(&blob)
         );
     }
+
+    // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
+    maybe_start_mesh(&core, &mesh).await?;
     // Show the invite as a scannable QR for in-person joining.
     println!("scan to join (or copy the URI above):\n");
     print_qr(&desc.to_uri());
@@ -1128,6 +1201,7 @@ async fn run_join(
     password: Option<String>,
     tor: bool,
     name: Option<String>,
+    mesh: MeshArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let mut desc = ChatDescriptor::from_uri(uri)?;
@@ -1181,6 +1255,9 @@ async fn run_join(
         "connected to {} peer(s). /help for commands.\n",
         core.peer_count()
     );
+
+    // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
+    maybe_start_mesh(&core, &mesh).await?;
 
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;

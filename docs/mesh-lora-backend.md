@@ -110,23 +110,59 @@ pub enum MeshHeard {
 
 ---
 
-## Device-gated: the real adapters
+## The real serial adapters (`feature = "mesh-radio"`)
 
-The Meshtastic and Meshcore `MeshNode` adapters live in
-`talkrypt_transport::mesh::adapters` (behind `feature = "mesh-radio"` when a device
-is in the loop). They are documented ports, not yet compiled/run here:
+`talkrypt_transport::mesh` ships two native USB-serial `MeshNode` adapters (behind
+`feature = "mesh-radio"`; off by default so the base build has no serial/udev
+dependency). Their pure codecs are unit-tested with golden vectors; the serial I/O
+is validated on hardware.
 
-- **Meshtastic** — BLE (Nordic-UART) / USB serial / TCP; the `ToRadio` /
-  `FromRadio` protobuf stream. Send bytes as a `MeshPacket { Data { portnum:
-  PRIVATE_APP, payload } }` on the channel; receive `FromRadio.packet`. Usable
-  `Data.payload` MTU ≈ 233 bytes. Needs a protobuf codec (`prost`) + a BLE/serial
-  handle.
-- **Meshcore** — BLE / USB serial companion protocol; send/receive channel
-  messages; MTU ≈ 184-230. Baseline AES-128 shared key (treated as an untrusted
-  outer wrapper).
+- **`MeshtasticSerial`** (`mesh::meshtastic`) — the Stream API framing
+  (`0x94 0xC3 <len16> <pb>`) + a hand-written minimal Meshtastic protobuf codec
+  (no `prost`/`protoc`). Sends `ToRadio { packet: MeshPacket { to: BROADCAST,
+  channel, decoded: Data { portnum: PRIVATE_APP, payload } } }`; receives
+  `FromRadio { packet }` and surfaces the `PRIVATE_APP` payload. `PRIVATE_APP`
+  carries arbitrary binary, so fragments ride raw. Field numbers verified against
+  `meshtastic/protobufs`. MTU 200. **Primary, fully-verified adapter.**
+- **`MeshcoreSerial`** (`mesh::meshcore`) — the companion protocol
+  (`CMD_SEND_CHANNEL_TXT_MSG` 0x03 / `PACKET_CHANNEL_MSG_RECV` 0x08 / `_V3` 0x11,
+  layouts verified against the companion protocol doc). Its channel message is a
+  UTF-8 *text* field, so fragments are **base64-wrapped** for text-safety; MTU 120
+  (`base64(120) ≤ 160`). The serial OUTER framing (`[type][len16 LE][payload]`) is
+  firmware-dependent — see `mesh::meshcore` module docs; **validate on your node.**
 
-Once either adapter is implemented, the rest of talkrypt — beacon, messaging,
-fragmentation, classification — works unchanged. That is the point of the seam.
+```rust
+# #[cfg(feature = "mesh-radio")]
+use talkrypt_transport::mesh::{MeshtasticSerial, MeshPolicy};
+let node = MeshtasticSerial::open("/dev/tty.usbserial-0001", 115200).await?;
+core.start_mesh_messaging(node, MeshPolicy { channel: 0, ..Default::default() }).await;
+```
+
+Everything above the adapters — beacon, messaging, fragmentation, classification —
+works unchanged over them; that is the point of the seam.
+
+### Run a bilateral test on hardware (CLI)
+
+With two USB LoRa nodes flashed with Meshtastic (or a T-Deck + a dongle), on the
+same LoRa channel/region, build the CLI with the feature and attach a node to each
+side of a normal chat — messages then flow over LoRa in addition to the primary
+transport:
+
+```sh
+# Node A (host):
+cargo run -p talkrypt-cli --features mesh-radio -- \
+    host --group --channel '#field' --mesh-serial /dev/tty.usbserial-A
+
+# Node B (join), using the invite A printed:
+cargo run -p talkrypt-cli --features mesh-radio -- \
+    join 'talkrypt://…' --group --mesh-serial /dev/tty.usbserial-B
+```
+
+Flags: `--mesh-serial <port>` (required to enable), `--mesh-kind meshtastic|meshcore`
+(default `meshtastic`), `--mesh-baud` (default 115200), `--mesh-channel` (default 0).
+Establish the group once over the primary transport (LAN/Tor); after that, messages
+also ride the mesh, and a mesh-only peer (primary transport unplugged) still
+receives them.
 
 ## Messaging: chat frames over the mesh
 
