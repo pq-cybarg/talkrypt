@@ -157,6 +157,27 @@ no new trust, no dependency on a connected peer. It mirrors `start_local_presenc
 The beacon (`kind = Advert`) and messaging (`kind = Frame`) share one mesh channel
 and ignore each other's fragments via the header `kind` byte.
 
+### From a host language (phone ↔ node over BLE)
+
+The FFI exposes messaging as a callback backend, mirroring the beacon FFI: the
+host implements the mesh link in its own language (e.g. a phone talking to a
+T-Deck / Meshtastic node over BLE) and talkrypt drives it.
+
+- Implement `MeshNodeBackend` (`mtu() -> u32`, `send(channel, payload)`) in
+  Kotlin/Swift.
+- Call `client.startMeshMessaging(backend, channel)` → returns an `FfiMeshNode`
+  handle. talkrypt now fragments + transmits this chat's outbound group frames via
+  your `send`.
+- From your radio's receive callback, push each inbound packet in with
+  `ffiMeshNode.deliverPacket(channel, payload, from)`. talkrypt reassembles
+  talkrypt fragments and surfaces recovered group frames as `FfiEvent.Message`;
+  non-talkrypt bytes are dropped. Same opaque-bytes invariant.
+
+### Native (desktop / CLI ↔ USB-serial LoRa)
+
+A Rust build links a `MeshNode` adapter directly — no FFI. See the device-gated
+serial adapters below.
+
 **Scope:** this carries chat CONTENT for an already-established group; group
 **membership/commits** ride the primary transport (mesh-native membership is a
 future slice). Airtime reality: a signed group frame is a few KB, so it fragments
@@ -164,9 +185,6 @@ into ~20-30 mesh packets — usable for text, not a Tor-speed experience.
 
 ## Out of scope (next slices)
 
-- **FFI host-callback surface** for messaging (`MeshNodeBackend` +
-  `FfiMeshNode.deliverPacket`, `TalkryptClient::start_mesh_messaging`) — mirrors
-  the `FfiBeacon` staging; no host has a real `MeshNode` backend yet.
 - **Mesh-native membership/commits** (control plane over broadcast).
 - A connection-oriented `Transport` over broadcast LoRa (the datagram carry is the
   substrate; the `Stream`/`Listener` model maps poorly onto a connectionless
