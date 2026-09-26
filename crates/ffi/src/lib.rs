@@ -1986,6 +1986,37 @@ impl FfiMeshNode {
     }
 }
 
+/// A Meshtastic `PRIVATE_APP` payload recovered from a `FromRadio` frame.
+#[derive(uniffi::Record)]
+pub struct MeshtasticRxFfi {
+    pub channel: u8,
+    pub from: Option<u32>,
+    pub payload: Vec<u8>,
+}
+
+/// Encode a talkrypt fragment as a Meshtastic `ToRadio` protobuf (`PRIVATE_APP`,
+/// broadcast) on `channel` — the raw bytes a BLE host writes to the node's ToRadio
+/// characteristic (BLE needs no Stream API framing; GATT frames each write). Lets a
+/// host implement a Meshtastic `MeshNodeBackend` as a dumb BLE pipe, reusing the
+/// verified Rust codec instead of a Kotlin/Swift protobuf.
+#[uniffi::export]
+pub fn meshtastic_encode_toradio(channel: u8, payload: Vec<u8>) -> Vec<u8> {
+    talkrypt_transport::mesh::meshtastic::encode_toradio(channel, &payload)
+}
+
+/// Parse a Meshtastic `FromRadio` protobuf (one GATT read); return its `PRIVATE_APP`
+/// payload with the channel + coarse sender if it carries one, else `None` (config /
+/// text / other ports). Forward a returned payload to
+/// [`FfiMeshNode::deliver_packet`]. Never panics on malformed bytes.
+#[uniffi::export]
+pub fn meshtastic_parse_fromradio(bytes: Vec<u8>) -> Option<MeshtasticRxFfi> {
+    talkrypt_transport::mesh::meshtastic::parse_fromradio(&bytes).map(|rx| MeshtasticRxFfi {
+        channel: rx.channel,
+        from: rx.from,
+        payload: rx.payload,
+    })
+}
+
 /// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase` (fully
 /// PQ-safe, `SoftwareSealed`), or a hardware `wrapper` for a `HardwareBacked`, device-bound
 /// blob. Per the QROM/L5 baseline a CLASSICAL hardware wrapper alone is refused (its

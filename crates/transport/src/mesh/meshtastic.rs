@@ -1,10 +1,13 @@
-//! Meshtastic USB-serial [`MeshNode`] adapter (feature `mesh-radio`).
+//! Meshtastic protocol codec + USB-serial [`MeshNode`] adapter.
 //!
-//! Talks to a Meshtastic node (T-Deck, USB LoRa dongle, …) over its **Stream API**
-//! serial framing, carrying talkrypt's opaque fragment bytes in a `PRIVATE_APP`
-//! payload. The Meshtastic protobuf is encoded/decoded by a **hand-written minimal
-//! codec** — only the handful of fields we use — so there is no `prost`/`protoc`
-//! build dependency and the codec is fully unit-testable with golden byte vectors.
+//! The **codec** (protobuf encode/parse of the fields talkrypt uses) is always
+//! compiled and `pub`, so any host can build/parse Meshtastic frames — the FFI
+//! exposes it for a phone driving a node over BLE (raw protobuf per GATT write, no
+//! Stream API framing), and [`MeshtasticSerial`] (behind `feature = "mesh-radio"`)
+//! uses it with the Stream API framing over USB-serial.
+//!
+//! The protobuf is hand-written (only the handful of fields we use) — no
+//! `prost`/`protoc` build dependency — and unit-tested with golden byte vectors.
 //!
 //! Verified field numbers (meshtastic/protobufs `mesh.proto`, `portnums.proto`):
 //! - `ToRadio.packet = 1` (len-delim), `ToRadio.want_config_id = 3` (varint)
@@ -14,39 +17,22 @@
 //! - `Data.portnum = 1` (varint), `.payload = 2` (len-delim)
 //! - `PortNum::PRIVATE_APP = 256`
 //!
-//! Stream API framing: `0x94 0xC3 <len_hi> <len_lo> <protobuf>`, length big-endian,
-//! payload ≤ 512 bytes; default serial baud 115200.
+//! Stream API framing (serial/TCP only, NOT BLE): `0x94 0xC3 <len_hi> <len_lo>
+//! <protobuf>`, length big-endian, payload ≤ 512 bytes; default serial baud 115200.
 //!
-//! The mesh's own per-channel crypto is an untrusted outer wrapper (see the module
-//! docs); talkrypt's seal is the real envelope. This adapter moves only opaque,
-//! already-sealed fragment bytes.
+//! The mesh's own per-channel crypto is an untrusted outer wrapper; talkrypt's seal
+//! is the real envelope. This layer moves only opaque, already-sealed fragment
+//! bytes.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::Mutex as AsyncMutex;
-use tokio_serial::{SerialPortBuilderExt, SerialStream};
-
-use super::{MeshInbox, MeshNode, MeshPacket};
-use crate::{Result, TransportError};
-
-/// Meshtastic Stream API frame markers.
-const START1: u8 = 0x94;
-const START2: u8 = 0xc3;
-/// Max protobuf payload per Stream API frame (device rejects larger).
-const MAX_STREAM_PAYLOAD: usize = 512;
 /// `PortNum::PRIVATE_APP` — the app port talkrypt fragments ride on.
-const PRIVATE_APP: u64 = 256;
+pub const PRIVATE_APP: u64 = 256;
 /// Meshtastic broadcast address (`0xffffffff`).
-const BROADCAST: u32 = 0xffff_ffff;
-/// Conservative usable `Data.payload` budget for one packet (region/preset
-/// dependent; the default LoRa preset allows ~237, we leave headroom).
-const DEFAULT_MTU: usize = 200;
+pub const BROADCAST: u32 = 0xffff_ffff;
 
 // ---------------------------------------------------------------------------
 // Minimal protobuf codec (only the fields we use). Encoding is standard
 // LEB128 varints + length-delimited + fixed32; decoding skips unknown fields.
+// Always compiled (no serial/feature dependency) so the FFI/BLE host can use it.
 // ---------------------------------------------------------------------------
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -157,7 +143,9 @@ fn each_field(buf: &[u8], mut f: impl FnMut(Field<'_>)) {
 
 /// Encode a `ToRadio { packet: MeshPacket { to: BROADCAST, channel, decoded:
 /// Data { portnum: PRIVATE_APP, payload } } }` carrying `payload` on `channel`.
-pub(crate) fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
+/// This is the raw protobuf a BLE host writes to the ToRadio characteristic; the
+/// serial adapter additionally wraps it in the Stream API [`frame`].
+pub fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
     // Data { portnum=1: PRIVATE_APP, payload=2 }
     let mut data = Vec::new();
     put_varint_field(&mut data, 1, PRIVATE_APP);
@@ -174,6 +162,7 @@ pub(crate) fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Encode a `ToRadio { want_config_id }` — sent on connect to engage the stream.
+#[cfg(feature = "mesh-radio")]
 pub(crate) fn encode_want_config(nonce: u32) -> Vec<u8> {
     let mut toradio = Vec::new();
     put_varint_field(&mut toradio, 3, nonce as u64);
@@ -182,7 +171,7 @@ pub(crate) fn encode_want_config(nonce: u32) -> Vec<u8> {
 
 /// A `PRIVATE_APP` payload recovered from a `FromRadio` protobuf.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct MeshtasticRx {
+pub struct MeshtasticRx {
     pub channel: u8,
     pub from: Option<u32>,
     pub payload: Vec<u8>,
@@ -190,8 +179,8 @@ pub(crate) struct MeshtasticRx {
 
 /// Parse a `FromRadio` protobuf; return the inner `PRIVATE_APP` payload (with its
 /// channel + sender) if this frame carries one, else `None` (config, node-info,
-/// text messages, other ports — all ignored).
-pub(crate) fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
+/// text messages, other ports — all ignored). Never panics on malformed input.
+pub fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
     let mut packet: Option<Vec<u8>> = None;
     each_field(buf, |fld| {
         if let Field::Bytes(2, b) = fld {
@@ -204,8 +193,8 @@ pub(crate) fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
     let mut channel: u8 = 0;
     let mut decoded: Option<Vec<u8>> = None;
     each_field(&packet, |fld| match fld {
-        Field::Fixed32(1, v) => from = Some(v),         // MeshPacket.from
-        Field::Varint(3, v) => channel = v as u8,       // MeshPacket.channel
+        Field::Fixed32(1, v) => from = Some(v),           // MeshPacket.from
+        Field::Varint(3, v) => channel = v as u8,         // MeshPacket.channel
         Field::Bytes(4, b) => decoded = Some(b.to_vec()), // MeshPacket.decoded (Data)
         _ => {}
     });
@@ -214,7 +203,7 @@ pub(crate) fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
     let mut portnum: u64 = 0;
     let mut payload: Option<Vec<u8>> = None;
     each_field(&decoded, |fld| match fld {
-        Field::Varint(1, v) => portnum = v,             // Data.portnum
+        Field::Varint(1, v) => portnum = v,               // Data.portnum
         Field::Bytes(2, b) => payload = Some(b.to_vec()), // Data.payload
         _ => {}
     });
@@ -228,7 +217,25 @@ pub(crate) fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Stream API framing + serial adapter (serial/TCP only; BLE does not use these).
+// ---------------------------------------------------------------------------
+
+/// Meshtastic Stream API frame markers.
+#[cfg(feature = "mesh-radio")]
+const START1: u8 = 0x94;
+#[cfg(feature = "mesh-radio")]
+const START2: u8 = 0xc3;
+/// Max protobuf payload per Stream API frame (device rejects larger).
+#[cfg(feature = "mesh-radio")]
+const MAX_STREAM_PAYLOAD: usize = 512;
+/// Conservative usable `Data.payload` budget for one packet (region/preset
+/// dependent; the default LoRa preset allows ~237, we leave headroom).
+#[cfg(feature = "mesh-radio")]
+const DEFAULT_MTU: usize = 200;
+
 /// Wrap a protobuf message in the Stream API frame (`0x94 0xC3 len16 …`).
+#[cfg(feature = "mesh-radio")]
 pub(crate) fn frame(pb: &[u8]) -> Vec<u8> {
     let len = pb.len() as u16;
     let mut out = Vec::with_capacity(4 + pb.len());
@@ -242,22 +249,22 @@ pub(crate) fn frame(pb: &[u8]) -> Vec<u8> {
 /// Incremental Stream API deframer: feed raw serial bytes, get complete protobuf
 /// frames out. Resynchronizes on START1/START2 and drops the (debug-log) bytes in
 /// between; discards over-long frames per the spec.
+#[cfg(feature = "mesh-radio")]
 #[derive(Default)]
 pub(crate) struct Deframer {
     buf: Vec<u8>,
 }
 
+#[cfg(feature = "mesh-radio")]
 impl Deframer {
     pub(crate) fn push(&mut self, bytes: &[u8], mut on_frame: impl FnMut(Vec<u8>)) {
         self.buf.extend_from_slice(bytes);
         loop {
-            // Find START1 START2; drop anything before it (device debug output).
             let start = self
                 .buf
                 .windows(2)
                 .position(|w| w[0] == START1 && w[1] == START2);
             let Some(s) = start else {
-                // Keep at most the last byte (could be a lone START1).
                 if self.buf.len() > 1 {
                     self.buf.drain(..self.buf.len() - 1);
                 }
@@ -267,16 +274,15 @@ impl Deframer {
                 self.buf.drain(..s);
             }
             if self.buf.len() < 4 {
-                return; // need the length header
+                return;
             }
             let len = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
             if len > MAX_STREAM_PAYLOAD {
-                // Corrupt length — skip these two magic bytes and resync.
                 self.buf.drain(..2);
                 continue;
             }
             if self.buf.len() < 4 + len {
-                return; // wait for the rest of the frame
+                return;
             }
             let pb = self.buf[4..4 + len].to_vec();
             self.buf.drain(..4 + len);
@@ -285,91 +291,107 @@ impl Deframer {
     }
 }
 
-/// A Meshtastic node reached over USB-serial, implementing [`MeshNode`].
-pub struct MeshtasticSerial {
-    writer: AsyncMutex<WriteHalf<SerialStream>>,
-    reader: std::sync::Mutex<Option<ReadHalf<SerialStream>>>,
-    mtu: usize,
-}
+#[cfg(feature = "mesh-radio")]
+mod serial {
+    use std::sync::Arc;
 
-impl MeshtasticSerial {
-    /// Open the node at serial `path` (e.g. `/dev/tty.usbserial-XXX`) at `baud`
-    /// (115200 for Meshtastic). Sends a `want_config_id` to engage the stream.
-    pub async fn open(path: &str, baud: u32) -> Result<Arc<Self>> {
-        Self::open_with_mtu(path, baud, DEFAULT_MTU).await
+    use async_trait::async_trait;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::sync::Mutex as AsyncMutex;
+    use tokio_serial::{SerialPortBuilderExt, SerialStream};
+
+    use super::{encode_toradio, encode_want_config, frame, parse_fromradio, Deframer, DEFAULT_MTU};
+    use crate::mesh::{MeshInbox, MeshNode, MeshPacket};
+    use crate::{Result, TransportError};
+
+    /// A Meshtastic node reached over USB-serial, implementing [`MeshNode`].
+    pub struct MeshtasticSerial {
+        writer: AsyncMutex<WriteHalf<SerialStream>>,
+        reader: std::sync::Mutex<Option<ReadHalf<SerialStream>>>,
+        mtu: usize,
     }
 
-    /// As [`open`](Self::open) with an explicit per-packet payload `mtu`.
-    pub async fn open_with_mtu(path: &str, baud: u32, mtu: usize) -> Result<Arc<Self>> {
-        let stream = tokio_serial::new(path, baud)
-            .open_native_async()
-            .map_err(|e| TransportError::Io(format!("open {path}: {e}")))?;
-        let (rd, mut wr) = tokio::io::split(stream);
-        // Engage the stream: a want_config_id nonce (correlation id only).
-        let _ = wr.write_all(&frame(&encode_want_config(0x7401_7401))).await;
-        let _ = wr.flush().await;
-        Ok(Arc::new(Self {
-            writer: AsyncMutex::new(wr),
-            reader: std::sync::Mutex::new(Some(rd)),
-            mtu,
-        }))
-    }
-}
+    impl MeshtasticSerial {
+        /// Open the node at serial `path` (e.g. `/dev/tty.usbserial-XXX`) at `baud`
+        /// (115200 for Meshtastic). Sends a `want_config_id` to engage the stream.
+        pub async fn open(path: &str, baud: u32) -> Result<Arc<Self>> {
+            Self::open_with_mtu(path, baud, DEFAULT_MTU).await
+        }
 
-#[async_trait]
-impl MeshNode for MeshtasticSerial {
-    fn mtu(&self) -> usize {
-        self.mtu
-    }
-
-    async fn send(&self, channel: u8, payload: &[u8]) -> Result<()> {
-        let pkt = frame(&encode_toradio(channel, payload));
-        let mut w = self.writer.lock().await;
-        w.write_all(&pkt)
-            .await
-            .map_err(|e| TransportError::Io(e.to_string()))?;
-        w.flush().await.map_err(|e| TransportError::Io(e.to_string()))?;
-        Ok(())
+        /// As [`open`](Self::open) with an explicit per-packet payload `mtu`.
+        pub async fn open_with_mtu(path: &str, baud: u32, mtu: usize) -> Result<Arc<Self>> {
+            let stream = tokio_serial::new(path, baud)
+                .open_native_async()
+                .map_err(|e| TransportError::Io(format!("open {path}: {e}")))?;
+            let (rd, mut wr) = tokio::io::split(stream);
+            let _ = wr.write_all(&frame(&encode_want_config(0x7401_7401))).await;
+            let _ = wr.flush().await;
+            Ok(Arc::new(Self {
+                writer: AsyncMutex::new(wr),
+                reader: std::sync::Mutex::new(Some(rd)),
+                mtu,
+            }))
+        }
     }
 
-    async fn subscribe(&self) -> Result<MeshInbox> {
-        let mut rd = self
-            .reader
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| TransportError::Io("meshtastic reader already taken".into()))?;
-        let (inbox, tx) = MeshInbox::channel();
-        tokio::spawn(async move {
-            let mut deframer = Deframer::default();
-            let mut buf = [0u8; 512];
-            loop {
-                match rd.read(&mut buf).await {
-                    Ok(0) => break, // port closed
-                    Ok(n) => {
-                        let mut packets = Vec::new();
-                        deframer.push(&buf[..n], |pb| {
-                            if let Some(rx) = parse_fromradio(&pb) {
-                                packets.push(MeshPacket {
-                                    channel: rx.channel,
-                                    payload: rx.payload,
-                                    from: rx.from,
-                                });
-                            }
-                        });
-                        for p in packets {
-                            if tx.send(p).is_err() {
-                                return; // inbox dropped
+    #[async_trait]
+    impl MeshNode for MeshtasticSerial {
+        fn mtu(&self) -> usize {
+            self.mtu
+        }
+
+        async fn send(&self, channel: u8, payload: &[u8]) -> Result<()> {
+            let pkt = frame(&encode_toradio(channel, payload));
+            let mut w = self.writer.lock().await;
+            w.write_all(&pkt)
+                .await
+                .map_err(|e| TransportError::Io(e.to_string()))?;
+            w.flush().await.map_err(|e| TransportError::Io(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn subscribe(&self) -> Result<MeshInbox> {
+            let mut rd = self
+                .reader
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| TransportError::Io("meshtastic reader already taken".into()))?;
+            let (inbox, tx) = MeshInbox::channel();
+            tokio::spawn(async move {
+                let mut deframer = Deframer::default();
+                let mut buf = [0u8; 512];
+                loop {
+                    match rd.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let mut packets = Vec::new();
+                            deframer.push(&buf[..n], |pb| {
+                                if let Some(rx) = parse_fromradio(&pb) {
+                                    packets.push(MeshPacket {
+                                        channel: rx.channel,
+                                        payload: rx.payload,
+                                        from: rx.from,
+                                    });
+                                }
+                            });
+                            for p in packets {
+                                if tx.send(p).is_err() {
+                                    return;
+                                }
                             }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
-        });
-        Ok(inbox)
+            });
+            Ok(inbox)
+        }
     }
 }
+
+#[cfg(feature = "mesh-radio")]
+pub use serial::MeshtasticSerial;
 
 #[cfg(test)]
 mod tests {
@@ -377,11 +399,7 @@ mod tests {
 
     #[test]
     fn toradio_roundtrips_through_a_fromradio_shaped_message() {
-        // Encode what we'd SEND, then wrap the same MeshPacket as a FromRadio the
-        // device would emit, and confirm our parser recovers the payload/channel.
         let payload = b"talkrypt-fragment-bytes";
-        // Build the MeshPacket exactly as encode_toradio does, then wrap as
-        // FromRadio { packet=2 } with a from=fixed32 added (device stamps it).
         let mut data = Vec::new();
         put_varint_field(&mut data, 1, PRIVATE_APP);
         put_len_delim(&mut data, 2, payload);
@@ -403,10 +421,9 @@ mod tests {
         let pb = encode_toradio(3, b"hi");
         // ToRadio.packet = field 1, wire 2 → first tag byte = (1<<3)|2 = 0x0a.
         assert_eq!(pb[0], 0x0a);
-        // Re-parse the packet as if echoed back (add a portnum-bearing Data) — the
-        // encoder must produce a PRIVATE_APP payload our parser accepts.
+        // Re-parse the inner MeshPacket as if echoed back by the device.
         let mut fromradio = Vec::new();
-        put_len_delim(&mut fromradio, 2, &pb[2..]); // pb[2..] = the MeshPacket bytes
+        put_len_delim(&mut fromradio, 2, &pb[2..]);
         let rx = parse_fromradio(&fromradio).unwrap();
         assert_eq!(rx.channel, 3);
         assert_eq!(rx.payload, b"hi");
@@ -414,7 +431,6 @@ mod tests {
 
     #[test]
     fn parse_ignores_non_private_app_ports() {
-        // A TEXT_MESSAGE_APP (portnum=1) packet must NOT surface as a talkrypt payload.
         let mut data = Vec::new();
         put_varint_field(&mut data, 1, 1); // TEXT_MESSAGE_APP
         put_len_delim(&mut data, 2, b"hello mesh");
@@ -429,25 +445,24 @@ mod tests {
     fn parse_tolerates_junk_and_truncation() {
         assert!(parse_fromradio(b"").is_none());
         assert!(parse_fromradio(b"\xff\xff\xff garbage").is_none());
-        // Truncated length-delimited field must not panic.
         assert!(parse_fromradio(&[0x12, 0x40, 0x01, 0x02]).is_none());
     }
 
+    #[cfg(feature = "mesh-radio")]
     #[test]
     fn frame_and_deframe_roundtrip() {
         let a = encode_toradio(1, b"one");
         let b = encode_toradio(2, b"two");
         let wire = [frame(&a), frame(&b)].concat();
-
         let mut d = Deframer::default();
         let mut got: Vec<Vec<u8>> = Vec::new();
-        // Feed the stream in awkward 3-byte chunks to exercise reassembly.
         for chunk in wire.chunks(3) {
             d.push(chunk, |pb| got.push(pb));
         }
         assert_eq!(got, vec![a, b]);
     }
 
+    #[cfg(feature = "mesh-radio")]
     #[test]
     fn deframer_resyncs_past_device_debug_output() {
         let a = encode_toradio(0, b"payload");
@@ -459,9 +474,9 @@ mod tests {
         assert_eq!(got, vec![a]);
     }
 
+    #[cfg(feature = "mesh-radio")]
     #[test]
     fn deframer_skips_corrupt_overlong_length() {
-        // START1 START2 followed by a >512 length must be skipped, then a good frame recovered.
         let good = encode_toradio(0, b"ok");
         let mut wire = vec![START1, START2, 0xff, 0xff]; // len 65535 > 512
         wire.extend_from_slice(&frame(&good));
