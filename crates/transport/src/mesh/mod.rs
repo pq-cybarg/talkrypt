@@ -33,10 +33,10 @@ pub mod beacon;
 pub mod frag;
 pub mod mock;
 
+/// Meshtastic codec (always compiled) + serial adapter (feature `mesh-radio`).
+pub mod meshtastic;
 #[cfg(feature = "mesh-radio")]
 pub mod meshcore;
-#[cfg(feature = "mesh-radio")]
-pub mod meshtastic;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
