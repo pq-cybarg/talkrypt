@@ -33,6 +33,11 @@ pub mod beacon;
 pub mod frag;
 pub mod mock;
 
+#[cfg(feature = "mesh-radio")]
+pub mod meshcore;
+#[cfg(feature = "mesh-radio")]
+pub mod meshtastic;
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -40,6 +45,11 @@ use crate::Result;
 
 pub use beacon::MeshBeacon;
 pub use mock::{MockMeshFabric, MockMeshNode};
+
+#[cfg(feature = "mesh-radio")]
+pub use meshcore::MeshcoreSerial;
+#[cfg(feature = "mesh-radio")]
+pub use meshtastic::MeshtasticSerial;
 
 /// One packet received from the mesh (already de-radioed by the node firmware —
 /// this is an application payload, never raw LoRa symbols).
