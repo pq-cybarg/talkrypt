@@ -7,11 +7,13 @@ else** on the mesh: it recognises other talkrypt nodes' traffic and hands their
 opaque blob to the core to open (when you hold the keys), and surfaces
 foreign / plaintext mesh traffic **clearly labelled as not talkrypt-secured**.
 
-Everything below the "device-gated" line is built and tested today over an
-in-memory mock node; the two real-radio adapters are documented, correct-by-
-construction ports validated on hardware later (there is no LoRa node in the dev
-loop). See the design in
-[`docs/superpowers/specs/2026-09-16-mesh-lora-backend-design.md`](superpowers/specs/2026-09-16-mesh-lora-backend-design.md).
+The seam, beacon, messaging, fragmentation, and classification are built and
+tested over an in-memory mock node **and** over two native USB-serial adapters
+(Meshtastic / Meshcore, `feature = "mesh-radio"`) whose codecs are unit-tested;
+the serial I/O is validated on real LoRa hardware. See the design in
+[`docs/superpowers/specs/2026-09-16-mesh-lora-backend-design.md`](superpowers/specs/2026-09-16-mesh-lora-backend-design.md)
+and the messaging design in
+[`docs/superpowers/specs/2026-09-18-mesh-messaging-design.md`](superpowers/specs/2026-09-18-mesh-messaging-design.md).
 
 ## Why encapsulation is the default (the mesh security reality)
 
