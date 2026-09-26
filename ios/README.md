@@ -24,13 +24,33 @@ mirroring the Android implementations.
   platforms interoperate over the air. Upholds the non-negotiable backend invariant:
   it only ever moves opaque sealed bytes, never keys or plaintext.
 
+- **`MeshtasticBackend.swift`** — CoreBluetooth implementation of the FFI
+  `MeshNodeBackend` seam (#68 mesh messaging over a Meshtastic LoRa node). The peer
+  of Android's `MeshtasticBleBackend`
+  (`android/app/src/main/kotlin/com/talkrypt/app/MeshtasticBle.kt`): `send(channel:payload:)`
+  wraps the opaque fragment as a `PRIVATE_APP` `ToRadio` protobuf **using the
+  verified Rust codec over the FFI** (`meshtasticEncodeToradio` — no Swift protobuf)
+  and writes it to the node's ToRadio characteristic; on the FromNum notification it
+  drains FromRadio and hands each `meshtasticParseFromradio` payload up for
+  `FfiMeshNode.deliverPacket(...)`. Meshtastic BLE UUIDs (service `6ba1b218…`,
+  ToRadio `f75c76d2…`, FromRadio `2c55e69e…`, FromNum `ed9da18c…`) verified against
+  meshtastic.org and identical to Android's. Same opaque-bytes invariant.
+
 ## Wiring (in a future iOS app)
 
 ```swift
+// Presence beacon:
 let backend = BleBeaconBackend()
 let beacon = try client.startLocalPresence(backend: backend, policy: .full)
 backend.startScanning { blob, source in
     try? beacon.deliverBeacon(blob: blob, source: source)
+}
+
+// Mesh messaging over a Meshtastic node:
+let mesh = MeshtasticBleBackend()
+let node = try client.startMeshMessaging(backend: mesh, channel: 0)
+mesh.startReceiving { channel, payload, from in
+    node.deliverPacket(channel: channel, payload: payload, from: from)
 }
 ```
 
