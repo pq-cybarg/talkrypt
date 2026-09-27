@@ -12,7 +12,6 @@ import android.os.Handler
 import android.os.Looper
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
-import uniffi.talkrypt_ffi.MeshNodeBackend
 import uniffi.talkrypt_ffi.meshtasticEncodeToradio
 import uniffi.talkrypt_ffi.meshtasticParseFromradio
 
@@ -38,7 +37,7 @@ import uniffi.talkrypt_ffi.meshtasticParseFromradio
 class MeshtasticBleBackend(
     private val context: Context,
     private val device: BluetoothDevice,
-) : MeshNodeBackend {
+) : MeshRadioBackend {
     private val main = Handler(Looper.getMainLooper())
     private var gatt: BluetoothGatt? = null
     private var toRadio: BluetoothGattCharacteristic? = null
@@ -82,7 +81,7 @@ class MeshtasticBleBackend(
      * `client.startMeshMessaging(backend, channel)` returns the handle.
      */
     @SuppressLint("MissingPermission")
-    fun startReceiving(onPacket: (UByte, ByteArray, UInt?) -> Unit) {
+    override fun startReceiving(onPacket: (UByte, ByteArray, UInt?) -> Unit) {
         this.onPacket = onPacket
         try {
             gatt = device.connectGatt(context, false, callback)
@@ -91,7 +90,7 @@ class MeshtasticBleBackend(
     }
 
     @SuppressLint("MissingPermission")
-    fun stop() {
+    override fun stop() {
         try {
             gatt?.disconnect()
             gatt?.close()
