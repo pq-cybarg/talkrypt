@@ -73,8 +73,8 @@ class MainActivity : Activity() {
     // SUB-SPEC A / #68: the active beacon (radio backend + FFI handle), if running.
     private var beaconBackend: RadioBeacon? = null
     private var beacon: FfiBeacon? = null
-    // Mesh messaging over a Meshtastic BLE node (radio backend + FFI handle + scan), if running.
-    private var meshBackend: MeshtasticBleBackend? = null
+    // Mesh messaging over a LoRa BLE node (Meshtastic/Meshcore backend + FFI handle + scan), if running.
+    private var meshBackend: MeshRadioBackend? = null
     private var meshNode: uniffi.talkrypt_ffi.FfiMeshNode? = null
     private var meshScan: android.bluetooth.le.ScanCallback? = null
 
@@ -469,7 +469,12 @@ class MainActivity : Activity() {
             add("Manage callsigns")
             add(if (beaconOn) "Stop nearby beacon" else "Beacon nearby (BLE + Wi-Fi)")
             if (beaconOn) add("Beacon self-test (spoof)")
-            add(if (meshOn) "Stop mesh (LoRa)" else "Mesh over LoRa (Meshtastic BLE)")
+            if (meshOn) {
+                add("Stop mesh (LoRa)")
+            } else {
+                add("Mesh over LoRa (Meshtastic BLE)")
+                add("Mesh over LoRa (Meshcore BLE)")
+            }
             add("Re-share invite")
             if (!connected) add("Reconnect")
             add("Leave (disconnect, keep history)")
@@ -483,7 +488,8 @@ class MainActivity : Activity() {
                     "Beacon nearby (BLE + Wi-Fi)" -> startBeacon(id)
                     "Stop nearby beacon" -> stopBeacon(id)
                     "Beacon self-test (spoof)" -> beaconSpoofSelfTest(id)
-                    "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id)
+                    "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id, MeshKind.MESHTASTIC)
+                    "Mesh over LoRa (Meshcore BLE)" -> startMesh(id, MeshKind.MESHCORE)
                     "Stop mesh (LoRa)" -> stopMesh(id)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
                     "Reconnect" -> reconnect(id)
@@ -523,21 +529,32 @@ class MainActivity : Activity() {
         beaconBackend = null
     }
 
-    /** Carry this chat's messages over a Meshtastic LoRa node reached by BLE (#68 mesh
-     *  messaging). Scans for a node advertising the Meshtastic GATT service, links it via
-     *  [MeshtasticBleBackend], and calls `startMeshMessaging` so outbound group frames also
-     *  ride LoRa and inbound ones are fed back through `deliverPacket`. Establish the chat
-     *  over the primary transport first; the mesh is an additional broadcast path.
+    /** Which LoRa mesh firmware the node runs — selects the BLE service to scan for
+     *  and the backend to build. */
+    private enum class MeshKind(
+        val label: String,
+        val service: java.util.UUID,
+        val make: (android.content.Context, android.bluetooth.BluetoothDevice) -> MeshRadioBackend,
+    ) {
+        MESHTASTIC("Meshtastic", MeshtasticBleBackend.SERVICE, ::MeshtasticBleBackend),
+        MESHCORE("Meshcore", MeshcoreBleBackend.SERVICE, ::MeshcoreBleBackend),
+    }
+
+    /** Carry this chat's messages over a LoRa node reached by BLE (#68 mesh messaging).
+     *  Scans for a node advertising the chosen firmware's GATT service, links it via the
+     *  matching [MeshRadioBackend], and calls `startMeshMessaging` so outbound group frames
+     *  also ride LoRa and inbound ones are fed back through `deliverPacket`. Establish the
+     *  chat over the primary transport first; the mesh is an additional broadcast path.
      *  On-device only (the emulator has no real BLE). */
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startMesh(id: String) {
+    private fun startMesh(id: String, kind: MeshKind) {
         val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
         stopMesh(id)
         ensureBlePermissions()
         val mgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
         val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast("no BLE scanner"); return }
         val filter = android.bluetooth.le.ScanFilter.Builder()
-            .setServiceUuid(android.os.ParcelUuid(MeshtasticBleBackend.SERVICE)).build()
+            .setServiceUuid(android.os.ParcelUuid(kind.service)).build()
         val settings = android.bluetooth.le.ScanSettings.Builder()
             .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         val cb = object : android.bluetooth.le.ScanCallback() {
@@ -545,12 +562,12 @@ class MainActivity : Activity() {
                 val dev = result?.device ?: return
                 runCatching { scanner.stopScan(this) }
                 meshScan = null
-                val backend = MeshtasticBleBackend(this@MainActivity, dev)
+                val backend = kind.make(this@MainActivity, dev)
                 val fmn = c.startMeshMessaging(backend, 0.toUByte()) // mesh channel 0
                 backend.startReceiving { ch, p, from -> runCatching { fmn.deliverPacket(ch, p, from) } }
                 meshBackend = backend
                 meshNode = fmn
-                ui.post { sysLine(id, "📻 mesh: linked a Meshtastic node — messages also ride LoRa") }
+                ui.post { sysLine(id, "📻 mesh: linked a ${kind.label} node — messages also ride LoRa") }
             }
             override fun onScanFailed(errorCode: Int) {
                 ui.post { sysLine(id, "mesh: BLE scan failed ($errorCode)") }
@@ -559,7 +576,7 @@ class MainActivity : Activity() {
         meshScan = cb
         try {
             scanner.startScan(listOf(filter), settings, cb)
-            sysLine(id, "🔎 looking for a Meshtastic node over BLE…")
+            sysLine(id, "🔎 looking for a ${kind.label} node over BLE…")
         } catch (e: SecurityException) {
             toast("BLE scan permission denied")
         }

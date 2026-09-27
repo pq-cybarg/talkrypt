@@ -2017,6 +2017,42 @@ pub fn meshtastic_parse_fromradio(bytes: Vec<u8>) -> Option<MeshtasticRxFfi> {
     })
 }
 
+/// A Meshcore channel message recovered from a companion frame — the opaque
+/// talkrypt fragment already base64-decoded out of the UTF-8 text field.
+#[derive(uniffi::Record)]
+pub struct MeshcoreRxFfi {
+    pub channel: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Build a Meshcore `CMD_APP_START` companion payload identifying `app_name` — a
+/// BLE host writes this to the RX characteristic once on connect (the node replies
+/// with its self-info). Reuses the verified Rust codec so the host does no protocol
+/// byte-twiddling.
+#[uniffi::export]
+pub fn meshcore_encode_app_start(app_name: String) -> Vec<u8> {
+    talkrypt_transport::mesh::meshcore::encode_app_start(app_name.as_bytes())
+}
+
+/// Build a Meshcore `CMD_SEND_CHANNEL_TXT_MSG` companion payload carrying a talkrypt
+/// fragment (base64-wrapped for the UTF-8 text field) on `channel` — the raw bytes a
+/// BLE host writes to the RX characteristic (over BLE each write is one frame; no
+/// serial length prefix).
+#[uniffi::export]
+pub fn meshcore_encode_channel_text(channel: u8, payload: Vec<u8>) -> Vec<u8> {
+    talkrypt_transport::mesh::meshcore::encode_channel_text_b64(channel, &payload)
+}
+
+/// Parse a Meshcore companion channel-message frame (one BLE notification) and
+/// base64-decode its text back to the opaque talkrypt fragment; `None` for other
+/// codes / truncated / non-base64. Forward a returned payload to
+/// [`FfiMeshNode::deliver_packet`]. Never panics.
+#[uniffi::export]
+pub fn meshcore_parse_channel_recv(bytes: Vec<u8>) -> Option<MeshcoreRxFfi> {
+    talkrypt_transport::mesh::meshcore::parse_channel_recv_b64(&bytes)
+        .map(|(channel, payload)| MeshcoreRxFfi { channel, payload })
+}
+
 /// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase` (fully
 /// PQ-safe, `SoftwareSealed`), or a hardware `wrapper` for a `HardwareBacked`, device-bound
 /// blob. Per the QROM/L5 baseline a CLASSICAL hardware wrapper alone is refused (its

@@ -35,7 +35,7 @@ pub mod mock;
 
 /// Meshtastic codec (always compiled) + serial adapter (feature `mesh-radio`).
 pub mod meshtastic;
-#[cfg(feature = "mesh-radio")]
+/// Meshcore codec (always compiled) + serial adapter (feature `mesh-radio`).
 pub mod meshcore;
 
 use async_trait::async_trait;
