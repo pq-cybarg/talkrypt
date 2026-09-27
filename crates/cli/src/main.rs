@@ -613,6 +613,35 @@ struct MeshArgs {
     /// Mesh channel index to transmit talkrypt fragments on.
     #[arg(long, default_value_t = 0)]
     mesh_channel: u8,
+    /// LoRa modem preset for airtime estimation (duty-cycle pacing): shortturbo |
+    /// shortfast | shortslow | mediumfast | mediumslow | longfast (default) |
+    /// longmoderate | longslow.
+    #[arg(long, default_value = "longfast")]
+    mesh_preset: String,
+    /// Duty-cycle limit as a fraction of airtime (e.g. 0.01 for the EU868 1% cap).
+    /// When set, transmissions are paced to respect it (plus `--mesh-min-gap`);
+    /// omit for no duty-cycle pacing.
+    #[arg(long)]
+    mesh_duty_cycle: Option<f64>,
+    /// Minimum gap between mesh transmissions, ms (protects the node's TX queue).
+    #[arg(long, default_value_t = 250)]
+    mesh_min_gap_ms: u64,
+}
+
+/// Parse a `--mesh-preset` name to a Meshtastic modem preset (default LongFast).
+#[cfg(feature = "mesh-radio")]
+fn parse_mesh_preset(s: &str) -> talkrypt_transport::mesh::MeshtasticPreset {
+    use talkrypt_transport::mesh::MeshtasticPreset::*;
+    match s.to_ascii_lowercase().as_str() {
+        "shortturbo" => ShortTurbo,
+        "shortfast" => ShortFast,
+        "shortslow" => ShortSlow,
+        "mediumfast" => MediumFast,
+        "mediumslow" => MediumSlow,
+        "longmoderate" => LongModerate,
+        "longslow" => LongSlow,
+        _ => LongFast,
+    }
 }
 
 /// If `--mesh-serial` was given, open the serial mesh node and start carrying this
@@ -624,13 +653,25 @@ async fn maybe_start_mesh(core: &Core, mesh: &MeshArgs) -> Result<(), Box<dyn st
     };
     #[cfg(feature = "mesh-radio")]
     {
-        use talkrypt_transport::mesh::{MeshNode, MeshPolicy, MeshcoreSerial, MeshtasticSerial};
-        let node: std::sync::Arc<dyn MeshNode> = match mesh.mesh_kind.as_str() {
+        use talkrypt_transport::mesh::{
+            AirtimeBudget, MeshNode, MeshPolicy, MeshcoreSerial, MeshtasticSerial, PacedMeshNode,
+        };
+        let mut node: std::sync::Arc<dyn MeshNode> = match mesh.mesh_kind.as_str() {
             "meshcore" => MeshcoreSerial::open(&port, mesh.mesh_baud).await?,
             "meshtastic" => MeshtasticSerial::open(&port, mesh.mesh_baud).await?,
             other => {
                 return Err(format!("unknown --mesh-kind '{other}' (meshtastic|meshcore)").into())
             }
+        };
+        // Optional duty-cycle pacing: wrap the node so transmissions respect the
+        // configured airtime budget + min-gap for the chosen modem preset.
+        let paced = if let Some(duty) = mesh.mesh_duty_cycle {
+            let preset = parse_mesh_preset(&mesh.mesh_preset);
+            let budget = AirtimeBudget::new(3_600_000, duty, mesh.mesh_min_gap_ms);
+            node = std::sync::Arc::new(PacedMeshNode::new(node, preset, budget));
+            format!(", paced {}% duty / {} ms gap", duty * 100.0, mesh.mesh_min_gap_ms)
+        } else {
+            String::new()
         };
         core.start_mesh_messaging(
             node,
@@ -641,8 +682,8 @@ async fn maybe_start_mesh(core: &Core, mesh: &MeshArgs) -> Result<(), Box<dyn st
         )
         .await;
         println!(
-            "mesh: {} on {port} @ {} baud (channel {}) — messages also ride the LoRa mesh",
-            mesh.mesh_kind, mesh.mesh_baud, mesh.mesh_channel
+            "mesh: {} on {port} @ {} baud (channel {}{}) — messages also ride the LoRa mesh",
+            mesh.mesh_kind, mesh.mesh_baud, mesh.mesh_channel, paced
         );
         Ok(())
     }

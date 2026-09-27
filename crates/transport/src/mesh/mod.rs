@@ -32,6 +32,7 @@ pub mod adapters;
 pub mod beacon;
 pub mod frag;
 pub mod mock;
+pub mod pacing;
 
 /// Meshtastic codec (always compiled) + serial adapter (feature `mesh-radio`).
 pub mod meshtastic;
@@ -45,6 +46,7 @@ use crate::Result;
 
 pub use beacon::MeshBeacon;
 pub use mock::{MockMeshFabric, MockMeshNode};
+pub use pacing::{airtime_ms, AirtimeBudget, LoraParams, MeshtasticPreset, PacedMeshNode};
 
 #[cfg(feature = "mesh-radio")]
 pub use meshcore::MeshcoreSerial;
