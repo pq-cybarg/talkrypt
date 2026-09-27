@@ -166,6 +166,25 @@ Establish the group once over the primary transport (LAN/Tor); after that, messa
 also ride the mesh, and a mesh-only peer (primary transport unplugged) still
 receives them.
 
+### Duty-cycle pacing
+
+LoRa is airtime-constrained and many regions cap **duty cycle** (EU868 = 1%). A
+talkrypt frame fragments into ~20-30 packets, so unpaced sending overruns the
+node's TX queue and can violate regional limits. `mesh::pacing` estimates each
+packet's time-on-air with the standard Semtech LoRa formula
+([`airtime_ms`] + `MeshtasticPreset` SF/BW), budgets airtime over a rolling window
+with a minimum inter-packet gap ([`AirtimeBudget`]), and wraps any `MeshNode` in a
+[`PacedMeshNode`] that awaits the budget before each `send`:
+
+```rust
+use talkrypt_transport::mesh::{AirtimeBudget, MeshtasticPreset, PacedMeshNode};
+let node = PacedMeshNode::new(inner, MeshtasticPreset::LongFast, AirtimeBudget::eu868());
+```
+
+In the CLI, add `--mesh-duty-cycle 0.01` (fraction), `--mesh-preset longfast`, and
+`--mesh-min-gap-ms 250`. The airtime formula is unit-tested against a hand-computed
+Semtech value; preset SF/BW come from Meshtastic's modem definitions.
+
 ## Messaging: chat frames over the mesh
 
 Beyond the CQ beacon, an established group's **chat messages** can ride the mesh
