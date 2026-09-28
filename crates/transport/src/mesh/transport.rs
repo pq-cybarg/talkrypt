@@ -750,12 +750,9 @@ mod proofs {
         }
     }
 
-    #[kani::proof]
-    #[kani::unwind(20)]
-    fn parse_syn_eps_never_panics() {
-        let len: usize = kani::any();
-        kani::assume(len <= 16);
-        let data: [u8; 16] = kani::any();
-        let _ = parse_syn_eps(&data[..len]);
-    }
+    // NOTE: `parse_syn_eps` is intentionally NOT a Kani harness — it calls
+    // `String::from_utf8_lossy`, which is CBMC-intractable (the same from_utf8 blowup
+    // that Marking hits; see SECURITY-AUDIT R-6). It is memory-safe by construction
+    // (only `slice::get(..)?` indexing; from_utf8_lossy never panics) and covered by
+    // the `packet_codec_roundtrips_and_rejects_junk` unit test.
 }

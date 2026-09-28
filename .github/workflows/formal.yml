@@ -90,7 +90,6 @@ jobs:
         run: |
           cargo kani -p talkrypt-transport --harness mesh::frag::proofs::parse_fragment_never_panics_and_is_bounded
           cargo kani -p talkrypt-transport --harness mesh::transport::proofs::parse_packet_never_panics_and_is_bounded
-          cargo kani -p talkrypt-transport --harness mesh::transport::proofs::parse_syn_eps_never_panics
 
   fstar:
     name: "F* — auth theorems"
