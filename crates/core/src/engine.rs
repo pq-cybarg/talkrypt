@@ -5517,6 +5517,61 @@ mod tests {
         assert!(got.is_err(), "foreign mesh traffic must not produce a message");
     }
 
+    /// MESH-NATIVE: a group forms and a message flows **entirely over LoRa**, with
+    /// `MeshTransport` (reliable ARQ over a broadcast `MeshNode`) as the group's
+    /// PRIMARY transport — no LAN/Tor at all. This exercises the whole stack over
+    /// the mesh: the joiner's handshake (multi-KB → many fragmented, ACK'd
+    /// segments), group admission/commit, and the message — proving off-grid
+    /// operation, not just the message overlay of `start_mesh_messaging`.
+    #[tokio::test]
+    async fn group_forms_and_messages_over_mesh_transport() {
+        use std::time::Duration;
+        use talkrypt_transport::mesh::{MeshTransport, MockMeshFabric};
+
+        let mesh = MockMeshFabric::new(180); // realistic-ish LoRa MTU
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#offgrid",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        // Short retransmit timeout so the (lossless) mock handshake is quick.
+        let host_tp = MeshTransport::with_timeout(
+            Arc::new(mesh.node(1)),
+            0,
+            "host",
+            Duration::from_millis(150),
+            30,
+        );
+        let (host, _host_rx) =
+            Core::new_group(IdentityKeyPair::generate(), suite.clone(), host_tp, desc.clone(), true);
+        host.host().await.unwrap();
+
+        let join_tp = MeshTransport::with_timeout(
+            Arc::new(mesh.node(2)),
+            0,
+            "joiner",
+            Duration::from_millis(150),
+            30,
+        );
+        let (m1, mut m1_rx) =
+            Core::new_group(IdentityKeyPair::generate(), suite, join_tp, desc.clone(), false);
+        // The join handshake + group admission run over the mesh transport.
+        m1.connect("host").await.unwrap();
+        // Give the fragmented, ARQ'd handshake/commit time to complete over the mesh.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // The host speaks; the member hears it — carried end-to-end over LoRa.
+        host.send("off the grid, on the air").await.unwrap();
+        let (text, from) = tokio::time::timeout(Duration::from_secs(8), next_message(&mut m1_rx))
+            .await
+            .expect("a mesh-native group message before timeout");
+        assert_eq!(text, "off the grid, on the air");
+        assert_eq!(from, host.fingerprint());
+    }
+
     /// SUB-SPEC A (§7, the decisive group gap #58 closes): a name announced by one
     /// MEMBER is resolved by ANOTHER member — not just the host. m1 joins with an
     /// account-linked name; m2 joins after and must resolve it at the verified Linked
