@@ -272,13 +272,37 @@ serial adapters below.
 future slice). Airtime reality: a signed group frame is a few KB, so it fragments
 into ~20-30 mesh packets — usable for text, not a Tor-speed experience.
 
-## Out of scope (next slices)
+## MQTT-gateway ingest (`feature = "mesh-mqtt"`)
 
-- **Mesh-native membership/commits** (control plane over broadcast).
-- A connection-oriented `Transport` over broadcast LoRa (the datagram carry is the
-  substrate; the `Stream`/`Listener` model maps poorly onto a connectionless
-  ~200-byte, seconds-latency medium).
-- Meshtastic MQTT-gateway ingest and region/duty-cycle-aware airtime pacing.
+A Meshtastic gateway node bridges packets to an **MQTT broker**, wrapping each
+`MeshPacket` in a `ServiceEnvelope` protobuf on the topic
+`msh/REGION/2/e/CHANNELNAME/NODEID`. `mesh::MqttMeshNode` is a `MeshNode` over that
+broker — it publishes talkrypt fragments as `PRIVATE_APP` packets and ingests
+inbound ones, bridging talkrypt-over-mesh across the internet (wide-area) or via a
+private broker.
+
+```rust
+# #[cfg(feature = "mesh-mqtt")]
+use talkrypt_transport::mesh::{mqtt, MqttConfig};
+let node = mqtt::connect("broker.example", 1883, "talkrypt-1", MqttConfig::default()).await?;
+core.start_mesh_messaging(node, policy).await; // or MeshTransport / MeshBeacon
+```
+
+**Channel config:** talkrypt's payload is already PQ+AES sealed, so it rides an
+**unencrypted** Meshtastic channel — the gateway then publishes it as a readable
+`decoded Data { PRIVATE_APP }`. Our seal is the real envelope; the broker sees only
+opaque ciphertext. (An encrypted channel would publish `encrypted` bytes we can't
+open without the channel key.) The `ServiceEnvelope` codec + node logic are always
+compiled and unit-tested over an in-memory broker; the real `rumqttc` client is
+behind the feature.
+
+## Remaining (device-gated / optional)
+
+- **On-hardware validation** of every bearer — BLE (Meshtastic/Meshcore), USB
+  serial, `MeshTransport` over RF, and the MQTT gateway — on real nodes.
+- A CLI `--mesh-transport` knob to select `MeshTransport` as the *primary* transport
+  (invite carries a `mesh:` endpoint); the API is usable today (see above).
+- iOS Meshcore BLE leave-behind; region/preset-aware airtime *auto*-tuning.
 
 See also [`docs/plugins/backend-plugins.md`](plugins/backend-plugins.md) for the
 general backend-plugin model both seams share.

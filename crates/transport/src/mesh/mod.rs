@@ -32,6 +32,7 @@ pub mod adapters;
 pub mod beacon;
 pub mod frag;
 pub mod mock;
+pub mod mqtt;
 pub mod pacing;
 pub mod transport;
 
@@ -47,6 +48,7 @@ use crate::Result;
 
 pub use beacon::MeshBeacon;
 pub use mock::{MockMeshFabric, MockMeshNode};
+pub use mqtt::{MqttClient, MqttConfig, MqttMeshNode};
 pub use pacing::{airtime_ms, AirtimeBudget, LoraParams, MeshtasticPreset, PacedMeshNode};
 pub use transport::MeshTransport;
 

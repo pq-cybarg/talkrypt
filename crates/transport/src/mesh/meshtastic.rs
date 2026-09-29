@@ -141,11 +141,10 @@ fn each_field(buf: &[u8], mut f: impl FnMut(Field<'_>)) {
     }
 }
 
-/// Encode a `ToRadio { packet: MeshPacket { to: BROADCAST, channel, decoded:
-/// Data { portnum: PRIVATE_APP, payload } } }` carrying `payload` on `channel`.
-/// This is the raw protobuf a BLE host writes to the ToRadio characteristic; the
-/// serial adapter additionally wraps it in the Stream API [`frame`].
-pub fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
+/// Encode a `MeshPacket { to: BROADCAST, channel, decoded: Data { portnum:
+/// PRIVATE_APP, payload } }` carrying `payload` on `channel`. This inner packet is
+/// what a `ToRadio` (serial/BLE) or a `ServiceEnvelope` (MQTT) wraps.
+pub fn encode_meshpacket(channel: u8, payload: &[u8]) -> Vec<u8> {
     // Data { portnum=1: PRIVATE_APP, payload=2 }
     let mut data = Vec::new();
     put_varint_field(&mut data, 1, PRIVATE_APP);
@@ -155,10 +154,50 @@ pub fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
     put_fixed32_field(&mut packet, 2, BROADCAST);
     put_varint_field(&mut packet, 3, channel as u64);
     put_len_delim(&mut packet, 4, &data);
+    packet
+}
+
+/// Encode a `ToRadio { packet: MeshPacket { … } }` carrying `payload` on `channel`.
+/// The raw protobuf a BLE host writes to the ToRadio characteristic; the serial
+/// adapter additionally wraps it in the Stream API [`frame`].
+pub fn encode_toradio(channel: u8, payload: &[u8]) -> Vec<u8> {
+    let packet = encode_meshpacket(channel, payload);
     // ToRadio { packet=1: MeshPacket }
     let mut toradio = Vec::new();
     put_len_delim(&mut toradio, 1, &packet);
     toradio
+}
+
+/// Parse a bare `MeshPacket` protobuf; return its inner `PRIVATE_APP` payload
+/// (with channel + sender) if it carries one, else `None`. Shared by the
+/// `FromRadio` (serial/BLE) and `ServiceEnvelope` (MQTT) parsers.
+pub fn parse_meshpacket(packet: &[u8]) -> Option<MeshtasticRx> {
+    let mut from: Option<u32> = None;
+    let mut channel: u8 = 0;
+    let mut decoded: Option<Vec<u8>> = None;
+    each_field(packet, |fld| match fld {
+        Field::Fixed32(1, v) => from = Some(v),           // MeshPacket.from
+        Field::Varint(3, v) => channel = v as u8,         // MeshPacket.channel
+        Field::Bytes(4, b) => decoded = Some(b.to_vec()), // MeshPacket.decoded (Data)
+        _ => {}
+    });
+    let decoded = decoded?;
+
+    let mut portnum: u64 = 0;
+    let mut payload: Option<Vec<u8>> = None;
+    each_field(&decoded, |fld| match fld {
+        Field::Varint(1, v) => portnum = v,               // Data.portnum
+        Field::Bytes(2, b) => payload = Some(b.to_vec()), // Data.payload
+        _ => {}
+    });
+    if portnum != PRIVATE_APP {
+        return None;
+    }
+    Some(MeshtasticRx {
+        channel,
+        from,
+        payload: payload?,
+    })
 }
 
 /// Encode a `ToRadio { want_config_id }` — sent on connect to engage the stream.
@@ -187,34 +226,7 @@ pub fn parse_fromradio(buf: &[u8]) -> Option<MeshtasticRx> {
             packet = Some(b.to_vec()); // FromRadio.packet = 2
         }
     });
-    let packet = packet?;
-
-    let mut from: Option<u32> = None;
-    let mut channel: u8 = 0;
-    let mut decoded: Option<Vec<u8>> = None;
-    each_field(&packet, |fld| match fld {
-        Field::Fixed32(1, v) => from = Some(v),           // MeshPacket.from
-        Field::Varint(3, v) => channel = v as u8,         // MeshPacket.channel
-        Field::Bytes(4, b) => decoded = Some(b.to_vec()), // MeshPacket.decoded (Data)
-        _ => {}
-    });
-    let decoded = decoded?;
-
-    let mut portnum: u64 = 0;
-    let mut payload: Option<Vec<u8>> = None;
-    each_field(&decoded, |fld| match fld {
-        Field::Varint(1, v) => portnum = v,               // Data.portnum
-        Field::Bytes(2, b) => payload = Some(b.to_vec()), // Data.payload
-        _ => {}
-    });
-    if portnum != PRIVATE_APP {
-        return None;
-    }
-    Some(MeshtasticRx {
-        channel,
-        from,
-        payload: payload?,
-    })
+    parse_meshpacket(&packet?)
 }
 
 // ---------------------------------------------------------------------------
