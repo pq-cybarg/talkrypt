@@ -185,6 +185,38 @@ In the CLI, add `--mesh-duty-cycle 0.01` (fraction), `--mesh-preset longfast`, a
 `--mesh-min-gap-ms 250`. The airtime formula is unit-tested against a hand-computed
 Semtech value; preset SF/BW come from Meshtastic's modem definitions.
 
+## Mesh-native operation: the whole stack over LoRa
+
+The message overlay above assumes the group was *established* over a primary
+transport (LAN/Tor) — messages then also ride the mesh. For **pure off-grid** use
+(no internet ever), `mesh::MeshTransport` implements the full
+`talkrypt_transport::Transport` seam over a broadcast `MeshNode`, so the *unchanged*
+engine runs entirely over LoRa — the join handshake, group admission/commits, and
+messages all flow over the mesh:
+
+```rust
+use talkrypt_transport::mesh::MeshTransport;
+let transport = MeshTransport::new(node /* Arc<dyn MeshNode> */, channel, "my-endpoint");
+// hand `transport` to Core::new / Core::new_group as the primary Arc<dyn Transport>.
+```
+
+`MeshTransport` bridges connection-oriented reliability onto the broadcast medium
+with **stop-and-wait ARQ**: pseudo-connections keyed by a dialer-chosen 64-bit
+`conn_id` (a `SYN` carries short endpoint labels so a listener knows it's the
+target), each `send_frame` fragmented to MTU-sized segments and retransmitted until
+ACKed. Transport packets use a distinct 2-byte magic (`0xA7 0x74`) from the
+fragmentation codec, so a node can run the beacon, the message overlay, and the
+transport on one channel without cross-parsing. Compose `PacedMeshNode` under it for
+duty-cycle limits. Design: `docs/superpowers/specs/2026-09-27-mesh-transport-design.md`.
+
+This is validated end-to-end in `talkrypt-core`
+(`group_forms_and_messages_over_mesh_transport`): two `Core`s whose *only* transport
+is `MeshTransport` over one mock mesh fabric form a group and exchange a message —
+the handshake, admission, and message carried over the reliable mesh. Loss is
+exercised by a deterministic drop-mock; RF is validated on hardware. Wiring
+`--mesh-transport` as the CLI's primary transport (invite carries a `mesh:` endpoint)
+is a follow-up UX knob; the API above is usable today.
+
 ## Messaging: chat frames over the mesh
 
 Beyond the CQ beacon, an established group's **chat messages** can ride the mesh
