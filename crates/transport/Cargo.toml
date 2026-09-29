@@ -61,11 +61,12 @@ base64 = "0.22"
 tokio-serial = { version = "5.4", optional = true }
 # --- optional: Meshtastic MQTT-gateway ingest (enabled by the `mesh-mqtt` feature) ---
 # rumqttc is the async MQTT client for the real broker connection; the ServiceEnvelope
-# codec + node logic are always compiled + tested over an in-memory broker.
-# `default-features = false` drops rumqttc's rustls TLS stack (pulls a vulnerable
-# rustls-webpki + unmaintained crates) — talkrypt seals its own payload, so a
-# plaintext broker (port 1883) is fine; TLS can be a later opt-in.
-rumqttc = { version = "0.24", optional = true, default-features = false }
+# codec + node logic are always compiled + tested over an in-memory broker. Use the
+# platform-native TLS stack (`use-native-tls`) rather than rumqttc's default rustls:
+# rumqttc pins `rustls-webpki = 0.102.8` (RUSTSEC-2026-0049, CRL-matching; fixed only
+# in the semver-incompatible 0.103.10), so native-tls KEEPS a TLS-broker capability
+# while dropping the vulnerable crate. Platform TLS = SChannel/SecureTransport/OpenSSL.
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-native-tls"] }
 
 [features]
 default = []
