@@ -20,6 +20,7 @@ pub mod custody;
 pub mod endpoint;
 pub mod error;
 pub mod frame;
+pub mod hsm;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod parity;

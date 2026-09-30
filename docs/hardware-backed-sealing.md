@@ -5,6 +5,10 @@ rest with a device's secure element, on every platform, through one shared
 format. This is recommendation **R-8** of [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md)
 (see §3b) and finding **F-15**.
 
+> For the full menu of custody backends (external HSM/PKCS#11, SEALSQ PQ chip,
+> macOS Secure-Enclave reach options, the permissive-security hardening plan) and
+> their trust/PQ/attribution trade-offs, see [`custody-options.md`](custody-options.md).
+
 ## What it does — and the honest limit
 
 A secure element wraps a random **KEK** with a non-exportable, user-presence-
