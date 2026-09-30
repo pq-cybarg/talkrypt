@@ -34,6 +34,11 @@ interface NearbyDiscovery {
         // 128-bit UUIDs derived from "talkrypt" — shared by BLE + Wi-Fi Direct.
         val SERVICE_UUID: UUID = UUID.fromString("74616c6b-7279-7074-0000-000000000001")
         val INVITE_CHAR_UUID: UUID = UUID.fromString("74616c6b-7279-7074-0000-000000000002")
+        // SUB-SPEC A / #68: a DISTINCT service+char for the pre-session CQ *beacon*
+        // (an opaque PQ+AES-sealed blob, NOT the invite) so a scanner can tell the
+        // two apart and never confuses a beacon read for an invite read.
+        val BEACON_SERVICE_UUID: UUID = UUID.fromString("74616c6b-7279-7074-0000-000000000003")
+        val BEACON_CHAR_UUID: UUID = UUID.fromString("74616c6b-7279-7074-0000-000000000004")
 
         /**
          * Bluetooth LE discovery — best as the low-power "who's nearby" beacon.

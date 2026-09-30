@@ -181,6 +181,20 @@ async fn run(
                     }
                     Some(CoreEvent::Disconnected { fingerprint }) =>
                         app.push(format!("* peer disconnected: {}", short_fp(&fingerprint))),
+                    Some(CoreEvent::Name { from, label: Some(label), .. }) =>
+                        app.push(format!("* {} is calling as \"{label}\"", short_fp(&from))),
+                    Some(CoreEvent::Name { .. }) => {}
+                    Some(CoreEvent::Linkage { .. }) => {} // SUB-SPEC B (UI: Task 13)
+                    Some(CoreEvent::Vouch { .. }) => {}   // SUB-SPEC C (UI: Task 11)
+                    Some(CoreEvent::Delivered { .. }) => {}    // D1 delivery receipt (UI later)
+                    Some(CoreEvent::OutboxDropped { .. }) => {} // D1 outbox cap/TTL drop
+                    Some(CoreEvent::PromoteProposed { .. }) => app.push("* promotion proposed".to_string()),
+                    Some(CoreEvent::Promoted { .. }) => app.push("* promoted - chat is persistent".to_string()),
+                    Some(CoreEvent::PromoteAborted { .. }) => app.push("* promotion aborted".to_string()),
+                    Some(CoreEvent::BeaconSeen { source, .. }) => app.push(format!(
+                        "* nearby: a device on this channel is beaconing{}",
+                        source.map(|s| format!(" ({s})")).unwrap_or_default()
+                    )),
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }

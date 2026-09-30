@@ -52,3 +52,9 @@ Thumbs.db
 
 # Desktop packaging output (scripts/package.sh)
 dist/
+
+# EasyCrypt compiled artifacts
+formal/*.eco
+
+# Local /export + /compact session transcripts (never commit)
+*-this-session-is-being-continued-from-a-previous-c.txt

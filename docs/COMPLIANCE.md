@@ -93,7 +93,7 @@ what talkrypt does today, and the concrete delta to a validatable module.
 | 5 | Operating environment | Runs as an unprivileged library on a general-purpose OS. | A defined "modifiable operational environment" entry, OS/version bounds. |
 | 6 | Physical security | N/A (software module). | N/A. |
 | 7 | Non-invasive security | Decryption is **uniform-failure**; decrypt runs on cloned state (no partial-state leak). Not formally constant-time across all primitives. | Side-channel (timing) review of each primitive; constant-time guarantees. |
-| 8 | Sensitive security parameter (SSP) management | ML-DSA seed in `Zeroizing`; **session symmetric secrets zeroized on drop** (ratchet + Noise; per-message keys in `Zeroizing` — SECURITY-AUDIT F-3, resolved); persistent keys sealed with Argon2id + AES-256-GCM; `OsRng` (`getrandom`) for keygen. | An approved DRBG with health tests; a documented SSP lifecycle table. |
+| 8 | Sensitive security parameter (SSP) management | ML-DSA seed in `Zeroizing`; **session symmetric secrets zeroized on drop** (ratchet + Noise; per-message keys in `Zeroizing` — SECURITY-AUDIT F-3, resolved); persistent keys sealed with Argon2id + AES-256-GCM; `OsRng` (`getrandom`) for keygen, **health-tested at POST** (SP 800-90B RCT + APT — SECURITY-AUDIT F-4). | A CAVP/CMVP-validated DRBG boundary (the OS DRBG is documented as the approved source); a documented SSP lifecycle table. |
 | 9 | Self-tests | **POST + conditional self-tests** (`talkrypt_crypto::self_test`/`ensure_self_tested`, SECURITY-AUDIT R-5). **Known-answer tests against official vectors**: AES-256-GCM + SHA3-384/SHA-384 (NIST); ML-DSA-87 keyGen (FIPS-204 reference); **ML-KEM-1024 keyGen/encaps/decaps (NIST FIPS-203 ACVP)** — keyGen in the POST, full set in `tests/nist_mlkem_acvp.rs`; plus a KDF KAT. Run at start-up (CLI `main`, suite-registry init, FFI keygen), **abort on failure**. **Per-keygen PCT**: every ML-DSA/ML-KEM keygen self-checks. CI validates every pinned vector. | A formal Security Policy documenting the POST; full-module CAVP/CMVP lab testing. |
 | 10 | Life-cycle assurance | Versioned, tested (211 tests), fuzzed wire codec, Kani-proven decoder, frozen+KAT-locked wire format. | Configuration-management, delivery, and operator-guidance documents per 140-3; CAVP test evidence. |
 | 11 | Mitigation of other attacks | Replay rejection (bounded skip), AEAD AAD-bound headers, wire padding for frame-indistinguishability, invite-token PSK + safety-number MITM mitigation. | Formal documentation of mitigations and their limits. |
@@ -153,10 +153,14 @@ In priority order, to move from *algorithm-aligned* to *validatable*:
    ML-KEM vectors are FIPS-203-**draft** and do not match a conformant final
    implementation.) Remaining for full module validation: CAVP/CMVP lab testing
    of the complete boundary.
-2. **Approved DRBG with health tests.** Replace bare `OsRng` use at the boundary
-   with an SP 800-90A DRBG seeded from a health-tested entropy source
-   (SP 800-90B), or document the OS DRBG as the approved entropy source per the
-   target platform's validation.
+2. **Approved DRBG with health tests.** *Partially done (SECURITY-AUDIT F-4).*
+   The SP 800-90B **startup health tests** (Repetition Count + Adaptive Proportion)
+   now run over the OS CSPRNG inside the power-on self-test (`crypto::rng`), so a
+   catastrophically broken source aborts start-up before any key is generated. The
+   OS DRBG (`getrandom` → the kernel's SP 800-90A DRBG on every target platform) is
+   documented as the approved entropy source rather than wrapping a hand-rolled
+   user-space DRBG (which, unaudited, would be worse). Remaining for strict FIPS: a
+   CAVP/CMVP-validated DRBG boundary — a certification question, not a code gap.
 3. **Verify SSP zeroization.** Transient session secrets are now zeroized on drop
    (SECURITY-AUDIT F-3, resolved); add a Miri run to *verify* the wipe and extend
    the same treatment to any future secret-bearing types.

@@ -13,12 +13,14 @@
 //!   talkrypt-desktop --headless join --uri 'talkrypt://…' [--tor | --no-tor]
 //!
 //! Output is line-oriented and stable for scripting:
+//! ```text
 //!   INVITE <uri>            the shareable invite (host only; print/scan this)
 //!   STATUS <text>           lifecycle/status updates (bootstrap, hosting, …)
 //!   CONNECTED <peer>        a peer completed the handshake
 //!   DISCONNECTED <peer>     a peer left
 //!   < <who>: <text>         an inbound message
 //!   > me: <text>            our own echoed message
+//! ```
 //! Each line of stdin is sent as a chat message once a session is up.
 
 use std::io::{BufRead, Write};

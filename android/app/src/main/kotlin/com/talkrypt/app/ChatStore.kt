@@ -46,6 +46,16 @@ class KeystoreWrapper(private val strongBox: Boolean) : HardwareKeyWrapper {
             .apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv)) }
         return c.doFinal(ct)
     }
+
+    /** The Android Keystore (StrongBox/TEE) is a CLASSICAL secure element — it holds
+     *  an AES-256 key, but a store-and-forget QROM adversary that later extracts it
+     *  would recover a symmetric key of full strength. StrongBox custody is not itself
+     *  the L5/QROM guarantee (the sealed contents are AES-256-GCM either way), and this
+     *  wrapper is never the sole factor for a QROM-L5 seal; a passphrase factor carries
+     *  that. So we report `false` — the core then refuses a hardware-only QROM-L5 seal
+     *  unless the caller explicitly opted into the classical hardware-bound tier
+     *  (`allow_weak_hardware_only`). See PQC-not-in-secure-elements / R-8. */
+    override fun qromSafe(): Boolean = false
 }
 
 /** Sealed at-rest store for chat metadata + history, under `filesDir/chats/`. */

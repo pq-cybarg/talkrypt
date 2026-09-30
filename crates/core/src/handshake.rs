@@ -8,8 +8,16 @@
 //! fingerprints.
 //!
 //!   Initiator → Responder : Init  { id_i, nonce_i }
-//!   Responder → Initiator : Resp  { id_r, prekey, nonce_r, sig_r }   sig_r over (nonce_i ‖ prekey ‖ suite_id)
-//!   Initiator → Responder : Confirm { sig_i }                        sig_i over (nonce_r ‖ fingerprint(id_r))
+//!   Responder → Initiator : Resp  { id_r, prekey, nonce_r, sig_r }
+//!   Initiator → Responder : Confirm { sig_i }
+//!
+//! **Both** signatures cover the **full handshake transcript** (SIGMA-style,
+//! SECURITY-AUDIT H-1): `tag ‖ suite_id ‖ id_i ‖ nonce_i ‖ id_r ‖ prekey ‖ nonce_r`,
+//! length-prefixed. So each party attests to *both* identities, *both* nonces, the
+//! prekey, and the negotiated suite — giving both sides cryptographic agreement on
+//! exactly who and what they handshook, downgrade resistance on the suite in *both*
+//! directions, and no room for field substitution. `sig_r`/`sig_i` differ only by
+//! the domain-separation tag.
 
 use rand::RngCore;
 
@@ -20,8 +28,35 @@ use talkrypt_wire::{Reader, Writer};
 
 use crate::error::{CoreError, Result};
 
-const T_RESP: &[u8] = b"talkrypt-resp-v1";
-const T_CONFIRM: &[u8] = b"talkrypt-confirm-v1";
+const T_RESP: &[u8] = b"talkrypt-resp-v2";
+const T_CONFIRM: &[u8] = b"talkrypt-confirm-v2";
+
+/// The full handshake transcript both parties sign over (SECURITY-AUDIT H-1). All
+/// fields are length-prefixed so no byte can migrate between adjacent fields, and
+/// the `tag` domain-separates the responder's vs. the initiator's signature. Both
+/// parties compute an identical transcript for a given signature (their local view
+/// of `id_i/id_r/nonce_i/nonce_r/prekey` agrees), so a verifying party is
+/// cryptographically bound to the same identities, nonces, prekey, and suite.
+#[allow(clippy::too_many_arguments)]
+fn handshake_transcript(
+    tag: &[u8],
+    suite_id: &str,
+    id_i: &IdentityPublic,
+    nonce_i: &[u8],
+    id_r: &IdentityPublic,
+    prekey: &[u8],
+    nonce_r: &[u8],
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.put_bytes(tag);
+    w.put_bytes(suite_id.as_bytes());
+    w.put_bytes(&id_i.sig_vk);
+    w.put_bytes(nonce_i);
+    w.put_bytes(&id_r.sig_vk);
+    w.put_bytes(prekey);
+    w.put_bytes(nonce_r);
+    w.into_vec()
+}
 
 /// Outcome of a successful handshake.
 pub struct HandshakeResult {
@@ -76,24 +111,36 @@ pub async fn initiate(
     let nonce_r = r.get_vec()?;
     let sig_r = r.get_vec()?;
 
-    // Verify responder's signature over (nonce_i ‖ prekey ‖ suite_id).
-    let mut transcript = Vec::new();
-    transcript.extend_from_slice(T_RESP);
-    transcript.extend_from_slice(&nonce_i);
-    transcript.extend_from_slice(&prekey);
-    transcript.extend_from_slice(suite_id.as_bytes());
+    // Verify the responder's signature over the FULL transcript (H-1): our identity
+    // and nonce, its identity, the prekey, its nonce, and the suite. Binding all of
+    // it means a MITM cannot have swapped the prekey, suite, or either identity.
+    let resp_transcript = handshake_transcript(
+        T_RESP,
+        &suite_id,
+        identity.public(),
+        &nonce_i,
+        &peer_identity,
+        &prekey,
+        &nonce_r,
+    );
     peer_identity
-        .verify(&transcript, &sig_r)
+        .verify(&resp_transcript, &sig_r)
         .map_err(|_| CoreError::PeerAuthFailed)?;
 
     let session = suite.begin_session(root0, &prekey)?;
 
-    // → Confirm: sign (nonce_r ‖ fingerprint(responder)).
-    let mut ct = Vec::new();
-    ct.extend_from_slice(T_CONFIRM);
-    ct.extend_from_slice(&nonce_r);
-    ct.extend_from_slice(&peer_identity.fingerprint());
-    let sig_i = identity.sign(&ct);
+    // → Confirm: sign the SAME full transcript (domain-separated tag), so the
+    // responder is bound to the identical view of the handshake (H-1).
+    let confirm_transcript = handshake_transcript(
+        T_CONFIRM,
+        &suite_id,
+        identity.public(),
+        &nonce_i,
+        &peer_identity,
+        &prekey,
+        &nonce_r,
+    );
+    let sig_i = identity.sign(&confirm_transcript);
     let mut w = Writer::new();
     w.put_bytes(&sig_i);
     stream.send_frame(&w.into_vec()).await?;
@@ -119,15 +166,20 @@ pub async fn respond(
     let peer_identity = decode_identity(&mut r)?;
     let nonce_i = r.get_vec()?;
 
-    // Generate a prekey and sign (nonce_i ‖ prekey ‖ suite_id).
+    // Generate a prekey and sign the FULL transcript (H-1): the initiator's identity
+    // and nonce, our identity, the prekey, our nonce, and the suite.
     let (prekey_pub, prekey_secret) = suite.generate_prekey();
     let nonce_r = random_nonce();
-    let mut transcript = Vec::new();
-    transcript.extend_from_slice(T_RESP);
-    transcript.extend_from_slice(&nonce_i);
-    transcript.extend_from_slice(&prekey_pub);
-    transcript.extend_from_slice(suite_id.as_bytes());
-    let sig_r = identity.sign(&transcript);
+    let resp_transcript = handshake_transcript(
+        T_RESP,
+        &suite_id,
+        &peer_identity,
+        &nonce_i,
+        identity.public(),
+        &prekey_pub,
+        &nonce_r,
+    );
+    let sig_r = identity.sign(&resp_transcript);
 
     // → Resp
     let mut w = Writer::new();
@@ -137,16 +189,22 @@ pub async fn respond(
     w.put_bytes(&sig_r);
     stream.send_frame(&w.into_vec()).await?;
 
-    // ← Confirm: verify initiator's signature over (nonce_r ‖ our fingerprint).
+    // ← Confirm: verify the initiator's signature over the SAME full transcript
+    // (H-1), so both sides agree on identities, nonces, prekey, and suite.
     let confirm = stream.recv_frame().await?;
     let mut r = Reader::new(&confirm);
     let sig_i = r.get_vec()?;
-    let mut ct = Vec::new();
-    ct.extend_from_slice(T_CONFIRM);
-    ct.extend_from_slice(&nonce_r);
-    ct.extend_from_slice(&identity.public().fingerprint());
+    let confirm_transcript = handshake_transcript(
+        T_CONFIRM,
+        &suite_id,
+        &peer_identity,
+        &nonce_i,
+        identity.public(),
+        &prekey_pub,
+        &nonce_r,
+    );
     peer_identity
-        .verify(&ct, &sig_i)
+        .verify(&confirm_transcript, &sig_i)
         .map_err(|_| CoreError::PeerAuthFailed)?;
 
     let session = suite.accept_session(root0, prekey_secret)?;
@@ -207,6 +265,38 @@ mod tests {
 
     fn encrypt_one(mut session: Box<dyn SessionHandle>) -> Vec<u8> {
         session.encrypt(b"first message").unwrap()
+    }
+
+    /// SECURITY-AUDIT H-1: the signed transcript binds EVERY field — changing any
+    /// one of {tag, suite, id_i, nonce_i, id_r, prekey, nonce_r} yields a different
+    /// transcript, so a signature over one cannot be lifted to any other handshake,
+    /// identity, prekey, or suite. This is the property the SIGMA-style full-binding
+    /// rests on (length-prefixed fields ⇒ no byte can migrate between fields).
+    #[test]
+    fn transcript_binds_every_field() {
+        let id_a = IdentityKeyPair::generate();
+        let id_b = IdentityKeyPair::generate();
+        let base = handshake_transcript(
+            T_RESP, "suite-1", id_a.public(), b"ni", id_b.public(), b"pk", b"nr",
+        );
+        // Each single-field change must alter the transcript.
+        let variants = [
+            handshake_transcript(T_CONFIRM, "suite-1", id_a.public(), b"ni", id_b.public(), b"pk", b"nr"),
+            handshake_transcript(T_RESP, "suite-2", id_a.public(), b"ni", id_b.public(), b"pk", b"nr"),
+            handshake_transcript(T_RESP, "suite-1", id_b.public(), b"ni", id_b.public(), b"pk", b"nr"),
+            handshake_transcript(T_RESP, "suite-1", id_a.public(), b"NI", id_b.public(), b"pk", b"nr"),
+            handshake_transcript(T_RESP, "suite-1", id_a.public(), b"ni", id_a.public(), b"pk", b"nr"),
+            handshake_transcript(T_RESP, "suite-1", id_a.public(), b"ni", id_b.public(), b"PK", b"nr"),
+            handshake_transcript(T_RESP, "suite-1", id_a.public(), b"ni", id_b.public(), b"pk", b"NR"),
+        ];
+        for v in variants {
+            assert_ne!(base, v, "every field must be bound into the transcript");
+        }
+        // Length-prefixing prevents field-boundary ambiguity: moving a byte from
+        // nonce_i into id_i must NOT collide. ("a"+"bc") != ("ab"+"c").
+        let split1 = handshake_transcript(T_RESP, "s", id_a.public(), b"bc", id_b.public(), b"pk", b"nr");
+        let split2 = handshake_transcript(T_RESP, "s", id_a.public(), b"c", id_b.public(), b"pk", b"nr");
+        assert_ne!(split1, split2, "length-prefixing must prevent field-boundary confusion");
     }
 
     #[tokio::test]

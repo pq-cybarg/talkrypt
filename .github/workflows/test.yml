@@ -1,0 +1,53 @@
+# Workspace unit/integration tests.
+#
+# The other workflows gate narrow concerns — fuzz (decoder corpora), formal (Kani/F*/
+# EasyCrypt on crypto+wire), miri (zeroization), audit, compliance. NONE ran a plain
+# `cargo test`, so whole crates (notably `crates/transport`, the CLI/TUI/desktop front-ends,
+# and the FFI) had no CI gate — a transport-only change could merge with zero checks. This
+# job closes that gap: it runs the entire workspace test suite on any crate change, with
+# default features (loopback transport; no tor/nym network deps).
+name: test
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Build workspace (tests)
+        run: cargo test --workspace --locked --no-run
+      - name: Run workspace tests
+        run: cargo test --workspace --locked

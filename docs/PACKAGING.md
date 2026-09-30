@@ -150,10 +150,49 @@ sha256sum  -c SHA256SUMS           # Linux                (SHA-256)
 openssl dgst -sha3-256 <file>      # compare to SHA3-256SUMS (any OpenSSL 3.x)
 ```
 
-There is **no trusted code-signing authority** behind these packages: macOS
-signing is ad-hoc (`codesign -s -`), the `.deb`s are unsigned, and nothing is
-notarized. Integrity rests on the (dual) checksums and on building from source.
-This matches the project's honesty posture — see `SECURITY.md` and `README.md`.
+### PQ release signature (SECURITY-AUDIT F-8)
+
+The dual checksums bind each artifact to a hash, but a mirror could serve a
+tampered artifact **and** a matching checksum file. To add a signing authority the
+project controls — without depending on Apple notarization or a Debian archive key
+(neither of which an opsec-clean, CA-free project uses) — the release **checksum
+manifest is signed with talkrypt's own ML-DSA-87 release key** (dogfooding the
+post-quantum signature). Integrity then chains:
+
+```
+artifact  ->  SHA-256 (in SHA256SUMS)  ->  ML-DSA-87 signature (SHA256SUMS.sig)  ->  published release public key
+```
+
+**Anyone can sign — there is no central signing authority.** The project signs its
+own releases, and *you* can sign your own copies, rebuilds, or mirror the same way,
+then hand your public key to the people you distribute to. The mechanism is
+identical; the only difference is *which* public key a verifier trusts.
+
+- **Generate your keypair (once):** `cargo run -p talkrypt-relsign -- keygen` prints a
+  `SEED` (secret) and a `PUBKEY`. Keep the SEED offline or in a CI secret; publish the
+  PUBKEY to whoever verifies your copies. The project keeps its SEED in
+  `TALKRYPT_RELEASE_SK` and publishes its PUBKEY as `docs/RELEASE_PUBKEY.hex` (its
+  trust anchor); a downstream packager or an individual user uses their own key
+  identically.
+- **Sign:** `talkrypt-relsign sign SHA256SUMS <seed>` writes `SHA256SUMS.sig`. At an
+  official release `hash-dist.sh` does this automatically when `TALKRYPT_RELEASE_SK`
+  is set; a user re-signing their own copy just runs the tool directly. `<seed>` and
+  `<pubkey>` may be the hex or a path to a (optionally `#`-commented) file.
+- **Verify:** `verify.sh` checks the dual checksums always, and — if `talkrypt-relsign`
+  is on PATH and a signer public key is provided (`TALKRYPT_RELEASE_PUBKEY` or a
+  pinned `RELEASE_PUBKEY.hex`) — also verifies the signature; a bad signature fails
+  the whole verification. **Pin the public key you obtained out of band** (the repo's
+  for an official build, or the person's who gave you their copy) — never a key
+  bundled by an untrusted mirror, which could swap both file and key. An ML-DSA
+  signature cannot be checked in pure shell, so this step needs the tool; it is
+  advisory (skipped, reported) when the tool or a real key is absent.
+
+**Still no OS code-signing authority:** macOS bundles remain ad-hoc (`codesign -s -`)
+and un-notarized and the `.deb`s remain unsigned — those need an Apple Developer ID /
+notarization and a Debian archive key respectively, deliberately out of scope. The
+PQ manifest signature is the project-controlled integrity layer on top of the (dual)
+checksums and building from source. This matches the project's honesty posture — see
+`SECURITY.md` and `README.md`.
 
 ## Packaging policy (political filter)
 

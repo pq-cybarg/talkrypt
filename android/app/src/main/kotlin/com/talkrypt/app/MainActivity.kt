@@ -31,7 +31,9 @@ import android.widget.Toast
 import com.talkrypt.custody.CustodyBridge
 import kotlin.concurrent.thread
 import uniffi.talkrypt_ffi.Account
+import uniffi.talkrypt_ffi.AdvertisePolicy
 import uniffi.talkrypt_ffi.AnchorNode
+import uniffi.talkrypt_ffi.FfiBeacon
 import uniffi.talkrypt_ffi.DeviceKey
 import uniffi.talkrypt_ffi.FfiEvent
 import uniffi.talkrypt_ffi.LinkOffer
@@ -72,6 +74,13 @@ class MainActivity : Activity() {
     private var pendingTier = Persistence.PERSISTENT_LOCAL  // tier chosen for the next join
     private val pendingSaves = HashSet<String>()
     private var polling = false   // guards a single foreground drain+render loop
+    // SUB-SPEC A / #68: the active beacon (radio backend + FFI handle), if running.
+    private var beaconBackend: RadioBeacon? = null
+    private var beacon: FfiBeacon? = null
+    // Mesh messaging over a LoRa BLE node (Meshtastic/Meshcore backend + FFI handle + scan), if running.
+    private var meshBackend: MeshRadioBackend? = null
+    private var meshNode: uniffi.talkrypt_ffi.FfiMeshNode? = null
+    private var meshScan: android.bluetooth.le.ScanCallback? = null
 
     /** Currently rendered chat id, or null on the list/other screens. */
     private val activeId: String? get() = sessions.active
@@ -203,6 +212,7 @@ class MainActivity : Activity() {
         private const val REQ_SCAN = 0x5343
         private const val REQ_NOTIF = 0x4E54  // "NT" — POST_NOTIFICATIONS for the always-on service
         private const val REQ_TICKETBOOK = 0x544B // "TK" — pick a Nym ticketbook file to import
+        private const val REQ_BLE = 0x424C // "BL" — BLE advertise/scan/connect for the beacon
         private const val ANCHOR_SEP = "\u001F" // delimiter for stored (uri, username)
     }
 
@@ -271,6 +281,13 @@ class MainActivity : Activity() {
         col.addView(label("ACCESS", access).also { it.setPadding(0, dp(20), 0, dp(8)) })
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
 
+        // SUB-SPEC A §5: the chat's baseline for how look-alike (homoglyph) names
+        // are shown — travels in the invite so joiners inherit it (any viewer may
+        // tighten it locally later, never loosen). Uses the a11y 2-arg label form.
+        val namePolicy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
+        col.addView(label("NAME DISPLAY", namePolicy).also { it.setPadding(0, dp(20), 0, dp(8)) })
+        col.addView(namePolicy, lp(MATCH_PARENT, WRAP_CONTENT))
+
         val persistence = darkSpinner(listOf("Ephemeral (memory only)", "Persistent (saved, reconnectable)", "Always-on (Phase 2)"))
         col.addView(label("PERSISTENCE", persistence).also { it.setPadding(0, dp(20), 0, dp(8)) })
         // Default to Persistent (matches pendingTier's default): a real chat is
@@ -310,6 +327,7 @@ class MainActivity : Activity() {
                 posture.selectedItem.toString(),
                 access.selectedItem.toString(),
                 tierOf(persistence),
+                when (namePolicy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "" },
             )
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(32)))
         col.addView(pillButton("Registry-restricted chat", panel, fg) {
@@ -470,7 +488,18 @@ class MainActivity : Activity() {
     private fun chatRowMenu(lc: LiveChat) {
         val id = lc.meta.id
         val connected = lc.client != null
+        val beaconOn = beacon != null
+        val meshOn = meshBackend != null
         val items = buildList {
+            add("Manage callsigns")
+            add(if (beaconOn) "Stop nearby beacon" else "Beacon nearby (BLE + Wi-Fi)")
+            if (beaconOn) add("Beacon self-test (spoof)")
+            if (meshOn) {
+                add("Stop mesh (LoRa)")
+            } else {
+                add("Mesh over LoRa (Meshtastic BLE)")
+                add("Mesh over LoRa (Meshcore BLE)")
+            }
             add("Re-share invite")
             if (lc.meta.inviteUri != null) add("Show invite QR")
             add("Safety number (verify)")
@@ -482,6 +511,13 @@ class MainActivity : Activity() {
             .setTitle(lc.meta.title)
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
+                    "Manage callsigns" -> setContentView(nameBookScreen(id))
+                    "Beacon nearby (BLE + Wi-Fi)" -> startBeacon(id)
+                    "Stop nearby beacon" -> stopBeacon(id)
+                    "Beacon self-test (spoof)" -> beaconSpoofSelfTest(id)
+                    "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id, MeshKind.MESHTASTIC)
+                    "Mesh over LoRa (Meshcore BLE)" -> startMesh(id, MeshKind.MESHCORE)
+                    "Stop mesh (LoRa)" -> stopMesh(id)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
                     "Show invite QR" -> lc.meta.inviteUri?.let { showInviteQr(it) }
                     "Safety number (verify)" -> {
@@ -503,6 +539,235 @@ class MainActivity : Activity() {
                     }
                 }
             }.show()
+    }
+
+    /** SUB-SPEC A / #68: start the pre-session CQ beacon over BLE. Core seals THIS
+     *  chat's beacon under the chat root and hands the opaque blob to the BLE backend
+     *  ([BleBeaconBackend.advertise]); the scan side reads nearby beacons and feeds
+     *  them back via `deliverBeacon`, so an invite-holder resolves them into a
+     *  `BeaconSeen` event. One active beacon at a time (matches the single-active-chat
+     *  UI); requires the BLE permissions the app already requests for nearby discovery. */
+    private fun startBeacon(id: String) {
+        val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
+        stopBeacon(id) // replace any prior beacon
+        ensureBlePermissions()
+        // Both radios at once (Rust MultiBeacon's Kotlin peer): BLE short-range +
+        // Wi-Fi/NSD for larger payloads/range. Each is best-effort; a dead radio is fine.
+        val backend = MultiLocalBeacon(listOf(BleBeaconBackend(this), WifiBeaconBackend(this)))
+        val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
+        // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
+        backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
+            { msg -> ui.post { sysLine(id, "beacon: $msg") } })
+        beaconBackend = backend
+        beacon = fb
+        sysLine(id, "📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning")
+    }
+
+    private fun stopBeacon(id: String) {
+        beacon?.let { runCatching { it.close() } }   // stops core's advertise/scan task
+        beaconBackend?.let { runCatching { it.stop() } }
+        if (beacon != null) sysLine(id, "nearby beacon stopped")
+        beacon = null
+        beaconBackend = null
+    }
+
+    /** Which LoRa mesh firmware the node runs — selects the BLE service to scan for
+     *  and the backend to build. */
+    private enum class MeshKind(
+        val label: String,
+        val service: java.util.UUID,
+        val make: (android.content.Context, android.bluetooth.BluetoothDevice) -> MeshRadioBackend,
+    ) {
+        MESHTASTIC("Meshtastic", MeshtasticBleBackend.SERVICE, ::MeshtasticBleBackend),
+        MESHCORE("Meshcore", MeshcoreBleBackend.SERVICE, ::MeshcoreBleBackend),
+    }
+
+    /** Carry this chat's messages over a LoRa node reached by BLE (#68 mesh messaging).
+     *  Scans for a node advertising the chosen firmware's GATT service, links it via the
+     *  matching [MeshRadioBackend], and calls `startMeshMessaging` so outbound group frames
+     *  also ride LoRa and inbound ones are fed back through `deliverPacket`. Establish the
+     *  chat over the primary transport first; the mesh is an additional broadcast path.
+     *  On-device only (the emulator has no real BLE). */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startMesh(id: String, kind: MeshKind) {
+        val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
+        stopMesh(id)
+        ensureBlePermissions()
+        val mgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
+        val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast("no BLE scanner"); return }
+        val filter = android.bluetooth.le.ScanFilter.Builder()
+            .setServiceUuid(android.os.ParcelUuid(kind.service)).build()
+        val settings = android.bluetooth.le.ScanSettings.Builder()
+            .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        val cb = object : android.bluetooth.le.ScanCallback() {
+            override fun onScanResult(type: Int, result: android.bluetooth.le.ScanResult?) {
+                val dev = result?.device ?: return
+                runCatching { scanner.stopScan(this) }
+                meshScan = null
+                val backend = kind.make(this@MainActivity, dev)
+                val fmn = c.startMeshMessaging(backend, 0.toUByte()) // mesh channel 0
+                backend.startReceiving { ch, p, from -> runCatching { fmn.deliverPacket(ch, p, from) } }
+                meshBackend = backend
+                meshNode = fmn
+                ui.post { sysLine(id, "📻 mesh: linked a ${kind.label} node — messages also ride LoRa") }
+            }
+            override fun onScanFailed(errorCode: Int) {
+                ui.post { sysLine(id, "mesh: BLE scan failed ($errorCode)") }
+            }
+        }
+        meshScan = cb
+        try {
+            scanner.startScan(listOf(filter), settings, cb)
+            sysLine(id, "🔎 looking for a ${kind.label} node over BLE…")
+        } catch (e: SecurityException) {
+            toast("BLE scan permission denied")
+        }
+    }
+
+    private fun stopMesh(id: String) {
+        meshScan?.let { cb ->
+            runCatching {
+                getSystemService(android.bluetooth.BluetoothManager::class.java)
+                    ?.adapter?.bluetoothLeScanner?.stopScan(cb)
+            }
+        }
+        meshNode?.let { runCatching { it.close() } } // stops core's mesh advertise/scan task
+        meshBackend?.let { runCatching { it.stop() } }
+        if (meshBackend != null) sysLine(id, "mesh stopped")
+        meshScan = null
+        meshNode = null
+        meshBackend = null
+    }
+
+    /** Emulator/QEMU spoof self-test (no real radio): feed the exact opaque blob core
+     *  asked the backend to advertise straight back through `deliverBeacon`, exercising
+     *  the full core round-trip (seal -> advertise -> open -> `Event::BeaconSeen`). On
+     *  real hardware the BLE scan path delivers this over the air instead. */
+    private fun beaconSpoofSelfTest(id: String) {
+        val fb = beacon ?: run { toast("start the beacon first"); return }
+        val blob = beaconBackend?.lastAdvertised()
+            ?: run { toast("no advertised blob yet — try again in a moment"); return }
+        runCatching { fb.deliverBeacon(blob, "spoof-self") }
+        sysLine(id, "beacon self-test: fed our own sealed beacon back (expect a 📡 sighting)")
+    }
+
+    /** Request the BLE runtime permissions (API 31+) the beacon/nearby features need. */
+    private fun ensureBlePermissions() {
+        if (Build.VERSION.SDK_INT >= 31) {
+            val perms = arrayOf(
+                android.Manifest.permission.BLUETOOTH_ADVERTISE,
+                android.Manifest.permission.BLUETOOTH_SCAN,
+                android.Manifest.permission.BLUETOOTH_CONNECT,
+            ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (perms.isNotEmpty()) runCatching { requestPermissions(perms.toTypedArray(), REQ_BLE) }
+        }
+    }
+
+    /** SUB-SPEC A: manage your self-declared callsigns for this chat — a name book
+     *  (add / switch / remove), the CQ cadence toggles (periodic + on-message name-id),
+     *  a viewer name-trust control, and a roster view surfacing each peer's tier badge
+     *  and always-available safety number. Reached from the chat overflow menu. */
+    private fun nameBookScreen(chatId: String): View {
+        val lc = sessions.get(chatId) ?: return chatListScreen()
+        val c = lc.client
+        val col = column(bg).apply { setPadding(dp(20), dp(20), dp(20), dp(20)) }
+        col.addView(text("Callsigns", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(4)) })
+        col.addView(text("Names you broadcast over your messages in this chat.", 13f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)))
+
+        if (c == null) {
+            col.addView(text("Connect to this chat to manage names.", 14f, muted), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+            col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+            return ScrollView(this).apply { setBackgroundColor(bg); addView(col); applyInsets(this) }
+        }
+
+        // ----- your saved names -----
+        col.addView(label("YOUR NAMES").also { it.setPadding(0, dp(12), 0, dp(8)) })
+        val names = runCatching { c.listNames() }.getOrDefault(emptyList())
+        val active = runCatching { c.leadingNameId() }.getOrDefault("")
+        if (names.isEmpty()) {
+            col.addView(text("None yet — add one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT))
+        }
+        for (n in names) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val badge = if (n.linked) "🔗 " else ""
+            val star = if (n.id == active) "★ " else ""
+            row.addView(text("$star$badge${n.label}", 16f, if (n.id == active) accent else fg), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            if (n.id != active) row.addView(pillButton("Use", accent, Color.WHITE) {
+                thread { val ok = runCatching { c.useName(n.id) }.getOrDefault(false)
+                    ui.post { toast(if (ok) "calling as “${n.label}”" else "failed"); setContentView(nameBookScreen(chatId)) } }
+            }.apply { setPadding(dp(16), dp(8), dp(16), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
+            row.addView(pillButton("✕", panel, muted) {
+                c.removeName(n.id); toast("removed"); setContentView(nameBookScreen(chatId))
+            }.apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            col.addView(row, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+        }
+
+        // ----- add a name -----
+        val add = inputField("New callsign")
+        col.addView(add, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(14)))
+        col.addView(pillButton("Save to name book", panel, fg) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) { c.addBareName(v, v); add.setText(""); setContentView(nameBookScreen(chatId)) }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton("Set + announce now", accent, Color.WHITE) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) { c.setLeadingName(v); thread { runCatching { c.announcePresence() } }
+                add.setText(""); toast("calling as “$v”"); setContentView(nameBookScreen(chatId)) }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton("Set as VERIFIED (🔗 account-linked)", panel, fg) {
+            val v = add.text.toString().trim()
+            if (v.isNotEmpty()) {
+                // Our account certifies this device → peers resolve it at the Linked
+                // tier (insider-unforgeable), unlike a bare callsign.
+                c.setLinkedLeadingName(account(), v); thread { runCatching { c.announcePresence() } }
+                add.setText(""); toast("verified name “$v”"); setContentView(nameBookScreen(chatId))
+            }
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("Verified uses your account key so a name can't be spoofed by another member.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        // ----- CQ cadence -----
+        col.addView(label("CQ BEACON").also { it.setPadding(0, dp(24), 0, dp(8)) })
+        val periodicOn = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL) > 0uL
+        val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
+        col.addView(pillButton(if (periodicOn) "Periodic re-beacon: ON (5 min)" else "Periodic re-beacon: off", if (periodicOn) accent else panel, if (periodicOn) Color.WHITE else fg) {
+            c.setPresenceCadence(if (periodicOn) 0uL else 300uL, onMsg); setContentView(nameBookScreen(chatId))
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(pillButton(if (onMsg) "On-message name-id: ON" else "On-message name-id: off", if (onMsg) accent else panel, if (onMsg) Color.WHITE else fg) {
+            c.setPresenceCadence(if (periodicOn) 300uL else 0uL, !onMsg); setContentView(nameBookScreen(chatId))
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("On-message name-id lets peers notice if you rename and drop your stale callsign.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        // ----- viewer name-trust policy (how strictly to show OTHERS' names) -----
+        col.addView(label("SHOW OTHERS' NAMES").also { it.setPadding(0, dp(24), 0, dp(8)) })
+        val policy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
+        col.addView(policy, lp(MATCH_PARENT, WRAP_CONTENT))
+        col.addView(pillButton("Apply name-trust setting", panel, fg) {
+            val v = when (policy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "signal" }
+            c.setNameTrustPolicy(v); toast("name-trust: $v")
+        }, lp(MATCH_PARENT, dp(48), top = dp(8)))
+        col.addView(text("You can only tighten the chat's baseline, never loosen it.", 12f, muted),
+            lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+
+        // ----- who's here (resolved names + safety numbers) -----
+        if (lc.roster.isNotEmpty()) {
+            col.addView(label("WHO'S HERE").also { it.setPadding(0, dp(24), 0, dp(8)) })
+            for (m in lc.roster.values) {
+                val badge = when (m.nameTier) { "Linked" -> "🔗 "; "RegistryConfirmed" -> "✓ "; else -> "" }
+                val shown = m.display ?: m.fp.take(8)
+                val sn = if (m.safetyNumber.isNotEmpty()) "  ·  safety ${m.safetyNumber}" else ""
+                col.addView(text("$badge$shown$sn", 14f, fg).apply {
+                    setOnClickListener { toast("safety number: ${m.safetyNumber.ifEmpty { m.fp.take(16) }}") }
+                }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+            }
+        }
+
+        col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
+        applyInsets(sv)
+        return sv
     }
 
     private fun openChat(id: String) {
@@ -1519,7 +1784,7 @@ class MainActivity : Activity() {
         thread {
             try {
                 val port = ChatNet.allocLanPort()
-                val c = TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
+                val c = TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port), null)
                 runCatching { c.presentAccount(account(), username) }
                 runCatching { loadContacts(c) } // recognize saved contacts
                 val members = c.restrictToAnchor(anchorUri)
@@ -1554,16 +1819,28 @@ class MainActivity : Activity() {
     /** Render history entries not yet on screen (the initial replay, live events,
      *  and anything the service drained while the Activity was paused). All
      *  history-backed rendering funnels through here so [renderedCount] stays
-     *  true; render-only extras (invite QR, action rows) don't count. */
+     *  true; render-only extras (invite QR, action rows) don't count. SUB-SPEC A:
+     *  each bubble's trust-tier badge is read from the CURRENT roster at render
+     *  time, so a re-render (see [rerenderTranscript]) reflects tier changes. */
     private fun renderNew(lc: LiveChat) {
         if (messages == null) return
         while (renderedCount < lc.history.size) {
             val m = lc.history[renderedCount++]
             when (m.kind) {
-                MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking)
+                MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking,
+                    tier = if (m.mine) "" else (m.sender?.let { lc.roster[it]?.nameTier } ?: ""))
                 MsgKind.SYSTEM, MsgKind.ACTION -> system(m.text)
             }
         }
+    }
+
+    /** Re-render the whole transcript in place — clears the message list and replays
+     *  history so a trust/tier change (Event::Name) reflects on EARLIER bubbles.
+     *  Rebuilds only the message list (not the screen), so the input draft is kept. */
+    private fun rerenderTranscript(lc: LiveChat) {
+        messages?.removeAllViews()
+        renderedCount = 0
+        renderNew(lc)
     }
 
     private fun chatScreen(chatId: String): View {
@@ -1612,7 +1889,7 @@ class MainActivity : Activity() {
         scroll = sv
         root.addView(sv, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // replay this chat's stored history into the view
+        // replay this chat's stored history into the view (tier-aware; see renderNew)
         renderedCount = 0
         renderNew(lc)
 
@@ -1652,7 +1929,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- bubbles ----------
-    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null) {
+    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null, tier: String = "") {
         val list = messages ?: return
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1665,7 +1942,18 @@ class MainActivity : Activity() {
         if (!marking.isNullOrEmpty()) {
             bubble.addView(text(marking, 10f, amber, bold = true))
         }
-        if (sender != null) bubble.addView(text(sender, 11f, accent, bold = true))
+        if (sender != null) {
+            // SUB-SPEC A: tint the sender label by trust tier — a verified (account-
+            // linked / registry-confirmed) callsign gets a badge + verified-green,
+            // a bare/unverified one stays the neutral accent so it can't pass for
+            // verified at a glance.
+            val (badge, color) = when (tier) {
+                "Linked" -> "🔗 " to Color.parseColor("#7FD1A6")
+                "RegistryConfirmed" -> "✓ " to Color.parseColor("#7FD1A6")
+                else -> "" to accent
+            }
+            bubble.addView(text("$badge$sender", 11f, color, bold = true))
+        }
         bubble.addView(text(body, 15f, if (mine) onAccent else fg).apply {
             // cap long messages at ~76% of screen width so bubbles don't span edge-to-edge
             maxWidth = (resources.displayMetrics.widthPixels * 0.76f).toInt()
@@ -1705,7 +1993,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
-    private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL) {
+    private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL, namePolicy: String = "") {
         toast("creating chat…")
         thread {
             try {
@@ -1715,15 +2003,18 @@ class MainActivity : Activity() {
                 // ChatNet.sharedTorDir); the onion service is per-chat within it.
                 // Nym multi-homes over Tor too, so it also uses the shared Tor dir.
                 val torSub = if (useTor || useNym) "shared" else null
+                // SUB-SPEC A §5: the chosen name-trust baseline (empty = default) is
+                // set at creation so it travels in the invite and joiners inherit it.
+                val pol = namePolicy.ifEmpty { null }
                 val c = if (useNym) {
-                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this))
+                    TalkryptClient.hostNym(channel, posture, ChatNet.sharedTorDir(this), ChatNet.nymMnemonic(this), pol)
                 } else if (useTor) {
-                    TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this))
+                    TalkryptClient.hostTor(channel, posture, ChatNet.sharedTorDir(this), pol)
                 } else {
                     // Bind a free port (so multiple chats can host at once); advertise
                     // the address peers dial.
                     val port = ChatNet.allocLanPort()
-                    TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port))
+                    TalkryptClient.host(ChatNet.lanBind(port), channel, posture, ChatNet.lanAdvertise(port), pol)
                 }
                 runCatching { c.presentAccount(account(), null) }
                 runCatching { loadContacts(c) } // recognize saved contacts
@@ -1940,12 +2231,82 @@ class MainActivity : Activity() {
     private fun sendMessage(chatId: String, t: String): Boolean {
         val lc = sessions.get(chatId) ?: return false
         val c = lc.client ?: run { reconnect(chatId); toast("reconnecting — your text is kept, try again in a moment"); return false }
+        // SUB-SPEC A: /name and /cq are handled locally (self-declared name + CQ beacon),
+        // mirroring the CLI, rather than sent as chat text. Handled = accepted (true).
+        if (t.startsWith("/name") || t.startsWith("/cq")) { handleNameCommand(chatId, c, t.trim()); return true }
         val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null, ts = System.currentTimeMillis())
         lc.history.add(msg); sessions.touch(chatId, msg.ts)
         if (activeId == chatId) renderNew(lc)
         scheduleSave(chatId)
         thread { runCatching { c.send(t) }.onFailure { ui.post { toast("send failed") } } }
         return true
+    }
+
+    /** SUB-SPEC A slash commands (self-declared name + CQ beacon), mirroring the CLI:
+     *  `/name <callsign>` | `/name off` | `/name new <cs>` | `/name list` |
+     *  `/name use <id>` | `/cq` | `/cq periodic <mins>|off` | `/cq onmsg on|off`.
+     *  The name book is also editable in the "Manage callsigns" screen. */
+    private fun handleNameCommand(chatId: String, c: TalkryptClient, t: String) {
+        when {
+            t == "/name list" -> {
+                val names = runCatching { c.listNames() }.getOrDefault(emptyList())
+                if (names.isEmpty()) sysLine(chatId, "name book empty — /name <callsign> to add one")
+                else {
+                    val active = runCatching { c.leadingNameId() }.getOrDefault("")
+                    names.forEach {
+                        val mark = if (it.id == active) "* " else "  "
+                        val tier = if (it.linked) "account-linked" else "bare"
+                        sysLine(chatId, "$mark${it.id}  “${it.label}”  ($tier)")
+                    }
+                }
+            }
+            t.startsWith("/name new ") -> {
+                val label = t.removePrefix("/name new ").trim()
+                if (label.isNotEmpty()) { c.addBareName(label, label); sysLine(chatId, "saved “$label” to the name book") }
+            }
+            t.startsWith("/name use ") -> {
+                val id = t.removePrefix("/name use ").trim()
+                thread {
+                    val ok = runCatching { c.useName(id) }.getOrDefault(false)
+                    ui.post { sysLine(chatId, if (ok) "switched to “$id” and announced" else "no saved name “$id”") }
+                }
+            }
+            t.startsWith("/name link ") -> {
+                // Account-LINKED (verified) name: our account certifies this device key,
+                // so peers resolve it at the insider-unforgeable Linked tier.
+                val label = t.removePrefix("/name link ").trim()
+                if (label.isNotEmpty()) {
+                    c.setLinkedLeadingName(account(), label)
+                    thread { runCatching { c.announcePresence() } }
+                    sysLine(chatId, "🔗 calling as verified “$label”")
+                }
+            }
+            t.startsWith("/name ") -> {
+                val label = t.removePrefix("/name ").trim()
+                if (label == "off") { c.setLeadingName(""); sysLine(chatId, "name cleared") }
+                else {
+                    c.setLeadingName(label)
+                    thread { runCatching { c.announcePresence() } }
+                    sysLine(chatId, "calling as “$label”")
+                }
+            }
+            t == "/cq" -> { thread { runCatching { c.announcePresence() } }; sysLine(chatId, "CQ — announced your name") }
+            t.startsWith("/cq periodic") -> {
+                val rest = t.removePrefix("/cq periodic").trim()
+                val secs = if (rest == "off" || rest.isEmpty()) 0L else (rest.toLongOrNull()?.times(60) ?: 0L)
+                // Preserve the on-message-id flag when changing the periodic interval.
+                val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
+                c.setPresenceCadence(secs.toULong(), onMsg)
+                sysLine(chatId, if (secs == 0L) "CQ cadence off" else "CQ cadence: every ${secs / 60} min")
+            }
+            t.startsWith("/cq onmsg") -> {
+                val on = t.removePrefix("/cq onmsg").trim().let { it == "on" || it.isEmpty() }
+                val secs = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL)
+                c.setPresenceCadence(secs, on)
+                sysLine(chatId, "CQ on-message name-id: ${if (on) "on" else "off"}")
+            }
+            else -> sysLine(chatId, "usage: /name <callsign>|link <cs>|new <cs>|list|use <id>|off  ·  /cq [periodic <mins>|off] [onmsg on|off]")
+        }
     }
 
     /** One loop drains every connected chat; events route to their room. The
@@ -1978,9 +2339,15 @@ class MainActivity : Activity() {
     private fun handleEvent(id: String, lc: LiveChat, e: FfiEvent) {
         val msg = applyEvent(sessions, id, lc, e)
         if (activeId == id) {
-            renderNew(lc)
-            // Connection changes refresh the header chip in place — a rebuild
-            // here used to wipe the user's half-typed draft on every peer flap.
+            // A trust/name change (Event::Name — e.g. a mode-3 stale-name drop or a
+            // tier upgrade) can retroactively change how EARLIER messages should be
+            // badged, so re-render the transcript in place. This is deterministic —
+            // unlike main, which only refreshed tiers incidentally on a connection
+            // flap (full setContentView). We rebuild only the message list, never the
+            // whole screen, so the user's half-typed input draft is preserved.
+            if (e is FfiEvent.Name) rerenderTranscript(lc) else renderNew(lc)
+            // Connection changes refresh the header chip in place — a rebuild here
+            // used to wipe the draft on every peer flap.
             if (e is FfiEvent.Connected || e is FfiEvent.Disconnected) updateChatHeader(lc)
             if (e is FfiEvent.Identity && !e.contact) {
                 val who = lc.roster[e.accountFingerprint]?.display ?: e.accountFingerprint.take(8)

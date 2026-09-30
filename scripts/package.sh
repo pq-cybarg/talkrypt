@@ -23,8 +23,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# The CLI binary is `talkrypt`; the workspace also ships a TUI and a helper.
-BINS=(talkrypt:talkrypt-cli talkrypt-tui:talkrypt-tui talkrypt-helper:talkrypt-helper)
+# The CLI binary is `talkrypt`; the workspace also ships a TUI, a helper, and the
+# PQ release-signature tool (F-8) so downloaders can verify — and sign their own
+# copies — without a Rust toolchain.
+BINS=(talkrypt:talkrypt-cli talkrypt-tui:talkrypt-tui talkrypt-helper:talkrypt-helper talkrypt-relsign:talkrypt-relsign)
 VERSION="$(grep -m1 '^version' crates/cli/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 [[ -z "$VERSION" ]] && VERSION="0.0.0"
 GITREV="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"

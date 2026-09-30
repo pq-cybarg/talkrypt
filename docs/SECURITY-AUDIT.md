@@ -41,7 +41,7 @@ restricted channels.
 
 | Adversary | Capability | Primary mitigation |
 | --- | --- | --- |
-| Network / metadata observer | sees all ciphertext + timing | Tor onion transport; PQ inner layer; wire padding for frame-indistinguishability |
+| Network / metadata observer | sees all ciphertext + timing | Tor onion transport (or optional Nym mixnet); PQ inner layer; KEM-posture wire padding; **opt-in message-length bucketing inside the group ciphertext (F-16)** collapses message sizes for the relay/observer. Residual: the DM-destination graph is inherent to a blind relay (F-16). |
 | Store-now-decrypt-later (quantum) | records ciphertext, breaks ECC later | ML-KEM-1024 KEM; ML-DSA-87 identity (zero load-bearing ECC) |
 | First-contact MITM | active on the first connection | invite-token PSK in the handshake + out-of-band safety-number (SHA3-384) comparison |
 | Malicious peer | a valid session peer | identity unforgeable without the account ML-DSA key; access-policy gating; revocation |
@@ -208,18 +208,29 @@ who has read the disclaimers.
 | F-1 | High (meta) | No independent audit / cryptographic review / penetration test. Every property above is unverified externally. | Open — disclosed in README & `SECURITY.md` |
 | F-2 | Medium | Dependency vulnerability scanning (`cargo audit` / `cargo deny`) was not run in CI. | **Resolved** — `scripts/audit-deps.sh` + `deny.toml` + `.github/workflows/audit.yml` (push/PR + weekly) |
 | F-3 | Low | Transient *symmetric* session secrets were not all zeroized-on-drop. | **Resolved** — Double Ratchet + PQ-Noise sessions now zeroize on drop; per-message keys held in `Zeroizing` |
-| F-4 | Low | Keygen uses `rand::OsRng` (`getrandom`) with no SP 800-90B health tests or approved DRBG wrapper. | Open — relevant to FIPS (COMPLIANCE §5.2) |
+| F-4 | Low | Keygen uses `rand::OsRng` (`getrandom`) with no SP 800-90B health tests or approved DRBG wrapper. | Partially addressed — **SP 800-90B §4.4 startup health tests** (Repetition Count + Adaptive Proportion) now run over the OS CSPRNG inside the power-on self-test (`crypto::rng`, wired into `self_test`/`ensure_self_tested`), aborting start-up on a catastrophically broken source (stuck-at / all-zero snapshot / grossly low-entropy) before any key is minted; `fill_secure` centralizes health-checked entropy. **Deliberately NOT done:** a user-space DRBG wrapper — on every target platform `getrandom`/`OsRng` *is* the kernel's SP 800-90A-approved DRBG, and a hand-rolled unaudited DRBG would be strictly worse. Residual for strict FIPS: the OS DRBG isn't a talkrypt-owned CAVP-validated module (a certification-boundary question, not a code gap). Relevant to FIPS (COMPLIANCE §5.2). |
 | F-5 | Low | Cert validity tolerates ±5 min clock skew (`CLOCK_SKEW_TOLERANCE`), so a cert expired by <5 min, or not-yet-valid by <5 min, is accepted. | Accepted — bounded, necessary for unsynchronized device clocks; revisit if short-TTL certs are introduced |
 | F-6 | Info | Default hash/KDF is SHA3-384/KMAC256 (FIPS 202), not the CNSA-named SHA-384; `--features cnsa-sha2` switches to SHA-384. | By design — `docs/COMPLIANCE.md` §2 |
 | F-7 | Info | Group layer is a custom PQ construction, not RFC 9420 (MLS) conformant — no MLS interop. | By design — `docs/CONFORMANCE.md` |
-| F-8 | Low | Desktop packages are ad-hoc-signed (macOS) or unsigned (`.deb`); integrity rests on `SHA256SUMS`, not a trusted signing authority or notarization. | Open — `docs/PACKAGING.md` |
+| F-8 | Low | Desktop packages are ad-hoc-signed (macOS) or unsigned (`.deb`); integrity rests on `SHA256SUMS`, not a trusted signing authority or notarization. | Partially addressed — the release **checksum manifest is now PQ-signed** with the project's own **ML-DSA-87** release key (`talkrypt-relsign`; `hash-dist.sh` writes `SHA256SUMS.sig` when `TALKRYPT_RELEASE_SK` is set; `verify.sh` checks it against the pinned `docs/RELEASE_PUBKEY.hex`). Integrity now chains artifact → SHA-256 → signed manifest → a signing authority the project controls, not a bare checksum. Residual (deliberately out of scope, CA-dependent): macOS **notarization** (Apple Developer ID) and **`.deb` signing** (Debian archive key). See `docs/PACKAGING.md`. |
 | F-9 | Info | Timing side-channel posture not documented. | **Reviewed** (R-4): AEAD/signature/KEM are constant-time via their crates; our code has no secret-dependent comparison; the auth-decision key comparison is now constant-time. See §3a. |
-| F-10 | Info | GUI bundles (Android APK, desktop) are not built/tested in CI; the Rust core + FFI they depend on are. | Open |
+| F-10 | Info | GUI bundles (Android APK, desktop) are not built/tested in CI; the Rust core + FFI they depend on are. | Partially addressed — the **Android** module now has a CI compile + JVM-unit gate (`.github/workflows/android.yml`): it regenerates the uniffi Kotlin bindings from the current FFI, compiles the whole app, and runs the JVM unit tests on any `android/**` or `crates/ffi/**` change — catching FFI-drift (non-exhaustive `when`, missing callback overrides, API mismatches) that previously merged silently. The **desktop** GUI now also has a dedicated gate (`.github/workflows/desktop.yml`): it clippy-lints the desktop crate (deny warnings), builds the **release** GUI binary (default Tor), and builds the **LAN-only `--no-default-features`** variant — closing the gap the workspace `cargo test` left (that job only compiles the desktop crate with default features and no clippy, so a broken release build, a broken non-Tor windowing path, or a GUI lint could merge green). Residual: both remain **build/compile + unit gates**, not instrumented/on-screen tests (a headless runner can't render the egui/GL window or run the packaged APK on a device). |
 | F-11 | Medium | The suite-registry floor was enforced only against a suite's *self-declared* `SecurityLevel` tag — a suite naming AES-128 / ML-KEM-768 / ML-DSA-65 could pass by tagging itself `PostQuantum`. | **Resolved** — `register` now also enforces the declared parameters (`meets_cnsa_floor`); the AEAD type (`&[u8;32]`) structurally bars an AES-128-length key |
 | F-12 | Info | The RFC 9420 conformance harness (`crates/crypto/src/mls/`) names the standard AES-128-GCM ciphersuite and derives 16-byte key-schedule bytes to match official MLS vectors. It instantiates no cipher, is not a registrable suite, and is not on any message path. | By design — `docs/CONFORMANCE.md`; walled off by F-11 + the AEAD type |
 | F-13 | Medium | `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing attack, no upstream fix) is pulled transitively by Arti under the `tor` feature; absent from default builds; talkrypt performs no RSA. | **Resolved** — `rsa` vendored + source-patched to blind every private-key op (`third-party/rsa/`, applied via `[patch.crates-io]`); see R-1 entry below |
 | F-14 | Medium | Remote-DoS panic in the ratchet-header decoder: a hybrid / padded-PQ-pure `RatchetPublic` whose length-prefixed X25519/pad field was shorter than 32 bytes triggered an out-of-range slice index (`hybrid.rs::to_32`), panicking the receiver on a single malformed inbound message. Found by the new `ratchet_header` fuzz target (R-6), in ~3.5k executions. | **Resolved** — decode path now uses a fallible `try_to_32` returning `Malformed`; regression test `short_x25519_or_pad_field_is_rejected_not_panic` + corpus seed `corpus/ratchet_header/regression-short-x25519-field` |
 | F-15 | Medium | RAM-capture exposure: long-lived secrets (notably the ML-DSA-87 identity seed) could be paged to swap or written to a core dump, and no process hardening blocked `ptrace`/`/proc/<pid>/mem` scraping. On a fully compromised (root/kernel) device this is unwinnable in software, but the disk-spill and same-uid vectors are mitigable. | **Resolved (mitigated)** — identity seed now in `mlock`'d, `MADV_DONTDUMP`, zeroize-on-drop page-locked memory (`mem::LockedBox`); startup `harden_process` disables core dumps + sets non-dumpable. Residual (hostile-device) folded into F-1. Hardware-backed *signing* of the PQ key is impossible on today's classical-only secure elements (StrongBox / Seeker SE / Secure Enclave / TPM lack ML-DSA); hardware-backed *at-rest sealing* is the available next step (R-8). See §3b |
+| F-16 | Low (metadata) | **Relay / observer message-length + DM-graph side-channel.** A non-member relay (`RelayHub`) decrypts the *pairwise* hop to route, so it observed each inner group-ciphertext's exact size + timing — leaking coarse content class. (The prior "wire padding" was KEM-*posture* padding only, `hybrid.rs`; it did not bucket message length.) A related **inherent** leak: `Route::Peer(dst)` must be cleartext to a blind relay (it needs the destination to deliver a DM). | **Length side-channel RESOLVED (opt-in).** Added **length-bucketing** (`talkrypt_wire::pad_to_bucket`/`unpad_bucket`). **Kani-proven:** the length quantization (`padded_len_quantizes_step4`/`_step256` — padded length is a bucket multiple, never truncates, adds < one bucket) and `unpad`'s no-panic on arbitrary bytes; the bucket is clamped to `[1, MAX_FRAME]` so an absurd descriptor step cannot force a giant allocation (proof-surfaced DoS, unit-tested). The `Vec` round-trip itself is CBMC-intractable, so it is covered by **exhaustive unit tests**, not Kani. Applied *inside* the group AEAD (`TreeKemGroup::set_pad_bucket`, `encrypt_signed`/`decrypt_verified`) — pairwise/transport padding can't help since the relay decrypts that layer. Gated per-chat by descriptor **v4** `message_padding` (all members share the invite → agree; default off, append-only/back-compat). Two different-length messages in a bucket produce identical wire length; each still recovers its exact plaintext, verified through the blind relay (`treekem::f16_padding_quantizes_ciphertext_length_and_round_trips`, `relay::padded_group_chat_through_relay_still_delivers`). **Residual (inherent, by design):** the DM-destination graph — a single blind relay cannot route `Route::Peer` without `dst`; mitigation is topological (prefer P2P/gossip for sensitive DMs, or the optional Nym mixnet for sender/recipient unlinkability), not a patch. See §4a. |
+| G1 | **High** | Group-message sender forgery: messages were authenticated only by the shared `epoch_secret` with the sender `leaf` an unauthenticated plaintext header — any member could derive any other member's chain and post a message every receiver attributed to the victim. Demonstrated by an in-repo test. | **Resolved** — versioned v2 group-message format carries a per-sender ML-DSA-87 signature over a domain-separated transcript, signed with a **per-membership leaf signature key** (a per-group alias, preserving pseudonymity), verified against the sending leaf's tree-bound key before decrypt. `treekem.rs::decrypt_verified`; F\* `thm_authenticity`/`thm_no_cross_leaf_forgery`; proptest + unit |
+| G2 | **High** | Relay attribution forgery: `Frame::Roster` had no per-message signature, so a relaying host/peer could restamp the sender. | **Resolved** — same per-sender signature; the engine drops (never forwards) any group message that fails verification, so a forged frame cannot ride the gossip fan-out. `engine.rs::handle_group_msg` |
+| G3 | Medium | Unauthenticated commits could crash the receiver (out-of-range leaf/`span==0` panics). | **Resolved** — bounds-checked node/leaf decode (`get_node`, `apply_proposals`); Kani-proven parser totality + proptest |
+| G4 | Medium | Commit/Welcome decoders could be driven to a large speculative allocation (declared count × element size) before reading data — process-abort DoS. | **Resolved** — `get_count(min_elem_bytes)` bounds every declared count by `remaining_input / min_elem_bytes`; test `oversized_commit_count_rejected_before_alloc` |
+| L1 | **High** | Device link certs were 10-year, auto-issued on handshake with no user approval — one seen QR granted account access for a decade. | **Resolved** — TTL cut to 24h (`LINK_CERT_TTL`, configurable), **fail-closed approval** default (no hook ⇒ deny), one-time + time-bounded offer; FFI/CLI opt into `auto_approve` for operator-initiated pairing. Self-presentation certs bounded to 30 days. `linking.rs`; tests incl. `default_without_approval_denies_certification` |
+| T-1 | Medium | No proof-of-possession on a joiner's leaf signature key: a malicious committer/relay could bind a leaf sig key it did not control to a leaf. | **Resolved** — every KeyPackage carries a PoP (self-signature over `POP_CONTEXT‖sig_vk`), verified at decode, re-verified on the receive side in `apply_proposals`, and re-verified for every member in the Welcome. F\* `thm_pop_binds_key`/`thm_pop_not_transferable`/`thm_pop_msg_non_confusion` |
+| T-2 | Medium | No post-compromise security for authentication: the leaf *signing* key never rotated, so a leaked signing key stayed valid for the whole membership. | **Resolved + activated** — `update()` rotates the leaf signing key (signed `sig_update` in the commit; receivers verify PoP + rebind). Wired into the protocol via `Core::self_update()` + FFI `self_update()`. F\* `thm_auth_pcs`; tests `update_rotates_leaf_signing_key_for_pcs`, `host_self_update_rotates_and_group_still_works` |
+| T-3 | Medium | A malicious committer (hub host) could (a) invent a *phantom* member whose leaf key it generated, or (b) substitute its own leaf key for a member who joins as a **bare pseudonym**. PoP (T-1) stops substituting a key *without its secret*; it did not stop a committer minting one it controls. | **Resolved (linked members)** — a linked member emits an account-signed `account→device→leaf_sig_key` chain (`Frame::LeafSigCert`); the host can only relay it (no account secret to forge), and every member binds a leaf to that account only if the chain's leaf equals the leaf's tree signing key. A substituted tree key finds no matching chain, so it is never attributed to a real account. Exposed via `Core::group_leaf_account` / FFI. Pseudonyms stay unbound by design. Tests `linked_member_leaf_binds_to_account_pseudonym_stays_unbound`, `leaf_sig_certificate_binds_leaf_key_to_device`, `leaf_sig_key_binds_to_account_and_rejects_substitution`. **Residual:** a *pure pseudonym* leaf still carries no account binding (there is nothing to bind — a pseudonym *is* its leaf key); this is by design, not a gap. |
+| A-1 | Medium | Reachability single-point-of-failure: a peer could reach the group only via the founding host's advertised route; if the host dropped and no member had gossiped an alternate, the peer was partitioned. Availability/censorship-resistance, not confidentiality. | **Resolved (core mechanism).** Nodes advertise identity-signed multi-homed route descriptors (`Core::advertise_routes` / `Frame::RouteDescriptor`), gossiped + re-flooded so every member learns every member's routes (verified, bounded). `Core::reconnect()` heals a partition by dialing learned routes when a member has lost all peers (no-op while connected). Exposed via FFI (`advertise_routes`/`known_routes`/`reconnect`). Tests `route_descriptors_gossip_and_reject_bad_signatures`, `reconnect_heals_partition_via_learned_route`. **Residual:** a reconnecting member re-runs the join handshake (rejoin, not seamless resume), and a *member* can only be an alternate route if it also listens (host-mode) — both follow-up refinements (§4a), not availability gaps. |
+| T-4 | Low | `self_update()` was host-driven only; a non-host member could not rotate its own leaf key, so member-side authentication PCS was not self-service. A naive member commit would advance the member's epoch optimistically and FORK against a concurrent host commit. | **Resolved (fork-free).** Implemented as an MLS-style Update **proposal**: `TreeKemGroup::propose_update` generates a fresh leaf keypair WITHOUT advancing the epoch; the member sends `Frame::UpdateProposal`; the host commits it (`commit_update`) and broadcasts — single committer, so no fork. The member installs its staged keys only when it applies the host's commit. Member KEM + signing keys rotate (member auth-PCS). `Core::self_update()`/FFI now handle both host and member. Tests `member_proposed_update_is_committed_by_host_without_fork` (3-member convergence + old-key rejection), `member_self_update_is_committed_by_host` (e2e). |
 
 ### Detail on the notable findings
 
@@ -311,6 +322,95 @@ are long-lived (device link TTL ~10 years), the symmetric grace past expiry is
 immaterial today; it would need re-evaluation if short-lived certificates are
 introduced. Bounded, documented, and unit-tested (`fresh_cert_tolerates_verifier_clock_behind`).
 
+**Note (L1 update):** the device-link TTL referenced above is now **24 h**, not
+10 years (see L1). The clock-skew grace is re-evaluated accordingly and remains
+bounded and acceptable.
+
+---
+
+## 4a. Residual group-layer risks — mitigation designs
+
+The G1/G2/T-1/T-2 fixes make group-message authentication sound *against ordinary
+members and relays*. Three residuals remain, each with a concrete, low-risk
+mitigation that reuses machinery already in the codebase. None is a confidentiality
+break; T-3 is the load-bearing one for a *malicious-host* threat model.
+
+### T-3 — bind the leaf signature key to an authenticated account (linked mode) — IMPLEMENTED
+
+**Problem.** In the hub topology the committer (host) chooses the leaf↔sig-key
+bindings. PoP (T-1) proves the holder controls the key, but a malicious host can
+still mint a key it *does* control and (a) attribute messages to a phantom leaf, or
+(b) substitute its key for a member who joined as a **bare pseudonym**. The host
+cannot forge as a member who is *cryptographically bound to a known account* — so
+the fix is to make that binding checkable.
+
+**Design (reuses `IdentityChain` / `belongs_to_account`).** The leaf signature key
+is, structurally, a **segment key** in the identity model. In *linked* mode the
+joiner extends its identity chain to certify its leaf sig key:
+
+```
+account ──cert──▶ device ──cert──▶ leaf_sig_key      (IdentityChain::extend)
+```
+
+- On join, a linked member presents this chain (the existing `Frame::Identity`
+  path already carries `account→device`; add one `extend` link for the leaf key).
+- The engine already records `roster: leaf → account_fingerprint`. It also holds
+  `leaf_sig_keys: leaf → sig_pk` (from TreeKEM). The cross-check is one call:
+  `belongs_to_account(account_pk, presented_chain, leaf_sig_pk, now)` must hold for
+  the account the roster binds to that leaf. If it fails, the member is flagged
+  **unverified** (attribution shown as pseudonymous, not as the account) or
+  rejected under a strict policy.
+- **Pseudonymity preserved:** a member with no account presents no chain; its leaf
+  key stands alone (a pseudonym *is* its leaf key), exactly as today. The binding is
+  strictly *additive* and opt-in per the identity model's linkage tiers.
+
+**Why this closes it.** A malicious host cannot produce a chain rooted at an account
+it does not control (that needs the account's ML-DSA-87 secret), so it cannot make a
+substituted/phantom leaf pass the `belongs_to_account` check for a real account.
+**Wiring:** primitives exist (`account.rs::IdentityChain::extend`,
+`belongs_to_account`); the work is (1) one extra `extend` link at join in
+`present_identity`, (2) the cross-check in `handle_identity`/`handle_group_msg`, and
+(3) an `Event`/UI signal for "verified account vs. pseudonym."
+
+### A-1 — reachability: gossip route descriptors + any-member bridging — IMPLEMENTED (gossip + reconnect; rejoin-vs-resume refinement pending)
+
+**Problem.** A peer reaches the group only via a route the founding host advertised;
+if the host drops and no multi-homed member has gossiped an alternate route, the
+peer partitions.
+
+**Design (extends the existing gossip mesh + `MultiTransport`).**
+
+1. **Gossip signed route descriptors.** Alongside the existing group-ciphertext
+   flood (`enable_gossip`), flood a small **signed** `RouteDescriptor` per member —
+   its multi-homed endpoint set `[onion, nym, lan]` signed by its leaf/identity key,
+   deduped by the same `SeenSet`. Every member thus learns every member's routes,
+   not just the host's.
+2. **Any multi-homed member bridges,** not only the host: a member with legs on two
+   fabrics re-floods across both (the gossip bridge already does this for
+   ciphertext; extend it to route descriptors).
+3. **Reconnect fan-out.** Extend `ReconnectPlan` to try *all* known peer routes
+   across *all* transports, not just the original host endpoint.
+
+**Why this closes it.** Losing the host no longer loses the routing map; the group
+stays connected as long as *any* multi-homed member remains, and single-homed peers
+on disjoint fabrics are bridged by any such member. Confidentiality is unchanged
+(descriptors are routing metadata; content stays E2E). **Wiring:** the seam is
+`crates/transport/src/multi.rs` (`select_endpoint`/`split_endpoints`) + the gossip
+path in `engine.rs`; add a `Frame::RouteDescriptor` and a learned-routes map.
+
+### T-4 — member-initiated self-update — IMPLEMENTED (fork-free Update proposal)
+
+**Problem.** `Core::self_update()` is host-driven; a non-host member cannot rotate
+its own leaf key, so its authentication-PCS is not self-service.
+
+**Design (mirrors KeyPackage flow).** A member's `update()` produces a valid commit
+re-keying *its own* path; today only the host broadcasts commits. Add a
+member→host→broadcast relay: the member sends its update commit to the host
+(as members already send KeyPackages to the host), the host validates it
+(`apply_commit` semantics: PoP on the `sig_update`, committer owns the leaf) and
+re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
+`handle_keypackage`, then routed as the existing `Frame::Commit` broadcast.
+
 ---
 
 ## 5. Attack surface
@@ -318,6 +418,23 @@ introduced. Bounded, documented, and unit-tested (`fresh_cert_tolerates_verifier
 - **Wire codec** (`crates/wire`): the primary untrusted-input surface. Bounded
   length-prefixed decoding, **fuzzed** (`fuzz_targets/wire_reader`) and
   **Kani-proven** for decoder bounds.
+- **Sub-spec B/C decoders** (`linkage.rs`, `vouch.rs`, `presence.rs`): parse
+  attacker-chosen bytes before any verification. Kani was confirmed to compile +
+  verify the async `talkrypt-core` crate; the flat `Predicate::decode` is now
+  **Kani-proven** total (`linkage::proofs::predicate_decode_never_panics`, in the
+  formal CI). The flat vouch decoders `VouchTarget`/`Vouch`/`VouchPolicy` are also
+  now **Kani-proven** total. **Tractability boundary (empirically diagnosed):** the
+  `SignedCert`/`IdentityChain`-embedding decoders (`LinkageProof`/`LinkagePayload`/
+  `NamePresence`) are CBMC-intractable (~34M clauses, no convergence). Root cause,
+  pinned down by a dependency-injection experiment (`LinkageProof::decode_with`):
+  with the sub-decoders replaced by trivial total stubs — so the crypto internals
+  are NEVER explored — it STILL blew up. So the bottleneck is NOT the sub-decoders;
+  it is the **nested-heap RETURN TYPE** (`IdentityChain(Vec<SignedCert{String, Vec,
+  Vec}>)`), whose construct-and-drop CBMC models expensively regardless of the parse
+  logic — which is why flat, fixed-array decoders (`VouchTarget`) verify in ~3 s and
+  these cannot. `Marking::decode` (its own nested/`String` structure) is the same
+  class. These stay fuzz + property-tested, not Kani, until a CBMC/Kani that models
+  nested heap drops cheaply; the `decode_with` seam is kept so the proof lands then.
 - **Invite/descriptor parsing** (`descriptor.rs`): parses attacker-influenceable
   `talkrypt://` URIs; **fuzzed** (`descriptor_parser`).
 - **Identity resolution** (`contacts.rs`, `account.rs`, `engine.rs::handle_identity`):

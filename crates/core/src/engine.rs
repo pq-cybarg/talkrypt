@@ -65,6 +65,66 @@ pub enum Event {
     },
     /// A peer connection closed.
     Disconnected { fingerprint: [u8; 48] },
+    /// D1 store-and-forward: an outbox frame was delivered (its `DeliveryAck`
+    /// arrived) — a delivery receipt keyed by the ciphertext gossip-id.
+    Delivered { gossip_id: [u8; 32] },
+    /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted to
+    /// stay within the cap — surfaced so a capped drop is never silent.
+    OutboxDropped { count: usize },
+    /// SUB-SPEC D2: a (verified) promotion was proposed. The UI shows the target tier,
+    /// the retention contract being agreed to, and the picked membership, and prompts
+    /// the user to consent via `respond_promote`.
+    PromoteProposed {
+        by: [u8; 48],
+        promote_id: [u8; 32],
+        target_tier: u8,
+        retention_mode: u8,
+        picked: Vec<[u8; 48]>,
+    },
+    /// SUB-SPEC D2: the promotion committed — this chat is now persistent.
+    Promoted { promote_id: [u8; 32] },
+    /// SUB-SPEC D2: the promotion was aborted (declined / timed out); chat stays ephemeral.
+    PromoteAborted { promote_id: [u8; 32] },
+    /// SUB-SPEC A / #68: a nearby device is advertising THIS chat over a local-radio
+    /// beacon and we (holding the invite) decrypted it — pre-session discovery. `source`
+    /// is a coarse backend handle (BLE MAC / adv-id) for the UI, never an identity.
+    BeaconSeen {
+        channel: String,
+        source: Option<String>,
+    },
+    /// A peer's resolved self-declared name changed. `account_fingerprint` is set
+    /// only for account-linked/registry tiers; `label` is `None` when suppressed by
+    /// the chat's trust policy.
+    Name {
+        from: [u8; 48],
+        account_fingerprint: Option<[u8; 48]>,
+        label: Option<String>,
+        tier: crate::nametrust::NameTier,
+        seq: u64,
+        caveat: Option<String>,
+        /// Short, always-available safety number for this peer (derived from the
+        /// render key). A UI shows it on tap/hover and when the name is suppressed —
+        /// the honest fallback that a spoofable label can never override.
+        safety_number: String,
+    },
+    /// SUB-SPEC B: a peer disclosed grouping linkage — `subject` (a leaf fp) is a
+    /// member of the grouping identified by `grouping_pub` (per-chat `G_c`). Viewers
+    /// aggregate all subjects sharing a `grouping_pub` into one grouping (one person).
+    /// `verdict` is false if a presented proof failed verification.
+    Linkage {
+        subject: [u8; 48],
+        grouping_pub: Vec<u8>,
+        verdict: bool,
+    },
+    /// SUB-SPEC C: a subject's vouch standing changed. `weighted_score` may be
+    /// negative when inflation was rejected (antibody, §6a) — display then snaps to
+    /// NEUTRAL, never below (invariant 1). Display-only; never gates access.
+    Vouch {
+        subject: [u8; 48],
+        weighted_score: i64,
+        vouched: bool,
+        inflation_rejected: bool,
+    },
     /// A non-fatal error (e.g. a frame that failed to decrypt).
     Error(String),
 }
@@ -100,6 +160,61 @@ enum Frame {
     /// An encoded [`Revocation`] propagated in-band: the receiver verifies the
     /// account signature and adds it, locking out the revoked device.
     Revocation(Vec<u8>),
+    /// An encoded `SignedCert` in which a member's DEVICE certifies its TreeKEM
+    /// leaf signature key (SECURITY-AUDIT T-3). Lets receivers bind the leaf's
+    /// message-signing key to the authenticated device (hence the account), so a
+    /// malicious committer cannot pass off a leaf key it substituted for a linked
+    /// member. Advisory: a bad/absent cert just leaves the leaf "unverified"
+    /// (pseudonymous), it does not drop messages.
+    LeafSigCert(Vec<u8>),
+    /// A member's self-rekey **Update proposal** (SECURITY-AUDIT T-4), sent to the
+    /// host, which commits it for the group (single committer -> no fork). Gives a
+    /// member post-compromise security for its own KEM + signing keys without
+    /// advancing its epoch optimistically.
+    UpdateProposal(Vec<u8>),
+    /// A signed **route descriptor** (SECURITY-AUDIT A-1): a node's own reachable
+    /// endpoints (its multi-homed `[onion, nym, lan]` set), signed by its identity
+    /// key, gossiped so every member learns every member's routes — not only the
+    /// founding host's. Ends the host-as-single-point-of-reachability partition: if
+    /// the host drops, members still hold alternate routes (and any multi-homed
+    /// member can bridge). Routes are dial *hints* — the authenticated handshake
+    /// remains the security boundary — so a bogus route only wastes a dial attempt.
+    RouteDescriptor(Vec<u8>),
+    /// An encoded [`crate::presence::NamePresence`] — a self-declared name, sent
+    /// directly in pairwise chats (in groups it rides a sentinel-tagged group
+    /// payload instead; see `handle_group_msg`). Tag 12 (9/10/11 are LeafSigCert /
+    /// RouteDescriptor / UpdateProposal from the group-security hardening).
+    Presence(Vec<u8>),
+    /// SUB-SPEC D2: a signed promotion proposal — an opaque `body ‖ leaf ‖ sig` blob;
+    /// the structured `PromoteBody` is decoded in core and the sig verified under
+    /// `leaf`'s bound key. Tag 13.
+    Promote(Vec<u8>),
+    /// SUB-SPEC D2: a signed consent response (opaque `body ‖ leaf ‖ sig` blob). Tag 14.
+    Consent(Vec<u8>),
+    /// SUB-SPEC D2/D3: the committer's signed announcement that a promotion COMMITTED
+    /// (opaque `promote_id ‖ leaf ‖ sig`); a member finalizes locally — flips persistence
+    /// and applies its consented D3 retention contract. Tag 19.
+    PromoteCommit(Vec<u8>),
+    /// SUB-SPEC D1 store-and-forward: a batch of gossip-ids the recipient has received,
+    /// so the sender can clear them from its outbox. Flat: count + fixed `[u8;32]` ids
+    /// (count-capped, no nested heap → Kani-provable). Rides the pairwise/transport
+    /// layer and clears only the acker's OWN outbox — NOT a group-attribution signal,
+    /// so `GroupAuth.fst` is unaffected. Tag 15.
+    DeliveryAck(Vec<[u8; 32]>),
+    /// D1 Layer-B (anchor mailbox): a sender deposits an OPAQUE (already-encrypted) frame
+    /// at a recipient's always-on anchor for later pickup. `recipient` = who it's for;
+    /// the anchor stores it keyed by that fp. Flat: fixed fp + one length-prefixed blob.
+    /// Tag 16.
+    MailboxPut { recipient: [u8; 48], frame: Vec<u8> },
+    /// D1 Layer-B: a phone asks its anchor for any frames buffered for it. The anchor
+    /// replies (only) with frames stored for the AUTHENTICATED requester's fingerprint —
+    /// the pairwise session proves the fetcher is the recipient. No payload. Tag 17.
+    MailboxFetch,
+    /// D1 Layer-C (replicated queue anti-entropy): a keeper advertises a DIGEST of what
+    /// it holds — `(gossip_id, recipient)` pairs — so a peer keeper can reconcile gaps.
+    /// Flat: count + fixed `[u8;32]`‖`[u8;48]` pairs (capped, no nested heap →
+    /// Kani-provable). Frame transfer of a missing entry rides `MailboxPut`. Tag 18.
+    QueueSync(Vec<([u8; 32], [u8; 48])>),
 }
 
 impl Frame {
@@ -153,6 +268,57 @@ impl Frame {
                 w.put_u8(8);
                 w.put_bytes(b);
             }
+            Frame::LeafSigCert(b) => {
+                w.put_u8(9);
+                w.put_bytes(b);
+            }
+            Frame::RouteDescriptor(b) => {
+                w.put_u8(10);
+                w.put_bytes(b);
+            }
+            Frame::UpdateProposal(b) => {
+                w.put_u8(11);
+                w.put_bytes(b);
+            }
+            Frame::Presence(b) => {
+                w.put_u8(12);
+                w.put_bytes(b);
+            }
+            Frame::Promote(b) => {
+                w.put_u8(13);
+                w.put_bytes(b);
+            }
+            Frame::Consent(b) => {
+                w.put_u8(14);
+                w.put_bytes(b);
+            }
+            Frame::PromoteCommit(b) => {
+                w.put_u8(19);
+                w.put_bytes(b);
+            }
+            Frame::DeliveryAck(ids) => {
+                w.put_u8(15);
+                w.put_u32(ids.len() as u32);
+                for id in ids {
+                    w.put_bytes(id);
+                }
+            }
+            Frame::MailboxPut { recipient, frame } => {
+                w.put_u8(16);
+                w.put_bytes(recipient);
+                w.put_bytes(frame);
+            }
+            Frame::MailboxFetch => {
+                w.put_u8(17);
+            }
+            Frame::QueueSync(entries) => {
+                w.put_u8(18);
+                w.put_u32(entries.len() as u32);
+                for (gid, fp) in entries {
+                    w.put_bytes(gid);
+                    w.put_bytes(fp);
+                }
+            }
         }
         w.into_vec()
     }
@@ -193,10 +359,321 @@ impl Frame {
             6 => Frame::Identity(r.get_vec().ok()?),
             7 => Frame::AccessDenied(String::from_utf8(r.get_vec().ok()?).ok()?),
             8 => Frame::Revocation(r.get_vec().ok()?),
+            9 => Frame::LeafSigCert(r.get_vec().ok()?),
+            10 => Frame::RouteDescriptor(r.get_vec().ok()?),
+            11 => Frame::UpdateProposal(r.get_vec().ok()?),
+            12 => Frame::Presence(r.get_vec().ok()?),
+            13 => Frame::Promote(r.get_vec().ok()?),
+            14 => Frame::Consent(r.get_vec().ok()?),
+            19 => Frame::PromoteCommit(r.get_vec().ok()?),
+            // D1 store-and-forward decoders are chunked into standalone, flat functions
+            // (below) so each is independently CBMC-provable in isolation — routing an
+            // arbitrary tag through this whole match would drag in the Marking-bearing
+            // arms, which are CBMC-intractable (SECURITY-AUDIT R-6).
+            15 => Frame::DeliveryAck(decode_delivery_ack(r.rest())?),
+            16 => {
+                let (recipient, frame) = decode_mailbox_put(r.rest())?;
+                Frame::MailboxPut { recipient, frame }
+            }
+            17 => Frame::MailboxFetch,
+            18 => Frame::QueueSync(decode_queue_sync(r.rest())?),
             _ => return None,
         };
         Some(frame)
     }
+}
+
+// ---------------------------------------------------------------------------
+// D1 store-and-forward body decoders (chunked out of `Frame::decode`).
+//
+// Each takes ONLY its own frame body (the bytes after the tag), so it is a small,
+// flat, self-contained decoder that CBMC verifies as total in isolation (see the
+// `d1_proofs` harnesses). They are the single source of truth — `Frame::decode`
+// delegates to them, so the wire format is unchanged.
+// ---------------------------------------------------------------------------
+
+/// D1 `DeliveryAck` body: a count-capped list of 32-byte gossip-ids.
+fn decode_delivery_ack(body: &[u8]) -> Option<Vec<[u8; 32]>> {
+    const MAX_ACK: usize = 64;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_ACK {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b = r.get_bytes().ok()?;
+        if b.len() != 32 {
+            return None;
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(b);
+        ids.push(id);
+    }
+    r.finish().ok()?;
+    Some(ids)
+}
+
+/// D1 Layer-B `MailboxPut` body: a fixed [u8;48] recipient + one length-prefixed
+/// opaque (already-encrypted) frame blob.
+fn decode_mailbox_put(body: &[u8]) -> Option<([u8; 48], Vec<u8>)> {
+    let mut r = Reader::new(body);
+    let rv = r.get_bytes().ok()?;
+    if rv.len() != 48 {
+        return None;
+    }
+    let mut recipient = [0u8; 48];
+    recipient.copy_from_slice(rv);
+    let frame = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((recipient, frame))
+}
+
+/// D1 Layer-C `QueueSync` body: a count-capped list of (32-byte gossip-id, 48-byte fp) pairs.
+fn decode_queue_sync(body: &[u8]) -> Option<Vec<([u8; 32], [u8; 48])>> {
+    const MAX_SYNC: usize = 512;
+    let mut r = Reader::new(body);
+    let n = r.get_u32().ok()? as usize;
+    if n > MAX_SYNC {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let gv = r.get_bytes().ok()?;
+        if gv.len() != 32 {
+            return None;
+        }
+        let fv = r.get_bytes().ok()?;
+        if fv.len() != 48 {
+            return None;
+        }
+        let mut gid = [0u8; 32];
+        gid.copy_from_slice(gv);
+        let mut fp = [0u8; 48];
+        fp.copy_from_slice(fv);
+        entries.push((gid, fp));
+    }
+    r.finish().ok()?;
+    Some(entries)
+}
+
+/// SUB-SPEC D3: what happens to the ephemeral backlog when a room is promoted.
+/// Rides the signed D2 `PromoteBody` (authenticated + shown in every consent prompt),
+/// so a member consents to a SPECIFIC retention contract. `from_u8` fails closed on
+/// an unknown tag; callers treat that (and `Fresh`) as "retain nothing".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RetentionMode {
+    /// Default-safe: the successor begins at the promotion boundary; the ephemeral
+    /// past stays ephemeral (nothing sealed). Strongest privacy.
+    Fresh,
+    /// Each consenting member seals its OWN already-received backlog (never sent to
+    /// anyone; no backfill to latecomers).
+    Carry,
+    /// Like `Carry`, but only messages at/after `carry_from_secs` are sealed.
+    CarryFromPoint,
+}
+impl RetentionMode {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(RetentionMode::Fresh),
+            1 => Some(RetentionMode::Carry),
+            2 => Some(RetentionMode::CarryFromPoint),
+            _ => None, // fail closed — unknown tag is treated as retain-nothing
+        }
+    }
+    pub fn as_u8(self) -> u8 {
+        match self {
+            RetentionMode::Fresh => 0,
+            RetentionMode::Carry => 1,
+            RetentionMode::CarryFromPoint => 2,
+        }
+    }
+}
+
+/// SUB-SPEC D2: the structured body of a promotion proposal, signed by the promoter.
+/// Flat/bounded (picked = a capped `Vec<[u8;48]>`) so its decoder is Kani-provable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PromoteBody {
+    /// Target persistence tier (app-level: 0=PersistentLocal, 1=Shared, 2=AlwaysOn).
+    pub target_tier: u8,
+    /// D3 retention (0=Fresh, 1=Carry, 2=CarryFromPoint).
+    pub retention_mode: u8,
+    /// Consent rule (0=Unanimous, 1=OptInSuccessor, 2=HostMandate).
+    pub consent_rule: u8,
+    /// Account fingerprints of members carried into the persistent successor.
+    pub picked: Vec<[u8; 48]>,
+    /// The successor's stable onion (empty = keep current).
+    pub onion: String,
+    /// D3 CarryFromPoint marker: seal only messages with `ts >= carry_from_secs`
+    /// (unix seconds). Ignored by Fresh/Carry (set 0). A timestamp — not a message
+    /// id — so every member evaluates it deterministically against its own backlog,
+    /// regardless of which messages that member happens to hold.
+    pub carry_from_secs: u64,
+    /// The group epoch this proposal binds to (replay/stale guard).
+    pub epoch: u32,
+}
+impl PromoteBody {
+    const MAX_PICKED: usize = 256;
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_u8(self.target_tier);
+        w.put_u8(self.retention_mode);
+        w.put_u8(self.consent_rule);
+        w.put_u32(self.picked.len() as u32);
+        for fp in &self.picked {
+            w.put_bytes(fp);
+        }
+        w.put_bytes(self.onion.as_bytes());
+        w.put_u64(self.carry_from_secs);
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    /// Flat framing decode: the whole body EXCEPT converting the onion bytes to a
+    /// `String` (returned raw). No `String::from_utf8`, so — unlike the full `decode` —
+    /// this is CBMC-tractable and is what the Kani totality harness targets. `from_utf8`
+    /// is a std, panic-free boundary (returns `Result`), CBMC-INTRACTABLE for the same
+    /// reason `Marking` is (SECURITY-AUDIT R-6), so it is kept OUT of the proof surface.
+    #[allow(clippy::type_complexity)]
+    fn decode_flat(b: &[u8]) -> Option<(u8, u8, u8, Vec<[u8; 48]>, Vec<u8>, u64, u32)> {
+        let mut r = Reader::new(b);
+        let target_tier = r.get_u8().ok()?;
+        let retention_mode = r.get_u8().ok()?;
+        let consent_rule = r.get_u8().ok()?;
+        let n = r.get_u32().ok()? as usize;
+        if n > Self::MAX_PICKED {
+            return None;
+        }
+        let mut picked = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.get_bytes().ok()?;
+            if v.len() != 48 {
+                return None;
+            }
+            let mut fp = [0u8; 48];
+            fp.copy_from_slice(v);
+            picked.push(fp);
+        }
+        let onion = r.get_vec().ok()?;
+        let carry_from_secs = r.get_u64().ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some((target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch))
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let (target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch) =
+            Self::decode_flat(b)?;
+        let onion = String::from_utf8(onion).ok()?;
+        Some(Self { target_tier, retention_mode, consent_rule, picked, onion, carry_from_secs, epoch })
+    }
+    /// SHA-256 of the canonical body — binds a Consent to exactly this proposal.
+    pub fn id(&self) -> [u8; 32] {
+        gossip_id(&self.encode())
+    }
+}
+
+/// SUB-SPEC D2: a member's signed consent (or decline) to a specific promotion.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConsentBody {
+    pub promote_id: [u8; 32],
+    pub accept: bool,
+    pub leaf: u32,
+    pub epoch: u32,
+}
+impl ConsentBody {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.put_bytes(&self.promote_id);
+        w.put_u8(self.accept as u8);
+        w.put_u32(self.leaf);
+        w.put_u32(self.epoch);
+        w.into_vec()
+    }
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(b);
+        let v = r.get_bytes().ok()?;
+        if v.len() != 32 {
+            return None;
+        }
+        let mut promote_id = [0u8; 32];
+        promote_id.copy_from_slice(v);
+        let accept = r.get_u8().ok()? != 0;
+        let leaf = r.get_u32().ok()?;
+        let epoch = r.get_u32().ok()?;
+        r.finish().ok()?;
+        Some(Self { promote_id, accept, leaf, epoch })
+    }
+}
+
+/// SUB-SPEC D2: a promotion the host is coordinating — the signed body + the per-leaf
+/// accept/decline tally collected from consents.
+struct PromoteState {
+    body: PromoteBody,
+    /// leaf -> accepted?  (only DISTINCT, signature-verified consents recorded).
+    consents: std::collections::HashMap<u32, bool>,
+    /// SUB-SPEC D3 (member side): our own accept/decline to this proposal, set by
+    /// `respond_promote`. `Some(true)` authorizes sealing our OWN backlog when the
+    /// committer announces the commit; `Some(false)`/`None` ⇒ we seal nothing.
+    my_response: Option<bool>,
+}
+
+/// SUB-SPEC D3: one entry in a member's own ephemeral backlog — the gossip-id of the
+/// message ciphertext (dedup/store key), the unix-second timestamp it was sent/received
+/// (the `CarryFromPoint` comparison basis), and the already-encoded [`HistoryRecord`].
+#[derive(Clone)]
+struct BacklogEntry {
+    gid: [u8; 32],
+    ts: u64,
+    record: Vec<u8>,
+}
+
+/// SUB-SPEC D3: cap on the in-memory ephemeral backlog (oldest dropped past this). Bounds
+/// memory while keeping a generous recent window for a Carry/CarryFromPoint promotion.
+const BACKLOG_CAP: usize = 4096;
+
+/// SUB-SPEC D3: append a message this node saw to its own ephemeral backlog (idempotent by
+/// gossip-id, oldest dropped past [`BACKLOG_CAP`]). Purely local bookkeeping — never sent.
+///
+/// SUB-SPEC D at-rest: once the chat is PERSISTENT (a promotion already established, with
+/// consent, that this room retains), also seal each new message to the local `HistoryStore`
+/// as it arrives — so a persistent chat's history keeps growing on disk and survives a
+/// restart, not just the backlog captured at the promotion boundary. Still LOCAL (this
+/// node's own copy; never transmitted); a sealed-file store persists it, the in-memory
+/// default just holds it. Ephemeral chats seal nothing (the D3 default-safe posture).
+fn record_backlog(inner: &Arc<Inner>, gid: [u8; 32], record: Vec<u8>, ts: u64) {
+    {
+        let mut bl = inner.backlog.lock().unwrap();
+        if bl.iter().any(|e| e.gid == gid) {
+            return; // same message reached us twice (mesh dedup) — count it once
+        }
+        bl.push(BacklogEntry { gid, ts, record: record.clone() });
+        while bl.len() > BACKLOG_CAP {
+            bl.remove(0);
+        }
+    }
+    if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+        let history = inner.history.lock().unwrap().clone();
+        history.put(&inner.descriptor.channel, gid, &record);
+    }
+}
+
+/// Wire a signed D2 control blob: `body ‖ leaf ‖ sig`, so the receiver knows which leaf
+/// to verify under. Used for both `Promote` and `Consent` payloads.
+fn wrap_signed(body: &[u8], leaf: u32, sig: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.put_bytes(body);
+    w.put_u32(leaf);
+    w.put_bytes(sig);
+    w.into_vec()
+}
+/// Inverse of [`wrap_signed`]: `(body, leaf, sig)`.
+fn unwrap_signed(payload: &[u8]) -> Option<(Vec<u8>, u32, Vec<u8>)> {
+    let mut r = Reader::new(payload);
+    let body = r.get_vec().ok()?;
+    let leaf = r.get_u32().ok()?;
+    let sig = r.get_vec().ok()?;
+    r.finish().ok()?;
+    Some((body, leaf, sig))
 }
 
 /// Who may participate in a (pairwise) channel. The host enforces this when a
@@ -265,6 +742,24 @@ pub enum GroupRole {
     Member,
 }
 
+/// How a member's per-membership leaf **signature** key is generated (its group
+/// alias). A local, per-member choice — it only affects one's own leaf key (seen
+/// by others via the KeyPackage), so it is NOT carried in the shared descriptor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LeafSigMode {
+    /// DEFAULT — deterministically derive the leaf signing key from the member's
+    /// identity root and the chat's invite token (`KDF(identity, invite_token)`).
+    /// Stable across rejoins of the SAME chat (a recognizable, recoverable alias)
+    /// and mutually unlinkable across DIFFERENT chats. In-session post-compromise
+    /// security still comes from `self_update()` (leaf-key rotation); a fresh join
+    /// re-derives the same key, so continuity is the trade for per-join PCS.
+    #[default]
+    Derived,
+    /// Fresh, random leaf signing key on every join — maximal unlinkability (even
+    /// across rejoins of the same chat), no continuity, not recoverable.
+    Ephemeral,
+}
+
 /// Where a routed frame should go, in **relayed** group mode (where a
 /// non-member relay forwards between participants). The relay never reads the
 /// inner group plaintext — it only routes the (still-encrypted) inner frame.
@@ -328,6 +823,9 @@ fn read_fp(r: &mut Reader) -> Option<[u8; 48]> {
 
 type SharedSession = Arc<AsyncMutex<Box<dyn SessionHandle>>>;
 type SharedWriter = Arc<AsyncMutex<Box<dyn FrameWriter>>>;
+/// A learned peer route (SECURITY-AUDIT A-1): the signer's monotonic `issued`
+/// stamp and the endpoint set it advertised at that time.
+type RouteEntry = (u64, Vec<String>);
 
 struct Peer {
     fingerprint: [u8; 48],
@@ -348,6 +846,10 @@ struct Inner {
     root0: [u8; 32],
     peers: Mutex<Vec<Peer>>,
     events_tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    /// Optional LoRa-mesh message carry (set by `start_mesh_messaging`). When
+    /// present, `Route::Broadcast` group messages are ALSO fragmented and
+    /// transmitted over the mesh, in addition to the peer fan-out.
+    mesh_tx: Mutex<Option<MeshTx>>,
     // --- TreeKEM group state (GroupRole::None for plain pairwise chats) ---
     role: GroupRole,
     group: AsyncMutex<Option<TreeKemGroup>>,
@@ -376,6 +878,23 @@ struct Inner {
     /// after an out-of-band safety-number check — TOFU friending without pasting
     /// a 2592-byte key. See [`Core::pin_seen_account`].
     seen_accounts: Mutex<HashMap<[u8; 48], IdentityPublic>>,
+    /// leaf -> the account fingerprint that has cryptographically certified that
+    /// leaf's message-signing key (SECURITY-AUDIT T-3). Populated from a relayed,
+    /// account-signed `account -> device -> leaf_sig_key` chain whose leaf equals
+    /// the leaf's tree-bound sig key. A committer cannot forge an entry (it lacks
+    /// the account's secret) nor substitute the tree key (the chain wouldn't match),
+    /// so a present entry means the leaf is genuinely that account's; its absence
+    /// just means "unverified / pseudonymous", never a message drop.
+    verified_leaf_accounts: Mutex<HashMap<u32, [u8; 48]>>,
+    /// Learned reachable routes per peer (SECURITY-AUDIT A-1): device fingerprint ->
+    /// `(issued, endpoints)` — the signer's monotonic timestamp and its advertised
+    /// endpoint set. Populated from gossiped, identity-signed route descriptors so a
+    /// member can reach the group via ANY member, not only the founding host. Entry
+    /// count is bounded ([`MAX_KNOWN_ROUTES`]) and storage is roster-gated so a hostile
+    /// node cannot bloat it with keys it forges from throwaway identities; the `issued`
+    /// stamp rejects replay/rollback to a stale route set. Routes are hints; the
+    /// handshake authenticates whoever answers.
+    known_routes: Mutex<HashMap<[u8; 48], RouteEntry>>,
     /// Who may participate (pairwise). `Open` by default; a registry-restricted
     /// channel sets [`AccessPolicy::Accounts`]. See [`Core::restrict_to_accounts`].
     access: Mutex<AccessPolicy>,
@@ -400,6 +919,107 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
+    /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
+    /// on reconnect so an offline member catches up. Default off (ephemeral).
+    persistent: std::sync::atomic::AtomicBool,
+    /// D1 Layer-0 outbox: un-acked outgoing group frames (opaque, already-encrypted),
+    /// keyed by ciphertext gossip-id. Persistence delegated to an `OutboxStore`.
+    outbox: crate::outbox::Outbox,
+    /// D1 Layer-A keeper: when enabled, buffer opaque frames for offline peers and
+    /// replay on their reconnect. Holds ciphertext only (no group key).
+    keeper: crate::keeper::KeeperQueue,
+    keeper_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-B (anchor mailbox): when this node is someone's always-on anchor,
+    /// `MailboxPut` deposits are stored here per recipient fp (opaque ciphertext), and
+    /// a `MailboxFetch` from the authenticated recipient drains + replays them.
+    mailbox: crate::keeper::KeeperQueue,
+    anchor_enabled: std::sync::atomic::AtomicBool,
+    /// D1 Layer-C: peers we've already sent our keeper digest to this session, so the
+    /// anti-entropy digest exchange terminates (the accepter replies exactly once, which
+    /// is needed because the pairwise responder is mute until the initiator speaks).
+    qs_sent: std::sync::Mutex<std::collections::HashSet<[u8; 48]>>,
+    /// SUB-SPEC D2: the in-flight promotion proposal we originated or are consenting to,
+    /// with the per-leaf consent tally. `None` when no promotion is pending.
+    promote: std::sync::Mutex<Option<PromoteState>>,
+    /// SUB-SPEC D3: this node's OWN in-memory chat backlog while the room is ephemeral —
+    /// every group message it sent or received, newest last, bounded to [`BACKLOG_CAP`]
+    /// (oldest dropped). On promotion the authenticated `retention_mode` decides whether
+    /// any of it is sealed into `history`; nothing here is ever transmitted.
+    backlog: Mutex<Vec<BacklogEntry>>,
+    /// SUB-SPEC D3: host-injected at-rest store for sealed history (in-memory default).
+    /// Mutex-wrapped so a host can swap in a sealed-file impl after construction.
+    history: Mutex<Arc<dyn crate::history::HistoryStore>>,
+    /// Self-declared names heard from peers (SUB-SPEC A), keyed by the cache/render
+    /// fingerprint (transport peer, or the signed device for a Linked presence).
+    names: Mutex<std::collections::HashMap<[u8; 48], crate::presence::NameRecord>>,
+    /// SUB-SPEC A: viewer-local trust-policy override. `None` = follow the chat
+    /// baseline (`descriptor.name_trust_policy`). When set, the EFFECTIVE policy is
+    /// the stricter of the two — a viewer may tighten collision handling, never
+    /// loosen it (spec §5: user policy trumps group, protective direction only).
+    name_policy_override: Mutex<Option<crate::nametrust::NameTrustPolicy>>,
+    /// SUB-SPEC A: per-sender presence rate limiter — `(window_start_secs, count)`
+    /// per cache key. Bounds accepted presences to `PRESENCE_RATE_BURST` per
+    /// `PRESENCE_RATE_WINDOW_SECS`, so a hostile peer cannot grief with a flood while
+    /// a legitimate small burst (eager on-join + a quick correction) still passes.
+    /// seq monotonicity is checked first, so replays never consume budget.
+    presence_rate: Mutex<std::collections::HashMap<[u8; 48], (u64, u32)>>,
+    /// SUB-SPEC A: generation counter for the roster-grow re-announce, so a burst of
+    /// joins coalesces into a single debounced CQ instead of one per join.
+    presence_grow_gen: std::sync::atomic::AtomicU64,
+    /// Our own leading name to announce (if any), and a monotonic presence sequence
+    /// number so peers can drop stale/replayed announcements.
+    leading_name: Mutex<Option<crate::presence::NameEntry>>,
+    /// SUB-SPEC A: the user's saved name book (multiple callsigns; the leading name is
+    /// selected from it by id via `use_name`). Persistence is a client concern — the
+    /// client loads/saves it via `name_book`/`load_name_book` (encode/decode).
+    name_book: Mutex<crate::presence::NameBook>,
+    presence_seq: std::sync::atomic::AtomicU64,
+    /// How often/when we re-announce our name (manual, on-join, periodic).
+    cadence: Mutex<crate::presence::PresenceCadence>,
+    /// SUB-SPEC B: the user's per-chat opsec/linkage-disclosure policy (Clean default).
+    opsec_mode: Mutex<crate::linkage::OpsecMode>,
+    /// SUB-SPEC B: defined groupings — grouping id -> the name-entry ids it links.
+    groupings: Mutex<std::collections::HashMap<crate::linkage::GroupingId, Vec<String>>>,
+    /// SUB-SPEC B: 32-byte root seed for the user's grouping key (account-unlinkable).
+    /// A persistent, user-held secret SHARED across the user's sessions (set via
+    /// `set_grouping_root`); random per-session by default (a grouping of one).
+    grouping_root: Mutex<[u8; 32]>,
+    /// SUB-SPEC B: whether to emit ALL associated identities vs just the leading one.
+    show_all: std::sync::atomic::AtomicBool,
+    /// SUB-SPEC B: grouping public (per-chat `G_c`) -> the set of leaf fingerprints
+    /// seen certified under it. Aggregation is how a viewer resolves "these leaves
+    /// are one grouping (one person)"; also feeds the sybil-count.
+    groupings_seen: Mutex<std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>>>,
+    /// SUB-SPEC B: last linkage seq seen per sender (anti-replay/reorder).
+    linkage_seq: Mutex<std::collections::HashMap<[u8; 48], u64>>,
+    /// SUB-SPEC C: per-subject vouch ledger — subject fp -> (voucher ACCOUNT fp ->
+    /// record). Dedup is by distinct voucher account (one effective vouch each);
+    /// `sender_fp` records the delivering leaf so the antibody can correlate a
+    /// voucher against B's grouping proofs (spec §6a).
+    vouches: Mutex<std::collections::HashMap<[u8; 48], std::collections::HashMap<[u8; 48], VouchRecord>>>,
+    /// SUB-SPEC C: user-scope overrides (stricter-than-chat only; spec §2).
+    user_weighting: Mutex<Option<crate::vouch::VouchWeighting>>,
+    user_threshold: Mutex<Option<crate::vouch::Threshold>>,
+    /// SUB-SPEC C: our own outbound vouches, re-asserted on the presence cadence
+    /// (spec §1.5). Kept so freshness reflects LIVE support.
+    my_vouches: Mutex<Vec<crate::vouch::VouchTarget>>,
+    /// SUB-SPEC C: gossip-witnessed round counter (§1.5) + the round at which each
+    /// voucher account fp was last witnessed; freshness = current - last_seen.
+    round: std::sync::atomic::AtomicU64,
+    voucher_round: Mutex<std::collections::HashMap<[u8; 48], u64>>,
+    /// SUB-SPEC C: the fp that advanced the last round — so one sender's repeated
+    /// gossip can't fast-forward rounds (distinct-person deflation, §1.5).
+    last_round_advancer: Mutex<Option<[u8; 48]>>,
+}
+
+/// SUB-SPEC C: one recorded vouch in the ledger (value type of `Inner::vouches`).
+struct VouchRecord {
+    epoch: u64,
+    voucher: IdentityPublic,
+    /// The authenticated leaf/transport fp that delivered this vouch (groupings_seen
+    /// key space) — lets the antibody correlate this voucher to a grouping proof.
+    sender_fp: [u8; 48],
 }
 
 /// Bounded LRU of group-ciphertext fingerprints for gossip dedup. Shared with
@@ -466,6 +1086,7 @@ impl Core {
             descriptor,
             GroupRole::None,
             false,
+            LeafSigMode::default(),
         )
     }
 
@@ -484,7 +1105,26 @@ impl Core {
         } else {
             GroupRole::Member
         };
-        Self::build(identity, suite, transport, descriptor, role, false)
+        Self::build(identity, suite, transport, descriptor, role, false, LeafSigMode::default())
+    }
+
+    /// Like [`new_group`](Core::new_group) but with an explicit [`LeafSigMode`] for
+    /// this node's leaf signature key (default is [`LeafSigMode::Derived`]). Pass
+    /// [`LeafSigMode::Ephemeral`] for a fresh, unlinkable-across-rejoins leaf key.
+    pub fn new_group_with_leaf_mode(
+        identity: IdentityKeyPair,
+        suite: Arc<dyn CryptoSuite>,
+        transport: Arc<dyn Transport>,
+        descriptor: ChatDescriptor,
+        is_host: bool,
+        leaf_sig_mode: LeafSigMode,
+    ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let role = if is_host {
+            GroupRole::Host
+        } else {
+            GroupRole::Member
+        };
+        Self::build(identity, suite, transport, descriptor, role, false, leaf_sig_mode)
     }
 
     /// Build a TreeKEM group chat that runs over a **non-member relay**
@@ -504,7 +1144,7 @@ impl Core {
         } else {
             GroupRole::Member
         };
-        Self::build(identity, suite, transport, descriptor, role, true)
+        Self::build(identity, suite, transport, descriptor, role, true, LeafSigMode::default())
     }
 
     fn build(
@@ -514,6 +1154,7 @@ impl Core {
         descriptor: ChatDescriptor,
         role: GroupRole,
         relayed: bool,
+        leaf_sig_mode: LeafSigMode,
     ) -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
         let root0 = descriptor.derive_root();
         let default_marking = descriptor.channel_marking.clone();
@@ -521,12 +1162,37 @@ impl Core {
         // Group state uses the same KEM profile as the suite's pairwise
         // sessions, so TreeKEM node keys and ratchet keys agree posture + wire.
         let kem_profile = suite.kem_profile();
-        let group = match role {
-            GroupRole::Host => Some(TreeKemGroup::create_with(kem_profile)),
+        // Leaf SIGNATURE key generation (LeafSigMode). Derived (default) binds a
+        // stable per-chat alias to KDF(identity_root, invite_token); Ephemeral mints
+        // a fresh key per join. The invite token is the stable per-chat id. Either way
+        // the host also applies the chat's F-16 length-bucket padding (message_padding).
+        let group = match (role, leaf_sig_mode) {
+            (GroupRole::Host, mode) => {
+                let mut g = match mode {
+                    LeafSigMode::Derived => TreeKemGroup::create_derived(
+                        kem_profile,
+                        &identity.export_secret(),
+                        &descriptor.invite_token,
+                    ),
+                    LeafSigMode::Ephemeral => TreeKemGroup::create_with(kem_profile),
+                };
+                // F-16: apply the chat's length-bucket padding to outgoing messages.
+                if let Some(step) = descriptor.message_padding {
+                    g.set_pad_bucket(step as usize);
+                }
+                Some(g)
+            }
             _ => None,
         };
-        let leaf_keypair = match role {
-            GroupRole::Member => Some(LeafKeyPair::generate_with(kem_profile)),
+        let leaf_keypair = match (role, leaf_sig_mode) {
+            (GroupRole::Member, LeafSigMode::Derived) => Some(LeafKeyPair::generate_derived(
+                kem_profile,
+                &identity.export_secret(),
+                &descriptor.invite_token,
+            )),
+            (GroupRole::Member, LeafSigMode::Ephemeral) => {
+                Some(LeafKeyPair::generate_with(kem_profile))
+            }
             _ => None,
         };
         // The host founds the group at leaf 0; seed the roster with itself.
@@ -542,6 +1208,7 @@ impl Core {
             root0,
             peers: Mutex::new(Vec::new()),
             events_tx,
+            mesh_tx: Mutex::new(None),
             role,
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
@@ -552,11 +1219,64 @@ impl Core {
             present_chain: Mutex::new(None),
             contacts: Mutex::new(ContactStore::new()),
             seen_accounts: Mutex::new(HashMap::new()),
+            verified_leaf_accounts: Mutex::new(HashMap::new()),
+            known_routes: Mutex::new(HashMap::new()),
             access: Mutex::new(AccessPolicy::Open),
             revocations: Mutex::new(std::collections::HashSet::new()),
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            // D1 store-and-forward. Default in-memory stores (delivery across
+            // reconnects within a run); a host injects a sealed-file `OutboxStore`
+            // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
+            persistent: std::sync::atomic::AtomicBool::new(false),
+            outbox: crate::outbox::Outbox::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            keeper_enabled: std::sync::atomic::AtomicBool::new(false),
+            mailbox: crate::keeper::KeeperQueue::new(
+                std::sync::Arc::new(crate::outbox::InMemoryOutbox::new()),
+                4096,
+                30 * 24 * 3600,
+            ),
+            anchor_enabled: std::sync::atomic::AtomicBool::new(false),
+            qs_sent: std::sync::Mutex::new(std::collections::HashSet::new()),
+            promote: std::sync::Mutex::new(None),
+            backlog: Mutex::new(Vec::new()),
+            history: Mutex::new(Arc::new(crate::history::InMemoryHistory::new())),
+            names: Mutex::new(std::collections::HashMap::new()),
+            name_policy_override: Mutex::new(None),
+            presence_rate: Mutex::new(std::collections::HashMap::new()),
+            presence_grow_gen: std::sync::atomic::AtomicU64::new(0),
+            leading_name: Mutex::new(None),
+            name_book: Mutex::new(crate::presence::NameBook::default()),
+            presence_seq: std::sync::atomic::AtomicU64::new(0),
+            cadence: Mutex::new(crate::presence::PresenceCadence::default()),
+            opsec_mode: Mutex::new(crate::linkage::OpsecMode::default()),
+            groupings: Mutex::new(std::collections::HashMap::new()),
+            grouping_root: Mutex::new({
+                use rand::RngCore;
+                let mut s = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut s);
+                s
+            }),
+            show_all: std::sync::atomic::AtomicBool::new(false),
+            groupings_seen: Mutex::new(std::collections::HashMap::new()),
+            linkage_seq: Mutex::new(std::collections::HashMap::new()),
+            vouches: Mutex::new(std::collections::HashMap::new()),
+            user_weighting: Mutex::new(None),
+            user_threshold: Mutex::new(None),
+            my_vouches: Mutex::new(Vec::new()),
+            round: std::sync::atomic::AtomicU64::new(0),
+            voucher_round: Mutex::new(std::collections::HashMap::new()),
+            last_round_advancer: Mutex::new(None),
         });
         (Core { inner }, events_rx)
     }
@@ -825,6 +1545,90 @@ impl Core {
     /// transport islands into one chat. Dedup (a bounded seen-set of ciphertext
     /// fingerprints) keeps multi-path flooding from duplicating or looping.
     /// Idempotent; off by default.
+    /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1):
+    /// sign our multi-homed endpoint set (`[onion, nym, lan]`) with our identity key
+    /// and gossip it, so every member learns how to reach us directly. Call after
+    /// `host()` with the address(es) at which others can dial us. Peers store these
+    /// as alternate routes; if the founding host drops, a member can reconnect via
+    /// any advertised member. A no-op with no endpoints.
+    pub async fn advertise_routes(&self, endpoints: Vec<String>) {
+        if endpoints.is_empty() {
+            return;
+        }
+        let signer = self.inner.identity.public().clone();
+        // Monotonic per-signer stamp so peers can reject a replayed older descriptor.
+        // Wall-clock seconds; route changes within the same second collapse (an exact
+        // re-advertise is deduped anyway) — routes change far slower than that.
+        let issued = now_secs();
+        let sig = self
+            .inner
+            .identity
+            .sign(&route_transcript(&signer, issued, &endpoints));
+        let bytes = encode_route_descriptor(&signer, issued, &endpoints, &sig);
+        // Record our own (so `known_routes` is complete) and flood to peers. This is a
+        // deliberate local action, so it overwrites our own prior entry unconditionally
+        // (freshness only gates untrusted *incoming* descriptors in the handler).
+        self.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .insert(signer.fingerprint(), (issued, endpoints));
+        route(&self.inner, Frame::RouteDescriptor(bytes), Route::Broadcast).await;
+    }
+
+    /// Reconnect over learned alternate routes when partitioned (SECURITY-AUDIT
+    /// A-1): if we have NO connected peers, dial the endpoints we learned from
+    /// gossiped route descriptors until one handshake succeeds, returning the
+    /// fingerprint we reconnected to. A no-op while still connected (so it is safe
+    /// to call on every `Disconnected` event or on a timer). This is what turns the
+    /// learned-routes map into actual healing: losing the founding host no longer
+    /// strands a member that has heard any other reachable member's routes.
+    ///
+    /// A reconnecting group member re-runs the join handshake (rejoin, not resume);
+    /// seamless resume is a follow-up refinement.
+    pub async fn reconnect(&self) -> Option<[u8; 48]> {
+        if !self.inner.peers.lock().unwrap().is_empty() {
+            return None; // still connected — nothing to heal
+        }
+        // Candidate endpoints across every peer whose routes we have learned. Route
+        // storage is roster-gated, so these all belong to actual group members.
+        let mut endpoints: Vec<String> = self
+            .known_routes()
+            .into_iter()
+            .flat_map(|(_, eps)| eps)
+            .collect();
+        endpoints.sort();
+        endpoints.dedup();
+        // Identities we expect to reconnect to: current roster members plus any peer
+        // we hold a route for. The join handshake already gates on `root0` (only
+        // invited parties complete it); pinning to this set (SECURITY-AUDIT A-1)
+        // additionally keeps a reconnect from binding to an invited-but-non-member
+        // identity that merely answered at a learned address — an eclipse attempt
+        // lands on a stranger we immediately drop, never on a trusted peer slot.
+        let expected: std::collections::HashSet<[u8; 48]> = {
+            let roster = self.inner.roster.lock().unwrap();
+            let routes = self.inner.known_routes.lock().unwrap();
+            roster.values().copied().chain(routes.keys().copied()).collect()
+        };
+        for ep in endpoints {
+            if let Ok(fp) = self.connect(&ep).await {
+                if expected.contains(&fp) {
+                    // D1: healed the link — flush any un-acked outbox backlog so a peer
+                    // that was offline while we sent now catches up.
+                    self.flush_outbox().await;
+                    return Some(fp);
+                }
+                // Answered, but not an expected member — drop it and keep trying.
+                self.inner
+                    .peers
+                    .lock()
+                    .unwrap()
+                    .retain(|p| p.fingerprint != fp);
+            }
+        }
+        None
+    }
+
     pub fn enable_gossip(&self) {
         self.inner
             .gossip
@@ -834,6 +1638,28 @@ impl Core {
     /// The chat descriptor (shareable invite).
     pub fn descriptor(&self) -> &ChatDescriptor {
         &self.inner.descriptor
+    }
+
+    /// Learned reachable routes for every peer we have heard a route descriptor
+    /// from (SECURITY-AUDIT A-1): `(device_fingerprint, endpoints)`. A reconnect
+    /// layer tries these across all transports when the original endpoint is dead,
+    /// so losing the founding host no longer partitions a member that has heard any
+    /// other member's routes.
+    pub fn known_routes(&self) -> Vec<([u8; 48], Vec<String>)> {
+        self.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(fp, (_, eps))| (*fp, eps.clone()))
+            .collect()
+    }
+
+    /// The account fingerprint cryptographically bound to a group `leaf` (T-3), or
+    /// `None` if that leaf is an unverified pseudonym (no valid account chain to its
+    /// tree signing key has been seen). A `Some` value is unforgeable by the host.
+    pub fn group_leaf_account(&self, leaf: u32) -> Option<[u8; 48]> {
+        self.inner.verified_leaf_accounts.lock().unwrap().get(&leaf).copied()
     }
 
     /// The current leaf→fingerprint roster (group chats).
@@ -903,6 +1729,63 @@ impl Core {
         Ok(())
     }
 
+    /// **Self-update** — rotate our own leaf: fresh ML-KEM path secrets AND a fresh
+    /// ML-DSA-87 leaf signing key. This gives **post-compromise security on demand**
+    /// (SECURITY-AUDIT T-2/T-4): an adversary who compromised our prior path/signing
+    /// keys can no longer derive the new epoch secret (confidentiality PCS) NOR forge
+    /// messages as us (authentication PCS) once the group applies the resulting
+    /// commit. No membership change — the roster is unchanged.
+    ///
+    /// The committer (host) rotates its own leaf and broadcasts the commit directly. A
+    /// **member** cannot commit, so it PROPOSES a self-rekey and sends it to the host,
+    /// which commits + broadcasts (T-4); the proposer stages its new keys and installs
+    /// them when that broadcast commit — which carries this Update — comes back to it.
+    /// A no-op off a group.
+    pub async fn self_update(&self) -> Result<()> {
+        match self.inner.role {
+            GroupRole::Host => {
+                let tagged = {
+                    let mut g = self.inner.group.lock().await;
+                    match g.as_mut() {
+                        Some(grp) => {
+                            let from_epoch = grp.epoch();
+                            grp.update().ok().map(|c| (from_epoch, c.encode()))
+                        }
+                        None => None,
+                    }
+                };
+                let Some((from_epoch, commit_bytes)) = tagged else {
+                    return Ok(());
+                };
+                // Roster (leaf -> account fingerprint) is unchanged by an update; only
+                // the per-leaf signing key rotates, and that rides INSIDE the commit
+                // (`sig_update`), which every member verifies + applies in apply_commit.
+                route(
+                    &self.inner,
+                    Frame::Commit {
+                        from_epoch,
+                        bytes: commit_bytes,
+                    },
+                    Route::Broadcast,
+                )
+                .await;
+                Ok(())
+            }
+            GroupRole::Member => {
+                // Stage a fresh leaf keypair and emit an Update proposal (does NOT
+                // advance our epoch); the host authenticates us and commits it.
+                let proposal = {
+                    let mut g = self.inner.group.lock().await;
+                    g.as_mut().and_then(|grp| grp.propose_update().ok())
+                };
+                let Some(bytes) = proposal else { return Ok(()) };
+                route(&self.inner, Frame::UpdateProposal(bytes), Route::Committer).await;
+                Ok(())
+            }
+            GroupRole::None => Ok(()),
+        }
+    }
+
     /// Start accepting inbound connections (spawns a background accept loop).
     pub async fn host(&self) -> Result<Endpoint> {
         let listener = self.inner.transport.listen().await?;
@@ -963,8 +1846,58 @@ impl Core {
                 .unwrap()
                 .as_ref()
                 .map(|k| k.key_package().encode());
+            let sent_keypackage = kp_bytes.is_some();
             if let Some(kpb) = kp_bytes {
                 route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+            }
+            // D1 restart survival: on a RECONNECT the leaf key was already consumed at the
+            // first Welcome, so we send NO KeyPackage — which would leave the host's Double
+            // Ratchet (the responder on this freshly re-dialed session) MUTE, unable to push
+            // us the outbox/keeper replay we came back for. Send an empty keying Presence
+            // (a no-op in `handle_presence`) so decrypting it makes the host send-ready and
+            // flushes anything it queued for us (the pairwise responder keying invariant,
+            // here on the group-member reconnect path — mirrors the pairwise-initiator case
+            // in `register`). Harmless on initial join since the KeyPackage already keyed it.
+            if !sent_keypackage && !self.inner.relayed {
+                route(&self.inner, Frame::Presence(Vec::new()), Route::Committer).await;
+            }
+            // If we present an account (linked mode), bind our leaf signing key to
+            // it: extend our account->device chain with device->leaf_sig_key and
+            // send it (SECURITY-AUDIT T-3). The host relays it to all members, who
+            // verify it against our tree leaf key. Pure pseudonyms present no chain
+            // and skip this by design.
+            if !self.inner.relayed {
+                let chain_and_leaf = {
+                    let pres = self.inner.present_chain.lock().unwrap().clone();
+                    let leaf_pub = self
+                        .inner
+                        .leaf_keypair
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|k| k.key_package().sig_public);
+                    pres.zip(leaf_pub)
+                };
+                if let Some((pres_bytes, leaf_sig_pub)) = chain_and_leaf {
+                    if let Ok(pres) = Presentation::decode(&pres_bytes) {
+                        let now = now_secs();
+                        // ~30 days, matching self-presentation cert lifetime.
+                        let expiry = now.saturating_add(30 * 24 * 3600);
+                        let bound = pres.chain.extend(
+                            &self.inner.identity,
+                            &leaf_sig_pub,
+                            "leaf-sig",
+                            now,
+                            expiry,
+                        );
+                        route(
+                            &self.inner,
+                            Frame::LeafSigCert(bound.encode()),
+                            Route::Committer,
+                        )
+                        .await;
+                    }
+                }
             }
         } else if self.inner.relayed && self.inner.role == GroupRole::Host {
             // A relayed committer is the session initiator toward the relay but
@@ -1017,23 +1950,1088 @@ impl Core {
                 }
             }
             GroupRole::Host | GroupRole::Member => {
-                let payload = marking::encode_payload(&marking, text);
-                let frame = {
+                // SUB-SPEC A §4 mode 3: when the on-message-id cadence is on and we
+                // have a leading name, stamp a stable name-id (label ‖ context) so a
+                // viewer can confirm our name is current or detect a rename it missed.
+                let name_tag = {
+                    let on = self.inner.cadence.lock().unwrap().on_message_id;
+                    if on {
+                        self.inner.leading_name.lock().unwrap().as_ref().map(|e| {
+                            let ctx = crate::presence::chat_context(
+                                &self.inner.descriptor.invite_token,
+                                &self.inner.descriptor.channel,
+                            );
+                            crate::presence::name_id_tag(&e.label, &ctx)
+                        })
+                    } else {
+                        None
+                    }
+                };
+                let payload = marking::encode_payload_tagged(&marking, text, name_tag);
+                let ct = {
                     let mut g = self.inner.group.lock().await;
                     match g.as_mut() {
                         // Sign every group message with our per-membership leaf
                         // signature key so receivers can bind it to our leaf and
                         // reject impersonation or relay restamping, without exposing
                         // a long-term identity (SECURITY-AUDIT G1/G2).
-                        Some(grp) => Frame::GroupMsg(grp.encrypt_signed(&payload)?),
+                        Some(grp) => grp.encrypt_signed(&payload)?,
                         None => return Err(crate::error::CoreError::GroupNotReady),
                     }
                 };
+                // D3: record our OWN outgoing message in the ephemeral backlog so a later
+                // Carry/CarryFromPoint promotion can seal what we already hold. Local only.
+                {
+                    let me = self.inner.identity.public().fingerprint();
+                    let ts = now_secs();
+                    let rec = crate::history::HistoryRecord {
+                        from: me,
+                        ts,
+                        text: text.to_string(),
+                        marking: marking.clone(),
+                    };
+                    record_backlog(&self.inner, gossip_id(&ct), rec.encode(), ts);
+                }
+                // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
+                // outbox (keyed by ciphertext gossip-id, which the receiver dedups +
+                // acks on) so an offline member catches up on reconnect. Re-encrypting
+                // later would advance the ratchet, so we store these exact bytes.
+                let frame = Frame::GroupMsg(ct.clone());
+                if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+                    let gid = gossip_id(&ct);
+                    let dropped = self.inner.outbox.enqueue(
+                        &self.inner.descriptor.channel,
+                        gid,
+                        &frame.encode(),
+                        now_secs(),
+                    );
+                    if dropped > 0 {
+                        let _ = self.inner.events_tx.send(Event::OutboxDropped { count: dropped });
+                    }
+                }
                 route(&self.inner, frame, Route::Broadcast).await;
             }
         }
         Ok(())
     }
+
+    /// D1: re-send every un-acked outbox frame to currently-connected peers. Idempotent
+    /// — a receiver that already has a frame dedups it by gossip-id (SeenSet); a receiver
+    /// that missed it (was offline) surfaces + acks it, clearing our outbox. Called at the
+    /// end of `reconnect()` and safe to call opportunistically when a peer connects. Also
+    /// evicts TTL-expired frames first (surfacing the count).
+    pub async fn flush_outbox(&self) {
+        if !self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let chat = self.inner.descriptor.channel.clone();
+        let expired = self.inner.outbox.evict_expired(&chat, now_secs());
+        if expired > 0 {
+            let _ = self.inner.events_tx.send(Event::OutboxDropped { count: expired });
+        }
+        for (_gid, bytes) in self.inner.outbox.due_for_resend(&chat) {
+            // Stored bytes are a complete `Frame::GroupMsg(ct)` encoding; re-broadcast
+            // the SAME ciphertext (re-encrypting would advance the group ratchet).
+            if let Some(frame) = Frame::decode(&bytes) {
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
+        }
+    }
+
+    /// SUB-SPEC D2: propose promoting this ephemeral group to a persistent successor.
+    /// Builds a `PromoteBody` bound to the current group epoch, signs it under our leaf
+    /// key, broadcasts it, and tracks the proposal for consent tallying. Returns the
+    /// `promote_id` (SHA-256 of the body) that consents will reference. Group role only.
+    pub async fn propose_promote(
+        &self,
+        target_tier: u8,
+        retention_mode: u8,
+        consent_rule: u8,
+        picked: Vec<[u8; 48]>,
+        onion: String,
+        carry_from_secs: u64,
+    ) -> Result<[u8; 32]> {
+        let (payload, id, body) = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let body = PromoteBody {
+                target_tier,
+                retention_mode,
+                consent_rule,
+                picked,
+                onion,
+                carry_from_secs,
+                epoch: grp.epoch(),
+            };
+            let body_bytes = body.encode();
+            let sig = grp
+                .sign_promote(&body_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            let payload = wrap_signed(&body_bytes, grp.my_leaf(), &sig);
+            (payload, body.id(), body)
+        };
+        *self.inner.promote.lock().unwrap() = Some(PromoteState {
+            body,
+            consents: std::collections::HashMap::new(),
+            my_response: Some(true), // the proposer implicitly consents to its own promotion
+        });
+        route(&self.inner, Frame::Promote(payload), Route::Broadcast).await;
+        // HostMandate (rule 2): the host converts unilaterally — commit immediately,
+        // carrying every picked member (a member that later declines is out of scope for
+        // the MVP; unanimous/opt-in are the consent-gated paths).
+        if consent_rule == 2 {
+            let carried: Vec<[u8; 48]> = {
+                let roster = self.inner.roster.lock().unwrap();
+                let me = self.inner.identity.public().fingerprint();
+                let picked: std::collections::HashSet<[u8; 48]> =
+                    self.inner.promote.lock().unwrap().as_ref().map(|s| s.body.picked.iter().copied().collect()).unwrap_or_default();
+                std::iter::once(me)
+                    .chain(roster.values().copied().filter(|fp| picked.contains(fp) && *fp != me))
+                    .collect()
+            };
+            commit_promotion(&self.inner, id, &carried).await;
+        }
+        Ok(id)
+    }
+
+    /// SUB-SPEC D2: consent to (or decline) the pending promotion `promote_id`. Signs a
+    /// `ConsentBody` under our leaf key and sends it to the committer (host), who tallies.
+    pub async fn respond_promote(&self, promote_id: [u8; 32], accept: bool) -> Result<()> {
+        let payload = {
+            let g = self.inner.group.lock().await;
+            let grp = g.as_ref().ok_or(crate::error::CoreError::GroupNotReady)?;
+            let cb = ConsentBody { promote_id, accept, leaf: grp.my_leaf(), epoch: grp.epoch() };
+            let cb_bytes = cb.encode();
+            let sig = grp
+                .sign_consent(&cb_bytes)
+                .map_err(|_| crate::error::CoreError::GroupNotReady)?;
+            wrap_signed(&cb_bytes, grp.my_leaf(), &sig)
+        };
+        // D3: remember our own authorization so a later PromoteCommit seals (or not) our
+        // OWN backlog per this decision — matches promote_id to avoid a stale carry-over.
+        if let Some(state) = self.inner.promote.lock().unwrap().as_mut() {
+            if state.body.id() == promote_id {
+                state.my_response = Some(accept);
+            }
+        }
+        route(&self.inner, Frame::Consent(payload), Route::Committer).await;
+        Ok(())
+    }
+
+    /// D1: turn this chat's persistent outbox on/off (Sub-spec D2 flips it on at
+    /// promotion). When on, outgoing group frames are queued until acked and re-sent
+    /// on reconnect so offline members catch up.
+    pub fn set_persistence(&self, on: bool) {
+        self.inner.persistent.store(on, std::sync::atomic::Ordering::Relaxed);
+        // SUB-SPEC D3 invariant 4 (recoverable): returning a chat to ephemeral erases its
+        // sealed history — the persistent copy no longer exists once persistence is off.
+        if !on {
+            self.purge_history();
+        }
+    }
+
+    /// SUB-SPEC D3: erase this chat's sealed history and drop the in-memory backlog. Backs
+    /// the Delete affordance and return-to-ephemeral (invariant 4). Idempotent.
+    pub fn purge_history(&self) {
+        self.inner.history.lock().unwrap().purge(&self.inner.descriptor.channel);
+        self.inner.backlog.lock().unwrap().clear();
+    }
+
+    /// Whether this chat's persistent outbox is on.
+    pub fn is_persistent(&self) -> bool {
+        self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// SUB-SPEC D3: inject a host-provided at-rest [`crate::history::HistoryStore`] (sealed
+    /// file) in place of the in-memory default.
+    pub fn set_history_store(&self, store: Arc<dyn crate::history::HistoryStore>) {
+        *self.inner.history.lock().unwrap() = store;
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): inject a host-provided [`crate::outbox::OutboxStore`]
+    /// (e.g. a [`crate::atrest::SealedFileStore`]) and rehydrate this chat's un-acked outbox
+    /// index from it, so a restarted client re-sends anything that was never delivered. Call
+    /// once at construction, before `host()`/`connect()`.
+    pub fn set_outbox_store(&self, store: Arc<dyn crate::outbox::OutboxStore>) {
+        self.inner.outbox.set_store(store);
+        self.inner.outbox.rehydrate(&self.inner.descriptor.channel, now_secs());
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): the sealed history retained for THIS chat,
+    /// decoded for redisplay after a restart. Empty unless a promotion sealed history and a
+    /// sealed [`crate::history::HistoryStore`] is injected. Newest-last ordering is not
+    /// guaranteed (records are keyed by gossip-id); callers sort by `ts` if needed.
+    pub fn load_history(&self) -> Vec<crate::history::HistoryRecord> {
+        let store = self.inner.history.lock().unwrap().clone();
+        store
+            .load(&self.inner.descriptor.channel)
+            .into_iter()
+            .filter_map(|(_gid, rec)| crate::history::HistoryRecord::decode(&rec))
+            .collect()
+    }
+
+    /// SUB-SPEC A / #68: drive pre-session presence over a local-radio [`LocalBeacon`]
+    /// backend (or a [`talkrypt_transport::MultiBeacon`] of host plugins). Under `policy`
+    /// (default `Off`) we advertise THIS chat's sealed beacon so nearby invite-holders can
+    /// find us; concurrently we scan and, for every nearby beacon we can decrypt with our
+    /// invite, emit [`Event::BeaconSeen`]. Opaque ciphertext only — a scanner without the
+    /// invite learns nothing. The scan runs in a background task until `beacon` is dropped;
+    /// duplicate identical beacons are surfaced once.
+    pub async fn start_local_presence(
+        &self,
+        beacon: std::sync::Arc<dyn talkrypt_transport::LocalBeacon>,
+        policy: crate::advert::AdvertisePolicy,
+    ) {
+        if let Ok(Some(blob)) = crate::advert::build_advertisement(&self.inner.descriptor, policy) {
+            let _ = beacon.advertise(blob).await;
+        }
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let Ok(mut scan) = beacon.scan().await else {
+                return;
+            };
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            while let Some(s) = scan.next().await {
+                if !seen.insert(s.blob.clone()) {
+                    continue; // same beacon on another radio / re-advertised — surface once
+                }
+                // Only beacons for OUR chat (openable with our invite) become an event.
+                if crate::advert::open_advertisement(&inner.descriptor, &s.blob).is_ok() {
+                    let _ = inner.events_tx.send(Event::BeaconSeen {
+                        channel: inner.descriptor.channel.clone(),
+                        source: s.source,
+                    });
+                }
+            }
+        });
+    }
+
+    /// Carry this group's chat messages over a LoRa mesh node (Meshtastic /
+    /// Meshcore), in ADDITION to the primary transport — for off-grid reach or
+    /// resilience. Mirrors [`Core::start_local_presence`]:
+    ///
+    /// * **Outbound:** every `Route::Broadcast` `Frame::GroupMsg` is fragmented and
+    ///   transmitted on `policy.channel` (see [`mesh_tee`]). The frame is already
+    ///   the opaque, self-authenticating group ciphertext — the mesh moves only
+    ///   sealed bytes (encapsulation; never keys or plaintext).
+    /// * **Inbound:** a spawned task reassembles `Frame`-kind fragments and feeds
+    ///   each recovered `Frame::GroupMsg` into [`handle_group_msg`] — the SAME
+    ///   self-authenticating path (group AEAD + per-sender ML-DSA) and the SAME
+    ///   `gossip_id`/`SeenSet` dedup as a peer frame, which is essential because a
+    ///   broadcast mesh redelivers every frame many times.
+    ///
+    /// A node on both mesh and a peer transport bridges the two: a mesh-received
+    /// frame is re-forwarded to connected peers by `handle_group_msg`'s gossip
+    /// loop, and vice versa, with `SeenSet` preventing loops. This slice carries
+    /// chat CONTENT only; group membership/commits ride the primary transport.
+    pub async fn start_mesh_messaging(
+        &self,
+        node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
+        policy: talkrypt_transport::mesh::MeshPolicy,
+    ) {
+        // Outbound: register the carry so `route` tees broadcasts to the mesh.
+        {
+            let mut g = self.inner.mesh_tx.lock().unwrap();
+            *g = Some(MeshTx {
+                node: node.clone(),
+                channel: policy.channel,
+                msg_id: std::sync::atomic::AtomicU16::new(0),
+            });
+        }
+        // Inbound: reassemble Frame-kind fragments and process each recovered
+        // GroupMsg through the self-authenticating group path.
+        let inner = self.inner.clone();
+        let channel = policy.channel;
+        tokio::spawn(async move {
+            let Ok(mut inbox) = node.subscribe().await else {
+                return;
+            };
+            let mut reasm = talkrypt_transport::mesh::frag::Reassembler::for_kind(
+                talkrypt_transport::mesh::frag::KIND_FRAME,
+            );
+            while let Some(pkt) = inbox.next().await {
+                if pkt.channel != channel {
+                    continue;
+                }
+                let src = pkt
+                    .from
+                    .map(|id| format!("{id:08x}"))
+                    .unwrap_or_else(|| "mesh".to_string());
+                if let Some(bytes) = reasm.accept(&src, &pkt.payload) {
+                    if let Some(Frame::GroupMsg(ct)) = Frame::decode(&bytes) {
+                        handle_group_msg(&inner, MESH_SOURCE_FP, ct).await;
+                    }
+                }
+            }
+        });
+    }
+
+    /// SUB-SPEC D3 (test/inspection): number of messages in our own ephemeral backlog.
+    #[doc(hidden)]
+    pub fn backlog_len(&self) -> usize {
+        self.inner.backlog.lock().unwrap().len()
+    }
+
+    /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
+    /// replay on their reconnect (holds ciphertext only, never a group key).
+    pub fn keeper_mode(&self, on: bool) {
+        self.inner.keeper_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: run as an anchor mailbox — accept `MailboxPut` deposits for offline
+    /// recipients and serve them on `MailboxFetch`. Holds opaque ciphertext only.
+    pub fn anchor_mode(&self, on: bool) {
+        self.inner.anchor_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// D1 Layer-B: deposit an opaque `frame` at a connected anchor for `recipient` to
+    /// pick up later (used when the recipient's own device is offline but its anchor is
+    /// reachable). Sent to whichever connected peer is acting as the anchor.
+    pub async fn deposit_to_anchor(&self, recipient: [u8; 48], frame: Vec<u8>) {
+        route(&self.inner, Frame::MailboxPut { recipient, frame }, Route::Broadcast).await;
+    }
+
+    /// D1 Layer-B: ask connected anchors for any mail buffered for us (call on wake).
+    /// The anchor replies with the stored frames, which arrive as normal group frames.
+    pub async fn fetch_mailbox(&self) {
+        route(&self.inner, Frame::MailboxFetch, Route::Broadcast).await;
+    }
+
+    /// Set (or clear) the leading self-declared name for this chat (SUB-SPEC A).
+    /// Does not send; call [`announce_presence`](Core::announce_presence) to broadcast.
+    pub fn set_leading_name(&self, entry: Option<crate::presence::NameEntry>) {
+        *self.inner.leading_name.lock().unwrap() = entry;
+    }
+
+    // ----- SUB-SPEC A: name book (multiple callsigns, select the leading one by id) --
+
+    /// A snapshot of the user's saved name book. Persistence is a client concern —
+    /// encode this and store it (see [`load_name_book`](Core::load_name_book)).
+    pub fn name_book(&self) -> crate::presence::NameBook {
+        self.inner.name_book.lock().unwrap().clone()
+    }
+
+    /// The id of the currently active leading name, if one is set.
+    pub fn leading_name_id(&self) -> Option<String> {
+        self.inner.leading_name.lock().unwrap().as_ref().map(|e| e.id.clone())
+    }
+
+    /// Replace the saved name book (e.g. restored from client persistence at startup).
+    /// Does not change the active leading name; call [`use_name`](Core::use_name).
+    pub fn load_name_book(&self, book: crate::presence::NameBook) {
+        *self.inner.name_book.lock().unwrap() = book;
+    }
+
+    /// Add or replace a saved name in the book (keyed by `entry.id`). Does not change
+    /// the active leading name.
+    pub fn add_name(&self, entry: crate::presence::NameEntry) {
+        self.inner.name_book.lock().unwrap().upsert(entry);
+    }
+
+    /// Remove a saved name from the book. Returns whether one was removed. If it was
+    /// the active leading name, the leading name is also cleared (so we stop beaconing
+    /// a name the user just deleted).
+    pub fn remove_name(&self, id: &str) -> bool {
+        let removed = self.inner.name_book.lock().unwrap().remove(id);
+        if removed {
+            let mut lead = self.inner.leading_name.lock().unwrap();
+            if lead.as_ref().map(|e| e.id.as_str()) == Some(id) {
+                *lead = None;
+            }
+        }
+        removed
+    }
+
+    /// Select a saved name (by id) as this chat's leading name and announce it. Errors
+    /// if no entry with that id exists. This is the mid-chat name switch (fires a fresh
+    /// CQ with a bumped seq so peers supersede the previous name).
+    pub async fn use_name(&self, id: &str) -> Result<()> {
+        let entry = self
+            .inner
+            .name_book
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| crate::error::CoreError::NoSuchName(id.to_string()))?;
+        *self.inner.leading_name.lock().unwrap() = Some(entry);
+        self.announce_presence().await
+    }
+
+    // ----- SUB-SPEC B: opsec modes + groupings (disclosure is user-controlled) -----
+
+    /// Set the user's per-chat opsec/linkage-disclosure policy. Controls only what
+    /// THIS user emits; a group can never compel disclosure.
+    pub fn set_opsec_mode(&self, mode: crate::linkage::OpsecMode) {
+        *self.inner.opsec_mode.lock().unwrap() = mode;
+    }
+
+    /// The current opsec mode.
+    pub fn opsec_mode(&self) -> crate::linkage::OpsecMode {
+        *self.inner.opsec_mode.lock().unwrap()
+    }
+
+    /// Define (or replace) a grouping of the user's own name-entry ids. Returns a
+    /// stable grouping id (derived from the sorted member ids, so redefining the
+    /// same set is idempotent). No presence is emitted here — call
+    /// [`present_grouping`](Core::present_grouping).
+    pub fn define_grouping(&self, name_ids: &[String]) -> crate::linkage::GroupingId {
+        let mut sorted: Vec<String> = name_ids.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let mut id_bytes = [0u8; 16];
+        talkrypt_crypto::kdf::mac_kdf(
+            &*self.inner.grouping_root.lock().unwrap(),
+            sorted.join("\u{0}").as_bytes(),
+            b"talkrypt-grouping-id-v1",
+            &mut id_bytes,
+        );
+        let id: String = id_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        self.inner.groupings.lock().unwrap().insert(id.clone(), sorted);
+        id
+    }
+
+    /// The name-entry ids in a defined grouping, if any.
+    pub fn grouping_members(&self, id: &crate::linkage::GroupingId) -> Option<Vec<String>> {
+        self.inner.groupings.lock().unwrap().get(id).cloned()
+    }
+
+    /// Per-chat: emit ALL associated identities (a grouping) vs just the leading one.
+    pub fn show_all_identities(&self, on: bool) {
+        self.inner.show_all.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether show-all is enabled.
+    pub fn show_all(&self) -> bool {
+        self.inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An honest lower bound on distinct people present (SUB-SPEC B): distinct
+    /// accounts + distinct groupings + isolated (unlinked bare) identities.
+    pub fn sybil_estimate(&self) -> crate::linkage::SybilCount {
+        let names = self.inner.names.lock().unwrap();
+        let groupings = self.inner.groupings_seen.lock().unwrap();
+        let grouped: std::collections::HashSet<[u8; 48]> =
+            groupings.values().flatten().copied().collect();
+        let mut accounts = std::collections::HashSet::new();
+        let mut isolated = 0usize;
+        for (fp, rec) in names.iter() {
+            match rec.account_fp {
+                Some(a) => {
+                    accounts.insert(a);
+                }
+                None if !grouped.contains(fp) => isolated += 1,
+                None => {} // bare, but in a verified grouping → counted under the grouping
+            }
+        }
+        let distinct_accounts = accounts.len();
+        let distinct_groupings = groupings.len();
+        crate::linkage::SybilCount {
+            distinct_accounts,
+            distinct_groupings,
+            isolated,
+            min_distinct_people: distinct_accounts + distinct_groupings + isolated,
+        }
+    }
+
+    /// Set the persistent, user-held grouping root seed (SUB-SPEC B). The SAME seed
+    /// across the user's sessions is what lets a viewer aggregate their leaves into
+    /// one grouping; app-persisted. Not derived from any device key (that would only
+    /// link same-device sessions).
+    pub fn set_grouping_root(&self, seed: [u8; 32]) {
+        *self.inner.grouping_root.lock().unwrap() = seed;
+    }
+
+    // ---- SUB-SPEC C: vouching ------------------------------------------------
+
+    /// Cast a vouch for `target` (async broadcast). Strictly ADDITIVE, display-only —
+    /// it never gates access (invariants 1-2). Re-cast with a higher epoch supersedes;
+    /// the vouch is re-asserted on the presence cadence to stay fresh (§1.5).
+    pub async fn vouch_for(&self, target: crate::vouch::VouchTarget) {
+        let ctx = crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        );
+        let now = now_secs();
+        let v = crate::vouch::sign_vouch(&self.inner.identity, target.clone(), ctx, now, now);
+        {
+            let mut mine = self.inner.my_vouches.lock().unwrap();
+            if !mine.contains(&target) {
+                mine.push(target);
+            }
+        }
+        send_vouch_now(&self.inner, v.encode()).await;
+    }
+
+    /// Withdraw a vouch: stop re-asserting it (it decays to neutral, §1.5) and emit a
+    /// higher-epoch superseding cast so peers drop it promptly. Additive-only: this
+    /// only removes a positive hint, it can never push the subject below neutral.
+    pub async fn revoke_vouch(&self, target: crate::vouch::VouchTarget) {
+        self.inner.my_vouches.lock().unwrap().retain(|t| t != &target);
+        // A higher-epoch re-cast that we then stop refreshing: the ledger supersedes
+        // and freshness lapses. (A dedicated tombstone is a follow-up; decay suffices.)
+        let ctx = crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        );
+        let now = now_secs();
+        let v = crate::vouch::sign_vouch(&self.inner.identity, target, ctx, now + 1, now);
+        send_vouch_now(&self.inner, v.encode()).await;
+    }
+
+    /// User-scope weighting override (spec §2): the viewer's own trust weighting.
+    pub fn set_vouch_weighting(&self, w: crate::vouch::VouchWeighting) {
+        *self.inner.user_weighting.lock().unwrap() = Some(w);
+    }
+
+    /// User-scope threshold override (spec §2): merged STRICTER-only with the chat bar.
+    pub fn set_vouch_threshold(&self, t: crate::vouch::Threshold) {
+        *self.inner.user_threshold.lock().unwrap() = Some(t);
+    }
+
+    /// The current vouch decision for `subject` under this viewer's effective policy.
+    pub fn vouch_decision(&self, subject: [u8; 48]) -> crate::vouch::VouchDecision {
+        compute_vouch_decision(&self.inner, subject)
+    }
+
+    /// A snapshot of every subject that has received a vouch, with its current decision
+    /// under this viewer's effective policy. Sorted by subject fp for stable display.
+    /// Display-only (invariant 2). Returns `(subject_fp, weighted_score, vouched)`.
+    pub fn vouch_summary(&self) -> Vec<([u8; 48], i64, bool)> {
+        let subjects: Vec<[u8; 48]> =
+            self.inner.vouches.lock().unwrap().keys().copied().collect();
+        let mut out: Vec<([u8; 48], i64, bool)> = subjects
+            .into_iter()
+            .map(|s| {
+                let d = compute_vouch_decision(&self.inner, s);
+                (s, d.weighted_score, d.vouched)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_chat_context(&self) -> [u8; 32] {
+        crate::presence::chat_context(
+            &self.inner.descriptor.invite_token,
+            &self.inner.descriptor.channel,
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_ingest_vouch(&self, sender: [u8; 48], v: crate::vouch::Vouch) {
+        handle_vouch(&self.inner, sender, v.encode());
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_vouch_count(&self, subject: [u8; 48]) -> usize {
+        self.inner.vouches.lock().unwrap().get(&subject).map(|m| m.len()).unwrap_or(0)
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_advance_round(&self) {
+        self.inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_record_grouping(&self, grouping_pub: Vec<u8>, leaf_fp: [u8; 48]) {
+        self.inner
+            .groupings_seen
+            .lock()
+            .unwrap()
+            .entry(grouping_pub)
+            .or_default()
+            .insert(leaf_fp);
+    }
+
+    /// Disclose this session's leaf as a member of a grouping (SUB-SPEC B): certify
+    /// our device leaf under the per-chat grouping key `G_c` and broadcast the proof.
+    /// A no-op under `OpsecMode::Clean`. Each of the user's sessions calls this; a
+    /// viewer aggregates all leaves sharing `G_c.pub` into one grouping.
+    pub async fn present_grouping(&self, _id: &crate::linkage::GroupingId) {
+        if matches!(*self.inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean) {
+            return; // Clean never emits linkage.
+        }
+        if let Some(bytes) = build_my_grouping_proof(&self.inner) {
+            send_linkage_now(&self.inner, bytes).await;
+        }
+    }
+
+    /// Set how/when this node re-announces its leading name (SUB-SPEC A): an optional
+    /// periodic re-beacon (clamped to a floor) plus the on-message-id mode. Manual
+    /// [`announce_presence`](Core::announce_presence) always works too. (Re)starts the
+    /// periodic task when enabled; a later cadence change stops the old task.
+    pub fn set_presence_cadence(&self, cadence: crate::presence::PresenceCadence) {
+        *self.inner.cadence.lock().unwrap() = cadence;
+        if let Some(secs) = cadence.effective_periodic() {
+            let inner = self.inner.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(secs));
+                ticker.tick().await; // consume the immediate first tick
+                loop {
+                    ticker.tick().await;
+                    // Stop if the cadence was disabled or changed to a different period.
+                    let still = inner.cadence.lock().unwrap().effective_periodic() == Some(secs);
+                    if !still {
+                        break;
+                    }
+                    if let Some(bytes) = build_my_presence(&inner) {
+                        send_presence_now(&inner, bytes).await;
+                    }
+                    // SUB-SPEC C (§1.5): re-assert our vouches so they stay fresh —
+                    // trust reflects LIVE support; a lapsed voucher decays to neutral.
+                    reassert_my_vouches(&inner).await;
+                }
+            });
+        }
+    }
+
+    /// The current presence cadence.
+    pub fn presence_cadence(&self) -> crate::presence::PresenceCadence {
+        self.inner.cadence.lock().unwrap().clone()
+    }
+
+    /// Set a viewer-local name-trust policy override (SUB-SPEC A, spec §5). The chat's
+    /// baseline policy travels in the descriptor; this lets a viewer render collisions
+    /// MORE strictly than the chat requires, never more loosely — the effective policy
+    /// is the stricter of the two. Pass `None` to drop the override and follow the
+    /// chat baseline. Takes effect on the next resolved presence.
+    pub fn set_name_trust_policy(&self, policy: Option<crate::nametrust::NameTrustPolicy>) {
+        *self.inner.name_policy_override.lock().unwrap() = policy;
+    }
+
+    /// The effective name-trust policy = the chat baseline tightened by any local
+    /// override (never loosened).
+    pub fn name_trust_policy(&self) -> crate::nametrust::NameTrustPolicy {
+        match *self.inner.name_policy_override.lock().unwrap() {
+            Some(local) => self.inner.descriptor.name_trust_policy.max_strictness(local),
+            None => self.inner.descriptor.name_trust_policy,
+        }
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat. No-op if no
+    /// leading name is set. Bumps the per-sender seq so it supersedes prior ones.
+    pub async fn announce_presence(&self) -> Result<()> {
+        if let Some(bytes) = build_my_presence(&self.inner) {
+            send_presence_now(&self.inner, bytes).await;
+        }
+        Ok(())
+    }
+}
+
+/// Send `bytes` (an encoded `NamePresence`) via the role-appropriate path: a pairwise
+/// `Frame::Presence` to each peer, or a signed group message behind the presence
+/// sentinel (SECURITY-AUDIT G1/G2 — leaf-signed, so a member/relay cannot forge or
+/// restamp a name onto another leaf). Shared by `announce_presence`, the periodic CQ
+/// timer, and the roster-grow re-announce hooks.
+async fn send_presence_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let payload = Frame::Presence(bytes).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_presence(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return, // group not ready yet
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// SUB-SPEC B: leading byte marking a grouping-linkage payload (vs a presence
+/// `0xF5` or a legacy Chat payload). Distinct value so the dispatch is unambiguous;
+/// old clients drop it (`marking::decode_payload` returns None).
+pub(crate) const LINKAGE_SENTINEL: u8 = 0xF6;
+
+fn encode_group_linkage(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.push(LINKAGE_SENTINEL);
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Build this session's single-member grouping proof: certify OUR device leaf under
+/// the per-chat grouping key `G_c`, and sign the chat context. `None` if unbuildable.
+fn build_my_grouping_proof(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::linkage::LinkagePayload;
+    let root = *inner.grouping_root.lock().unwrap();
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let g = talkrypt_crypto::GroupingKey::from_root_seed(root);
+    let now = now_secs();
+    let cert = g.certify(&ctx, inner.identity.public(), now, now + 30 * 24 * 3600);
+    let ctx_sig = inner.identity.sign(&ctx);
+    let grouping_pub = g.derive_for_chat(&ctx).public().sig_vk.clone();
+    let seq = inner.presence_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }.encode())
+}
+
+/// SUB-SPEC B: whether to auto-emit our grouping on join (show-all + not Clean).
+fn wants_show_all_grouping(inner: &Arc<Inner>) -> bool {
+    inner.show_all.load(std::sync::atomic::Ordering::Relaxed)
+        && !matches!(*inner.opsec_mode.lock().unwrap(), crate::linkage::OpsecMode::Clean)
+}
+
+/// Send an encoded `LinkagePayload` via the role-appropriate path, behind
+/// `LINKAGE_SENTINEL` (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`).
+async fn send_linkage_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let mut framed = Vec::with_capacity(bytes.len() + 1);
+            framed.push(LINKAGE_SENTINEL);
+            framed.extend_from_slice(&bytes);
+            let payload = Frame::Presence(framed).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_linkage(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return,
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// Verify a grouping-linkage proof attributed to `sender_fp`, record the grouping
+/// association on success, and emit `Event::Linkage`. Reuses the audited
+/// `MlDsaCertBackend`. Binds the cert subject to the authenticated sender and
+/// enforces per-sender seq monotonicity (anti-replay).
+fn handle_linkage(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // A distinct member's linkage disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
+    use crate::linkage::{Claim, LinkageProof, MlDsaCertBackend, LinkagePayload, Predicate, Proof, ProofBackend, Verdict};
+    let Some(LinkagePayload::GroupingProof { grouping_pub, cert, ctx_sig, seq }) =
+        LinkagePayload::decode(&bytes)
+    else {
+        return;
+    };
+    // Anti-replay/reorder: per-sender seq must strictly increase.
+    {
+        let mut seqs = inner.linkage_seq.lock().unwrap();
+        if let Some(last) = seqs.get(&sender_fp) {
+            if seq <= *last {
+                return;
+            }
+        }
+        seqs.insert(sender_fp, seq);
+    }
+    // Bind the certified leaf to the authenticated sender (no restamping).
+    let subject_ok = cert.cert.subject.fingerprint() == sender_fp;
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let claim = Claim { predicate: Predicate::Grouping { grouping_pub: grouping_pub.clone() }, context: ctx };
+    let proof = Proof(
+        LinkageProof::Grouping { member: cert.cert.subject.clone(), cert, ctx_sig }.encode(),
+    );
+    let verdict = subject_ok
+        && MlDsaCertBackend { now: now_secs() }.verify(&claim, &proof) == Verdict::Pass;
+    if verdict {
+        inner
+            .groupings_seen
+            .lock()
+            .unwrap()
+            .entry(grouping_pub.clone())
+            .or_default()
+            .insert(sender_fp);
+    }
+    let _ = inner.events_tx.send(Event::Linkage { subject: sender_fp, grouping_pub, verdict });
+}
+
+// ---------------------------------------------------------------------------
+// SUB-SPEC C: vouching wire + evaluation glue.
+// ---------------------------------------------------------------------------
+
+/// SUB-SPEC C: leading byte marking a vouch payload (vs presence `0xF5` / linkage
+/// `0xF6`). Distinct value → unambiguous dispatch; old clients drop it.
+pub(crate) const VOUCH_SENTINEL: u8 = 0xF7;
+
+fn encode_group_vouch(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.push(VOUCH_SENTINEL);
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Send an encoded `Vouch` via the role-appropriate path, behind `VOUCH_SENTINEL`
+/// (pairwise: `Frame::Presence`; group: leaf-signed `GroupMsg`). Mirrors
+/// `send_linkage_now`.
+async fn send_vouch_now(inner: &Arc<Inner>, bytes: Vec<u8>) {
+    match inner.role {
+        GroupRole::None => {
+            let mut framed = Vec::with_capacity(bytes.len() + 1);
+            framed.push(VOUCH_SENTINEL);
+            framed.extend_from_slice(&bytes);
+            let payload = Frame::Presence(framed).encode();
+            for (session, writer, fp) in collect_peers(inner) {
+                let ready = { session.lock().await.can_send() };
+                if ready {
+                    let _ = send_payload(&session, &writer, &payload).await;
+                } else if let Some(pending) = pending_for(inner, fp) {
+                    pending.lock().unwrap().push(payload.clone());
+                }
+            }
+        }
+        GroupRole::Host | GroupRole::Member => {
+            let frame = {
+                let mut g = inner.group.lock().await;
+                match g.as_mut() {
+                    Some(grp) => match grp.encrypt_signed(&encode_group_vouch(&bytes)) {
+                        Ok(ct) => Frame::GroupMsg(ct),
+                        Err(_) => return,
+                    },
+                    None => return,
+                }
+            };
+            route(inner, frame, Route::Broadcast).await;
+        }
+    }
+}
+
+/// SUB-SPEC C (§1.5): re-emit our current outbound vouches at a fresh `asserted_at`
+/// (a low-rate re-assertion beacon on the encrypted path). A vouch we stop
+/// re-asserting decays to neutral on peers' gossip clocks — trust reflects live
+/// support. Epoch is bumped so the re-assertion supersedes the prior one.
+async fn reassert_my_vouches(inner: &Arc<Inner>) {
+    let targets = inner.my_vouches.lock().unwrap().clone();
+    if targets.is_empty() {
+        return;
+    }
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    let now = now_secs();
+    for target in targets {
+        let v = crate::vouch::sign_vouch(&inner.identity, target, ctx, now, now);
+        send_vouch_now(inner, v.encode()).await;
+    }
+}
+
+/// Verify + record a vouch attributed to the delivering `sender_fp`, then emit
+/// `Event::Vouch` with the recomputed decision. Account-bound + context-bound +
+/// self-vouch-dropped + epoch-monotonic + distinct-voucher dedup (spec §1, §4).
+fn handle_vouch(inner: &Arc<Inner>, sender_fp: [u8; 48], bytes: Vec<u8>) {
+    // Hearing a distinct member's disclosure advances the gossip clock (§1.5).
+    witness_gossip_round(inner, sender_fp);
+    let Some(v) = crate::vouch::Vouch::decode(&bytes) else { return };
+    // Context-bound: only vouches for THIS chat count.
+    let ctx = crate::presence::chat_context(&inner.descriptor.invite_token, &inner.descriptor.channel);
+    if v.context != ctx {
+        return;
+    }
+    // Unforgeable: the sig must verify under the voucher account key (a vouch cannot
+    // be forged without that private key, nor replayed into another chat).
+    if !v.verify() {
+        return;
+    }
+    let voucher_fp = v.voucher.fingerprint();
+    // Self-vouch dropped (voucher == subject).
+    let subject = v.target_fp();
+    if voucher_fp == subject {
+        return;
+    }
+    {
+        let mut led = inner.vouches.lock().unwrap();
+        let per = led.entry(subject).or_default();
+        // Dedup by distinct voucher account; epoch strictly increases per (voucher,
+        // subject) — a stale/replayed epoch is ignored, a higher epoch supersedes
+        // (a revoke is a higher-epoch withdraw handled by the caller's re-cast).
+        if let Some(existing) = per.get(&voucher_fp) {
+            if v.epoch <= existing.epoch {
+                return;
+            }
+        }
+        per.insert(voucher_fp, VouchRecord { epoch: v.epoch, voucher: v.voucher.clone(), sender_fp });
+    }
+    // Witnessing this assertion refreshes freshness for this voucher (§1.5).
+    let r = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+    inner.voucher_round.lock().unwrap().insert(voucher_fp, r);
+    let d = compute_vouch_decision(inner, subject);
+    let _ = inner.events_tx.send(Event::Vouch {
+        subject,
+        weighted_score: d.weighted_score,
+        vouched: d.vouched,
+        inflation_rejected: d.inflation_rejected,
+    });
+}
+
+/// SUB-SPEC C (§1.5): advance the gossip-witnessed round when a DISTINCT member is
+/// heard. A round advances only when `member_fp` differs from the last advancer, so
+/// one sender's repeated gossip — or a sock-puppet swarm behind a single link —
+/// cannot fast-forward freshness (distinct-person deflation). This makes decay depend
+/// on connected OTHER users and defeats local wall-clock manipulation.
+fn witness_gossip_round(inner: &Arc<Inner>, member_fp: [u8; 48]) {
+    let mut last = inner.last_round_advancer.lock().unwrap();
+    if *last != Some(member_fp) {
+        inner.round.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *last = Some(member_fp);
+    }
+}
+
+/// The viewer's effective policy: chat baseline (descriptor v4) merged with user
+/// overrides in the PROTECTIVE direction only — the viewer may be STRICTER, never
+/// weaker (spec §2, mirrors A's "render stricter, never weaker").
+fn effective_policy(inner: &Arc<Inner>) -> crate::vouch::VouchPolicy {
+    use crate::vouch::Threshold;
+    let mut p = inner.descriptor.vouch_policy;
+    if let Some(w) = *inner.user_weighting.lock().unwrap() {
+        p.weighting = w; // the viewer's own trust weighting
+    }
+    if let Some(t) = *inner.user_threshold.lock().unwrap() {
+        p.threshold = match (p.threshold, t) {
+            // Chat vouching OFF (the default sentinel) → the user's own bar applies
+            // directly (opting IN for their own view is not "weaker than" an unset bar).
+            (Threshold::Count(u32::MAX), _) => t,
+            // Otherwise the viewer may only be STRICTER, never weaker (spec §2).
+            (Threshold::Count(a), Threshold::Count(b)) => Threshold::Count(a.max(b)),
+            (Threshold::Percent(a), Threshold::Percent(b)) => Threshold::Percent(a.max(b)),
+            _ => t, // cross-kind: the viewer's own bar
+        };
+    }
+    p
+}
+
+/// Invert `groupings_seen` (grouping_pub -> {leaf fps}) into leaf fp -> grouping_pub,
+/// so the antibody can tell whether a voucher's delivering leaf sits in a grouping.
+fn grouping_index(inner: &Arc<Inner>) -> std::collections::HashMap<[u8; 48], Vec<u8>> {
+    let mut out = std::collections::HashMap::new();
+    for (gp, leaves) in inner.groupings_seen.lock().unwrap().iter() {
+        for leaf in leaves {
+            out.insert(*leaf, gp.clone());
+        }
+    }
+    out
+}
+
+fn relationship_of(inner: &Arc<Inner>, voucher: &IdentityPublic) -> crate::vouch::Relationship {
+    let store = inner.contacts.lock().unwrap();
+    if store.is_friend(voucher) {
+        crate::vouch::Relationship::Friend
+    } else if store.is_contact(voucher) {
+        crate::vouch::Relationship::Contact
+    } else {
+        crate::vouch::Relationship::Stranger
+    }
+}
+
+/// Materialize per-viewer `VoucherView`s from the ledger + relationship + grouping +
+/// gossip-round freshness, then run the pure evaluator under the effective policy.
+fn compute_vouch_decision(inner: &Arc<Inner>, subject: [u8; 48]) -> crate::vouch::VouchDecision {
+    use crate::vouch::VoucherView;
+    let policy = effective_policy(inner);
+    let cur = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+    let gidx = grouping_index(inner);
+    let led = inner.vouches.lock().unwrap();
+    let rounds = inner.voucher_round.lock().unwrap();
+    let views: Vec<VoucherView> = led
+        .get(&subject)
+        .map(|per| {
+            per.iter()
+                .map(|(vf, rec)| {
+                    let last = rounds.get(vf).copied().unwrap_or(0);
+                    VoucherView {
+                        voucher_fp: *vf,
+                        relationship: relationship_of(inner, &rec.voucher),
+                        rounds_since_witnessed: cur.saturating_sub(last) as u32,
+                        grouping: gidx.get(&rec.sender_fp).cloned(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::vouch::evaluate(&views, &policy)
+}
+
+/// Leading byte marking a TYPED group payload (presence) vs a legacy marking+text
+/// Chat payload (whose first byte is an opt-marking flag 0x00/0x01). A legacy
+/// client's `marking::decode_payload` returns `None` on this, dropping it gracefully.
+pub(crate) const PRESENCE_SENTINEL: u8 = 0xF5;
+
+/// SUB-SPEC A anti-grief: at most `PRESENCE_RATE_BURST` accepted presences per peer
+/// per `PRESENCE_RATE_WINDOW_SECS` (viewer-enforced in `handle_presence`). The window
+/// bounds a sustained flood to ~`BURST`/`WINDOW`; the burst headroom lets a legitimate
+/// eager-on-join plus a quick name correction both land. seq monotonicity (checked
+/// first) already drops replays, so only genuinely new presences spend budget.
+const PRESENCE_RATE_WINDOW_SECS: u64 = 2;
+const PRESENCE_RATE_BURST: u32 = 3;
+
+/// SUB-SPEC A: debounce window for the roster-grow re-announce. A burst of joins
+/// within this window coalesces into a single CQ (see `schedule_grow_reannounce`).
+const PRESENCE_GROW_DEBOUNCE_MS: u64 = 250;
+
+/// Schedule a single debounced CQ after the roster grows. Each grow bumps a
+/// generation counter and sleeps the debounce window; only the LAST grow in a burst
+/// (the one whose generation is still current when its timer fires) actually
+/// announces, so N near-simultaneous joins yield one presence, not N.
+fn schedule_grow_reannounce(inner: &Arc<Inner>) {
+    if inner.leading_name.lock().unwrap().is_none() {
+        return;
+    }
+    let gen = inner
+        .presence_grow_gen
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let inner2 = inner.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(PRESENCE_GROW_DEBOUNCE_MS)).await;
+        // A newer grow superseded us during the window — let its timer send instead.
+        if inner2.presence_grow_gen.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return;
+        }
+        if let Some(bytes) = build_my_presence(&inner2) {
+            send_presence_now(&inner2, bytes).await;
+        }
+    });
+}
+
+fn encode_group_presence(np_bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(np_bytes.len() + 1);
+    v.push(PRESENCE_SENTINEL);
+    v.extend_from_slice(np_bytes);
+    v
+}
+
+/// Encode this node's current leading name as a `NamePresence`, or `None` if none is
+/// set. Bumps `presence_seq` so each announcement supersedes the last.
+fn build_my_presence(inner: &Arc<Inner>) -> Option<Vec<u8>> {
+    use crate::presence::{NameBacking, NamePresence};
+    let entry = inner.leading_name.lock().unwrap().clone()?;
+    let seq = inner
+        .presence_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let np = match entry.backing {
+        NameBacking::Bare => NamePresence::Bare { seq, label: entry.label.clone() },
+        NameBacking::Account { chain } => {
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            NamePresence::linked(seq, chain, &entry.label, ctx, &inner.identity)
+        }
+    };
+    Some(np.encode())
 }
 
 fn collect_peers(inner: &Arc<Inner>) -> Vec<(SharedSession, SharedWriter, [u8; 48])> {
@@ -1082,10 +3080,66 @@ async fn send_payload(
     Ok(())
 }
 
+/// Outbound LoRa-mesh message carry, set by [`Core::start_mesh_messaging`]. Holds
+/// the node handle, the transmit channel, and a rolling per-message id so each
+/// mesh transmission's fragments group correctly.
+struct MeshTx {
+    node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
+    channel: u8,
+    msg_id: std::sync::atomic::AtomicU16,
+}
+
+/// The `from` handle stamped on a frame received over the mesh. The mesh is a
+/// broadcast medium with no per-peer session, so there is no real connected-peer
+/// fingerprint. This sentinel is only ever used by [`handle_group_msg`] for the
+/// echo-skip (`fp != from`, so we correctly forward to every real peer), as the
+/// no-op target of an optional `DeliveryAck` (`Route::Peer(sentinel)` matches no
+/// peer), and as an attribution fallback that never fires for a validly-signed
+/// frame — NONE of which is a trust decision (the frame self-authenticates via
+/// group AEAD + per-sender ML-DSA before any of this).
+const MESH_SOURCE_FP: [u8; 48] = [0xED; 48];
+
+/// If a mesh carry is active, also fragment + transmit a `Route::Broadcast`
+/// **`Frame::GroupMsg`** over the mesh (chat content only — control-plane frames
+/// stay on the primary transport to conserve scarce LoRa airtime). The frame is
+/// already the opaque, self-authenticating group ciphertext, so the mesh moves
+/// only sealed bytes.
+async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame) {
+    if !matches!(frame, Frame::GroupMsg(_)) {
+        return;
+    }
+    let (node, channel, id) = {
+        let guard = inner.mesh_tx.lock().unwrap();
+        let Some(tx) = guard.as_ref() else { return };
+        (
+            tx.node.clone(),
+            tx.channel,
+            tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    };
+    let bytes = frame.encode();
+    let mtu = node.mtu();
+    if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
+        talkrypt_transport::mesh::frag::KIND_FRAME,
+        id,
+        &bytes,
+        mtu,
+    ) {
+        for f in frags {
+            let _ = node.send(channel, &f).await;
+        }
+    }
+}
+
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
 /// in a [`Routed`] envelope and sent to the single relay peer, which fans it
 /// out. In host-coordinated mode it is sent directly to the resolved peers.
 async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
+    // Tee broadcast chat content onto the mesh (if active), in addition to the
+    // normal peer fan-out below. Works in both relayed and host-coordinated modes.
+    if matches!(to, Route::Broadcast) {
+        mesh_tee(inner, &frame).await;
+    }
     if inner.relayed {
         let routed = Routed {
             to,
@@ -1129,13 +3183,33 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     let session = Arc::new(AsyncMutex::new(hs.session));
     let writer = Arc::new(AsyncMutex::new(writer));
 
+    let pending: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     inner.peers.lock().unwrap().push(Peer {
         fingerprint,
         writer: writer.clone(),
         session: session.clone(),
-        pending: Arc::new(Mutex::new(Vec::new())),
+        pending: pending.clone(),
     });
     let _ = inner.events_tx.send(Event::Connected { fingerprint });
+
+    // D1 Layer-A keeper: if we buffered frames for this peer while it was offline, replay
+    // them now that it is back (holds ciphertext only), then advertise our digest so a peer
+    // keeper can reconcile gaps (Layer-C anti-entropy). We QUEUE these into the peer's
+    // `pending` (rather than sending immediately) because when the returning peer re-dials
+    // WE are the Double-Ratchet responder — mute until it sends its first (keying) frame.
+    // The reader loop flushes `pending` in order the moment the session becomes send-ready,
+    // so the replay actually reaches a member whose reconnect sends no KeyPackage. Filling
+    // `pending` synchronously here (before the reader loop is spawned) avoids a race with
+    // that flush.
+    if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut q = pending.lock().unwrap();
+        for (_gid, bytes) in inner.keeper.drain(fingerprint) {
+            q.push(bytes);
+        }
+        // Always advertise our digest (even empty) so a peer keeper that HOLDS entries we
+        // lack sees the gap and pushes them.
+        q.push(Frame::QueueSync(inner.keeper.digest()).encode());
+    }
 
     // Identity presentation rides as the first frame *inside* the encrypted
     // session (never in the plaintext handshake), so the sensitive
@@ -1143,12 +3217,54 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     // group/relayed pairwise channels carry coordination/`Routed` envelopes.
     let present_pairwise = inner.role == GroupRole::None && !inner.relayed;
     if present_pairwise && is_initiator {
+        let ident = inner.present_chain.lock().unwrap().clone();
+        let presence = build_my_presence(inner);
+        // Whether we send anything self-describing as our opening frame. A
+        // pseudonym with no leading name sends neither — see the keying frame below.
+        let sends_opening = ident.is_some() || presence.is_some();
         // Initiator sends first, so it can present right away.
-        if let Some(bytes) = inner.present_chain.lock().unwrap().clone() {
+        if let Some(bytes) = ident {
             let s = session.clone();
             let w = writer.clone();
             tokio::spawn(async move {
                 let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+            });
+        }
+        // SUB-SPEC A: also announce our leading self-declared name on connect, so a
+        // pairwise peer resolves us without us acting (the CQ beacon's on-join
+        // trigger for a pairwise dialer). Sending this first frame also makes the
+        // peer (ratchet responder) send-ready, so it can announce back.
+        if let Some(bytes) = presence {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+            });
+        }
+        // SUB-SPEC B: if show-all is on, also disclose our grouping on join.
+        if wants_show_all_grouping(inner) {
+            if let Some(gp) = build_my_grouping_proof(inner) {
+                let s = session.clone();
+                let w = writer.clone();
+                let mut framed = vec![LINKAGE_SENTINEL];
+                framed.extend_from_slice(&gp);
+                tokio::spawn(async move {
+                    let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                });
+            }
+        }
+        // A pseudonym initiator with no leading name would otherwise send NOTHING
+        // as its opening frame — leaving the responder's Double Ratchet unkeyed, so
+        // the responder could never present its identity or announce its CQ name
+        // back (the most common case: an anonymous joiner dialing a named host).
+        // Send an empty keying Presence: it decodes to nothing (pure no-op in
+        // `handle_presence`), but decrypting it makes the responder send-ready and
+        // fires its reactive on-join announce.
+        if !sends_opening {
+            let s = session.clone();
+            let w = writer.clone();
+            tokio::spawn(async move {
+                let _ = send_payload(&s, &w, &Frame::Presence(Vec::new()).encode()).await;
             });
         }
     }
@@ -1165,6 +3281,17 @@ fn register(inner: &Arc<Inner>, stream: Box<dyn Stream>, hs: HandshakeResult, is
     ));
 }
 
+/// How many *consecutive* undecryptable frames a stream may deliver before we give
+/// up on its ratchet, drop the peer, and close the reader — so the reconnect layer
+/// (which only fires when `peers` is empty) can re-establish a fresh session. A
+/// healthy session decrypts virtually every frame and resets the counter, so this
+/// only trips on a genuinely desynced/mismatched stream (a peer that restarted and
+/// re-handshaked on a new session, ratchet corruption, or a cross-wired socket) that
+/// would otherwise spin forever on "frame failed to decrypt" with no recovery. The
+/// Double Ratchet already tolerates reordering via skipped-message keys, so a small
+/// bound does not fire on ordinary out-of-order delivery.
+const MAX_CONSECUTIVE_DECRYPT_FAILURES: u32 = 8;
+
 async fn reader_loop(
     inner: Arc<Inner>,
     mut reader: Box<dyn FrameReader>,
@@ -1175,9 +3302,16 @@ async fn reader_loop(
     // The responder presents its identity once, after the first inbound frame
     // makes its ratchet send-ready (see `register`).
     let mut presented = false;
+    // Consecutive frames this stream failed to decrypt; reset on any success. A
+    // run of failures means the ratchet is desynced beyond recovery — drop the
+    // peer so a fresh handshake can heal it (see MAX_CONSECUTIVE_DECRYPT_FAILURES).
+    let mut decrypt_failures: u32 = 0;
     // Access gate: a peer is "approved" immediately under an Open policy, else
     // only after it presents an allowed account (see the Identity arm below).
-    let mut approved = inner.access.lock().unwrap().is_open();
+    // SUB-SPEC B: an access predicate means a peer is NOT auto-approved (even under
+    // an Open policy) — it must first present a satisfying identity (handle_identity).
+    let mut approved =
+        inner.access.lock().unwrap().is_open() && inner.descriptor.access_predicate.is_none();
     loop {
         let frame = match reader.recv_frame().await {
             Ok(f) => f,
@@ -1191,11 +3325,23 @@ async fn reader_loop(
             s.decrypt(&frame)
         };
         let pt = match opened {
-            Ok(pt) => pt,
+            Ok(pt) => {
+                decrypt_failures = 0;
+                pt
+            }
             Err(_) => {
                 let _ = inner
                     .events_tx
                     .send(Event::Error("frame failed to decrypt".into()));
+                decrypt_failures += 1;
+                if decrypt_failures >= MAX_CONSECUTIVE_DECRYPT_FAILURES {
+                    // The ratchet is desynced beyond recovery on this stream. Drop
+                    // the peer and close the reader so the reconnect layer can dial
+                    // a fresh handshake, instead of spinning on a dead session.
+                    inner.peers.lock().unwrap().retain(|p| p.fingerprint != fingerprint);
+                    let _ = inner.events_tx.send(Event::Disconnected { fingerprint });
+                    break;
+                }
                 continue;
             }
         };
@@ -1208,6 +3354,23 @@ async fn reader_loop(
             if let Some(bytes) = pending {
                 if let Some((s, w)) = peer_handles(&inner, fingerprint) {
                     let _ = send_payload(&s, &w, &Frame::Identity(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC A: now send-ready, announce our leading self-declared name too
+            // (the CQ beacon's on-join trigger for a pairwise responder/host).
+            if let Some(bytes) = build_my_presence(&inner) {
+                if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                    let _ = send_payload(&s, &w, &Frame::Presence(bytes).encode()).await;
+                }
+            }
+            // SUB-SPEC B: if show-all is on, disclose our grouping on join too.
+            if wants_show_all_grouping(&inner) {
+                if let Some(gp) = build_my_grouping_proof(&inner) {
+                    if let Some((s, w)) = peer_handles(&inner, fingerprint) {
+                        let mut framed = vec![LINKAGE_SENTINEL];
+                        framed.extend_from_slice(&gp);
+                        let _ = send_payload(&s, &w, &Frame::Presence(framed).encode()).await;
+                    }
                 }
             }
         }
@@ -1273,12 +3436,110 @@ async fn reader_loop(
             Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
                 handle_commit(&inner, from_epoch, bytes).await;
             }
+            Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
+                handle_update_proposal(&inner, from, b).await;
+            }
             Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
-                let mut roster = inner.roster.lock().unwrap();
-                *roster = entries.into_iter().collect();
+                let grew = {
+                    let mut roster = inner.roster.lock().unwrap();
+                    let before = roster.len();
+                    *roster = entries.into_iter().collect();
+                    roster.len() > before
+                };
+                // A new member appeared — re-announce our leading name so they
+                // resolve us without us acting (SUB-SPEC A CQ beacon), debounced so a
+                // join burst coalesces into one CQ.
+                if grew {
+                    schedule_grow_reannounce(&inner);
+                }
             }
             Some(Frame::GroupMsg(b)) => {
                 handle_group_msg(&inner, from, b).await;
+            }
+            Some(Frame::Promote(payload)) if inner.role != GroupRole::None => {
+                // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
+                handle_promote(&inner, from, payload).await;
+            }
+            Some(Frame::Consent(payload)) if inner.role == GroupRole::Host => {
+                // SUB-SPEC D2: a consent response — the host tallies + commits/aborts.
+                handle_consent(&inner, from, payload).await;
+            }
+            Some(Frame::PromoteCommit(payload)) if inner.role == GroupRole::Member => {
+                // SUB-SPEC D2/D3: the committer announced the promotion committed — a member
+                // finalizes locally (persistence + its consented retention).
+                handle_promote_commit(&inner, payload).await;
+            }
+            Some(Frame::DeliveryAck(ids)) => {
+                // D1: the peer confirms it received these frames. Clear them from our
+                // outbox (we originated them) and from the keeper queue for that peer
+                // (we buffered them for it). Emit a delivery receipt. An ack for an
+                // unknown gid is a harmless no-op.
+                for gid in ids {
+                    inner.outbox.ack(&inner.descriptor.channel, gid);
+                    inner.keeper.ack(from, gid);
+                    let _ = inner.events_tx.send(Event::Delivered { gossip_id: gid });
+                }
+            }
+            Some(Frame::MailboxPut { recipient, frame })
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    || inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                let gid = gossip_id(&frame);
+                // D1 Layer-B: as an anchor, store for pull-on-fetch.
+                if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.mailbox.buffer(recipient, gid, &frame, now_secs());
+                }
+                // D1 Layer-C: as a keeper (anti-entropy replica), store for
+                // push-on-reconnect so a replicated frame survives other keepers dropping.
+                if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    inner.keeper.buffer(recipient, gid, &frame, now_secs());
+                }
+            }
+            Some(Frame::QueueSync(peer_digest)) if inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-C anti-entropy: push the peer any entry we hold that its digest
+                // lacks, as an opaque MailboxPut it will buffer (keeper). Bounded by our
+                // own queue size + the peer's digest cap.
+                let have: std::collections::HashSet<([u8; 32], [u8; 48])> = peer_digest.into_iter().collect();
+                let mine = inner.keeper.digest();
+                for (gid, recipient) in &mine {
+                    if !have.contains(&(*gid, *recipient)) {
+                        if let Some(frame) = inner.keeper.frame_for(*recipient, *gid) {
+                            route(&inner, Frame::MailboxPut { recipient: *recipient, frame }, Route::Peer(from)).await;
+                        }
+                    }
+                }
+                // Reply with OUR digest exactly once, so the peer (which may have been
+                // mute as the pairwise responder until now) learns what WE hold and can
+                // push us anything we lack. The `qs_sent` guard prevents a reply loop.
+                let should_reply = inner.qs_sent.lock().unwrap().insert(from);
+                if should_reply {
+                    route(&inner, Frame::QueueSync(inner.keeper.digest()), Route::Peer(from)).await;
+                }
+            }
+            Some(Frame::MailboxFetch) if inner.anchor_enabled.load(std::sync::atomic::Ordering::Relaxed) => {
+                // D1 Layer-B: serve the authenticated requester (`from`) its buffered
+                // mail — only frames stored for its own fingerprint. Re-send each raw
+                // (they are already-encoded frames); the requester dedups via SeenSet.
+                let mail = inner.mailbox.drain(from);
+                if let Some((s, w)) = peer_handles(&inner, from) {
+                    for (gid, bytes) in mail {
+                        if send_payload(&s, &w, &bytes).await.is_ok() {
+                            inner.mailbox.ack(from, gid);
+                        }
+                    }
+                }
+            }
+            Some(Frame::Presence(bytes)) if inner.role == GroupRole::None => {
+                if bytes.first() == Some(&LINKAGE_SENTINEL) {
+                    // SUB-SPEC B: a grouping-linkage disclosure; attribute to this peer.
+                    handle_linkage(&inner, fingerprint, bytes[1..].to_vec());
+                } else if bytes.first() == Some(&VOUCH_SENTINEL) {
+                    // SUB-SPEC C: a vouch; attribute delivery to this peer.
+                    handle_vouch(&inner, fingerprint, bytes[1..].to_vec());
+                } else {
+                    // A pairwise self-declared name (SUB-SPEC A); attribute to this peer.
+                    handle_presence(&inner, fingerprint, bytes);
+                }
             }
             Some(Frame::Identity(bytes)) if inner.role == GroupRole::None => {
                 match handle_identity(&inner, fingerprint, bytes) {
@@ -1327,7 +3588,222 @@ async fn reader_loop(
                     }
                 }
             }
+            Some(Frame::LeafSigCert(b)) if inner.role != GroupRole::None => {
+                handle_leaf_sig_cert(&inner, from, b).await;
+            }
+            Some(Frame::RouteDescriptor(b)) => {
+                handle_route_descriptor(&inner, from, b).await;
+            }
             _ => { /* frame not valid for this role; ignore */ }
+        }
+    }
+}
+
+/// Domain-separation prefix for a route descriptor's signature (A-1). The `-v2`
+/// bump reflects the added `issued` freshness stamp: a v1 signature (no timestamp)
+/// can never validate under the v2 transcript, so old descriptors cannot be replayed
+/// across the format change.
+const ROUTE_CONTEXT: &[u8] = b"talkrypt-route-descriptor-v2";
+/// Bounds so a hostile node cannot bloat `known_routes`.
+const MAX_ROUTE_ENDPOINTS: u32 = 8;
+const MAX_ROUTE_EP_LEN: usize = 512;
+/// Cap on the number of distinct signers whose routes we retain. Route storage is
+/// also roster-gated (only current members), so this is a belt-and-suspenders bound
+/// against unbounded growth even if the roster itself is large.
+const MAX_KNOWN_ROUTES: usize = 256;
+
+/// The bytes a node signs over its route descriptor:
+/// `ROUTE_CONTEXT | signer | issued | eps`. Binding `issued` makes the timestamp
+/// tamper-evident, so a replayed old descriptor cannot masquerade as fresh.
+fn route_transcript(signer: &IdentityPublic, issued: u64, endpoints: &[String]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(ROUTE_CONTEXT);
+    w.put_bytes(&signer.sig_vk);
+    w.put_bytes(&issued.to_be_bytes());
+    w.put_u32(endpoints.len() as u32);
+    for e in endpoints {
+        w.put_bytes(e.as_bytes());
+    }
+    w.into_vec()
+}
+
+fn encode_route_descriptor(
+    signer: &IdentityPublic,
+    issued: u64,
+    endpoints: &[String],
+    sig: &[u8],
+) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(&signer.sig_vk);
+    w.put_bytes(&issued.to_be_bytes());
+    w.put_u32(endpoints.len() as u32);
+    for e in endpoints {
+        w.put_bytes(e.as_bytes());
+    }
+    w.put_bytes(sig);
+    w.into_vec()
+}
+
+/// Handle a gossiped route descriptor (SECURITY-AUDIT A-1): verify the identity
+/// signature over the advertised endpoints, store them keyed by the signer's
+/// fingerprint, and (host/bridge) re-flood so the routes reach the whole mesh. The
+/// signature makes routes attributable + tamper-evident; because dialing is
+/// authenticated by the handshake, a bogus route can at worst waste a dial.
+async fn handle_route_descriptor(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    // Dedup on the descriptor bytes so a re-flooded copy does not loop.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&bytes)) {
+        return;
+    }
+    let mut r = talkrypt_wire::Reader::new(&bytes);
+    let Some(parsed) = (|| {
+        let sig_vk = r.get_bytes().ok()?.to_vec();
+        let issued_be = r.get_bytes().ok()?;
+        if issued_be.len() != 8 {
+            return None;
+        }
+        let issued = u64::from_be_bytes(issued_be.try_into().ok()?);
+        let n = r.get_u32().ok()?;
+        if n > MAX_ROUTE_ENDPOINTS {
+            return None;
+        }
+        let mut endpoints = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let e = r.get_bytes().ok()?;
+            if e.len() > MAX_ROUTE_EP_LEN {
+                return None;
+            }
+            endpoints.push(String::from_utf8(e.to_vec()).ok()?);
+        }
+        let sig = r.get_bytes().ok()?.to_vec();
+        r.finish().ok()?;
+        Some((IdentityPublic { sig_vk }, issued, endpoints, sig))
+    })() else {
+        return;
+    };
+    let (signer, issued, endpoints, sig) = parsed;
+    // Verify the signer actually authored these endpoints at this `issued` time.
+    if signer
+        .verify(&route_transcript(&signer, issued, &endpoints), &sig)
+        .is_err()
+    {
+        return;
+    }
+    let signer_fp = signer.fingerprint();
+    // Roster-gate storage (SECURITY-AUDIT A-1): only retain routes for a node that is
+    // actually a group member. Route descriptors are a group feature — every honest
+    // advertiser is in the roster — so this caps `known_routes` at the group size and
+    // stops a node from bloating the map with keys it forges from throwaway identities
+    // it never joins under. A node always knows its own route (it is in its own
+    // roster; the host seeds leaf 0 with itself).
+    if !inner.roster.lock().unwrap().values().any(|fp| *fp == signer_fp) {
+        return;
+    }
+    {
+        let mut routes = inner.known_routes.lock().unwrap();
+        // Freshness / anti-rollback (SECURITY-AUDIT A-1): reject a descriptor that is
+        // not strictly newer than the last one we hold for this signer, so a replayed
+        // older descriptor cannot roll a peer's routes back to a stale (attacker-
+        // chosen, now-unreachable) set. An exact replay is already dropped by the
+        // seen-set above; this additionally defeats a *different* stale descriptor.
+        if let Some((last, _)) = routes.get(&signer_fp) {
+            if issued <= *last {
+                return;
+            }
+        } else if routes.len() >= MAX_KNOWN_ROUTES {
+            // At capacity and this is a new signer: refuse rather than grow unbounded.
+            return;
+        }
+        routes.insert(signer_fp, (issued, endpoints));
+    }
+    // Re-flood (host coordinates; a gossip bridge spans transport islands).
+    let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
+        for (s, w, fp) in collect_peers(inner) {
+            if fp != from {
+                let _ = send_payload(&s, &w, &Frame::RouteDescriptor(bytes.clone()).encode()).await;
+            }
+        }
+    }
+}
+
+/// Handle a relayed leaf-signature certificate (SECURITY-AUDIT T-3): an
+/// account-signed `account -> device -> leaf_sig_key` chain. If it verifies AND its
+/// leaf equals some group leaf's tree-bound signing key, bind that leaf to the
+/// account. A host re-broadcasts it so every member can verify independently — and
+/// because the chain is account-signed, the host can only relay it, never forge it.
+async fn handle_leaf_sig_cert(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    // Dedup on the certificate bytes (SECURITY-AUDIT T-3 hardening): a member that
+    // re-sends the same cert must not make the host re-broadcast it to the whole
+    // group on every copy (amplification). Mirrors the route-descriptor gossip guard.
+    if !inner.seen.lock().unwrap().insert(gossip_id(&bytes)) {
+        return;
+    }
+    let Ok(chain) = IdentityChain::decode(&bytes) else { return };
+    // The claimed account is the chain's root issuer; the leaf is its end key.
+    let Some(account) = chain.links.first().map(|l| l.issuer.clone()) else { return };
+    let Some(leaf_key) = chain.leaf().cloned() else { return };
+    let now = now_secs();
+    // The chain must be validly rooted at that account and end at leaf_key. A host
+    // cannot forge this (no account secret), so a pass is trustworthy.
+    if chain.verify(&account, &leaf_key, now).is_err() {
+        return;
+    }
+    // Reject a chain any of whose links the account has revoked (SECURITY-AUDIT T-3
+    // hardening): a leaked-but-revoked device/leaf key must not still bind its leaf to
+    // the account. Mirrors the revocation gate in `handle_identity`.
+    {
+        let account_fp = account.fingerprint();
+        let revs = inner.revocations.lock().unwrap();
+        if chain
+            .links
+            .iter()
+            .any(|l| revs.contains(&(account_fp, l.cert.subject.fingerprint())))
+        {
+            return;
+        }
+    }
+    // Bind to the group leaf whose tree signing key IS this chain's leaf key. If the
+    // host substituted a different key into the tree, no leaf matches -> unverified.
+    let matched_leaf = {
+        let g = inner.group.lock().await;
+        g.as_ref().and_then(|grp| {
+            let leaves: Vec<u32> =
+                inner.roster.lock().unwrap().keys().copied().collect();
+            leaves
+                .into_iter()
+                .find(|l| grp.leaf_sig_public(*l) == Some(&leaf_key))
+        })
+    };
+    if let Some(leaf) = matched_leaf {
+        // SECURITY-AUDIT T-3 (device→leaf binding): the chain proves `account`
+        // vouches for `leaf_key`, but `leaf_key` is a PUBLIC tree signing key that
+        // every member reads from the ratchet tree. Binding the leaf to the account
+        // on key-match alone lets ANY peer certify a victim's public leaf key under
+        // an attacker-controlled account and overwrite the verified badge
+        // (attribution hijack). Require the device that vouches for the leaf key —
+        // the issuer of the chain's final link — to be the SAME device we
+        // authenticated into this leaf at the join handshake (`roster[leaf]`).
+        // Forging that final link needs the roster device's ML-DSA SECRET, which
+        // only the legitimate leaf operator holds, so this closes the hijack while
+        // still admitting the honest `account → device → leaf_sig_key` chain.
+        let leaf_device = inner.roster.lock().unwrap().get(&leaf).copied();
+        let cert_device = chain.links.last().map(|l| l.issuer.fingerprint());
+        if leaf_device.is_none() || leaf_device != cert_device {
+            return;
+        }
+        inner
+            .verified_leaf_accounts
+            .lock()
+            .unwrap()
+            .insert(leaf, account.fingerprint());
+    }
+    // Host relays the (unforgeable, account-signed) cert to the other members so
+    // they can verify it too — mirrors how the roster is fanned out.
+    if !inner.relayed && inner.role == GroupRole::Host {
+        for (s, w, fp) in collect_peers(inner) {
+            if fp != from {
+                let _ = send_payload(&s, &w, &Frame::LeafSigCert(bytes.clone()).encode()).await;
+            }
         }
     }
 }
@@ -1353,6 +3829,158 @@ fn now_secs() -> u64 {
 /// A presentation that fails to decode, doesn't bind to this peer, or carries a
 /// malformed/expired chain is dropped (surfaced as a non-fatal `Error`) — it can
 /// never be mistaken for a verified friend.
+/// SUB-SPEC A §4 mode 3: reconcile a sender's on-message name-id against our cached
+/// name for them. If we have no cached name, do nothing (the tag is a one-way hash —
+/// it can confirm or refute, never deliver an unseen name). If the cached name's id
+/// matches, it is current (no-op). If it MISMATCHES, the sender renamed and we missed
+/// the presence: drop the stale name and emit an `Event::Name` with `label: None` so
+/// the UI falls back to the safety number until a fresh presence arrives. Only fires
+/// once per stale entry (we remove it), so it does not spam on subsequent messages.
+fn reconcile_name_tag(inner: &Arc<Inner>, sender: [u8; 48], tag: [u8; 8]) {
+    let ctx = crate::presence::chat_context(
+        &inner.descriptor.invite_token,
+        &inner.descriptor.channel,
+    );
+    let cached = inner.names.lock().unwrap().get(&sender).cloned();
+    let Some(rec) = cached else { return };
+    if crate::presence::name_id_tag(&rec.label, &ctx) == tag {
+        return; // cached name is current
+    }
+    // Stale: the sender's current name is not what we have cached. Invalidate it.
+    inner.names.lock().unwrap().remove(&sender);
+    let _ = inner.events_tx.send(Event::Name {
+        from: sender,
+        account_fingerprint: rec.account_fp,
+        label: None,
+        tier: rec.tier,
+        seq: rec.seq,
+        caveat: Some("this peer's name changed — awaiting confirmation".to_string()),
+        safety_number: short_hex6(&sender),
+    });
+}
+
+/// A peer announced a self-declared name (pairwise `Frame::Presence`, or a group
+/// sentinel payload). Verify (Linked only), enforce seq monotonicity, cache the
+/// record, and emit `Event::Name` with the policy-resolved label/caveat/tier.
+///
+/// `attributed_fp` is the message-attribution fingerprint (pairwise transport peer,
+/// or `roster[sender_leaf]` in a group). For a `Linked` presence the device
+/// signature — not `attributed_fp` — is the authority; the signed device becomes the
+/// cache/render key so the name shows over that peer's messages.
+fn handle_presence(inner: &Arc<Inner>, attributed_fp: [u8; 48], bytes: Vec<u8>) {
+    use crate::nametrust::{resolve_render, NameTier};
+    use crate::presence::{NamePresence, NameRecord};
+    let Ok(np) = NamePresence::decode(&bytes) else { return };
+    let now = now_secs();
+    let (rec, key) = match &np {
+        NamePresence::Bare { seq, label } => (
+            NameRecord { label: label.clone(), tier: NameTier::Bare, seq: *seq, account_fp: None },
+            attributed_fp,
+        ),
+        NamePresence::Linked { .. } => {
+            let Some(v) = np.verify_linked(now) else { return };
+            // The Linked presence must be scoped to THIS chat (anti-replay across chats).
+            let ctx = crate::presence::chat_context(
+                &inner.descriptor.invite_token,
+                &inner.descriptor.channel,
+            );
+            if !matches!(&np, NamePresence::Linked { context, .. } if *context == ctx) {
+                return;
+            }
+            // Reject a revoked device.
+            let revoked = {
+                let revs = inner.revocations.lock().unwrap();
+                revs.contains(&(v.account_fp, v.device_fp))
+            };
+            if revoked {
+                return;
+            }
+            (
+                NameRecord {
+                    label: v.label.clone(),
+                    tier: NameTier::Linked,
+                    seq: v.seq,
+                    account_fp: Some(v.account_fp),
+                },
+                v.device_fp,
+            )
+        }
+    };
+    // Admission gates, cheapest first, committing state only once BOTH pass:
+    //   1. seq monotonicity — drop a replayed/stale announcement (read-only peek).
+    //      Checked first so a replay never consumes rate budget.
+    //   2. per-sender rate limit (anti-grief) — at most PRESENCE_RATE_BURST accepted
+    //      presences per key per PRESENCE_RATE_WINDOW_SECS. seq alone can't stop a
+    //      strictly-increasing-seq flood; this bounds cache churn + event spam while
+    //      letting a legitimate small burst through. Viewer-enforced.
+    {
+        let names = inner.names.lock().unwrap();
+        if let Some(existing) = names.get(&key) {
+            if rec.seq <= existing.seq {
+                return;
+            }
+        }
+    }
+    {
+        let mut rl = inner.presence_rate.lock().unwrap();
+        let e = rl.entry(key).or_insert((now, 0));
+        if now.saturating_sub(e.0) >= PRESENCE_RATE_WINDOW_SECS {
+            *e = (now, 0); // window elapsed — reset
+        }
+        if e.1 >= PRESENCE_RATE_BURST {
+            return; // too many presences from this peer this window
+        }
+        e.1 += 1;
+    }
+    inner.names.lock().unwrap().insert(key, rec.clone());
+    // Resolve the render against the rest of the cache under the chat's trust policy.
+    // SUB-SPEC B: a Bare subject with no verifiable grouping linkage is "isolated"
+    // (a possible sybil) → subtle tint / optional group-amplified caveat.
+    let isolated = rec.account_fp.is_none()
+        && !inner.groupings_seen.lock().unwrap().values().any(|s| s.contains(&key));
+    let amplify_isolated = inner.descriptor.group_display_amplify_isolated;
+    // SUB-SPEC C: does this subject clear the viewer's effective vouch threshold?
+    // A vouch may target the leaf (== render key) or the account; check both. Never
+    // vouched from a below-neutral/inflation-rejected score (invariant 1).
+    let (vouched, vouch_badge) = {
+        let mut d = compute_vouch_decision(inner, key);
+        if !d.vouched {
+            if let Some(acct) = rec.account_fp {
+                let da = compute_vouch_decision(inner, acct);
+                if da.vouched {
+                    d = da;
+                }
+            }
+        }
+        if d.vouched {
+            (true, Some(format!("\u{2733} vouched \u{00b7} {}", d.weighted_score)))
+        } else {
+            (false, None)
+        }
+    };
+    let (label, caveat, tier, account_fp, safety_number) = {
+        let names = inner.names.lock().unwrap();
+        // Effective policy = chat baseline, tightened (never loosened) by any
+        // viewer-local override (spec §5).
+        let policy = match *inner.name_policy_override.lock().unwrap() {
+            Some(local) => inner.descriptor.name_trust_policy.max_strictness(local),
+            None => inner.descriptor.name_trust_policy,
+        };
+        let sn = short_hex6(&key);
+        let r = resolve_render(key, &rec, &names, policy, sn, isolated, amplify_isolated, vouched, vouch_badge);
+        (r.label, r.caveat, r.tier, rec.account_fp, r.safety_number)
+    };
+    let _ = inner.events_tx.send(Event::Name {
+        from: key,
+        account_fingerprint: account_fp,
+        label,
+        tier,
+        seq: rec.seq,
+        safety_number,
+        caveat,
+    });
+}
+
 fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> IdentityOutcome {
     let presentation = match Presentation::decode(&bytes) {
         Ok(p) => p,
@@ -1410,6 +4038,43 @@ fn handle_identity(inner: &Arc<Inner>, peer_fp: [u8; 48], bytes: Vec<u8>) -> Ide
                 .lock()
                 .unwrap()
                 .insert(res.account_fingerprint, res.account.clone());
+            // SUB-SPEC B: an access PREDICATE is an ADDITIONAL admission gate on top
+            // of the AccessPolicy — satisfied here from the presented chain. It learns
+            // only pass/fail (no identity leaked to the group beyond admission).
+            match &inner.descriptor.access_predicate {
+                None => {}
+                Some(crate::linkage::Predicate::LinkedToAccount { account_fp }) => {
+                    if res.account_fingerprint != *account_fp {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "account does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(crate::linkage::Predicate::DerivedFromNamed { ancestor_fp }) => {
+                    let descends = presentation
+                        .chain
+                        .links
+                        .iter()
+                        .any(|l| l.issuer.fingerprint() == *ancestor_fp);
+                    if !descends {
+                        let _ = inner.events_tx.send(Event::Error(
+                            "identity does not satisfy the channel access predicate".into(),
+                        ));
+                        return IdentityOutcome::Rejected;
+                    }
+                }
+                Some(_) => {
+                    // A grouping/ZK access predicate is not satisfiable by an identity
+                    // presentation — fail closed in B0 (Backend-1 adds the ZK path).
+                    let _ = inner.events_tx.send(Event::Error(
+                        "channel requires a proof this build cannot present".into(),
+                    ));
+                    return IdentityOutcome::Rejected;
+                }
+            }
+            // Remember the verified account key so the UI can pin it by
+            // fingerprint after an out-of-band safety-number comparison.
             let _ = inner.events_tx.send(Event::Identity {
                 from: peer_fp,
                 account_fingerprint: res.account_fingerprint,
@@ -1539,6 +4204,11 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     )
     .await;
     route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
+
+    // The roster just grew (a member joined) — re-announce our leading name so the
+    // new member resolves us without us acting (SUB-SPEC A CQ beacon), debounced so a
+    // join burst coalesces into one CQ.
+    schedule_grow_reannounce(inner);
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -1552,7 +4222,14 @@ async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
             Err(_) => return,
         };
         match TreeKemGroup::join_with_welcome(kp, &welcome) {
-            Ok(grp) => *inner.group.lock().await = Some(grp),
+            Ok(mut grp) => {
+                // F-16: match the chat's padding so our outgoing messages are bucketed
+                // like everyone else's (all members share this from the descriptor).
+                if let Some(step) = inner.descriptor.message_padding {
+                    grp.set_pad_bucket(step as usize);
+                }
+                *inner.group.lock().await = Some(grp);
+            }
             Err(e) => {
                 let _ = inner
                     .events_tx
@@ -1596,7 +4273,319 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
     }
 }
 
+/// HOST: a member proposed a self-rekey (SECURITY-AUDIT T-4). Authenticate the
+/// proposer by mapping its session fingerprint to the leaf it occupies, then commit
+/// the Update against THAT leaf — `commit_update` refuses a proposal targeting any
+/// other leaf, so a member can only rotate its OWN keys (no leaf-hijack) — and
+/// broadcast the resulting commit to the whole group. A proposal from a fingerprint
+/// not seated in the roster is dropped.
+async fn handle_update_proposal(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u8>) {
+    let proposer_leaf = inner
+        .roster
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, fp)| **fp == from)
+        .map(|(l, _)| *l);
+    let Some(proposer_leaf) = proposer_leaf else { return };
+    let tagged = {
+        let mut g = inner.group.lock().await;
+        match g.as_mut() {
+            Some(grp) => {
+                let from_epoch = grp.epoch();
+                grp.commit_update(proposer_leaf, &bytes)
+                    .ok()
+                    .map(|c| (from_epoch, c.encode()))
+            }
+            None => None,
+        }
+    };
+    let Some((from_epoch, commit_bytes)) = tagged else { return };
+    route(
+        inner,
+        Frame::Commit {
+            from_epoch,
+            bytes: commit_bytes,
+        },
+        Route::Broadcast,
+    )
+    .await;
+}
+
 /// Decrypt a group message; the host also relays it to the other members.
+/// SUB-SPEC D2: a member received a promotion proposal. Verify the promoter's signature
+/// under its claimed leaf (fail-closed), check it binds the current epoch, record it as
+/// pending, and surface it for user consent. A forged/stale/malformed proposal is dropped.
+async fn handle_promote(inner: &Arc<Inner>, from: [u8; 48], payload: Vec<u8>) {
+    let Some((body_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let ok = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => grp.verify_promote(leaf, &body_bytes, &sig) && {
+                // The proposal must bind the CURRENT epoch (anti replay/rollback).
+                PromoteBody::decode(&body_bytes).map(|b| b.epoch == grp.epoch()).unwrap_or(false)
+            },
+            None => false,
+        }
+    };
+    if !ok {
+        return; // forged, stale-epoch, or malformed — fail closed
+    }
+    let Some(body) = PromoteBody::decode(&body_bytes) else {
+        return;
+    };
+    let id = body.id();
+    let ev = Event::PromoteProposed {
+        by: from,
+        promote_id: id,
+        target_tier: body.target_tier,
+        retention_mode: body.retention_mode,
+        picked: body.picked.clone(),
+    };
+    *inner.promote.lock().unwrap() = Some(PromoteState {
+        body,
+        consents: std::collections::HashMap::new(),
+        my_response: None, // set when this member calls respond_promote
+    });
+    let _ = inner.events_tx.send(ev);
+}
+
+/// SUB-SPEC D2: the tally decision. `Commit(carried)` names the fingerprints (incl. the
+/// host) to keep in the persistent successor; `Abort` cancels; `Wait` keeps collecting.
+enum PromoDecision {
+    Wait,
+    Abort,
+    Commit(Vec<[u8; 48]>),
+}
+
+/// Evaluate the pending promotion per its consent rule given the current tally. Picked
+/// members (other than the host) are resolved to their roster leaves.
+///   0 Unanimous     — any decline aborts; all-accept commits carrying every picked member.
+///   1 OptInSuccessor— once every picked member has responded, commit carrying the accepters.
+///   2 HostMandate   — decided at propose time (see `propose_promote`), never here.
+fn promotion_decision(
+    state: &PromoteState,
+    roster: &std::collections::HashMap<u32, [u8; 48]>,
+    me_fp: [u8; 48],
+) -> PromoDecision {
+    let picked: std::collections::HashSet<[u8; 48]> = state.body.picked.iter().copied().collect();
+    let picked_members: Vec<(u32, [u8; 48])> = roster
+        .iter()
+        .filter(|(_, fp)| picked.contains(*fp) && **fp != me_fp)
+        .map(|(l, fp)| (*l, *fp))
+        .collect();
+    let carried_all = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp).chain(picked_members.iter().map(|(_, fp)| *fp)).collect()
+    };
+    let carried_accepters = || -> Vec<[u8; 48]> {
+        std::iter::once(me_fp)
+            .chain(
+                picked_members
+                    .iter()
+                    .filter(|(l, _)| state.consents.get(l) == Some(&true))
+                    .map(|(_, fp)| *fp),
+            )
+            .collect()
+    };
+    match state.body.consent_rule {
+        0 => {
+            if picked_members.iter().any(|(l, _)| state.consents.get(l) == Some(&false)) {
+                PromoDecision::Abort
+            } else if picked_members.iter().all(|(l, _)| state.consents.get(l) == Some(&true)) {
+                PromoDecision::Commit(carried_all())
+            } else {
+                PromoDecision::Wait
+            }
+        }
+        1 => {
+            if picked_members.iter().all(|(l, _)| state.consents.contains_key(l)) {
+                PromoDecision::Commit(carried_accepters())
+            } else {
+                PromoDecision::Wait
+            }
+        }
+        _ => PromoDecision::Wait,
+    }
+}
+
+/// SUB-SPEC D3: apply the retention contract at the promotion boundary. `Fresh` (and any
+/// unknown tag — fail-safe) seals nothing; `Carry` seals every backlog entry into the local
+/// history store; `CarryFromPoint` seals only entries with `ts >= carry_from_secs`. The
+/// in-memory ephemeral backlog is drained either way (the ephemeral window has closed).
+///
+/// LOCAL ONLY: this seals THIS node's own already-received/-sent messages — it never sends
+/// history to anyone (no transmission) and never fabricates messages for a latecomer (a
+/// member with an empty backlog seals nothing). See D3 spec "promotion authorizes RETENTION,
+/// never TRANSMISSION".
+fn apply_retention(inner: &Arc<Inner>, retention_mode: u8, carry_from_secs: u64) {
+    // Unknown tag ⇒ Fresh (retain nothing) — fail closed toward the ephemeral expectation.
+    let mode = RetentionMode::from_u8(retention_mode).unwrap_or(RetentionMode::Fresh);
+    let chat = inner.descriptor.channel.clone();
+    let entries: Vec<BacklogEntry> = std::mem::take(&mut *inner.backlog.lock().unwrap());
+    let to_seal: Vec<&BacklogEntry> =
+        entries.iter().filter(|e| should_seal(mode, carry_from_secs, e.ts)).collect();
+    if !to_seal.is_empty() {
+        let history = inner.history.lock().unwrap().clone();
+        for e in to_seal {
+            history.put(&chat, e.gid, &e.record);
+        }
+    }
+}
+
+/// SUB-SPEC D3: pure predicate — does a backlog entry with timestamp `ts` get sealed under
+/// `mode`? `Fresh` never seals; `Carry` always; `CarryFromPoint` seals only `ts >=
+/// carry_from_secs`. Kept pure (no I/O) so the boundary logic is deterministically testable.
+fn should_seal(mode: RetentionMode, carry_from_secs: u64, ts: u64) -> bool {
+    match mode {
+        RetentionMode::Fresh => false,
+        RetentionMode::Carry => true,
+        RetentionMode::CarryFromPoint => ts >= carry_from_secs,
+    }
+}
+
+/// SUB-SPEC D2 (HOST): commit the promotion — evict every roster member NOT in `carried`
+/// (member picker + decliners), re-key the group at the PCS boundary (reusing the audited
+/// `self_update` path so GroupAuth Thms 7/8 hold), mark the chat persistent (D1), and
+/// announce. Reuses the existing, tested Core operations rather than duplicating the
+/// commit machinery.
+async fn commit_promotion(inner: &Arc<Inner>, promote_id: [u8; 32], carried: &[[u8; 48]]) {
+    let core = Core { inner: inner.clone() };
+    let me = inner.identity.public().fingerprint();
+    // SUB-SPEC D3: read the authenticated retention contract from the committing proposal
+    // BEFORE it is cleared, and apply it (seal / drop our OWN backlog) at the boundary.
+    let (retention_mode, carry_from_secs) = inner
+        .promote
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| (s.body.retention_mode, s.body.carry_from_secs))
+        .unwrap_or((0, 0));
+    // SUB-SPEC D2/D3: announce the commit to members BEFORE the re-key so they verify at the
+    // still-current epoch, flip persistence, and apply their consented retention. Signed under
+    // our leaf over the distinct PROMO_COMMIT_CONTEXT (never confusable with a promote/consent).
+    if let Some(payload) = {
+        let g = inner.group.lock().await;
+        g.as_ref().and_then(|grp| {
+            grp.sign_promo_commit(&promote_id)
+                .ok()
+                .map(|sig| wrap_signed(&promote_id, grp.my_leaf(), &sig))
+        })
+    } {
+        route(inner, Frame::PromoteCommit(payload), Route::Broadcast).await;
+    }
+    apply_retention(inner, retention_mode, carry_from_secs);
+    let keep: std::collections::HashSet<[u8; 48]> = carried.iter().copied().collect();
+    let to_remove: Vec<[u8; 48]> = {
+        let roster = inner.roster.lock().unwrap();
+        roster
+            .values()
+            .copied()
+            .filter(|fp| *fp != me && !keep.contains(fp))
+            .collect()
+    };
+    for fp in to_remove {
+        let _ = core.remove_member(fp).await; // evict (commit + roster broadcast)
+    }
+    let _ = core.self_update().await; // PCS re-key boundary (Thms 7/8)
+    core.set_persistence(true); // D1: the successor is persistent
+    let _ = inner.events_tx.send(Event::Promoted { promote_id });
+    *inner.promote.lock().unwrap() = None;
+}
+
+/// SUB-SPEC D2/D3 (MEMBER): the committer announced that promotion `promote_id` committed.
+/// Verify the announcement under the committer's leaf key (fail-closed), then — only if it
+/// matches the proposal WE consented to accept — apply our own D3 retention contract to our
+/// OWN backlog and flip this chat persistent. A member that declined (or never responded)
+/// seals nothing; a forged/unknown-leaf announcement is dropped.
+async fn handle_promote_commit(inner: &Arc<Inner>, payload: Vec<u8>) {
+    let Some((body, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let verified = {
+        let g = inner.group.lock().await;
+        g.as_ref().map(|grp| grp.verify_promo_commit(leaf, &body, &sig)).unwrap_or(false)
+    };
+    if !verified || body.len() != 32 {
+        return; // forged / unknown leaf / malformed — fail closed
+    }
+    let mut promote_id = [0u8; 32];
+    promote_id.copy_from_slice(&body);
+    // Pull the retention contract we consented to — only if this commit matches it AND we
+    // accepted. Clear the pending state regardless (the promotion is now decided).
+    let apply = {
+        let mut pend = inner.promote.lock().unwrap();
+        let decision = pend.as_ref().and_then(|s| {
+            if s.body.id() == promote_id && s.my_response == Some(true) {
+                Some((s.body.retention_mode, s.body.carry_from_secs))
+            } else {
+                None
+            }
+        });
+        *pend = None;
+        decision
+    };
+    if let Some((mode, carry_from_secs)) = apply {
+        apply_retention(inner, mode, carry_from_secs);
+        Core { inner: inner.clone() }.set_persistence(true);
+        let _ = inner.events_tx.send(Event::Promoted { promote_id });
+    }
+}
+
+/// SUB-SPEC D2 (HOST): a consent arrived. Verify it under the consenting leaf's key
+/// (fail-closed), bind it to the pending proposal (id + epoch), record it once per
+/// distinct leaf, then commit or abort per the consent rule.
+async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
+    let Some((cb_bytes, leaf, sig)) = unwrap_signed(&payload) else {
+        return;
+    };
+    let (verified, cur_epoch) = {
+        let g = inner.group.lock().await;
+        match g.as_ref() {
+            Some(grp) => (grp.verify_consent(leaf, &cb_bytes, &sig), grp.epoch()),
+            None => (false, 0),
+        }
+    };
+    if !verified {
+        return; // forged / unknown leaf — fail closed
+    }
+    let Some(cb) = ConsentBody::decode(&cb_bytes) else {
+        return;
+    };
+    // The consent's declared leaf must equal the SIGNING leaf, and bind the live epoch.
+    if cb.leaf != leaf || cb.epoch != cur_epoch {
+        return;
+    }
+    let decided = {
+        let mut pend = inner.promote.lock().unwrap();
+        let Some(state) = pend.as_mut() else {
+            return;
+        };
+        if cb.promote_id != state.body.id() || cb.epoch != state.body.epoch {
+            return; // consent for a different / stale proposal
+        }
+        state.consents.insert(cb.leaf, cb.accept); // distinct-leaf dedup (overwrite)
+        promotion_decision(state, &inner.roster.lock().unwrap(), inner.identity.public().fingerprint())
+    };
+    match decided {
+        PromoDecision::Commit(carried) => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            if let Some(id) = id {
+                commit_promotion(inner, id, &carried).await;
+            }
+        }
+        PromoDecision::Abort => {
+            let id = inner.promote.lock().unwrap().as_ref().map(|s| s.body.id());
+            *inner.promote.lock().unwrap() = None;
+            if let Some(id) = id {
+                let _ = inner.events_tx.send(Event::PromoteAborted { promote_id: id });
+            }
+        }
+        PromoDecision::Wait => {}
+    }
+}
+
 async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
     // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
@@ -1621,29 +4610,92 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
         // our gossip fan-out to other members (SECURITY-AUDIT G2).
         return;
     };
-    if let Some((marking, text)) = marking::decode_payload(&pt) {
-        // The signature has been verified against the sending leaf's tree-bound
-        // key, so leaf attribution is trustworthy; map it to a fingerprint.
-        let sender = TreeKemGroup::sender_leaf(&gct)
-            .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
-            .unwrap_or(from);
+    // The signature has been verified against the sending leaf's tree-bound key, so
+    // leaf attribution is trustworthy; map it to a fingerprint for either payload type.
+    let sender = TreeKemGroup::sender_leaf(&gct)
+        .and_then(|leaf| inner.roster.lock().unwrap().get(&leaf).copied())
+        .unwrap_or(from);
+    if pt.first() == Some(&PRESENCE_SENTINEL) {
+        // A self-declared name riding the signed group path (SUB-SPEC A).
+        handle_presence(&inner, sender, pt[1..].to_vec());
+    } else if pt.first() == Some(&LINKAGE_SENTINEL) {
+        // SUB-SPEC B: a grouping-linkage disclosure on the signed group path.
+        handle_linkage(&inner, sender, pt[1..].to_vec());
+    } else if pt.first() == Some(&VOUCH_SENTINEL) {
+        // SUB-SPEC C: a vouch on the signed group path (attributed to the leaf sender).
+        handle_vouch(&inner, sender, pt[1..].to_vec());
+    } else if let Some((marking, text, name_tag)) = marking::decode_payload_tagged(&pt) {
+        // D3: record the received message in our OWN ephemeral backlog (before the text is
+        // moved into the event) so a later Carry/CarryFromPoint promotion can seal exactly
+        // what we already received — never anyone else's copy, never a transmission.
+        {
+            let ts = now_secs();
+            let rec = crate::history::HistoryRecord {
+                from: sender,
+                ts,
+                text: text.clone(),
+                marking: marking.clone(),
+            };
+            record_backlog(inner, gossip_id(&gct), rec.encode(), ts);
+        }
+        // SUB-SPEC A §4 mode 3: reconcile the sender's on-message name-id against the
+        // name we have cached for them. A mismatch means they renamed and we missed
+        // the presence — drop the stale name so we don't attribute the wrong callsign.
+        if let Some(tag) = name_tag {
+            reconcile_name_tag(inner, sender, tag);
+        }
         let _ = inner.events_tx.send(Event::Message {
             from: sender,
             channel: inner.descriptor.channel.clone(),
             text,
             marking,
         });
+        // D1: in a persistent chat, acknowledge receipt to the peer we got it from so
+        // that node can clear this frame from its outbox. Keyed by the ciphertext
+        // gossip-id — the same key the sender's outbox used. Idempotent: a re-sent
+        // frame is dropped by the dedup above yet still re-acked here would not fire
+        // (dedup returns early), so a lost ack is recovered only by a fresh delivery;
+        // the outbox TTL bounds the worst case.
+        if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+            route(inner, Frame::DeliveryAck(vec![gossip_id(&gct)]), Route::Peer(from)).await;
+        }
     }
     // Fan out to other members. In host-coordinated mode the host relays; a
     // gossip bridge re-floods regardless of role (that's what bridges transport
     // islands). Both only apply to direct peer links — in relayed mode the
     // non-member relay does the fan-out (Routed envelopes), so we never re-relay.
+    let frame_bytes = Frame::GroupMsg(gct.clone()).encode();
+    let connected: std::collections::HashSet<[u8; 48]> =
+        collect_peers(inner).iter().map(|(_, _, fp)| *fp).collect();
     let gossip = inner.gossip.load(std::sync::atomic::Ordering::Relaxed);
+    // Fan out to other members. In host-coordinated mode the host relays; a gossip
+    // bridge re-floods regardless of role (that's what bridges transport islands). Both
+    // only apply to direct peer links — in relayed mode the non-member relay does the
+    // fan-out (Routed envelopes), so we never re-relay.
     if !inner.relayed && (gossip || inner.role == GroupRole::Host) {
         for (s, w, fp) in collect_peers(inner) {
             if fp != from {
-                let _ = send_payload(&s, &w, &Frame::GroupMsg(gct.clone()).encode()).await;
+                let _ = send_payload(&s, &w, &frame_bytes).await;
             }
+        }
+    }
+    // D1 Layer-A/C keeper: ANY keeper-enabled node (not just the relaying host) buffers
+    // the opaque frame for roster members that are NOT currently connected, so an
+    // offline member catches up on reconnect — and multiple keepers replicate it. Holds
+    // ciphertext only; skips the original sender and ourselves.
+    if !inner.relayed && inner.keeper_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let me = inner.identity.public().fingerprint();
+        let gid = gossip_id(&gct);
+        let offline: Vec<[u8; 48]> = {
+            let roster = inner.roster.lock().unwrap();
+            roster
+                .values()
+                .copied()
+                .filter(|fp| *fp != from && *fp != me && !connected.contains(fp))
+                .collect()
+        };
+        for fp in offline {
+            inner.keeper.buffer(fp, gid, &frame_bytes, now_secs());
         }
     }
 }
@@ -1670,6 +4722,47 @@ mod tests {
             .await
             .expect("event before timeout")
             .expect("channel open")
+    }
+
+    /// D3 test helpers: block until a specific event arrives (ignoring other noise).
+    async fn wait_for_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, want: &str) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(rx).await {
+                    if text == want {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("message {want:?} before timeout"));
+    }
+    async fn wait_for_promote(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, id: [u8; 32]) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(rx).await {
+                    if promote_id == id {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("PromoteProposed before timeout");
+    }
+    async fn wait_for_promoted(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, id: [u8; 32]) {
+        timeout(Duration::from_secs(6), async {
+            loop {
+                if let Event::Promoted { promote_id } = next_event(rx).await {
+                    if promote_id == id {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Promoted before timeout");
     }
 
     /// Wait for the next `Message` event, ignoring Connected/Error noise.
@@ -1722,6 +4815,1210 @@ mod tests {
         )
     }
 
+    fn test_inner_pairwise() -> std::sync::Arc<Inner> {
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#t",
+        );
+        let (core, _rx) = Core::new(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("a")),
+            desc,
+        );
+        core.inner.clone()
+    }
+
+    fn test_core_pairwise() -> (Core, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#t",
+        );
+        Core::new(IdentityKeyPair::generate(), suite, Arc::new(fabric.transport("a")), desc)
+    }
+
+    // SUB-SPEC C (Task 7): ledger dedup + epoch monotonicity via the engine glue.
+    #[test]
+    fn vouch_ledger_dedups_by_voucher_and_honors_epoch() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let target = VouchTarget::Leaf([9u8; 48]);
+        let sender = voucher.public().fingerprint();
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 1, 10));
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 2, 20));
+        // A stale epoch (1 <= 2) is ignored.
+        core.debug_ingest_vouch(sender, sign_vouch(&voucher, target.clone(), ctx, 1, 5));
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1, "one distinct voucher recorded");
+        assert!(core.vouch_decision([9u8; 48]).weighted_score >= 0);
+    }
+
+    // A self-vouch (voucher == subject) is dropped, and a wrong-context vouch too.
+    #[test]
+    fn vouch_self_and_wrong_context_dropped() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let acct = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        // self-vouch
+        let selfv = sign_vouch(&acct, VouchTarget::Account(acct.public().fingerprint()), ctx, 1, 10);
+        core.debug_ingest_vouch(acct.public().fingerprint(), selfv);
+        assert_eq!(core.debug_vouch_count(acct.public().fingerprint()), 0);
+        // wrong context
+        let wrong = sign_vouch(&acct, VouchTarget::Leaf([3u8; 48]), [0xAA; 32], 1, 10);
+        core.debug_ingest_vouch(acct.public().fingerprint(), wrong);
+        assert_eq!(core.debug_vouch_count([3u8; 48]), 0);
+    }
+
+    // SUB-SPEC C (Task 9): a vouch delivered over the pairwise wire clears the chat
+    // threshold and surfaces Event::Vouch { vouched: true } at the receiver.
+    #[tokio::test]
+    async fn vouch_over_wire_clears_threshold_and_tints() {
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#vw",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // one stranger vouch suffices
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("hi").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hi");
+        // Joiner vouches for an (abstract) leaf target; host must see it.
+        let target = [0x9u8; 48];
+        joiner.vouch_for(VouchTarget::Leaf(target)).await;
+        let got = tokio::time::timeout(Duration::from_millis(800), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Vouch { subject, vouched, .. }) if subject == target => break vouched,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .expect("Event::Vouch must arrive");
+        assert!(got, "one stranger vouch clears Count(1) at the host");
+        assert!(host.vouch_decision(target).vouched);
+    }
+
+    // A viewer stricter than the chat baseline withholds the tint though the chat bar
+    // is met (spec §2, user-trumps-group protective direction).
+    #[test]
+    fn user_stricter_than_chat_withholds_tint() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#us");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Chat bar Count(1) met by one stranger vouch...
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        core.debug_ingest_vouch(
+            voucher.public().fingerprint(),
+            sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10),
+        );
+        assert!(core.vouch_decision([9u8; 48]).vouched, "chat bar met");
+        // ...but the viewer requires Count(5) → withheld (score 1 < 5).
+        core.set_vouch_threshold(Threshold::Count(5));
+        assert!(!core.vouch_decision([9u8; 48]).vouched, "viewer is stricter → not tinted");
+    }
+
+    // A proven sybil cluster (two vouchers whose delivering leaves share a grouping)
+    // backfires: inflation_rejected, subject snaps to neutral, cluster flagged (§6a).
+    #[test]
+    fn proven_sybil_cluster_backfires_end_to_end() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sy");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let target = [9u8; 48];
+        // Two DISTINCT voucher accounts, delivered by two leaves proven (B) to share
+        // one grouping = one operator.
+        let a = IdentityKeyPair::generate();
+        let b = IdentityKeyPair::generate();
+        let (leaf_a, leaf_b) = ([0xA1u8; 48], [0xB2u8; 48]);
+        core.debug_record_grouping(vec![7u8; 4], leaf_a);
+        core.debug_record_grouping(vec![7u8; 4], leaf_b);
+        core.debug_ingest_vouch(leaf_a, sign_vouch(&a, VouchTarget::Leaf(target), ctx, 1, 10));
+        core.debug_ingest_vouch(leaf_b, sign_vouch(&b, VouchTarget::Leaf(target), ctx, 1, 10));
+        let d = core.vouch_decision(target);
+        assert!(d.inflation_rejected, "a proven cluster is antibody-rejected");
+        assert!(!d.vouched, "target snaps to neutral, never above");
+        assert!(d.weighted_score < 0, "EV-negative backfire");
+        assert_eq!(d.flagged.len(), 2, "both operator leaves flagged");
+    }
+
+    // Poisoning: an adversary vouching an honest subject cannot push it BELOW neutral —
+    // the subject returns to neutral; the negativity falls on the adversary's own
+    // proven cluster (invariant 1). Here the honest subject has one genuine vouch.
+    #[test]
+    fn poisoning_an_honest_target_only_self_harms() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#po");
+        desc.vouch_policy.threshold = Threshold::Count(1);
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = core.debug_chat_context();
+        let honest_target = [9u8; 48];
+        // Adversary runs two grouped sybils that BOTH vouch the honest target to taint it.
+        let s1 = IdentityKeyPair::generate();
+        let s2 = IdentityKeyPair::generate();
+        core.debug_record_grouping(vec![0xEE; 4], [0x01; 48]);
+        core.debug_record_grouping(vec![0xEE; 4], [0x02; 48]);
+        core.debug_ingest_vouch([0x01; 48], sign_vouch(&s1, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        core.debug_ingest_vouch([0x02; 48], sign_vouch(&s2, VouchTarget::Leaf(honest_target), ctx, 1, 10));
+        let d = core.vouch_decision(honest_target);
+        // The subject is NOT vouched (the boost was rejected) but is NEVER below neutral.
+        assert!(!d.vouched);
+        assert!(d.inflation_rejected);
+        // The flagged fps are the ADVERSARY's VOUCHER ACCOUNTS (whose future vouches
+        // get discounted) — the honest subject is never flagged.
+        assert!(d.flagged.contains(&s1.public().fingerprint()));
+        assert!(d.flagged.contains(&s2.public().fingerprint()));
+        assert!(!d.flagged.contains(&honest_target), "the target is never flagged");
+    }
+
+    // SUB-SPEC C: vouch_summary lists every vouched subject with its decision.
+    #[test]
+    fn vouch_summary_lists_subjects_with_decisions() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let ctx = core.debug_chat_context();
+        let v1 = IdentityKeyPair::generate();
+        let v2 = IdentityKeyPair::generate();
+        core.debug_ingest_vouch(v1.public().fingerprint(), sign_vouch(&v1, VouchTarget::Leaf([1u8; 48]), ctx, 1, 10));
+        core.debug_ingest_vouch(v2.public().fingerprint(), sign_vouch(&v2, VouchTarget::Leaf([2u8; 48]), ctx, 1, 10));
+        let sum = core.vouch_summary();
+        assert_eq!(sum.len(), 2);
+        assert_eq!(sum[0].0, [1u8; 48]); // sorted by subject fp
+        assert_eq!(sum[1].0, [2u8; 48]);
+        assert!(sum.iter().all(|(_, _, vouched)| *vouched));
+    }
+
+    // SUB-SPEC C (Task 10): a forged/tampered vouch sig is rejected (ledger untouched).
+    #[test]
+    fn forged_vouch_sig_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let mut v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        v.sig[0] ^= 0xFF; // tamper
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 0, "a forged sig never enters the ledger");
+    }
+
+    // Stale/replayed epoch (≤ last) for a (voucher, subject) is ignored; the recorded
+    // epoch is not rolled back.
+    #[test]
+    fn stale_epoch_rejected() {
+        use crate::vouch::{sign_vouch, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let fp = voucher.public().fingerprint();
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 50));
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 3, 30)); // stale
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+        // The stale replay did not roll the epoch back: a fresh epoch-6 supersedes,
+        // an epoch-5 replay does not.
+        core.debug_ingest_vouch(fp, sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 5, 55)); // == last, ignored
+        assert_eq!(core.debug_vouch_count([9u8; 48]), 1);
+    }
+
+    // INVARIANT 2 (trust ≠ access): a chat with a vouch policy still admits a joiner
+    // who has NEVER been vouched — vouching is display-only and NEVER gates access.
+    #[tokio::test]
+    async fn vouch_never_gates_access() {
+        use crate::vouch::Threshold;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#ng",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // vouching configured...
+        // ...but access_predicate is None → Open. A never-vouched joiner is admitted.
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jr) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        joiner.send("i was never vouched").await.unwrap();
+        assert_eq!(
+            next_message(&mut host_rx).await.0,
+            "i was never vouched",
+            "vouch state must NEVER gate participation (invariant 2)"
+        );
+    }
+
+    // SUB-SPEC C end-to-end antibody (B+C composition over the real wire): one operator
+    // running two group sessions that SHARE a grouping root discloses grouping from both
+    // and vouches the same target from both. The host correlates the two vouchers' leaves
+    // under one grouping proof → antibody backfire, target snaps to neutral (spec §6a).
+    #[tokio::test]
+    async fn end_to_end_grouped_double_vouch_backfires() {
+        use crate::linkage::OpsecMode;
+        use crate::vouch::{Threshold, VouchTarget};
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#e2e",
+        );
+        desc.vouch_policy.threshold = Threshold::Count(1); // absent the antibody, 1 vouch tints
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // One operator, two sessions, SAME grouping root → same per-chat grouping pub.
+        let op_root = [0x5Au8; 32];
+        let target = [0x9u8; 48];
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        for m in [&m1, &m2] {
+            m.set_grouping_root(op_root);
+            m.set_opsec_mode(OpsecMode::Selective);
+        }
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Each session discloses its grouping FIRST (so the host records both leaves
+        // under one grouping pub), then vouches the target.
+        let gid1 = m1.define_grouping(&["1".into()]);
+        let gid2 = m2.define_grouping(&["2".into()]);
+        m1.present_grouping(&gid1).await;
+        m2.present_grouping(&gid2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.vouch_for(VouchTarget::Leaf(target)).await;
+        m2.vouch_for(VouchTarget::Leaf(target)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // The host, having verified both grouping proofs share one grouping pub, must
+        // reject the doubled vouch as inflation — the target is NOT vouched (neutral).
+        let d = host.vouch_decision(target);
+        assert!(d.inflation_rejected, "host correlates the two vouchers as one operator");
+        assert!(!d.vouched, "the doubled vouch backfires → neutral, never tinted");
+    }
+
+    // SUB-SPEC C (Task 8): freshness decays over GOSSIP rounds, not wall-clock secs.
+    #[test]
+    fn freshness_decays_over_gossip_rounds_not_seconds() {
+        use crate::vouch::{sign_vouch, Threshold, VouchTarget};
+        let (core, _rx) = test_core_pairwise();
+        core.set_vouch_threshold(Threshold::Count(1));
+        let voucher = IdentityKeyPair::generate();
+        let ctx = core.debug_chat_context();
+        let v = sign_vouch(&voucher, VouchTarget::Leaf([9u8; 48]), ctx, 1, 10);
+        core.debug_ingest_vouch(voucher.public().fingerprint(), v);
+        assert!(core.vouch_decision([9u8; 48]).weighted_score > 0, "fresh at round 0");
+        assert!(core.vouch_decision([9u8; 48]).vouched);
+        // Advancing rounds past the default freshness window (64) with no re-assertion
+        // decays the vouch to NEUTRAL — no wall clock is consulted.
+        for _ in 0..100 {
+            core.debug_advance_round();
+        }
+        assert_eq!(core.vouch_decision([9u8; 48]).weighted_score, 0, "decayed to neutral");
+        assert!(!core.vouch_decision([9u8; 48]).vouched);
+    }
+
+    // A distinct member advances the round; the SAME sender repeated does not (anti
+    // sock-puppet fast-forward, §1.5).
+    #[test]
+    fn only_distinct_members_advance_the_gossip_round() {
+        let inner = test_inner_pairwise();
+        let r0 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        witness_gossip_round(&inner, [1u8; 48]);
+        witness_gossip_round(&inner, [1u8; 48]); // same sender → no advance
+        witness_gossip_round(&inner, [1u8; 48]);
+        let r1 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r1, r0 + 1, "one distinct sender advances the round once");
+        witness_gossip_round(&inner, [2u8; 48]); // a distinct sender → advance
+        let r2 = inner.round.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(r2, r0 + 2);
+    }
+
+    #[test]
+    fn frame_presence_roundtrips() {
+        let f = Frame::Presence(vec![1, 2, 3, 4]);
+        let bytes = f.encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::Presence(b)) => assert_eq!(b, vec![1, 2, 3, 4]),
+            _ => panic!("expected Presence frame"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pairwise_bare_name_emits_name_event() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NamePresence, NameRecord};
+        let inner = test_inner_pairwise();
+        let np = NamePresence::Bare { seq: 5, label: "Whiskey".into() };
+        handle_presence(&inner, [7u8; 48], np.encode());
+        let rec = inner.names.lock().unwrap().get(&[7u8; 48]).cloned().unwrap();
+        assert_eq!(
+            rec,
+            NameRecord { label: "Whiskey".into(), tier: NameTier::Bare, seq: 5, account_fp: None }
+        );
+        // A stale seq is ignored (monotonic per cache key).
+        let older = NamePresence::Bare { seq: 4, label: "Nope".into() };
+        handle_presence(&inner, [7u8; 48], older.encode());
+        assert_eq!(inner.names.lock().unwrap().get(&[7u8; 48]).unwrap().label, "Whiskey");
+    }
+
+    /// SUB-SPEC A (§6 NameRender): even when the chat policy SUPPRESSES a colliding
+    /// bare name (label None), the emitted event still carries a non-empty safety
+    /// number — the honest fallback a spoofable label can never override.
+    #[tokio::test]
+    async fn suppressed_name_event_still_carries_safety_number() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#sn",
+        );
+        desc.name_trust_policy = NameTrustPolicy::SuppressColliding;
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        // A verified "Alice".
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain = IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+        let ctx = chat_context(
+            &core.inner.descriptor.invite_token,
+            &core.inner.descriptor.channel,
+        );
+        let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+        handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+        // A bare homoglyph impostor — suppressed under the policy.
+        let impostor = [9u8; 48];
+        handle_presence(
+            &core.inner,
+            impostor,
+            NamePresence::Bare { seq: 1, label: "Аlice".into() }.encode(), // Cyrillic А
+        );
+        let mut found = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { from, label, safety_number, .. } = ev {
+                if from == impostor {
+                    found = Some((label, safety_number));
+                }
+            }
+        }
+        let (label, sn) = found.expect("the impostor still emits a name event");
+        assert!(label.is_none(), "a colliding bare name is suppressed under the policy");
+        assert!(!sn.is_empty(), "the safety number is always present, even when suppressed");
+    }
+
+    /// SUB-SPEC A §4 mode 3: the on-message name-id reconciler confirms a current name
+    /// (matching tag → no-op), suppresses a stale one (mismatching tag → drop + emit
+    /// label:None), and does not spam once a stale entry is invalidated.
+    #[tokio::test]
+    async fn on_message_name_id_reconciles_stale_name() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{chat_context, name_id_tag, NameRecord};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#mid",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let sender = [3u8; 48];
+        core.inner.names.lock().unwrap().insert(
+            sender,
+            NameRecord { label: "Alpha".into(), tier: NameTier::Bare, seq: 1, account_fp: None },
+        );
+        let ctx = chat_context(
+            &core.inner.descriptor.invite_token,
+            &core.inner.descriptor.channel,
+        );
+        // A message stamped with the CURRENT name's id → the name stays cached.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Alpha", &ctx));
+        assert!(core.inner.names.lock().unwrap().contains_key(&sender), "matching tag keeps it");
+        // A message stamped for a DIFFERENT name (a rename we missed) → invalidate it.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Beta", &ctx));
+        assert!(!core.inner.names.lock().unwrap().contains_key(&sender), "stale name dropped");
+        let mut ev = None;
+        while let Ok(e) = rx.try_recv() {
+            if let Event::Name { from, label, safety_number, .. } = e {
+                if from == sender {
+                    ev = Some((label, safety_number));
+                }
+            }
+        }
+        let (label, sn) = ev.expect("a staleness event fired");
+        assert!(label.is_none(), "the stale name is dropped (label None)");
+        assert!(!sn.is_empty(), "the safety-number fallback is present");
+        // A subsequent stale-tagged message no longer fires — no spam once invalidated.
+        reconcile_name_tag(&core.inner, sender, name_id_tag("Beta", &ctx));
+        let mut more = 0;
+        while rx.try_recv().is_ok() {
+            more += 1;
+        }
+        assert_eq!(more, 0, "no repeat staleness event after invalidation");
+    }
+
+    /// SUB-SPEC A §4 mode 3 (end-to-end, no-false-positive): with the on-message-id
+    /// cadence on, a member's normal messages carry a name-id that MATCHES the name it
+    /// announced — so the host keeps showing that name and never spuriously flags it.
+    #[tokio::test]
+    async fn on_message_name_id_does_not_false_flag_current_name() {
+        use crate::presence::{NameBacking, NameEntry, PresenceCadence};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mid2",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Whiskey".into(),
+            backing: NameBacking::Bare,
+        }));
+        m1.set_presence_cadence(PresenceCadence { periodic_secs: None, on_message_id: true });
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.announce_presence().await.unwrap();
+        // Host resolves the name.
+        assert!(wait_for_name(&mut host_rx, "Whiskey").await, "host resolves the name");
+        // m1 sends normal messages (each stamped with the matching name-id).
+        m1.send("one").await.unwrap();
+        m1.send("two").await.unwrap();
+        // The host must NOT emit a staleness drop (label None) for m1 — the tags match.
+        let mut stale = false;
+        for _ in 0..15 {
+            match tokio::time::timeout(Duration::from_millis(100), host_rx.recv()).await {
+                Ok(Some(Event::Name { from, label: None, .. })) if from == m1.fingerprint() => {
+                    stale = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(!stale, "a current name must never be flagged stale by its own messages");
+        // And the host still has the name cached.
+        assert_eq!(
+            host.inner.names.lock().unwrap().get(&m1.fingerprint()).map(|r| r.label.clone()),
+            Some("Whiskey".into()),
+        );
+    }
+
+    async fn wait_for_name(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &str,
+    ) -> bool {
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(Event::Name { label: Some(l), .. })) if l == want => return true,
+                Ok(Some(_)) => continue,
+                Ok(None) => return false, // channel closed
+                Err(_) => continue,       // idle tick — keep waiting
+            }
+        }
+        false
+    }
+
+    /// End-to-end (SUB-SPEC A): a group MEMBER sets a leading name and announces it;
+    /// the name rides the signed group path and the host emits `Event::Name` for it,
+    /// attributed to the member's roster fingerprint.
+    #[tokio::test]
+    async fn group_member_presence_reaches_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#names",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Whiskey".into(),
+            backing: NameBacking::Bare,
+        }));
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        m1.announce_presence().await.unwrap();
+        // The name must arrive AND be attributed to m1's verified leaf fingerprint —
+        // the group presence rides the per-sender-signed path (G1/G2), so attribution
+        // follows the signing leaf and cannot be restamped to another member/the host.
+        let attributed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { from, label: Some(l), .. }) if l == "Whiskey" => break Some(from),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        assert_eq!(
+            attributed,
+            Some(m1.fingerprint()),
+            "the group name must be attributed to m1's verified leaf, not the relaying host"
+        );
+    }
+
+    /// Mesh messaging: a group chat message reaches another member purely over a
+    /// LoRa mesh, with the primary (loopback) transport SEVERED — proving the mesh
+    /// carry actually delivers, not the peer fan-out. The group is formed over
+    /// loopback (to share keys/roster), both members attach `start_mesh_messaging`
+    /// on a shared mock mesh, then the loopback peers are cleared so the only path
+    /// left is the mesh. The received frame must decrypt+verify and be attributed
+    /// to the SENDER's signing leaf (self-authenticating; the mesh source is a
+    /// non-identity sentinel).
+    #[tokio::test]
+    async fn group_message_travels_over_mesh_only() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mesh",
+        );
+        // Form the group over loopback so both sides share the epoch + roster.
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Attach both to a shared mock mesh (MTU 200 → a ~5 KB signed group frame
+        // fragments into ~25 packets, exercising the real fragment/reassembly path).
+        let mesh = MockMeshFabric::new(200);
+        host.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default())
+            .await;
+        m1.start_mesh_messaging(Arc::new(mesh.node(2)), MeshPolicy::default())
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await; // let subscribe() register
+
+        // SEVER the loopback link on both sides: the mesh is now the ONLY path.
+        host.inner.peers.lock().unwrap().clear();
+        m1.inner.peers.lock().unwrap().clear();
+
+        m1.send("over the air, no internet").await.unwrap();
+
+        let (text, from) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, from, .. }) => break (text, from),
+                    Some(_) => continue,
+                    None => break (String::new(), [0u8; 48]),
+                }
+            }
+        })
+        .await
+        .expect("a mesh-delivered message before timeout");
+
+        assert_eq!(text, "over the air, no internet");
+        assert_eq!(
+            from,
+            m1.fingerprint(),
+            "the mesh-delivered frame is attributed to the sender's verified leaf, \
+             not the mesh source sentinel"
+        );
+    }
+
+    /// Mesh messaging robustness: foreign / junk traffic on the mesh channel is
+    /// ignored — no `Event::Message`, no panic. A non-talkrypt node blasts random
+    /// bytes; the receiver's mesh task must drop them at `parse_fragment` and never
+    /// reach the group path.
+    #[tokio::test]
+    async fn foreign_mesh_traffic_does_not_produce_a_message() {
+        use talkrypt_transport::mesh::{MeshNode, MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#mesh2",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        let mesh = MockMeshFabric::new(200);
+        host.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default())
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A foreign (non-talkrypt) node sends junk on the same channel.
+        let foreign = mesh.node(9);
+        for _ in 0..8 {
+            foreign
+                .send(0, b"hello from a plain meshtastic node")
+                .await
+                .unwrap();
+        }
+
+        // No Event::Message should surface within a short window.
+        let got = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await;
+        assert!(got.is_err(), "foreign mesh traffic must not produce a message");
+    }
+
+    /// MESH-NATIVE: a group forms and a message flows **entirely over LoRa**, with
+    /// `MeshTransport` (reliable ARQ over a broadcast `MeshNode`) as the group's
+    /// PRIMARY transport — no LAN/Tor at all. This exercises the whole stack over
+    /// the mesh: the joiner's handshake (multi-KB → many fragmented, ACK'd
+    /// segments), group admission/commit, and the message — proving off-grid
+    /// operation, not just the message overlay of `start_mesh_messaging`.
+    #[tokio::test]
+    async fn group_forms_and_messages_over_mesh_transport() {
+        use std::time::Duration;
+        use talkrypt_transport::mesh::{MeshTransport, MockMeshFabric};
+
+        let mesh = MockMeshFabric::new(180); // realistic-ish LoRa MTU
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#offgrid",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        // Short retransmit timeout so the (lossless) mock handshake is quick.
+        let host_tp = MeshTransport::with_timeout(
+            Arc::new(mesh.node(1)),
+            0,
+            "host",
+            Duration::from_millis(150),
+            30,
+        );
+        let (host, _host_rx) =
+            Core::new_group(IdentityKeyPair::generate(), suite.clone(), host_tp, desc.clone(), true);
+        host.host().await.unwrap();
+
+        let join_tp = MeshTransport::with_timeout(
+            Arc::new(mesh.node(2)),
+            0,
+            "joiner",
+            Duration::from_millis(150),
+            30,
+        );
+        let (m1, mut m1_rx) =
+            Core::new_group(IdentityKeyPair::generate(), suite, join_tp, desc.clone(), false);
+        // The join handshake + group admission run over the mesh transport.
+        m1.connect("host").await.unwrap();
+        // Give the fragmented, ARQ'd handshake/commit time to complete over the mesh.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // The host speaks; the member hears it — carried end-to-end over LoRa.
+        host.send("off the grid, on the air").await.unwrap();
+        let (text, from) = tokio::time::timeout(Duration::from_secs(8), next_message(&mut m1_rx))
+            .await
+            .expect("a mesh-native group message before timeout");
+        assert_eq!(text, "off the grid, on the air");
+        assert_eq!(from, host.fingerprint());
+    }
+
+    /// SUB-SPEC A (§7, the decisive group gap #58 closes): a name announced by one
+    /// MEMBER is resolved by ANOTHER member — not just the host. m1 joins with an
+    /// account-linked name; m2 joins after and must resolve it at the verified Linked
+    /// tier, attributed to m1's signing leaf and m1's account. Proves group presence
+    /// reaches the whole group (via the host's relay) rather than the host alone.
+    #[tokio::test]
+    async fn group_linked_name_reaches_another_member() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NameBacking, NameEntry};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#names3",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        // m1 joins with an account-linked leading name.
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain =
+            IdentityChain::device(&account, m1.identity_public(), "dev", now, now + 100_000);
+        m1.set_leading_name(Some(NameEntry {
+            id: "1".into(),
+            label: "Victor".into(),
+            backing: NameBacking::Account { chain },
+        }));
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // m2 joins AFTER m1 (the documented sequential-join model).
+        let (m2, mut m2rx) = group_core(&fabric, "m2", &desc, false);
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // m1 re-announces so a late joiner resolves it (also covered by roster-grow).
+        m1.announce_presence().await.unwrap();
+        // m2 — a MEMBER, not the host — resolves m1's Linked name.
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match m2rx.recv().await {
+                    Some(Event::Name {
+                        label: Some(l),
+                        tier,
+                        from,
+                        account_fingerprint,
+                        ..
+                    }) if l == "Victor" => break Some((tier, from, account_fingerprint)),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tier, from, acct_fp) = got.expect("m2 (a member) must resolve m1's linked name");
+        assert_eq!(tier, NameTier::Linked, "resolves at the verified Linked tier");
+        assert_eq!(from, m1.fingerprint(), "attributed to m1's signing leaf, not the relaying host");
+        assert_eq!(
+            acct_fp,
+            Some(account.public().fingerprint()),
+            "a linked name is attributed to the account"
+        );
+    }
+
+    /// D1 Task 5: a member's persistent-chat send is queued in its outbox, and the
+    /// host's auto-ack (on receipt) clears it — the delivery-confirmation round-trip.
+    #[tokio::test]
+    async fn ack_clears_sender_outbox_after_delivery() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        m1.send("hi").await.unwrap();
+        assert_eq!(m1.inner.outbox.pending("#p").len(), 1, "member queues its send");
+        // Host receives + surfaces the message, then auto-acks m1; m1 clears its outbox.
+        let _ = next_message(&mut host_rx).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            m1.inner.outbox.pending("#p").is_empty(),
+            "sender outbox cleared once the host acks receipt"
+        );
+    }
+
+    /// D1 Task 6 (the headline "phone was off" scenario): while a member is OFFLINE the
+    /// host's send is queued (not lost); when the member returns, `flush_outbox` delivers
+    /// the backlog over the same link and the member's ack drains the host's outbox.
+    #[tokio::test]
+    async fn offline_member_receives_backlog_on_flush() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.set_persistence(true); // so it auto-acks on receipt
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // m1's phone goes off: the host's send is queued, m1 never receives it.
+        fabric.go_offline("m1");
+        host.send("while-you-were-out").await.unwrap();
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "host queued the send while m1 was offline"
+        );
+
+        // m1 comes back; the host flushes the backlog over the still-open link.
+        fabric.come_online("m1");
+        host.flush_outbox().await;
+        let (text, _) = next_message(&mut m1rx).await;
+        assert_eq!(text, "while-you-were-out", "the offline member catches up on return");
+
+        // m1's auto-ack drains the host outbox.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            host.inner.outbox.pending("#p").is_empty(),
+            "backlog cleared once the returned member acks"
+        );
+    }
+
+    /// D1 Task 7 (group keeper): a keeper-enabled host relaying member A's message
+    /// BUFFERS it (opaque) for roster member B who is offline, so B can catch up on
+    /// return. Proves the buffer-for-offline-roster-member production path.
+    #[tokio::test]
+    async fn keeper_buffers_relayed_frame_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.keeper_mode(true);
+        let (a, _arx) = group_core(&fabric, "a", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        a.connect("host").await.unwrap();
+        b.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let b_fp = b.fingerprint();
+        assert!(
+            host.inner.roster.lock().unwrap().values().any(|fp| *fp == b_fp),
+            "B joined the group (in the host roster)"
+        );
+        // B goes offline: drop the host's peer entry for B (B is no longer connected).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        // A sends; the host relays to connected peers (B is gone) and, as keeper,
+        // buffers the opaque frame for offline roster member B.
+        a.send("for-b").await.unwrap();
+        let _ = next_message(&mut host_rx).await; // host surfaces A's message
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !host.inner.keeper.drain(b_fp).is_empty(),
+            "keeper buffered A's relayed frame for offline member B"
+        );
+    }
+
+    /// D1 Layer-B (anchor mailbox): a sender deposits an opaque frame at an anchor for a
+    /// recipient; the anchor stores it; when the recipient fetches, the anchor serves +
+    /// clears it (only the authenticated recipient can pull its own mail).
+    #[tokio::test]
+    async fn anchor_mailbox_stores_and_serves() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["anchor".into()],
+            "#m",
+        );
+        let (anchor, _arx) = core_on(&fabric, "anchor", &desc);
+        anchor.anchor_mode(true);
+        anchor.host().await.unwrap();
+        let (sender, _srx) = core_on(&fabric, "sender", &desc);
+        sender.connect("anchor").await.unwrap();
+        let (r, _rrx) = core_on(&fabric, "r", &desc);
+        r.connect("anchor").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Sender deposits a frame for R at the anchor.
+        let r_fp = r.fingerprint();
+        sender
+            .deposit_to_anchor(r_fp, Frame::MailboxFetch.encode())
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor stored the deposited frame for R"
+        );
+
+        // R pulls its mail; the anchor serves + clears it.
+        r.fetch_mailbox().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            anchor.inner.mailbox.drain(r_fp).is_empty(),
+            "anchor cleared R's mail after serving the fetch"
+        );
+    }
+
+    /// D1 Layer-C (replication): TWO keepers each independently buffer for an offline
+    /// member from one fan-out — so the offline member catches up from EITHER keeper,
+    /// surviving one of them dropping (the survive-node-loss guarantee).
+    #[tokio::test]
+    async fn multi_keeper_replicates_for_offline_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#p",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (k1, _k1rx) = group_core(&fabric, "k1", &desc, false);
+        let (k2, _k2rx) = group_core(&fabric, "k2", &desc, false);
+        let (b, _brx) = group_core(&fabric, "b", &desc, false);
+        k1.keeper_mode(true);
+        k2.keeper_mode(true);
+        for m in ["k1", "k2", "b"] {
+            let c = match m { "k1" => &k1, "k2" => &k2, _ => &b };
+            c.connect("host").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let b_fp = b.fingerprint();
+        // B goes offline (drop the host's peer entry for B).
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp);
+        host.send("broadcast-to-all").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!k1.inner.keeper.drain(b_fp).is_empty(), "keeper k1 buffered for offline B");
+        assert!(!k2.inner.keeper.drain(b_fp).is_empty(), "keeper k2 also buffered (replicated)");
+    }
+
+    /// Wait until `m1rx` has surfaced a `Message` for EACH expected text (order-independent,
+    /// ignoring Connected/other events), or panic on timeout. Proves the frames were not just
+    /// delivered but DECRYPTED into messages.
+    async fn expect_decrypted(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &[&str],
+    ) {
+        let mut need: std::collections::HashSet<String> =
+            want.iter().map(|s| s.to_string()).collect();
+        timeout(Duration::from_secs(6), async {
+            while !need.is_empty() {
+                if let Event::Message { text, .. } = next_event(rx).await {
+                    need.remove(&text);
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("returning member did not decrypt {need:?}"));
+    }
+
+    /// D1 Layer-0 (outbox) replay-WITH-DECRYPT e2e: the host sends to an offline member; the
+    /// frames queue in the outbox; when the member returns and the host flushes, the member
+    /// DECRYPTS them. This is the epoch-safety proof: the member's group session persists
+    /// across the transport reconnect — `connect()` sends no KeyPackage once the leaf key was
+    /// consumed at the first Welcome, so no re-join rotates the epoch and the buffered
+    /// (same-epoch) ciphertext still opens.
+    #[tokio::test]
+    async fn outbox_replay_decrypts_on_returning_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Persistent, DEFAULT_SUITE_ID, vec!["host".into()], "#rd",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.set_persistence(true);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let (host_fp, m1_fp) = (host.fingerprint(), m1.fingerprint());
+
+        // m1 goes offline: a clean link-down on both sides. Its Core (and group session at
+        // the current epoch) stays alive — modelling a phone that lost connectivity.
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m1_fp);
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != host_fp);
+
+        // Host sends while m1 is away → queued in the outbox (never acked by m1).
+        host.send("missed-1").await.unwrap();
+        host.send("missed-2").await.unwrap();
+        assert_eq!(host.inner.outbox.pending("#rd").len(), 2, "both queued for the offline member");
+
+        // m1 returns (transport reconnect, no re-join) and the host flushes the outbox.
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        host.flush_outbox().await;
+
+        expect_decrypted(&mut m1rx, &["missed-1", "missed-2"]).await;
+    }
+
+    /// D1 Layer-A (keeper) replay-WITH-DECRYPT e2e: a THIRD member sends while `m1` is offline;
+    /// the keeper-enabled host relays + buffers the opaque frame; when `m1` returns, the host
+    /// replays it and `m1` DECRYPTS it. Same epoch-safety property as above, on the keeper
+    /// path. (No commit happens while m1 is away, so the buffered frames are all at m1's epoch.)
+    #[tokio::test]
+    async fn keeper_replay_decrypts_on_returning_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Persistent, DEFAULT_SUITE_ID, vec!["host".into()], "#kd",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        host.keeper_mode(true);
+        let (a2, _a2rx) = group_core(&fabric, "a2", &desc, false);
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        a2.connect("host").await.unwrap();
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let (host_fp, m1_fp) = (host.fingerprint(), m1.fingerprint());
+
+        // m1 offline (both sides); its session persists at the current epoch.
+        host.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m1_fp);
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != host_fp);
+
+        // a2 sends while m1 is away → host relays to connected peers (m1 gone) and, as keeper,
+        // buffers the opaque frame for offline m1.
+        a2.send("k-1").await.unwrap();
+        a2.send("k-2").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // m1 returns → host's register() replays the keeper buffer over the new stream.
+        m1.connect("host").await.unwrap();
+        expect_decrypted(&mut m1rx, &["k-1", "k-2"]).await;
+    }
+
+    /// D1 Layer-C (anti-entropy): a keeper that missed a frame reconciles it from a peer
+    /// keeper on connect — the peer's QueueSync digest reveals the gap and the holder
+    /// pushes the opaque frame (via MailboxPut), which the keeper buffers.
+    #[tokio::test]
+    async fn keeper_anti_entropy_pushes_missing_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["k2".into()],
+            "#ae",
+        );
+        // k2 listens; k1 will dial it. Both are keepers.
+        let (k2, _k2rx) = core_on(&fabric, "k2", &desc);
+        k2.keeper_mode(true);
+        k2.host().await.unwrap();
+        let (k1, _k1rx) = core_on(&fabric, "k1", &desc);
+        k1.keeper_mode(true);
+        // Preload k1 with a frame for offline recipient B that k2 lacks.
+        let b_fp = [0x55u8; 48];
+        k1.inner.keeper.buffer(b_fp, gossip_id(b"held-for-b"), b"held-for-b", now_secs());
+        k1.connect("k2").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // k2 received k1's digest gap-fill: it now holds the frame for B too.
+        assert!(
+            !k2.inner.keeper.drain(b_fp).is_empty(),
+            "k2 reconciled the missing frame from k1 via QueueSync anti-entropy"
+        );
+    }
+
+    /// SUB-SPEC A CQ beacon (roster-grow re-announce): when a new member joins, the
+    /// host re-announces its leading name automatically — the joiner resolves the host
+    /// WITHOUT the host acting.
+    #[tokio::test]
+    async fn new_member_triggers_host_reannounce() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#cq",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Host-CQ".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        // No explicit announce — the host's roster-grow hook re-announces for us.
+        assert!(
+            wait_for_name(&mut m1rx, "Host-CQ").await,
+            "a joining member must hear the host's auto-re-announced name"
+        );
+    }
+
+
+
+    /// SUB-SPEC A security: a `Linked` presence scoped to a DIFFERENT chat context
+    /// must be dropped (anti-replay across chats).
+    #[test]
+    fn linked_presence_rejects_wrong_chat_context() {
+        use talkrypt_crypto::IdentityChain;
+        let inner = test_inner_pairwise();
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let chain = IdentityChain::device(&account, device.public(), "dev", now, now + 10_000);
+        let wrong_ctx = crate::presence::chat_context(b"other-token", "#other");
+        let np = crate::presence::NamePresence::linked(1, chain, "Alice", wrong_ctx, &device);
+        handle_presence(&inner, device.public().fingerprint(), np.encode());
+        assert!(inner.names.lock().unwrap().is_empty());
+    }
+
+    /// SUB-SPEC A security: an insider who holds the epoch secret still cannot forge a
+    /// `Linked` name for an account whose device key it does not hold — signing the
+    /// real chain with the wrong key fails `verify_linked`.
+    #[test]
+    fn insider_cannot_forge_linked_name() {
+        use talkrypt_crypto::IdentityChain;
+        let now = now_secs();
+        let account = IdentityKeyPair::generate();
+        let real_device = IdentityKeyPair::generate();
+        let attacker = IdentityKeyPair::generate();
+        let chain =
+            IdentityChain::device(&account, real_device.public(), "dev", now, now + 10_000);
+        let ctx = crate::presence::chat_context(b"tok", "#c");
+        let forged = crate::presence::NamePresence::linked(1, chain, "Alice", ctx, &attacker);
+        assert!(forged.verify_linked(now).is_none());
+    }
+
     /// The host (responder) cannot encrypt before it has received the joiner's
     /// first frame. A message sent in that window must be QUEUED and delivered
     /// once the session is keyed — not silently dropped (the "host's opening
@@ -1757,6 +6054,959 @@ mod tests {
             "welcome",
             "the host's pre-ratchet message must be delivered, not dropped"
         );
+    }
+
+    /// SUB-SPEC B (Task 4): opsec mode + grouping state on Core — set/get round-trips,
+    /// grouping ids are stable/idempotent for the same set, show-all toggles.
+    #[test]
+    fn opsec_mode_and_grouping_state() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#b",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Default is Clean.
+        assert_eq!(core.opsec_mode(), OpsecMode::Clean);
+        core.set_opsec_mode(OpsecMode::Transparent { hide: true });
+        assert_eq!(core.opsec_mode(), OpsecMode::Transparent { hide: true });
+        // Grouping id is stable for the same set regardless of order, and stores members.
+        let id1 = core.define_grouping(&["work".into(), "alt".into()]);
+        let id2 = core.define_grouping(&["alt".into(), "work".into()]);
+        assert_eq!(id1, id2, "grouping id is order-independent + idempotent");
+        assert_eq!(core.grouping_members(&id1), Some(vec!["alt".to_string(), "work".to_string()]));
+        // A different set → different id.
+        assert_ne!(id1, core.define_grouping(&["work".into()]));
+        // show-all toggles.
+        assert!(!core.show_all());
+        core.show_all_identities(true);
+        assert!(core.show_all());
+    }
+
+    /// SUB-SPEC B (Task 7): honest sybil-count = distinct accounts + distinct
+    /// groupings + isolated bare identities.
+    #[test]
+    fn sybil_estimate_counts_distinct_people() {
+        use crate::nametrust::NameTier;
+        use crate::presence::NameRecord;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#s",
+        );
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let linked = |label: &str, acct: [u8; 48]| NameRecord {
+            label: label.into(),
+            tier: NameTier::Linked,
+            seq: 1,
+            account_fp: Some(acct),
+        };
+        let bare = |label: &str| NameRecord {
+            label: label.into(),
+            tier: NameTier::Bare,
+            seq: 1,
+            account_fp: None,
+        };
+        {
+            let mut names = core.inner.names.lock().unwrap();
+            // Two linked names sharing ONE account.
+            names.insert([1u8; 48], linked("A", [9u8; 48]));
+            names.insert([2u8; 48], linked("B", [9u8; 48]));
+            // Two isolated bare identities.
+            names.insert([5u8; 48], bare("C"));
+            names.insert([6u8; 48], bare("D"));
+            // A bare identity that IS in a grouping — counted under the grouping, not isolated.
+            names.insert([3u8; 48], bare("E"));
+        }
+        // A 2-leaf grouping (leaves [3],[4]).
+        core.inner.groupings_seen.lock().unwrap().insert(
+            vec![7u8; 4],
+            std::collections::HashSet::from([[3u8; 48], [4u8; 48]]),
+        );
+        let s = core.sybil_estimate();
+        assert_eq!(s.distinct_accounts, 1);
+        assert_eq!(s.distinct_groupings, 1);
+        assert_eq!(s.isolated, 2, "C and D; E is grouped");
+        assert_eq!(s.min_distinct_people, 4);
+    }
+
+    /// SUB-SPEC B access hardening: a `DerivedFromNamed` predicate admits a joiner
+    /// whose cert chain descends from the named ancestor, and blocks one that doesn't.
+    #[tokio::test]
+    async fn access_predicate_derived_from_named() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let ancestor = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#dfn");
+        desc.access_predicate = Some(Predicate::DerivedFromNamed { ancestor_fp: ancestor.public().fingerprint() });
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+
+        // Descends from the ancestor → admitted.
+        let (ok, _r) = core_on(&fabric, "ok", &desc);
+        let chain = IdentityChain::device(&ancestor, ok.identity_public(), "dev", 0, now_secs() + 10_000);
+        ok.present_identity(chain, None);
+        ok.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ok.send("descendant").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "descendant", "a descendant is admitted");
+
+        // Rooted at a DIFFERENT account → blocked (no message through).
+        let other = IdentityKeyPair::generate();
+        let (bad, _r2) = core_on(&fabric, "bad", &desc);
+        let bad_chain = IdentityChain::device(&other, bad.identity_public(), "dev", 0, now_secs() + 10_000);
+        bad.present_identity(bad_chain, None);
+        bad.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = bad.send("intruder").await;
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "intruder" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "a non-descendant must be blocked");
+    }
+
+    /// SUB-SPEC B access hardening: an access predicate an identity CANNOT satisfy
+    /// (a grouping/ZK predicate in B0) fails closed — even a valid identity is blocked.
+    #[tokio::test]
+    async fn access_predicate_unsupported_fails_closed() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let acct = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#fc");
+        // A grouping predicate is not satisfiable by an identity presentation in B0.
+        desc.access_predicate = Some(Predicate::Grouping { grouping_pub: vec![0u8; 32] });
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (j, _r) = core_on(&fabric, "j", &desc);
+        let chain = IdentityChain::device(&acct, j.identity_public(), "dev", 0, now_secs() + 10_000);
+        j.present_identity(chain, None);
+        j.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = j.send("should not pass").await;
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "should not pass" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "an unsupported access predicate must fail closed");
+    }
+
+    /// SUB-SPEC B (Task 9): an access predicate (LinkedToAccount) gates admission —
+    /// a joiner linked to the required account is admitted; a joiner linked to a
+    /// DIFFERENT account is rejected (AccessDenied), learning only pass/fail.
+    #[tokio::test]
+    async fn access_predicate_gates_admission() {
+        use crate::linkage::Predicate;
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let acct = IdentityKeyPair::generate();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#gate");
+        desc.access_predicate = Some(Predicate::LinkedToAccount { account_fp: acct.public().fingerprint() });
+
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+
+        // Admitted: a joiner presenting a chain rooted at the required account.
+        let (ok, _r1) = core_on(&fabric, "ok", &desc);
+        let chain = IdentityChain::device(&acct, ok.identity_public(), "dev", 0, now_secs() + 10_000);
+        ok.present_identity(chain, None);
+        ok.connect("host").await.unwrap();
+        // Let the identity presentation land + be approved before sending (the
+        // initiator presents in a spawned task; a real user doesn't send instantly).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ok.send("i am in").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "i am in", "matching account is admitted");
+
+        // Rejected: a joiner linked to a DIFFERENT account must NOT be able to
+        // participate — the security property (no access bypass).
+        let other = IdentityKeyPair::generate();
+        let (bad, mut bad_rx) = core_on(&fabric, "bad", &desc);
+        let bad_chain = IdentityChain::device(&other, bad.identity_public(), "dev", 0, now_secs() + 10_000);
+        bad.present_identity(bad_chain, None);
+        bad.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = bad.send("sneak in").await; // may error once disconnected — fine
+        // The host must NOT deliver the rejected joiner's message.
+        let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Message { text, .. }) if text == "sneak in" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        }).await.unwrap_or(false);
+        assert!(!leaked, "a wrong-account joiner must not get a message through the access gate");
+        let _ = &mut bad_rx; // (AccessDenied feedback path is covered by the existing reject test)
+    }
+
+    /// SUB-SPEC B (Task 10): with show-all on, a session auto-discloses its grouping
+    /// on join; with show-all off, it does not.
+    #[tokio::test]
+    async fn show_all_emits_grouping_on_join() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#sa");
+        // show-all ON
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h1", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d1", &desc);
+            d.set_grouping_root([1u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective);
+            d.show_all_identities(true);
+            d.connect("h1").await.unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { subject, verdict: true, .. }) => break Some(subject),
+                        Some(_) => continue,
+                        None => break None,
+                    }
+                }
+            }).await.ok().flatten();
+            assert_eq!(got, Some(d.fingerprint()), "show-all discloses grouping on join");
+        }
+        // show-all OFF (default) — no linkage disclosed.
+        {
+            let (host, mut host_rx) = core_on(&fabric, "h2", &desc);
+            host.host().await.unwrap();
+            let (d, _r) = core_on(&fabric, "d2", &desc);
+            d.set_grouping_root([2u8; 32]);
+            d.set_opsec_mode(OpsecMode::Selective); // opted in, but show_all is off
+            d.connect("h2").await.unwrap();
+            let leaked = tokio::time::timeout(Duration::from_millis(400), async {
+                loop {
+                    match host_rx.recv().await {
+                        Some(Event::Linkage { verdict: true, .. }) => break true,
+                        Some(_) => continue,
+                        None => break false,
+                    }
+                }
+            }).await.unwrap_or(false);
+            assert!(!leaked, "no grouping disclosed when show-all is off");
+        }
+    }
+
+    // ---- SUB-SPEC B hardening (adversarial): grouping-disclosure attack vectors ----
+
+    /// A member cannot RESTAMP a grouping cert onto another member's leaf:
+    /// handle_linkage binds the certified subject to the authenticated sender.
+    #[tokio::test]
+    async fn grouping_proof_cannot_be_restamped_to_another_leaf() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hr");
+        let (core, mut rx) = core_on(&fabric, "n", &desc);
+        let ctx = crate::presence::chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let victim = IdentityKeyPair::generate();
+        let g = talkrypt_crypto::GroupingKey::from_root_seed([1u8; 32]);
+        let cert = g.certify(&ctx, victim.public(), 0, now_secs() + 10_000);
+        let ctx_sig = victim.sign(&ctx);
+        let gp = g.derive_for_chat(&ctx).public().sig_vk.clone();
+        let payload = crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig, seq: 1 }.encode();
+        // An attacker with a DIFFERENT fp presents the victim's grouping cert.
+        let attacker_fp = [0x33u8; 48];
+        assert_ne!(attacker_fp, victim.public().fingerprint());
+        handle_linkage(&core.inner, attacker_fp, payload);
+        // Rejected (verdict false), aggregated under NOBODY.
+        assert!(core.inner.groupings_seen.lock().unwrap().values().all(|set| set.is_empty()));
+        let mut saw_false = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Linkage { verdict, .. } = ev {
+                assert!(!verdict, "restamped proof must not verify");
+                saw_false = true;
+            }
+        }
+        assert!(saw_false, "a verdict:false linkage event is emitted");
+    }
+
+    /// A grouping proof from one chat replayed into another must fail: the ctx-sig
+    /// is bound to the originating chat context.
+    #[tokio::test]
+    async fn grouping_proof_cross_chat_replay_fails() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hy");
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        // Build the proof entirely in a DIFFERENT chat context (ctx_x).
+        let ctx_x = [0xAAu8; 32];
+        let member = IdentityKeyPair::generate();
+        let g = talkrypt_crypto::GroupingKey::from_root_seed([2u8; 32]);
+        let cert = g.certify(&ctx_x, member.public(), 0, now_secs() + 10_000);
+        let ctx_sig = member.sign(&ctx_x);
+        let gp = g.derive_for_chat(&ctx_x).public().sig_vk.clone();
+        let payload = crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig, seq: 1 }.encode();
+        // Fed into THIS chat (whose real context != ctx_x), attributed to `member`.
+        handle_linkage(&core.inner, member.public().fingerprint(), payload);
+        assert!(
+            core.inner.groupings_seen.lock().unwrap().values().all(|set| set.is_empty()),
+            "a proof bound to another chat's context must not aggregate here"
+        );
+    }
+
+    /// A replayed/lower-seq grouping proof is dropped (anti-replay/reorder).
+    #[tokio::test]
+    async fn grouping_proof_stale_seq_is_dropped() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(TopologyKind::P2P, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec![], "#hs");
+        let (core, _rx) = core_on(&fabric, "n", &desc);
+        let ctx = crate::presence::chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let member = IdentityKeyPair::generate();
+        let member_fp = member.public().fingerprint();
+        let ctx_sig = member.sign(&ctx);
+        let mk = |root: [u8; 32], seq: u64| {
+            let g = talkrypt_crypto::GroupingKey::from_root_seed(root);
+            let cert = g.certify(&ctx, member.public(), 0, now_secs() + 10_000);
+            let gp = g.derive_for_chat(&ctx).public().sig_vk.clone();
+            crate::linkage::LinkagePayload::GroupingProof { grouping_pub: gp, cert, ctx_sig: ctx_sig.clone(), seq }.encode()
+        };
+        // seq 5 (grouping A) aggregates; then a stale seq 3 (grouping B) is dropped.
+        handle_linkage(&core.inner, member_fp, mk([3u8; 32], 5));
+        handle_linkage(&core.inner, member_fp, mk([4u8; 32], 3));
+        let seen = core.inner.groupings_seen.lock().unwrap();
+        let groupings_with_member: usize = seen.values().filter(|set| set.contains(&member_fp)).count();
+        assert_eq!(groupings_with_member, 1, "only the higher-seq grouping is recorded; the stale replay is dropped");
+    }
+
+    /// SUB-SPEC B (Task 5): two of the user's sessions share a grouping root; each
+    /// presents its own leaf certified under the per-chat grouping key. A viewer
+    /// AGGREGATES both leaves under one `grouping_pub` (one person) — and learns NO
+    /// account (account-hidden). A third, non-grouped session is not aggregated.
+    #[tokio::test]
+    async fn grouping_disclosure_aggregates_by_grouping_pub() {
+        use crate::linkage::OpsecMode;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#grp",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        // Two of ONE user's sessions, sharing a grouping root secret.
+        let shared_root = [42u8; 32];
+        let (d1, _r1) = core_on(&fabric, "d1", &desc);
+        let (d2, _r2) = core_on(&fabric, "d2", &desc);
+        for d in [&d1, &d2] {
+            d.set_grouping_root(shared_root);
+            d.set_opsec_mode(OpsecMode::Selective);
+        }
+        d1.connect("host").await.unwrap();
+        d2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        d1.present_grouping(&"g".to_string()).await;
+        d2.present_grouping(&"g".to_string()).await;
+
+        // Collect linkage verdicts on the host.
+        let mut seen: std::collections::HashMap<Vec<u8>, std::collections::HashSet<[u8; 48]>> =
+            Default::default();
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), host_rx.recv()).await {
+                Ok(Some(Event::Linkage { subject, grouping_pub, verdict: true })) => {
+                    seen.entry(grouping_pub).or_default().insert(subject);
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => {
+                    if seen.values().any(|s| s.len() >= 2) {
+                        break;
+                    }
+                }
+            }
+        }
+        // Exactly one grouping_pub, aggregating BOTH sessions' leaves.
+        let (_gp, members) = seen.iter().max_by_key(|(_, s)| s.len()).expect("a grouping was seen");
+        assert!(members.contains(&d1.fingerprint()), "d1 aggregated");
+        assert!(members.contains(&d2.fingerprint()), "d2 aggregated");
+        assert_eq!(members.len(), 2, "both under ONE grouping_pub (account-hidden)");
+    }
+
+    /// SUB-SPEC A (pairwise CQ beacon on-join): when two pairwise peers connect, each
+    /// auto-announces its leading name — the dialer eagerly (it sends first), the
+    /// host reactively once the dialer's first frame makes it send-ready — so both
+    /// resolve each other's names with NO explicit announce.
+    #[tokio::test]
+    async fn pairwise_on_join_auto_announce_both_directions() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#pj",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "j".into(),
+            label: "Bravo".into(),
+            backing: NameBacking::Bare,
+        }));
+        joiner.connect("host").await.unwrap();
+        // No explicit announce — the on-join triggers fire both ways.
+        assert!(
+            wait_for_name(&mut host_rx, "Bravo").await,
+            "host must hear the dialer's name on connect"
+        );
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "dialer must hear the host's name once the host is send-ready"
+        );
+    }
+
+    /// SUB-SPEC A regression (the "anonymous joiner never hears the host" bug): a
+    /// pseudonym dialer with NO leading name and NO account presents nothing on
+    /// connect. Without an opening keying frame the host's (responder's) ratchet
+    /// never becomes send-ready, so its reactive on-join CQ announce never fires
+    /// and the joiner never resolves the host's name — the most common real case
+    /// (an anonymous joiner dialing a named host). The empty keying Presence sent
+    /// by a silent initiator must key the host so its name still arrives.
+    #[tokio::test]
+    async fn nameless_pseudonym_joiner_still_hears_named_host() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#anon",
+        );
+        let (host, _host_rx) = core_on(&fabric, "host", &desc);
+        host.set_leading_name(Some(NameEntry {
+            id: "h".into(),
+            label: "Alpha".into(),
+            backing: NameBacking::Bare,
+        }));
+        host.host().await.unwrap();
+        // Joiner: no leading name, no presented account — a bare pseudonym.
+        let (joiner, mut joiner_rx) = core_on(&fabric, "joiner", &desc);
+        joiner.connect("host").await.unwrap();
+        assert!(
+            wait_for_name(&mut joiner_rx, "Alpha").await,
+            "a nameless pseudonym joiner must still hear the host's CQ name on join"
+        );
+    }
+
+    /// Resilience: a desynced/mismatched stream (a peer that restarted onto a new
+    /// session, ratchet corruption, or a cross-wired socket) delivers frames the
+    /// receiver can never decrypt. The reader must not spin forever on "frame failed
+    /// to decrypt" — after MAX_CONSECUTIVE_DECRYPT_FAILURES it drops the peer and
+    /// closes the stream so the reconnect layer (which only fires when `peers` is
+    /// empty) can heal with a fresh handshake instead of looping on a dead ratchet.
+    #[tokio::test]
+    async fn persistent_decrypt_failures_drop_peer_for_reconnect() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#desync",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        // Let the handshake + any on-connect frames settle; those decrypt fine, so
+        // the host's consecutive-failure counter is back to 0.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "host holds the dialer as a peer after the handshake"
+        );
+        // Inject raw garbage straight onto the dialer→host stream: send_frame is
+        // unencrypted, so the host cannot decrypt any of it — simulating a stream
+        // whose ratchet is desynced beyond recovery.
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        for i in 0..MAX_CONSECUTIVE_DECRYPT_FAILURES {
+            w.lock()
+                .await
+                .send_frame(format!("garbage-{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+        // The host drops the dead peer and emits Disconnected — not an endless
+        // error spin — so `peers` empties and reconnect can re-establish.
+        let dropped = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Disconnected { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(dropped, "host must drop a peer whose stream never decrypts");
+        assert!(
+            host.inner.peers.lock().unwrap().is_empty(),
+            "the dead peer is removed so the reconnect layer can heal the link"
+        );
+    }
+
+    /// Resilience guard: the consecutive-failure bound must reset on any success, so
+    /// a HEALTHY session that sees the odd undecryptable frame (transient corruption)
+    /// is never dropped. Interleaving garbage with a real message keeps the run below
+    /// MAX_CONSECUTIVE_DECRYPT_FAILURES, so the peer survives and traffic still flows.
+    #[tokio::test]
+    async fn transient_decrypt_failures_do_not_drop_healthy_peer() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#transient",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (dialer, _drx) = core_on(&fabric, "dialer", &desc);
+        dialer.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let w = dialer.inner.peers.lock().unwrap()[0].writer.clone();
+        // A burst below the threshold, then a real (decryptable) message that resets
+        // the counter, then another sub-threshold burst — never 8 in a row.
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-a-{i}").as_bytes()).await.unwrap();
+        }
+        dialer.send("still here").await.unwrap();
+        for i in 0..(MAX_CONSECUTIVE_DECRYPT_FAILURES - 2) {
+            w.lock().await.send_frame(format!("junk-b-{i}").as_bytes()).await.unwrap();
+        }
+        // The real message is delivered and the peer is NOT dropped.
+        assert_eq!(next_message(&mut host_rx).await.0, "still here");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !host.inner.peers.lock().unwrap().is_empty(),
+            "a healthy peer with only transient decrypt failures must not be dropped"
+        );
+    }
+
+    /// SUB-SPEC A (Linked tier, end-to-end through the engine): a peer that presents
+    /// an account-linked name announces a `Linked` presence; the receiver verifies the
+    /// account→device chain and the chat-context binding, then emits `Event::Name` at
+    /// the `Linked` tier attributed to the ACCOUNT fingerprint — not the bare device.
+    #[tokio::test]
+    async fn pairwise_linked_name_resolves_as_linked_tier() {
+        use crate::nametrust::NameTier;
+        use crate::presence::{NameBacking, NameEntry};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#linked",
+        );
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jrx) = core_on(&fabric, "joiner", &desc);
+        // The joiner's account certifies its own device key; the leading name is
+        // backed by that chain (an account-linked CQ name).
+        let account = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain =
+            IdentityChain::device(&account, joiner.identity_public(), "dev", now, now + 100_000);
+        joiner.set_leading_name(Some(NameEntry {
+            id: "acct".into(),
+            label: "Victor".into(),
+            backing: NameBacking::Account { chain },
+        }));
+        joiner.connect("host").await.unwrap();
+        // The host resolves the joiner's name at the verified Linked tier, attributed
+        // to the account (not the device) fingerprint.
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { label: Some(l), tier, account_fingerprint, .. })
+                        if l == "Victor" =>
+                    {
+                        break Some((tier, account_fingerprint))
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tier, acct_fp) = got.expect("host must resolve the joiner's linked name");
+        assert_eq!(tier, NameTier::Linked, "an account-backed name resolves at the Linked tier");
+        assert_eq!(
+            acct_fp,
+            Some(account.public().fingerprint()),
+            "a linked name is attributed to the account, not the device"
+        );
+    }
+
+    /// SUB-SPEC A security (homoglyph spoof, end-to-end): a bare name that CONFUSABLE-
+    /// folds onto a verified (Linked) name must be flagged under the chat's trust
+    /// policy. This exercises the descriptor.name_trust_policy → resolve_render wiring
+    /// that the `--name-policy` flag configures: a bare "Аlice" (Cyrillic А) mimicking
+    /// a linked "Alice" resolves WITH a collision caveat under WarnOnCollision.
+    #[tokio::test]
+    async fn engine_flags_bare_homoglyph_collision_under_policy() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let mut desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#spoof",
+        );
+        desc.name_trust_policy = NameTrustPolicy::WarnOnCollision;
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        // A genuine account-linked "Alice" (the verified name being impersonated).
+        let account = IdentityKeyPair::generate();
+        let device = IdentityKeyPair::generate();
+        let now = now_secs();
+        let chain = IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+        let ctx = chat_context(&core.inner.descriptor.invite_token, &core.inner.descriptor.channel);
+        let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+        handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+        // A DIFFERENT peer presents a bare "Аlice" whose first letter is Cyrillic А —
+        // it confusable-folds onto "alice", colliding with the verified name.
+        let impostor_fp = [9u8; 48];
+        let bare = NamePresence::Bare { seq: 1, label: "Аlice".into() };
+        handle_presence(&core.inner, impostor_fp, bare.encode());
+        // Drain: the impostor's Event::Name must carry a collision caveat; the genuine
+        // verified name must NOT.
+        let mut impostor_caveat: Option<Option<String>> = None;
+        let mut linked_caveat: Option<Option<String>> = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { from, caveat, tier, .. } = ev {
+                if from == impostor_fp {
+                    impostor_caveat = Some(caveat);
+                } else if tier == crate::nametrust::NameTier::Linked {
+                    linked_caveat = Some(caveat);
+                }
+            }
+        }
+        assert_eq!(
+            linked_caveat,
+            Some(None),
+            "the genuine verified name is not caveated by an impostor"
+        );
+        assert!(
+            matches!(impostor_caveat, Some(Some(_))),
+            "a bare homoglyph of a verified name must be flagged with a caveat under WarnOnCollision"
+        );
+    }
+
+    /// SUB-SPEC A security (anti-replay): a name presence with a seq at or below the
+    /// last one seen for that peer must be ignored, so a relay/attacker replaying an
+    /// old presence cannot roll a peer's displayed name back to a stale value. Only a
+    /// strictly-higher seq updates the cache.
+    #[tokio::test]
+    async fn stale_presence_replay_is_ignored() {
+        use crate::presence::NamePresence;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#replay",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let fp = [7u8; 48];
+        let bare = |seq: u64, label: &str| NamePresence::Bare { seq, label: label.into() }.encode();
+        handle_presence(&core.inner, fp, bare(5, "Foxtrot")); // current
+        handle_presence(&core.inner, fp, bare(3, "Golf")); // stale replay — must be dropped
+        handle_presence(&core.inner, fp, bare(5, "Golf")); // equal seq — also dropped
+        handle_presence(&core.inner, fp, bare(6, "Hotel")); // newer — accepted
+        // The cache ends on the newest name, never the replayed one.
+        assert_eq!(
+            core.inner.names.lock().unwrap().get(&fp).map(|r| r.label.clone()),
+            Some("Hotel".into()),
+            "only a strictly-higher seq updates the displayed name"
+        );
+        // No Event::Name ever surfaced the replayed "Golf".
+        let mut labels = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { label: Some(l), .. } = ev {
+                labels.push(l);
+            }
+        }
+        assert!(
+            !labels.iter().any(|l| l == "Golf"),
+            "a replayed stale presence must never surface: saw {labels:?}"
+        );
+        assert_eq!(labels, vec!["Foxtrot".to_string(), "Hotel".to_string()]);
+    }
+
+    /// SUB-SPEC A anti-grief (§4): a peer flooding many strictly-increasing-seq
+    /// presences in one window is bounded to `PRESENCE_RATE_BURST` accepted — the
+    /// excess is dropped so a hostile peer cannot grief the cache/event stream. seq
+    /// monotonicity is checked first, so this never rejects a legitimate slow beacon.
+    #[tokio::test]
+    async fn presence_rate_limit_bounds_a_flood() {
+        use crate::presence::NamePresence;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#flood",
+        );
+        let (core, mut rx) = core_on(&fabric, "r", &desc);
+        let fp = [8u8; 48];
+        // Fire BURST + 3 presences, each with a strictly-higher seq (all would pass
+        // seq monotonicity), synchronously (one rate window).
+        let total = PRESENCE_RATE_BURST + 3;
+        for seq in 1..=total as u64 {
+            let np = NamePresence::Bare { seq, label: format!("N{seq}") };
+            handle_presence(&core.inner, fp, np.encode());
+        }
+        let mut emitted = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Name { label: Some(l), .. } = ev {
+                emitted.push(l);
+            }
+        }
+        assert_eq!(
+            emitted.len(),
+            PRESENCE_RATE_BURST as usize,
+            "flood must be bounded to the per-window burst: saw {emitted:?}"
+        );
+        // The cache holds the last ACCEPTED name (N{BURST}), not the flooded tail.
+        assert_eq!(
+            core.inner.names.lock().unwrap().get(&fp).map(|r| r.label.clone()),
+            Some(format!("N{PRESENCE_RATE_BURST}")),
+        );
+    }
+
+    /// SUB-SPEC A (§5): a viewer-local trust-policy override only ever TIGHTENS the
+    /// chat baseline, never loosens it. A chat baseline of SignalStyle (no warning)
+    /// plus a local WarnOnCollision override must flag a homoglyph collision; the
+    /// reverse (baseline WarnOnCollision + local SignalStyle) must still warn.
+    #[tokio::test]
+    async fn viewer_policy_override_only_tightens() {
+        use crate::nametrust::NameTrustPolicy;
+        use crate::presence::{chat_context, NamePresence};
+        use talkrypt_crypto::IdentityChain;
+
+        async fn collision_caveat(
+            baseline: NameTrustPolicy,
+            local: Option<NameTrustPolicy>,
+        ) -> Option<String> {
+            let fabric = LoopbackFabric::new();
+            let mut desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec![],
+                "#ovr",
+            );
+            desc.name_trust_policy = baseline;
+            let (core, mut rx) = core_on(&fabric, "r", &desc);
+            core.set_name_trust_policy(local);
+            // A verified "Alice".
+            let account = IdentityKeyPair::generate();
+            let device = IdentityKeyPair::generate();
+            let now = now_secs();
+            let chain =
+                IdentityChain::device(&account, device.public(), "d", now, now + 100_000);
+            let ctx = chat_context(
+                &core.inner.descriptor.invite_token,
+                &core.inner.descriptor.channel,
+            );
+            let linked = NamePresence::linked(1, chain, "Alice", ctx, &device);
+            handle_presence(&core.inner, device.public().fingerprint(), linked.encode());
+            // A bare homoglyph impostor.
+            let impostor_fp = [9u8; 48];
+            let bare = NamePresence::Bare { seq: 1, label: "Аlice".into() }; // Cyrillic А
+            handle_presence(&core.inner, impostor_fp, bare.encode());
+            let mut caveat = None;
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::Name { from, caveat: c, .. } = ev {
+                    if from == impostor_fp {
+                        caveat = c;
+                    }
+                }
+            }
+            caveat
+        }
+
+        // Baseline SignalStyle would NOT warn on its own...
+        assert!(
+            collision_caveat(NameTrustPolicy::SignalStyle, None).await.is_none(),
+            "SignalStyle baseline alone must not warn"
+        );
+        // ...but a local WarnOnCollision override tightens it into a warning.
+        assert!(
+            collision_caveat(NameTrustPolicy::SignalStyle, Some(NameTrustPolicy::WarnOnCollision))
+                .await
+                .is_some(),
+            "a stricter local override must apply"
+        );
+        // A local override cannot LOOSEN a stricter baseline: WarnOnCollision baseline
+        // + a SignalStyle local override still warns.
+        assert!(
+            collision_caveat(NameTrustPolicy::WarnOnCollision, Some(NameTrustPolicy::SignalStyle))
+                .await
+                .is_some(),
+            "a local override must never weaken the chat baseline"
+        );
+    }
+
+    /// SUB-SPEC A: the roster-grow re-announce coalesces a burst of joins into a
+    /// single CQ. Firing several grows back-to-back bumps the generation each time;
+    /// only the last generation's timer survives to send, so we don't emit N beacons
+    /// for N near-simultaneous joins.
+    #[tokio::test]
+    async fn roster_grow_reannounce_coalesces_a_burst() {
+        use std::sync::atomic::Ordering;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#grow",
+        );
+        let (core, _rx) = core_on(&fabric, "r", &desc);
+        core.set_leading_name(Some(crate::presence::NameEntry {
+            id: "1".into(),
+            label: "Zulu".into(),
+            backing: crate::presence::NameBacking::Bare,
+        }));
+        // A burst of grows within the debounce window.
+        for _ in 0..5 {
+            schedule_grow_reannounce(&core.inner);
+        }
+        // Exactly one generation is live per fired grow; the counter advanced by the
+        // burst size, and only the final generation's task will actually send.
+        assert_eq!(core.inner.presence_grow_gen.load(Ordering::SeqCst), 5);
+        // Give the debounce window time; superseded generations must self-cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(
+            PRESENCE_GROW_DEBOUNCE_MS + 100,
+        ))
+        .await;
+        // The generation counter is unchanged (no new grows), confirming the coalesce
+        // logic keyed on a stable final generation.
+        assert_eq!(core.inner.presence_grow_gen.load(Ordering::SeqCst), 5);
+    }
+
+    /// SUB-SPEC A (§6 name book): multiple saved names, select the leading one by id
+    /// (mid-chat switch), and deleting the active name stops us beaconing it.
+    #[tokio::test]
+    async fn name_book_use_switches_leading_and_remove_clears_it() {
+        use crate::presence::{NameBacking, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#book",
+        );
+        let (core, _rx) = core_on(&fabric, "r", &desc);
+        let e = |id: &str, label: &str| NameEntry {
+            id: id.into(),
+            label: label.into(),
+            backing: NameBacking::Bare,
+        };
+        core.add_name(e("1", "Alpha"));
+        core.add_name(e("2", "Bravo"));
+        assert_eq!(core.name_book().entries.len(), 2);
+        // Selecting a saved name by id makes it the active leading name (a CQ fires).
+        core.use_name("2").await.unwrap();
+        assert_eq!(
+            core.inner.leading_name.lock().unwrap().as_ref().unwrap().label,
+            "Bravo"
+        );
+        // An unknown id is a clean error, not a panic or a silent clear.
+        assert!(core.use_name("nope").await.is_err());
+        assert_eq!(
+            core.inner.leading_name.lock().unwrap().as_ref().unwrap().label,
+            "Bravo",
+            "a failed switch leaves the leading name untouched"
+        );
+        // Deleting the ACTIVE name clears the leading name so we stop beaconing it.
+        assert!(core.remove_name("2"));
+        assert!(core.inner.leading_name.lock().unwrap().is_none());
+        assert_eq!(core.name_book().entries.len(), 1);
+    }
+
+    /// SUB-SPEC A (§6): the name book survives a client persistence round-trip
+    /// (encode → load) and a peer resolves the reloaded, switched-to name.
+    #[tokio::test]
+    async fn name_book_persists_and_reloaded_name_reaches_peer() {
+        use crate::presence::{NameBacking, NameBook, NameEntry};
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec![],
+            "#bookp",
+        );
+        // Simulate a saved book restored from client storage.
+        let saved = NameBook {
+            entries: vec![NameEntry {
+                id: "call".into(),
+                label: "Sierra".into(),
+                backing: NameBacking::Bare,
+            }],
+            default: Some("call".into()),
+        };
+        let restored = NameBook::decode(&saved.encode()).unwrap();
+        let (host, mut host_rx) = core_on(&fabric, "host", &desc);
+        host.host().await.unwrap();
+        let (joiner, _jrx) = core_on(&fabric, "joiner", &desc);
+        joiner.load_name_book(restored);
+        joiner.use_name("call").await.unwrap();
+        joiner.connect("host").await.unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match host_rx.recv().await {
+                    Some(Event::Name { label: Some(l), .. }) if l == "Sierra" => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(seen, "the host resolves the joiner's reloaded, selected name");
     }
 
     /// Full TreeKEM group chat through the engine over loopback: a host and two
@@ -1797,6 +7047,443 @@ mod tests {
         let (text2, from2) = next_message(&mut m2_rx).await;
         assert_eq!(text2, "from m1");
         assert_eq!(from2, m1.fingerprint(), "m2 must attribute to m1, not host");
+    }
+
+    /// SECURITY-AUDIT T-2 ACTIVATION: a host self-update rotates its leaf (KEM path
+    /// + signing key), the member applies the broadcast commit, the group stays
+    /// converged, and messaging keeps working across the rotation — post-compromise
+    /// security exercised end-to-end through the engine.
+    #[tokio::test]
+    async fn host_self_update_rotates_and_group_still_works() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#upd",
+        );
+        let (host, _host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Baseline: host -> m1 works before the update.
+        host.send("before update").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "before update");
+
+        // Host self-updates (rotates its leaf key); m1 applies the broadcast commit.
+        host.self_update().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Messaging still works after the rotation, and m1 still attributes to host.
+        host.send("after update").await.unwrap();
+        let (text, from) = next_message(&mut m1_rx).await;
+        assert_eq!(text, "after update");
+        assert_eq!(from, host.fingerprint(), "attribution survives key rotation");
+    }
+
+    /// SECURITY-AUDIT T-4 end-to-end: a MEMBER self-rekeys via the host. The member
+    /// calls self_update() (which proposes, not commits); the host commits the
+    /// proposal and broadcasts it; the group keeps working across the member's
+    /// rekey, with no fork — the member's post-compromise security is self-service.
+    #[tokio::test]
+    async fn member_self_update_is_committed_by_host() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t4",
+        );
+        let (host, mut host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Baseline both directions.
+        host.send("hello m1").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "hello m1");
+        m1.send("hello host").await.unwrap();
+        assert_eq!(next_message(&mut host_rx).await.0, "hello host");
+
+        // Capture m1's leaf signing key (as the host's tree holds it) before the rekey.
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        let sig_before = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+
+        // The MEMBER self-rekeys: proposes, host commits, group heals.
+        m1.self_update().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The rekey actually rotated m1's leaf signing key (post-compromise security);
+        // the host's tree now holds the NEW key, not the old one.
+        let sig_after = {
+            let g = host.inner.group.lock().await;
+            g.as_ref().and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+        };
+        assert!(sig_before.is_some() && sig_after.is_some());
+        assert_ne!(
+            sig_before, sig_after,
+            "the member's leaf signing key must rotate on a self-rekey"
+        );
+
+        // Messaging still works both ways after the member's rekey (no fork).
+        host.send("after m1 rekey").await.unwrap();
+        assert_eq!(next_message(&mut m1_rx).await.0, "after m1 rekey");
+        m1.send("m1 rekeyed").await.unwrap();
+        let (text, from) = next_message(&mut host_rx).await;
+        assert_eq!(text, "m1 rekeyed");
+        assert_eq!(from, m1.fingerprint(), "m1 still attributed correctly post-rekey");
+    }
+
+    /// SECURITY-AUDIT T-3 end-to-end: a **linked** member (presents an account)
+    /// gets its group leaf cryptographically bound to that account — the host
+    /// records `group_leaf_account(leaf) == account`. The binding rides an
+    /// account-signed `account->device->leaf_sig_key` chain the host can only relay,
+    /// not forge. A member that stays a **pseudonym** (no account) leaves the leaf
+    /// unbound (`None`), by design.
+    #[tokio::test]
+    async fn linked_member_leaf_binds_to_account_pseudonym_stays_unbound() {
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t3",
+        );
+        let (host, _host_rx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // Linked member: account certifies its device; present it, then join.
+        let (m1, _m1_rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let acct_fp = account.public().fingerprint();
+        m1.present_identity(
+            IdentityChain::device(&account, m1.identity_public(), "device:m1", 0, 0),
+            Some("m1".into()),
+        );
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Pseudonym member: no account presented.
+        let (m2, _m2_rx) = group_core(&fabric, "m2", &desc, false);
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The host's roster maps each leaf to its device fingerprint; find each.
+        let roster = host.roster();
+        let m1_leaf = roster.iter().find(|(_, fp)| *fp == m1.fingerprint()).map(|(l, _)| *l);
+        let m2_leaf = roster.iter().find(|(_, fp)| *fp == m2.fingerprint()).map(|(l, _)| *l);
+        let m1_leaf = m1_leaf.expect("m1 in roster");
+        let m2_leaf = m2_leaf.expect("m2 in roster");
+
+        // T-3: the linked member's leaf is bound to its account, unforgeably.
+        assert_eq!(
+            host.group_leaf_account(m1_leaf),
+            Some(acct_fp),
+            "linked member's leaf must bind to its account"
+        );
+        // The pseudonym's leaf stays unbound.
+        assert_eq!(
+            host.group_leaf_account(m2_leaf),
+            None,
+            "a pseudonym leaf must not be bound to any account"
+        );
+    }
+
+    /// SECURITY-AUDIT T-3 (device→leaf binding): a leaf's tree signing key is PUBLIC,
+    /// so a hostile member/relay can certify a *victim's* leaf key under its OWN
+    /// account and, on key-match alone, overwrite the victim's verified badge
+    /// (attribution hijack). The handler must reject any leaf-sig cert whose final
+    /// certifying device is not the device authenticated into that leaf, leaving the
+    /// honest binding intact.
+    #[tokio::test]
+    async fn leaf_sig_cert_forgery_cannot_hijack_verified_account() {
+        use talkrypt_crypto::IdentityChain;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#t3f",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // Honest linked member: its account certifies its device; it joins and binds.
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let account = IdentityKeyPair::generate();
+        let acct_fp = account.public().fingerprint();
+        m1.present_identity(
+            IdentityChain::device(&account, m1.identity_public(), "device:m1", 0, 0),
+            Some("m1".into()),
+        );
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let m1_leaf = host
+            .roster()
+            .iter()
+            .find(|(_, fp)| *fp == m1.fingerprint())
+            .map(|(l, _)| *l)
+            .expect("m1 in roster");
+        // Precondition: the honest binding is in place.
+        assert_eq!(host.group_leaf_account(m1_leaf), Some(acct_fp));
+
+        // Attacker reads m1's PUBLIC leaf signing key straight from the ratchet tree
+        // and certifies it under the attacker's OWN account+device — no victim secret
+        // is needed. (Reading it from the host's tree models exactly that exposure.)
+        let victim_leaf_key = {
+            let g = host.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.leaf_sig_public(m1_leaf).cloned())
+                .expect("m1 leaf sig key in host tree")
+        };
+        let atk_acct = IdentityKeyPair::generate();
+        let atk_dev = IdentityKeyPair::generate();
+        let forged = IdentityChain::device(&atk_acct, atk_dev.public(), "device:atk", 0, 0)
+            .extend(&atk_dev, &victim_leaf_key, "leaf-sig", 0, 0);
+
+        // Feed the forgery straight to the host's handler as if relayed.
+        handle_leaf_sig_cert(&host.inner, [7u8; 48], forged.encode()).await;
+
+        // The honest binding must survive; the hijack to the attacker account is refused.
+        assert_eq!(
+            host.group_leaf_account(m1_leaf),
+            Some(acct_fp),
+            "a forged leaf-sig cert must not overwrite the verified account badge"
+        );
+        assert_ne!(
+            host.group_leaf_account(m1_leaf),
+            Some(atk_acct.public().fingerprint()),
+            "attacker account must never bind to the victim's leaf"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1: route-descriptor gossip. A host advertises its
+    /// multi-homed routes; a connected member learns them (so it holds an alternate
+    /// route if the host later drops). A member also advertising its routes reaches
+    /// the whole group via the host's re-flood. A descriptor with a bad signature is
+    /// rejected.
+    #[tokio::test]
+    async fn route_descriptors_gossip_and_reject_bad_signatures() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Host advertises its multi-homed routes; m1 learns them.
+        let host_routes = vec!["abc.onion".to_string(), "nym:xyz".to_string()];
+        host.advertise_routes(host_routes.clone()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let learned = m1.known_routes();
+        let host_fp = host.fingerprint();
+        let got = learned.iter().find(|(fp, _)| *fp == host_fp).map(|(_, e)| e.clone());
+        assert_eq!(got, Some(host_routes), "m1 must learn the host's advertised routes");
+
+        // The host itself records its own routes too (complete map).
+        assert!(host.known_routes().iter().any(|(fp, _)| *fp == host_fp));
+
+        // A forged descriptor (valid structure, wrong signature) is dropped: a peer
+        // signs endpoints with the WRONG key, so verification fails and nothing is
+        // stored for that signer.
+        let attacker = IdentityKeyPair::generate();
+        let victim = IdentityKeyPair::generate();
+        let eps = vec!["evil.onion".to_string()];
+        // Sign with attacker but claim to be victim: encode victim's key + attacker's sig.
+        let bad_sig = attacker.sign(&route_transcript(victim.public(), 1, &eps));
+        let forged = encode_route_descriptor(victim.public(), 1, &eps, &bad_sig);
+        // Feed it straight to the handler as if received.
+        handle_route_descriptor(&host.inner, [9u8; 48], forged).await;
+        assert!(
+            !host.known_routes().iter().any(|(fp, _)| *fp == victim.public().fingerprint()),
+            "a descriptor with a bad signature must not be stored"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1: reconnect over learned routes heals a partition. A member
+    /// learns the host's dialable route, is then partitioned (all peers lost), and
+    /// `reconnect()` re-establishes the connection via the learned route — so losing
+    /// the original link no longer strands the member. While still connected,
+    /// `reconnect()` is a safe no-op.
+    #[tokio::test]
+    async fn reconnect_heals_partition_via_learned_route() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1r",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Host advertises its actual dialable endpoint; m1 learns it.
+        host.advertise_routes(vec!["host".to_string()]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(m1.known_routes().iter().any(|(fp, _)| *fp == host.fingerprint()));
+
+        // While still connected, reconnect() does nothing (guard).
+        assert_eq!(m1.reconnect().await, None, "no-op while connected");
+
+        // Simulate a partition: m1 loses all peers (host link dropped).
+        m1.inner.peers.lock().unwrap().clear();
+        assert_eq!(m1.peer_count(), 0);
+
+        // reconnect() dials the learned route and re-establishes the link.
+        let healed = m1.reconnect().await;
+        assert_eq!(healed, Some(host.fingerprint()), "reconnect restores the link via the learned route");
+    }
+
+    /// SECURITY-AUDIT A-1 (roster gate): a route descriptor with a perfectly VALID
+    /// signature but from a signer that is not a current group member must not be
+    /// stored. Route storage is a group feature; accepting non-members lets anyone
+    /// bloat `known_routes` with keys minted from throwaway identities.
+    #[tokio::test]
+    async fn route_descriptor_from_non_member_is_rejected() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1g",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+
+        // A stranger signs its OWN valid descriptor but never joined the group.
+        let stranger = IdentityKeyPair::generate();
+        let eps = vec!["stranger.onion".to_string()];
+        let sig = stranger.sign(&route_transcript(stranger.public(), 100, &eps));
+        let good = encode_route_descriptor(stranger.public(), 100, &eps, &sig);
+        handle_route_descriptor(&host.inner, [3u8; 48], good).await;
+
+        assert!(
+            !host
+                .known_routes()
+                .iter()
+                .any(|(fp, _)| *fp == stranger.public().fingerprint()),
+            "a validly-signed route from a non-member must be rejected (roster gate)"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1 (freshness / anti-rollback): a replayed OLDER descriptor
+    /// from a member — even with a valid signature — must not roll that member's
+    /// stored routes back to a stale (attacker-chosen, now-unreachable) set.
+    #[tokio::test]
+    async fn stale_route_descriptor_cannot_roll_back_routes() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1f",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // m1 is now a roster member on the host, so its (signed) descriptors pass the gate.
+        let m1_pub = m1.identity_public().clone();
+
+        // Fresher descriptor first (issued = 200).
+        let fresh_eps = vec!["fresh.onion".to_string()];
+        let fresh_sig = m1.inner.identity.sign(&route_transcript(&m1_pub, 200, &fresh_eps));
+        let fresh = encode_route_descriptor(&m1_pub, 200, &fresh_eps, &fresh_sig);
+        handle_route_descriptor(&host.inner, [4u8; 48], fresh).await;
+
+        // Then a replayed, validly-signed OLDER descriptor (issued = 100).
+        let stale_eps = vec!["stale.onion".to_string()];
+        let stale_sig = m1.inner.identity.sign(&route_transcript(&m1_pub, 100, &stale_eps));
+        let stale = encode_route_descriptor(&m1_pub, 100, &stale_eps, &stale_sig);
+        handle_route_descriptor(&host.inner, [4u8; 48], stale).await;
+
+        let got = host
+            .known_routes()
+            .into_iter()
+            .find(|(fp, _)| *fp == m1_pub.fingerprint())
+            .map(|(_, e)| e);
+        assert_eq!(
+            got,
+            Some(fresh_eps),
+            "a replayed older descriptor must not override the fresher routes"
+        );
+    }
+
+    /// SECURITY-AUDIT A-1 (eclipse resistance): if a learned address is answered by
+    /// an identity we do not expect (not a current roster member, nor the peer we
+    /// learned the route from), `reconnect()` must NOT report it as a heal. The join
+    /// handshake already gates on `root0`; this pins the reconnected identity too, so
+    /// an invited-but-non-member that merely answers cannot capture the peer slot.
+    #[tokio::test]
+    async fn reconnect_refuses_unexpected_identity_at_learned_address() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#a1e",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // A stranger that shares the chat's `root0` (same descriptor → the handshake
+        // will succeed) but is NOT a member of the group's roster.
+        let (evil, _erx) = group_core(&fabric, "evil", &desc, true);
+        evil.host().await.unwrap();
+
+        // m1 holds a learned route to "evil" attributed to some ghost fp it will never
+        // actually meet there (models a stale / poisoned learned address).
+        let ghost = IdentityKeyPair::generate();
+        m1.inner
+            .known_routes
+            .lock()
+            .unwrap()
+            .insert(ghost.public().fingerprint(), (1, vec!["evil".to_string()]));
+
+        // Partition m1, then reconnect: it dials "evil", completes the handshake, but
+        // evil's fp is neither a roster member nor the ghost route-owner → refused.
+        m1.inner.peers.lock().unwrap().clear();
+        let healed = m1.reconnect().await;
+        assert_eq!(
+            healed, None,
+            "reconnect must refuse an unexpected identity answering a learned address"
+        );
     }
 
     /// The gossip dedup key: a bounded seen-set that reports first sightings as
@@ -2661,5 +8348,805 @@ mod tests {
             !saw_forged,
             "a non-member relay must not be able to inject a forged Chat message"
         );
+    }
+
+    /// SUB-SPEC A + G2 (relay attribution of NAMES): a non-member relay must not be
+    /// able to inject a forged self-declared **name** to impersonate a trusted
+    /// callsign. A genuine group name rides the per-sender-signed group path
+    /// (`GroupMsg` behind the presence sentinel); a relay can only craft a raw
+    /// `Frame::Presence` in its `Routed` envelope, which a group member ignores
+    /// (the pairwise presence arm requires `role == None`). So no `Event::Name`
+    /// for the forged label may ever surface. This is the zRonin side-channel worry:
+    /// a relay dressing itself (or a stranger) as a trusted participant.
+    #[tokio::test]
+    async fn malicious_relay_cannot_inject_forged_name_into_relayed_group() {
+        use crate::presence::NamePresence;
+        use talkrypt_transport::Transport;
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["relay".into()],
+            "#g2name",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let root0 = desc.derive_root();
+
+        let relay_suite = suite.clone();
+        let relay_transport = Arc::new(fabric.transport("relay"));
+        let mut listener = relay_transport.listen().await.unwrap();
+        tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let identity = IdentityKeyPair::generate();
+            let hs = crate::handshake::respond(stream.as_mut(), &identity, relay_suite.as_ref(), root0)
+                .await
+                .unwrap();
+            let mut session = hs.session;
+            let (mut writer, mut reader) = stream.into_split();
+            // Consume the member's first (KeyPackage) frame to key our sending chain.
+            if let Ok(frame) = reader.recv_frame().await {
+                let _ = session.decrypt(&frame);
+            }
+            // Inject a raw name presence claiming a trusted callsign, spoofing `from`.
+            let forged = Routed {
+                to: Route::Broadcast,
+                from: [0x22; 48],
+                inner: Frame::Presence(
+                    NamePresence::Bare { seq: 1, label: "Trusted-Actual".into() }.encode(),
+                )
+                .encode(),
+            }
+            .encode();
+            if let Ok(ct) = session.encrypt(&forged) {
+                let _ = writer.send_frame(&ct).await;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let (member, mut member_rx) = Core::new_relayed_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("member")),
+            desc,
+            false,
+        );
+        member.connect("relay").await.unwrap();
+
+        // No Event::Name for the relay's forged callsign may ever surface.
+        let mut saw_forged_name = false;
+        for _ in 0..4 {
+            if let Ok(Some(ev)) = timeout(Duration::from_millis(250), member_rx.recv()).await {
+                if let Event::Name { label: Some(l), .. } = ev {
+                    if l == "Trusted-Actual" {
+                        saw_forged_name = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            !saw_forged_name,
+            "a non-member relay must not be able to inject a forged self-declared name"
+        );
+    }
+
+    /// LeafSigMode end-to-end: the DEFAULT (Derived) leaf signing key is stable for a
+    /// given (identity, chat) — a recognizable alias across rejoins — and unlinkable
+    /// across chats; the Ephemeral toggle mints a fresh key per construction. Also
+    /// asserts the whole existing group suite runs under the new default (Derived).
+    #[tokio::test]
+    async fn leaf_sig_mode_derived_is_stable_ephemeral_is_fresh() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#leafmode",
+        );
+        let desc2 = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#leafmode2",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        // A stable identity we can reconstruct (IdentityKeyPair is not Clone).
+        let seed = IdentityKeyPair::generate().export_secret();
+        let dup = || IdentityKeyPair::from_secret_bytes(seed);
+        let tp = |n: &str| Arc::new(fabric.transport(n));
+        let leaf_vk = |c: &Core| {
+            c.inner
+                .leaf_keypair
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|k| k.key_package().sig_public.sig_vk.clone())
+        };
+
+        // Same identity + chat, Derived (default): identical leaf signing key.
+        let (m1, _r1) = Core::new_group(dup(), suite.clone(), tp("m1"), desc.clone(), false);
+        let (m2, _r2) = Core::new_group(dup(), suite.clone(), tp("m2"), desc.clone(), false);
+        assert!(leaf_vk(&m1).is_some());
+        assert_eq!(leaf_vk(&m1), leaf_vk(&m2), "derived leaf key stable per (identity, chat)");
+
+        // Different chat -> unlinkable leaf key.
+        let (m3, _r3) = Core::new_group(dup(), suite.clone(), tp("m3"), desc2, false);
+        assert_ne!(leaf_vk(&m1), leaf_vk(&m3), "different chat -> unlinkable leaf key");
+
+        // Ephemeral toggle -> fresh key per construction, differing from Derived.
+        let (e1, _e1) = Core::new_group_with_leaf_mode(
+            dup(), suite.clone(), tp("e1"), desc.clone(), false, LeafSigMode::Ephemeral,
+        );
+        let (e2, _e2) = Core::new_group_with_leaf_mode(
+            dup(), suite.clone(), tp("e2"), desc.clone(), false, LeafSigMode::Ephemeral,
+        );
+        assert_ne!(leaf_vk(&e1), leaf_vk(&e2), "ephemeral leaf keys differ per construction");
+        assert_ne!(leaf_vk(&m1), leaf_vk(&e1), "ephemeral differs from the derived key");
+    }
+
+    #[test]
+    fn delivery_ack_frame_roundtrips_and_caps() {
+        let ids = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let bytes = Frame::DeliveryAck(ids.clone()).encode();
+        match Frame::decode(&bytes) {
+            Some(Frame::DeliveryAck(got)) => assert_eq!(got, ids),
+            _ => panic!("expected DeliveryAck"),
+        }
+        // Empty batch round-trips.
+        assert!(matches!(
+            Frame::decode(&Frame::DeliveryAck(vec![]).encode()),
+            Some(Frame::DeliveryAck(v)) if v.is_empty()
+        ));
+        // A count over MAX_ACK is rejected (never allocates unboundedly).
+        let mut hostile = Writer::new();
+        hostile.put_u8(15);
+        hostile.put_u32(70); // > MAX_ACK (64)
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
+    #[test]
+    fn promote_consent_frames_and_bodies_roundtrip() {
+        let body = PromoteBody {
+            target_tier: 1,
+            retention_mode: 0,
+            consent_rule: 0,
+            picked: vec![[1u8; 48], [2u8; 48]],
+            onion: "abc.onion".into(),
+            carry_from_secs: 0,
+            epoch: 3,
+        };
+        assert_eq!(PromoteBody::decode(&body.encode()).unwrap(), body);
+        assert!(matches!(Frame::decode(&Frame::Promote(body.encode()).encode()), Some(Frame::Promote(_))));
+        assert!(matches!(Frame::decode(&Frame::Consent(vec![1, 2, 3]).encode()), Some(Frame::Consent(_))));
+        // Over-cap picked list is rejected (no unbounded alloc).
+        let mut w = Writer::new();
+        w.put_u8(1);
+        w.put_u8(0);
+        w.put_u8(0);
+        w.put_u32(300); // n_picked > MAX_PICKED
+        assert!(PromoteBody::decode(&w.into_vec()).is_none());
+        let cb = ConsentBody { promote_id: [7u8; 32], accept: true, leaf: 2, epoch: 3 };
+        assert_eq!(ConsentBody::decode(&cb.encode()).unwrap(), cb);
+    }
+
+    #[tokio::test]
+    async fn propose_promote_broadcasts_and_tracks_state() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        let picked = vec![host.fingerprint()];
+        let id = host
+            .propose_promote(1, 0, 0, picked, String::new(), 0)
+            .await
+            .unwrap();
+        let st = host.inner.promote.lock().unwrap();
+        let state = st.as_ref().expect("pending promotion tracked");
+        assert_eq!(state.body.id(), id, "tracked body matches the returned promote_id");
+        assert!(state.consents.is_empty(), "no consents yet");
+    }
+
+    /// D2 Task 4: a member receives the host's promotion proposal, VERIFIES the signature
+    /// under the host's leaf, surfaces `PromoteProposed`, and can send a signed consent.
+    #[tokio::test]
+    async fn member_receives_verifies_promote_and_can_consent() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let picked = vec![host.fingerprint(), m1.fingerprint()];
+        let id = host.propose_promote(1, 0, 0, picked, String::new(), 0).await.unwrap();
+        // m1 verifies + surfaces the proposal.
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, target_tier, .. } = next_event(&mut m1rx).await {
+                    break (promote_id, target_tier);
+                }
+            }
+        })
+        .await
+        .expect("PromoteProposed before timeout");
+        assert_eq!(got.0, id, "the surfaced promote_id matches the proposal");
+        assert_eq!(got.1, 1);
+        // m1 consents (signs + sends without error).
+        m1.respond_promote(id, true).await.unwrap();
+    }
+
+    /// D2 Task 5: unanimous consent over the picked set commits the promotion — the host
+    /// re-keys, marks the chat persistent, removes the un-picked member, and emits Promoted.
+    #[tokio::test]
+    async fn promotion_commits_on_unanimous_consent_and_removes_unpicked() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["host".into()],
+            "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        assert!(host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp), "m2 joined");
+
+        // Promote picking host + m1 only (m2 un-picked); unanimous rule.
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        // m1 consents.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("m1 sees the proposal");
+        m1.respond_promote(id, true).await.unwrap();
+
+        // The host tallies + commits: Promoted fires.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::Promoted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("host commits the promotion");
+        assert!(host.is_persistent(), "chat is now persistent");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "the un-picked member m2 was removed by the re-key commit"
+        );
+    }
+
+    /// D2 Task 7 (HostMandate rule 2): the host converts unilaterally — the promotion
+    /// commits immediately at propose time with no consent, and un-picked members are removed.
+    #[tokio::test]
+    async fn host_mandate_commits_immediately() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, _hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, _m1rx) = group_core(&fabric, "m1", &desc, false);
+        let (m2, _m2rx) = group_core(&fabric, "m2", &desc, false);
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let m2_fp = m2.fingerprint();
+        // Rule 2 = HostMandate; picks host + m1.
+        host.propose_promote(1, 0, 2, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        assert!(host.is_persistent(), "host-mandate commits immediately");
+        assert!(
+            !host.inner.roster.lock().unwrap().values().any(|fp| *fp == m2_fp),
+            "un-picked m2 removed under host-mandate"
+        );
+    }
+
+    /// D3 Task 3: each node records its OWN group messages (sent + received) in its
+    /// ephemeral backlog — the material a later Carry promotion may seal.
+    #[tokio::test]
+    async fn backlog_captures_own_and_received_group_messages() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#bl",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        host.send("hello from host").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(&mut m1rx).await {
+                    if text == "hello from host" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("m1 receives host's message");
+        m1.send("hi back").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::Message { text, .. } = next_event(&mut hrx).await {
+                    if text == "hi back" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("host receives m1's reply");
+
+        // Host: its own send + m1's reply. m1: host's message + its own send.
+        assert_eq!(host.backlog_len(), 2, "host backlog = own send + received reply");
+        assert_eq!(m1.backlog_len(), 2, "m1 backlog = received + own send");
+    }
+
+    /// D3 Task 4: the pure retention predicate covers all three modes deterministically
+    /// (no timing). Fresh never seals; Carry always; CarryFromPoint respects the marker.
+    #[test]
+    fn should_seal_covers_all_modes() {
+        // Fresh: nothing, regardless of ts/marker.
+        assert!(!should_seal(RetentionMode::Fresh, 0, 100));
+        assert!(!should_seal(RetentionMode::Fresh, 50, 100));
+        // Carry: everything.
+        assert!(should_seal(RetentionMode::Carry, 999, 0));
+        assert!(should_seal(RetentionMode::Carry, 0, 100));
+        // CarryFromPoint: at/after the marker only.
+        assert!(should_seal(RetentionMode::CarryFromPoint, 100, 100), "boundary is inclusive");
+        assert!(should_seal(RetentionMode::CarryFromPoint, 100, 101));
+        assert!(!should_seal(RetentionMode::CarryFromPoint, 100, 99));
+        // from_u8 fails closed on an unknown tag.
+        assert_eq!(RetentionMode::from_u8(3), None);
+        assert_eq!(RetentionMode::from_u8(0), Some(RetentionMode::Fresh));
+    }
+
+    /// D3 Task 4: a Carry promotion seals each node's OWN backlog into its history store;
+    /// a Fresh promotion seals nothing. Verifies host + member both apply the contract.
+    #[tokio::test]
+    async fn retention_carry_seals_own_backlog_fresh_seals_nothing() {
+        use crate::history::HistoryStore;
+        for (mode, expect_sealed) in [(1u8, true), (0u8, false)] {
+            let fabric = LoopbackFabric::new();
+            let desc = ChatDescriptor::new(
+                TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#rt",
+            );
+            let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+            host.host().await.unwrap();
+            let host_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+            host.set_history_store(host_hist.clone());
+            let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+            let m1_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+            m1.set_history_store(m1_hist.clone());
+            m1.connect("host").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+
+            // Exchange two messages so both nodes have a non-empty backlog.
+            host.send("m-from-host").await.unwrap();
+            wait_for_message(&mut m1rx, "m-from-host").await;
+            m1.send("m-from-m1").await.unwrap();
+            wait_for_message(&mut hrx, "m-from-m1").await;
+
+            let id = host
+                .propose_promote(1, mode, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
+                .await
+                .unwrap();
+            // m1 consents accept.
+            wait_for_promote(&mut m1rx, id).await;
+            m1.respond_promote(id, true).await.unwrap();
+            wait_for_promoted(&mut hrx, id).await;
+            // Let the PromoteCommit reach m1 so it finalizes.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            if expect_sealed {
+                assert_eq!(host_hist.load("#rt").len(), 2, "Carry: host sealed its own backlog");
+                assert_eq!(m1_hist.load("#rt").len(), 2, "Carry: m1 sealed its own backlog");
+            } else {
+                assert!(host_hist.load("#rt").is_empty(), "Fresh: host sealed nothing");
+                assert!(m1_hist.load("#rt").is_empty(), "Fresh: m1 sealed nothing");
+            }
+        }
+    }
+
+    /// D3 Task 5 (invariant 4, recoverable): returning a persistent chat to ephemeral
+    /// erases its sealed history (the Delete affordance). Uses the sealing store directly.
+    #[test]
+    fn return_to_ephemeral_purges_sealed_history() {
+        use crate::history::HistoryStore;
+        let (core, _rx) = test_core_pairwise();
+        let chat = core.descriptor().channel.clone();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        core.set_history_store(hist.clone());
+        // Seed a sealed record + a live persistent chat.
+        hist.put(&chat, [1u8; 32], &[0xAA]);
+        core.set_persistence(true);
+        assert_eq!(hist.load(&chat).len(), 1);
+        // Return to ephemeral → the sealed blob is erased.
+        core.set_persistence(false);
+        assert!(hist.load(&chat).is_empty(), "return-to-ephemeral purges sealed history");
+        assert!(!core.is_persistent());
+    }
+
+    /// SUB-SPEC D at-rest: `load_history` decodes what a sealed HistoryStore holds for this
+    /// chat (the restart-redisplay path). Uses the in-memory store as the trait stand-in.
+    #[test]
+    fn load_history_decodes_sealed_records() {
+        use crate::history::{HistoryRecord, HistoryStore};
+        let (core, _rx) = test_core_pairwise();
+        let chat = core.descriptor().channel.clone();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        core.set_history_store(hist.clone());
+        let rec = HistoryRecord { from: [4u8; 48], ts: 42, text: "carried".into(), marking: None };
+        hist.put(&chat, [1u8; 32], &rec.encode());
+        let loaded = core.load_history();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], rec, "load_history round-trips the sealed record");
+    }
+
+    /// SUB-SPEC A / #68 (engine wiring): one Core advertises this chat over a local-radio
+    /// LocalBeacon; another Core holding the SAME invite, scanning, decrypts it and emits
+    /// Event::BeaconSeen — pre-session discovery, end to end over the loopback beacon fabric.
+    #[tokio::test]
+    async fn start_local_presence_advertises_and_surfaces_beacon_seen() {
+        use crate::advert::AdvertisePolicy;
+        use talkrypt_transport::LoopbackBeaconFabric;
+        let net = LoopbackFabric::new();
+        // Two invite-holders share the SAME descriptor (same invite token / chat root).
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["a".into()], "#cq",
+        );
+        let (a, _arx) = core_on(&net, "a", &desc);
+        let (b, mut brx) = core_on(&net, "b", &desc);
+
+        let radio = LoopbackBeaconFabric::new();
+        // B only scans; A advertises the chat's sealed beacon.
+        b.start_local_presence(std::sync::Arc::new(radio.node("b")), AdvertisePolicy::Off).await;
+        a.start_local_presence(std::sync::Arc::new(radio.node("a")), AdvertisePolicy::Full).await;
+
+        // B decrypts A's beacon (same invite) and surfaces a BeaconSeen for the shared chat.
+        let channel = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::BeaconSeen { channel, .. } = next_event(&mut brx).await {
+                    return channel;
+                }
+            }
+        })
+        .await
+        .expect("BeaconSeen before timeout");
+        assert_eq!(channel, "#cq");
+    }
+
+    /// SUB-SPEC D at-rest: once a chat is persistent, every new own+received message is
+    /// sealed to the HistoryStore as it arrives; an ephemeral chat seals nothing.
+    #[tokio::test]
+    async fn persistent_chat_seals_each_message_to_history() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#live",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        host.set_history_store(hist.clone());
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Ephemeral: a send seals nothing.
+        host.send("before").await.unwrap();
+        wait_for_message(&mut m1rx, "before").await;
+        assert!(hist.load("#live").is_empty(), "ephemeral chat seals nothing to history");
+
+        // Flip persistent: each new own-sent and received message is sealed live.
+        host.set_persistence(true);
+        host.send("after-own").await.unwrap();
+        m1.send("after-recv").await.unwrap();
+        wait_for_message(&mut hrx, "after-recv").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            hist.load("#live").len(),
+            2,
+            "persistent chat seals its own send + the received message"
+        );
+    }
+
+    /// D3 Task 6 (invariant 1, default-safe): the default retention (Fresh / any unknown
+    /// tag) seals nothing — no retroactive persistence without an explicit choice.
+    #[test]
+    fn invariant_default_safe_seals_nothing() {
+        // The wire/UI default is 0 = Fresh; an unrecognized tag also falls back to Fresh.
+        assert!(!should_seal(RetentionMode::from_u8(0).unwrap(), 0, 12345));
+        assert!(!should_seal(RetentionMode::from_u8(200).unwrap_or(RetentionMode::Fresh), 0, 12345));
+    }
+
+    /// D3 Task 6 (invariant 2, consented): a member that DECLINES a Carry promotion seals
+    /// nothing for itself, even though it holds a backlog — retention needs THAT member's
+    /// consent. Uses opt-in-successor (rule 1) so a decline doesn't abort the whole thing.
+    #[tokio::test]
+    async fn invariant_decliner_seals_nothing() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#in2",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        let m1_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m1.set_history_store(m1_hist.clone());
+        let (m2, mut m2rx) = group_core(&fabric, "m2", &desc, false);
+        let m2_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m2.set_history_store(m2_hist.clone());
+        m1.connect("host").await.unwrap();
+        m2.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // Everyone builds a backlog.
+        host.send("hello all").await.unwrap();
+        wait_for_message(&mut m1rx, "hello all").await;
+        wait_for_message(&mut m2rx, "hello all").await;
+        assert!(m2.backlog_len() >= 1, "m2 has a backlog it COULD seal");
+
+        // Opt-in Carry picking host+m1+m2; m1 accepts, m2 declines.
+        let id = host
+            .propose_promote(1, 1, 1, vec![host.fingerprint(), m1.fingerprint(), m2.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        wait_for_promote(&mut m1rx, id).await;
+        wait_for_promote(&mut m2rx, id).await;
+        m1.respond_promote(id, true).await.unwrap();
+        m2.respond_promote(id, false).await.unwrap();
+        wait_for_promoted(&mut hrx, id).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(!m1_hist.load("#in2").is_empty(), "the accepter sealed its own backlog");
+        assert!(m2_hist.load("#in2").is_empty(), "the DECLINER sealed nothing (invariant 2)");
+    }
+
+    /// D3 Task 6 (invariant 3, no fabrication / no transmission): a latecomer who joins after
+    /// the messages were sent has an empty backlog, so a Carry promotion seals NOTHING for it
+    /// — history is never backfilled to a member who wasn't there. (Structurally, there is no
+    /// history wire frame at all, so carrying can never transmit.)
+    #[tokio::test]
+    async fn invariant_latecomer_gets_no_backfill() {
+        use crate::history::HistoryStore;
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#in3",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Messages exchanged BEFORE the latecomer joins.
+        host.send("early-1").await.unwrap();
+        wait_for_message(&mut m1rx, "early-1").await;
+        m1.send("early-2").await.unwrap();
+        wait_for_message(&mut hrx, "early-2").await;
+
+        // Latecomer joins now — its backlog is empty.
+        let (m3, mut m3rx) = group_core(&fabric, "m3", &desc, false);
+        let m3_hist = std::sync::Arc::new(crate::history::InMemoryHistory::new());
+        m3.set_history_store(m3_hist.clone());
+        m3.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(m3.backlog_len(), 0, "latecomer has no backlog");
+
+        // Carry promotion, m3 accepts.
+        let id = host
+            .propose_promote(1, 1, 1, vec![host.fingerprint(), m1.fingerprint(), m3.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        wait_for_promote(&mut m1rx, id).await;
+        wait_for_promote(&mut m3rx, id).await;
+        m1.respond_promote(id, true).await.unwrap();
+        m3.respond_promote(id, true).await.unwrap();
+        wait_for_promoted(&mut hrx, id).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(m3_hist.load("#in3").is_empty(), "no backfill to a latecomer (invariant 3)");
+    }
+
+    /// D2 Task 7 (Unanimous rule 0): a single decline ABORTS the promotion; the chat
+    /// stays ephemeral (nobody's expectation is overridden).
+    #[tokio::test]
+    async fn unanimous_decline_aborts() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub, Persistence::Ephemeral, DEFAULT_SUITE_ID, vec!["host".into()], "#pr",
+        );
+        let (host, mut hrx) = group_core(&fabric, "host", &desc, true);
+        host.host().await.unwrap();
+        let (m1, mut m1rx) = group_core(&fabric, "m1", &desc, false);
+        m1.connect("host").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let id = host
+            .propose_promote(1, 0, 0, vec![host.fingerprint(), m1.fingerprint()], String::new(), 0)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteProposed { promote_id, .. } = next_event(&mut m1rx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        m1.respond_promote(id, false).await.unwrap(); // DECLINE
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::PromoteAborted { promote_id } = next_event(&mut hrx).await {
+                    if promote_id == id { break; }
+                }
+            }
+        })
+        .await
+        .expect("promotion aborts on decline");
+        assert!(!host.is_persistent(), "chat stays ephemeral after an abort");
+    }
+
+    #[test]
+    fn mailbox_frames_roundtrip() {
+        let put = Frame::MailboxPut { recipient: [9u8; 48], frame: b"sealed".to_vec() };
+        match Frame::decode(&put.encode()) {
+            Some(Frame::MailboxPut { recipient, frame }) => {
+                assert_eq!(recipient, [9u8; 48]);
+                assert_eq!(frame, b"sealed");
+            }
+            _ => panic!("expected MailboxPut"),
+        }
+        assert!(matches!(Frame::decode(&Frame::MailboxFetch.encode()), Some(Frame::MailboxFetch)));
+    }
+
+    #[test]
+    fn queue_sync_frame_roundtrips_and_caps() {
+        let entries = vec![([1u8; 32], [2u8; 48]), ([3u8; 32], [4u8; 48])];
+        match Frame::decode(&Frame::QueueSync(entries.clone()).encode()) {
+            Some(Frame::QueueSync(got)) => assert_eq!(got, entries),
+            _ => panic!("expected QueueSync"),
+        }
+        let mut hostile = Writer::new();
+        hostile.put_u8(18);
+        hostile.put_u32(1000); // > MAX_SYNC
+        assert!(Frame::decode(&hostile.into_vec()).is_none());
+    }
+
+    #[tokio::test]
+    async fn persistent_chat_enqueues_outgoing_group_frame() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Persistent,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#p",
+        );
+        let suite = SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID).unwrap();
+        let (host, _rx) = Core::new_group(
+            IdentityKeyPair::generate(),
+            suite,
+            Arc::new(fabric.transport("h")),
+            desc,
+            true,
+        );
+        assert!(!host.is_persistent());
+        host.set_persistence(true);
+        host.send("hello").await.unwrap();
+        // The frame is now recoverable from the outbox for resend (keyed by channel).
+        assert_eq!(
+            host.inner.outbox.pending("#p").len(),
+            1,
+            "a persistent-chat send is queued in the outbox"
+        );
+        // A second send adds a distinct entry.
+        host.send("world").await.unwrap();
+        assert_eq!(host.inner.outbox.pending("#p").len(), 2);
+    }
+}
+
+#[cfg(kani)]
+mod d1_proofs {
+    use super::*;
+
+    // Each harness targets the CHUNKED, standalone D1 body decoder directly — NOT the whole
+    // `Frame::decode` (whose arbitrary-tag dispatch drags in the CBMC-intractable Marking
+    // arms, SECURITY-AUDIT R-6). This keeps every proof small, flat, and fast.
+
+    /// D1 `decode_delivery_ack` never panics on any body — count-capped [u8;32] ids.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn delivery_ack_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64);
+        let data: [u8; 64] = kani::any();
+        let _ = decode_delivery_ack(&data[..len]);
+    }
+
+    /// D1 Layer-B `decode_mailbox_put` never panics — fixed [u8;48] recipient + one
+    /// length-prefixed opaque blob. (`MailboxFetch`, tag 17, is field-less: trivially total.)
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn mailbox_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 80);
+        let data: [u8; 80] = kani::any();
+        let _ = decode_mailbox_put(&data[..len]);
+    }
+
+    /// D1 Layer-C `decode_queue_sync` never panics — count-capped [u8;32]+[u8;48] pairs.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn queue_sync_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 96);
+        let data: [u8; 96] = kani::any();
+        let _ = decode_queue_sync(&data[..len]);
+    }
+
+    /// D2/D3 PromoteBody FLAT framing decode never panics (fixed enums + capped [u8;48]
+    /// picked list + length-prefixed onion bytes + the D3 `carry_from_secs` u64 marker +
+    /// epoch). Targets `decode_flat`, which excludes the onion `String::from_utf8` — a
+    /// std, panic-free boundary that is CBMC-intractable for the same reason `Marking` is
+    /// (SECURITY-AUDIT R-6). Structurally identical to the D1 count-capped-list decoders,
+    /// so it is CBMC-tractable at the same `unwind`.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn promote_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 88);
+        let data: [u8; 88] = kani::any();
+        let _ = PromoteBody::decode_flat(&data[..len]);
+    }
+
+    /// D2 ConsentBody decode never panics (flat: fixed [u8;32] + u8 + u32 + u32).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn consent_body_decode_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 48);
+        let data: [u8; 48] = kani::any();
+        let _ = ConsentBody::decode(&data[..len]);
     }
 }

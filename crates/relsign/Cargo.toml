@@ -1,0 +1,17 @@
+[package]
+name = "talkrypt-relsign"
+version = "0.1.0"
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Release-manifest signing tool (SECURITY-AUDIT F-8). NOT part of the shipped app;
+# a build/release utility that PQ-signs the release checksum manifest with the
+# project's ML-DSA-87 release key, so integrity rests on a signing authority the
+# project controls — not only bare checksums. Dogfoods talkrypt's own signature.
+[[bin]]
+name = "talkrypt-relsign"
+path = "src/main.rs"
+
+[dependencies]
+talkrypt-crypto.workspace = true

@@ -149,6 +149,33 @@ mod tests {
         assert!(open_advertisement(&outsider, &blob).is_err());
     }
 
+    /// SUB-SPEC A / #68 (OTA pipeline, end to end): a sealed beacon is carried over the
+    /// local-radio [`talkrypt_transport::LocalBeacon`] seam, a nearby invite-holder scans
+    /// and OPENS it, and a device without the invite sees only opaque bytes.
+    #[tokio::test]
+    async fn beacon_travels_over_local_radio_and_opens_for_invite_holder() {
+        use talkrypt_transport::{LocalBeacon, LoopbackBeaconFabric};
+        let d = desc(talkrypt_crypto::DEFAULT_SUITE_ID);
+        let blob = build_advertisement(&d, AdvertisePolicy::Full).unwrap().unwrap();
+
+        let fabric = LoopbackBeaconFabric::new();
+        let alice = fabric.node("alice");
+        let bob = fabric.node("bob");
+        let mut scan = bob.scan().await.unwrap();
+        alice.advertise(blob).await.unwrap();
+
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(2), scan.next())
+            .await
+            .expect("beacon before timeout")
+            .expect("scan open");
+        // Bob holds the same invite → opens the OTA beacon and recovers the scheme.
+        let body = open_advertisement(&d, &seen.blob).unwrap();
+        assert_eq!(body.fingerprint(), d.scheme_hash());
+        // A device without the invite recovers nothing from the same over-the-air bytes.
+        let outsider = desc(talkrypt_crypto::DEFAULT_SUITE_ID);
+        assert!(open_advertisement(&outsider, &seen.blob).is_err());
+    }
+
     #[test]
     fn advert_store_put_get() {
         let mut store = AdvertStore::new();

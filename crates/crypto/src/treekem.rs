@@ -29,7 +29,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use rand::RngCore;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{open as aead_open, seal as aead_seal};
@@ -193,11 +192,30 @@ impl LeafKeyPair {
     }
 
     /// Generate a fresh leaf key for a specific KEM profile (must match the
-    /// group being joined).
+    /// group being joined). The signature key is EPHEMERAL (fresh per join) —
+    /// maximal unlinkability, no cross-rejoin continuity. See
+    /// [`generate_derived`](LeafKeyPair::generate_derived) for the stable default.
     pub fn generate_with(profile: KemProfile) -> LeafKeyPair {
         let mut secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
+        crate::rng::fill_secure(&mut secret); // F-4: health-gated keygen entropy
         LeafKeyPair { profile, secret, sig: IdentityKeyPair::generate() }
+    }
+
+    /// Generate a leaf key whose SIGNATURE key is deterministically derived from
+    /// the member's identity root secret and a stable per-group id (the invite
+    /// token) — see [`derive_leaf_sig_seed`]. The same `(identity, group)` yields
+    /// the same leaf signing key across rejoins (recognizable + recoverable), while
+    /// different groups yield mutually unlinkable keys. The KEM secret stays random
+    /// (it rotates on every commit regardless, so it need not be derived).
+    pub fn generate_derived(
+        profile: KemProfile,
+        identity_root: &[u8; 32],
+        group_id: &[u8],
+    ) -> LeafKeyPair {
+        let mut secret = [0u8; 32];
+        crate::rng::fill_secure(&mut secret); // F-4: health-gated keygen entropy
+        let sig = IdentityKeyPair::from_secret_bytes(derive_leaf_sig_seed(identity_root, group_id));
+        LeafKeyPair { profile, secret, sig }
     }
 
     /// The KEM profile this leaf key is bound to.
@@ -228,6 +246,22 @@ enum Proposal {
     },
     Remove {
         leaf: u32,
+    },
+    /// A member's self-rekey PROPOSAL (SECURITY-AUDIT T-4): replace an existing
+    /// leaf's KEM and signature keys. Unlike `update()`, this is committed by the
+    /// HOST (single committer), so a member gets post-compromise security WITHOUT
+    /// advancing its own epoch — no concurrent-commit fork.
+    Update {
+        leaf: u32,
+        leaf_public: RatchetPublic,
+        sig_public: IdentityPublic,
+        pop: Vec<u8>,
+        /// Signature by the leaf's **current** signing key authorizing this rotation
+        /// (`update_auth_transcript`). Verified against the pre-update
+        /// `leaf_sig_keys[leaf]` BEFORE the new key is installed, so a malicious
+        /// committer/relay cannot forge an `Update` that rewrites another member's
+        /// leaf key and impersonate them (only the current occupant can sign it).
+        auth: Vec<u8>,
     },
 }
 
@@ -328,6 +362,14 @@ impl Proposal {
                 w.put_u8(1);
                 w.put_u32(*leaf);
             }
+            Proposal::Update { leaf, leaf_public, sig_public, pop, auth } => {
+                w.put_u8(2);
+                w.put_u32(*leaf);
+                w.put_bytes(&leaf_public.encode());
+                w.put_bytes(&sig_public.sig_vk);
+                w.put_bytes(pop);
+                w.put_bytes(auth);
+            }
         }
     }
     fn get(profile: KemProfile, r: &mut talkrypt_wire::Reader) -> Result<Proposal> {
@@ -339,6 +381,13 @@ impl Proposal {
                 pop: r.get_vec()?,
             }),
             1 => Ok(Proposal::Remove { leaf: r.get_u32()? }),
+            2 => Ok(Proposal::Update {
+                leaf: r.get_u32()?,
+                leaf_public: RatchetPublic::decode(profile, r.get_bytes()?)?,
+                sig_public: decode_sig_public(r.get_bytes()?)?,
+                pop: r.get_vec()?,
+                auth: r.get_vec()?,
+            }),
             _ => Err(CryptoError::Malformed("bad proposal tag")),
         }
     }
@@ -374,6 +423,46 @@ const SIG_CONTEXT: &[u8] = b"talkrypt-treekem-msg-v2";
 /// group-message signature or vice versa.
 const POP_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-pop-v2";
 
+/// SUB-SPEC D2 promotion/consent signature contexts. DISTINCT from `SIG_CONTEXT` and
+/// `POP_CONTEXT` (and each other) so a promote/consent signature can never be replayed
+/// as a group message, a PoP, or across the promote↔consent boundary (GroupAuth Thm 6).
+const PROMOTE_CONTEXT: &[u8] = b"talkrypt-treekem-promote-v1";
+const CONSENT_CONTEXT: &[u8] = b"talkrypt-treekem-consent-v1";
+const PROMO_COMMIT_CONTEXT: &[u8] = b"talkrypt-treekem-promo-commit-v1";
+
+/// Injective (length-prefixed) transcript a leaf signs to propose a promotion:
+/// `PROMOTE_CONTEXT | epoch | leaf | body`.
+fn promote_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(PROMOTE_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+/// Injective transcript a leaf signs to consent to a promotion:
+/// `CONSENT_CONTEXT | epoch | leaf | body`.
+fn consent_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(CONSENT_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+/// Injective transcript the committer (host) signs to announce a promotion has
+/// COMMITTED, so members can finalize locally (flip persistence, apply the D3
+/// retention contract): `PROMO_COMMIT_CONTEXT | epoch | leaf | body`. Distinct
+/// context ⇒ a commit signature can never be replayed as a promote/consent/message.
+fn promo_commit_transcript(epoch: u32, leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(PROMO_COMMIT_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(leaf);
+    w.put_bytes(body);
+    w.into_vec()
+}
+
 /// The bytes a joiner signs (with its leaf signing key) to prove possession of it:
 /// `POP_CONTEXT | sig_vk`. The KEM leaf key is NOT bound here — it rotates on every
 /// commit (`rekey_path`) and the leaf index isn't known at KeyPackage-creation
@@ -395,6 +484,29 @@ fn verify_pop(sig_public: &IdentityPublic, pop: &[u8]) -> Result<()> {
     sig_public
         .verify(&pop_transcript(sig_public), pop)
         .map_err(|_| CryptoError::BadSignature)
+}
+
+/// Domain-separation prefix for a leaf-update AUTHORIZATION signature. Distinct from
+/// POP/SIG/message contexts so an update authorization can never be replayed as a
+/// PoP or a group-message signature (or vice versa).
+const UPDATE_AUTH_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-update-v2";
+
+/// The bytes a member signs with its **current** leaf signing key to AUTHORIZE
+/// rotating its leaf to a new `(leaf_public, sig_public)`:
+/// `UPDATE_AUTH_CONTEXT | leaf | new_leaf_public | new_sig_vk`. Verified against the
+/// leaf's CURRENT signing key before the new key is installed, so a committer/relay
+/// cannot fabricate an `Update` that rewrites a leaf whose secret it does not hold.
+fn update_auth_transcript(
+    leaf: u32,
+    leaf_public: &RatchetPublic,
+    sig_public: &IdentityPublic,
+) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(UPDATE_AUTH_CONTEXT);
+    w.put_u32(leaf);
+    w.put_bytes(&leaf_public.encode());
+    w.put_bytes(&sig_public.sig_vk);
+    w.into_vec()
 }
 
 /// The bytes a sender signs (and a receiver verifies) for a v2 group message:
@@ -631,6 +743,16 @@ pub struct TreeKemGroup {
     /// degenerate test-built group; `create`/`join` always set it. Used to SIGN our
     /// outgoing group messages.
     my_sig: Option<IdentityKeyPair>,
+    /// A staged new leaf keypair from `propose_update()` (SECURITY-AUDIT T-4),
+    /// installed when the host's commit carrying our Update proposal is applied. We
+    /// do NOT advance our epoch on proposing, so there is no concurrent-commit fork.
+    pending_update: Option<LeafKeyPair>,
+    /// SECURITY-AUDIT F-16: length-bucket step in bytes. When > 0, every outgoing
+    /// group message plaintext is padded to a multiple of this before the AEAD, so a
+    /// non-member relay (and any observer) sees quantized ciphertext sizes rather than
+    /// exact message lengths. 0 = off (default; back-compat with unpadded peers). Set
+    /// per chat from the descriptor; all members must agree (they share the descriptor).
+    pad_bucket: usize,
 }
 
 // Zero the group's secret material on drop: the ratchet-tree node secrets, the
@@ -669,13 +791,35 @@ impl TreeKemGroup {
     }
 
     /// Create a new group with a specific KEM profile (posture + wire padding).
+    /// The founder's leaf signature key is EPHEMERAL; see
+    /// [`create_derived`](TreeKemGroup::create_derived) for the stable default.
     pub fn create_with(profile: KemProfile) -> TreeKemGroup {
+        TreeKemGroup::create_with_sig(profile, IdentityKeyPair::generate())
+    }
+
+    /// Create a new group whose founder leaf signature key is deterministically
+    /// derived from the founder's identity root and a stable per-group id (the
+    /// invite token) — stable across re-founds, unlinkable across groups. See
+    /// [`derive_leaf_sig_seed`].
+    pub fn create_derived(
+        profile: KemProfile,
+        identity_root: &[u8; 32],
+        group_id: &[u8],
+    ) -> TreeKemGroup {
+        TreeKemGroup::create_with_sig(
+            profile,
+            IdentityKeyPair::from_secret_bytes(derive_leaf_sig_seed(identity_root, group_id)),
+        )
+    }
+
+    /// Create a new group with a caller-supplied founder leaf signature key
+    /// `my_sig` (ephemeral or derived). All other founding state is fresh.
+    pub fn create_with_sig(profile: KemProfile, my_sig: IdentityKeyPair) -> TreeKemGroup {
         let capacity = 2;
         let mut leaf_secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut leaf_secret);
+        crate::rng::fill_secure(&mut leaf_secret); // F-4: health-gated keygen entropy
 
         // The founder's per-membership leaf signature key (its group alias).
-        let my_sig = IdentityKeyPair::generate();
         let mut leaf_sig_keys = HashMap::new();
         leaf_sig_keys.insert(0u32, my_sig.public().clone());
 
@@ -694,6 +838,8 @@ impl TreeKemGroup {
             leaf_sig_keys,
             leaf_pops: HashMap::new(),
             my_sig: Some(my_sig),
+            pending_update: None,
+            pad_bucket: 0,
         };
         g.occupied[0] = true;
         // Set the founder's whole path (leaf -> root) from a fresh secret chain.
@@ -734,6 +880,23 @@ impl TreeKemGroup {
     /// Needed to decode incoming `KeyPackage`/`Commit`/`Welcome` wire bytes.
     pub fn profile(&self) -> KemProfile {
         self.profile
+    }
+
+    /// The leaf signature public key bound to `leaf`, if occupied. This is the key
+    /// a member's group messages are verified against; exposing it lets a higher
+    /// layer CROSS-CHECK it against an authenticated account credential
+    /// (SECURITY-AUDIT T-3 mitigation): a leaf that presents an account must have
+    /// its tree-bound sig key certified by that account (`belongs_to_account`), so a
+    /// malicious committer cannot bind a substituted key to a real account.
+    pub fn leaf_sig_public(&self, leaf: u32) -> Option<&IdentityPublic> {
+        self.leaf_sig_keys.get(&leaf)
+    }
+
+    /// This member's OWN leaf signature public key — the key its group messages are
+    /// signed with, and the subject a member's device certifies to bind its leaf to
+    /// an account (SECURITY-AUDIT T-3). `None` in a degenerate test-built group.
+    pub fn my_leaf_sig_public(&self) -> Option<IdentityPublic> {
+        self.my_sig.as_ref().map(|s| s.public().clone())
     }
 
     // ---- tree helpers ----
@@ -834,6 +997,73 @@ impl TreeKemGroup {
     /// roster changes. Mechanically identical to add/remove's re-key, with no
     /// proposals (roster unchanged). `rekey_path` already refreshes the caller's
     /// path secrets and advances `self.epoch`/`epoch_secret`.
+    /// **Propose** a self-rekey without advancing our epoch (SECURITY-AUDIT T-4):
+    /// generate a fresh leaf keypair (KEM + ML-DSA-87 signing key), stage it, and
+    /// return the encoded `Update` proposal to hand to the HOST. The host commits it
+    /// ([`commit_update`]); we install the staged keys only when that commit is
+    /// applied — so, unlike [`update`], a member never advances optimistically and
+    /// cannot fork against a concurrent host commit. Gives a member post-compromise
+    /// security (KEM + signing key) through the single-committer path.
+    ///
+    /// [`commit_update`]: TreeKemGroup::commit_update
+    /// [`update`]: TreeKemGroup::update
+    pub fn propose_update(&mut self) -> Result<Vec<u8>> {
+        let kp = LeafKeyPair::generate_with(self.profile);
+        let package = kp.key_package();
+        // Authorize the rotation with our CURRENT leaf signing key, so a committer
+        // cannot fabricate an Update that rewrites our (or anyone's) leaf key — only
+        // the current occupant can produce this signature (verified on the receive
+        // side against the pre-update leaf key).
+        let auth = {
+            let current = self
+                .my_sig
+                .as_ref()
+                .ok_or(CryptoError::Malformed("no current leaf signing key"))?;
+            current.sign(&update_auth_transcript(
+                self.me,
+                &package.leaf_public,
+                &package.sig_public,
+            ))
+        };
+        let prop = Proposal::Update {
+            leaf: self.me,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+            auth,
+        };
+        self.pending_update = Some(kp);
+        let mut w = talkrypt_wire::Writer::new();
+        prop.put(&mut w);
+        Ok(w.into_vec())
+    }
+
+    /// HOST: commit a member's `Update` proposal (SECURITY-AUDIT T-4). `proposer_leaf`
+    /// is the leaf the caller **authenticated** the proposal as coming from (e.g. the
+    /// transport session → roster leaf). The proposal is rejected unless it updates
+    /// exactly that leaf, so a member can only rotate ITS OWN keys — a malicious
+    /// member cannot craft an `Update { leaf: victim }` to seize another member's leaf
+    /// (leaf-hijack). Applies the proposal (replacing that leaf's KEM + signing keys),
+    /// re-keys our path, and returns a `Commit` every member — including the proposer —
+    /// applies. Single committer, so no fork. Rejects anything that is not an `Update`.
+    pub fn commit_update(&mut self, proposer_leaf: u32, proposal_bytes: &[u8]) -> Result<Commit> {
+        let mut r = talkrypt_wire::Reader::new(proposal_bytes);
+        let prop = Proposal::get(self.profile, &mut r)?;
+        r.finish()?;
+        match &prop {
+            Proposal::Update { leaf, .. } if *leaf == proposer_leaf => {}
+            Proposal::Update { .. } => {
+                return Err(CryptoError::Malformed(
+                    "update proposal leaf does not match its authenticated proposer",
+                ));
+            }
+            _ => return Err(CryptoError::Malformed("expected an Update proposal")),
+        }
+        let proposals = vec![prop];
+        self.apply_proposals(&proposals)?;
+        self.rekey_path(proposals)
+    }
+
     pub fn update(&mut self) -> Result<Commit> {
         let mut commit = self.rekey_path(Vec::new())?;
         // Rotate our leaf SIGNING key too (SECURITY-AUDIT T-2): a compromised leaf
@@ -856,7 +1086,9 @@ impl TreeKemGroup {
             // `occupied` vector before indexing, so a crafted Commit can no longer
             // panic the receiver with an out-of-range leaf.
             let leaf = match p {
-                Proposal::Add { leaf, .. } | Proposal::Remove { leaf } => *leaf,
+                Proposal::Add { leaf, .. }
+                | Proposal::Remove { leaf }
+                | Proposal::Update { leaf, .. } => *leaf,
             };
             if leaf as usize >= self.occupied.len() {
                 return Err(CryptoError::Malformed("treekem proposal leaf out of range"));
@@ -883,6 +1115,44 @@ impl TreeKemGroup {
                     self.leaf_pops.remove(leaf);
                     self.blank_path_above(*leaf);
                 }
+                Proposal::Update { leaf, leaf_public, sig_public, pop, auth } => {
+                    // Re-verify PoP (T-1) then replace the leaf's KEM + signing keys
+                    // (T-4 member rekey; T-2 auth-PCS for a member). The leaf must
+                    // already be occupied — Update never adds a member.
+                    verify_pop(sig_public, pop)?;
+                    if !self.occupied.get(*leaf as usize).copied().unwrap_or(false) {
+                        return Err(CryptoError::Malformed("treekem update for empty leaf"));
+                    }
+                    // AUTHORIZE the rotation with the leaf's CURRENT signing key BEFORE
+                    // overwriting it (SECURITY-AUDIT): a committer/relay must not be
+                    // able to forge an Update that rewrites another member's leaf
+                    // signing key and thereby impersonate them. Only the current
+                    // occupant holds the secret that signs `update_auth_transcript`.
+                    {
+                        let current = self.leaf_sig_keys.get(leaf).ok_or(
+                            CryptoError::Malformed("update for a leaf with no current signing key"),
+                        )?;
+                        current
+                            .verify(
+                                &update_auth_transcript(*leaf, leaf_public, sig_public),
+                                auth,
+                            )
+                            .map_err(|_| CryptoError::BadSignature)?;
+                    }
+                    self.public.insert(Node::leaf(*leaf), leaf_public.clone());
+                    self.leaf_sig_keys.insert(*leaf, sig_public.clone());
+                    self.leaf_pops.insert(*leaf, pop.clone());
+                    // If this is OUR proposed update, install the staged new leaf
+                    // secret + signing key so we can process the committer's path.
+                    if *leaf == self.me {
+                        if let Some(kp) = self.pending_update.take() {
+                            self.secrets.insert(Node::leaf(self.me), kp.secret);
+                            self.my_sig =
+                                Some(IdentityKeyPair::from_secret_bytes(kp.sig.export_secret()));
+                        }
+                    }
+                    self.blank_path_above(*leaf);
+                }
             }
         }
         Ok(())
@@ -903,7 +1173,7 @@ impl TreeKemGroup {
     fn rekey_path(&mut self, proposals: Vec<Proposal>) -> Result<Commit> {
         let path = self.path_to_root(self.me);
         let mut path_secrets = vec![[0u8; 32]; path.len()];
-        rand::rngs::OsRng.fill_bytes(&mut path_secrets[0]);
+        crate::rng::fill_secure(&mut path_secrets[0]); // F-4: health-gated keygen entropy
         for i in 1..path.len() {
             path_secrets[i] = derive_parent_secret(&path_secrets[i - 1]);
         }
@@ -952,11 +1222,23 @@ impl TreeKemGroup {
         }
         self.apply_proposals(&commit.proposals)?;
         // Apply an optional leaf-signature-key rotation (SECURITY-AUDIT T-2). The
-        // new key must carry a valid PoP; the committer may only rotate its OWN
-        // leaf (a committer cannot rotate another member's signing key). The leaf
-        // must be occupied. Rebinds the verifying key so the old key stops
-        // verifying from this epoch on.
+        // new key must carry a valid PoP; the committer may only rotate its OWN leaf.
+        // A commit's path starts at the committer's own leaf, so bind sig_update to
+        // it: WITHOUT this check a malicious committer could set sig_update to a
+        // victim's leaf (with a key + valid PoP it controls), overwrite the victim's
+        // signing key, and forge messages as the victim (a G1 regression) while
+        // locking the victim out. The leaf must be occupied. Rebinds the verifying
+        // key so the old key stops verifying from this epoch on.
         if let Some((leaf, sig_public, pop)) = &commit.sig_update {
+            let committer_leaf = match commit.path.first() {
+                Some(n) if n.span == 1 => n.lo,
+                _ => return Err(CryptoError::Malformed("commit path does not start at a leaf")),
+            };
+            if *leaf != committer_leaf {
+                return Err(CryptoError::Malformed(
+                    "sig_update may only rotate the committer's own leaf",
+                ));
+            }
             match self.occupied.get(*leaf as usize) {
                 Some(true) => {}
                 _ => return Err(CryptoError::Malformed("sig_update for empty leaf")),
@@ -1005,6 +1287,8 @@ impl TreeKemGroup {
             leaf_sig_keys,
             leaf_pops,
             my_sig: Some(sig),
+            pending_update: None,
+            pad_bucket: 0,
         };
         g.leaf_sig_keys
             .insert(welcome.your_leaf, g.my_sig.as_ref().unwrap().public().clone());
@@ -1099,6 +1383,70 @@ impl TreeKemGroup {
     /// message without revealing a long-term identity.
     ///
     /// [`decrypt_verified`]: TreeKemGroup::decrypt_verified
+    /// SECURITY-AUDIT F-16: set the length-bucket step (bytes) for outgoing messages.
+    /// 0 disables padding. All members share the descriptor, so they agree on this.
+    pub fn set_pad_bucket(&mut self, step: usize) {
+        self.pad_bucket = step;
+    }
+
+    /// The current length-bucket step (0 = padding off).
+    pub fn pad_bucket(&self) -> usize {
+        self.pad_bucket
+    }
+
+    /// SUB-SPEC D2: sign a promotion proposal `body` under our tree-bound leaf signing
+    /// key over the domain-separated `PROMOTE_CONTEXT` transcript. Mirrors the message
+    /// signing so GroupAuth's authenticity/no-cross-leaf-forgery/domain-separation
+    /// theorems extend to promotion signatures.
+    pub fn sign_promote(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&promote_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a promotion proposal signature under `leaf`'s bound key. Fail-closed on an
+    /// unknown leaf (GroupAuth Thm 1). Uses the current epoch's transcript.
+    pub fn verify_promote(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&promote_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+    /// SUB-SPEC D2: sign a consent `body` under our leaf key over `CONSENT_CONTEXT`.
+    pub fn sign_consent(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&consent_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a consent signature under `leaf`'s bound key. Fail-closed on unknown leaf.
+    pub fn verify_consent(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&consent_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+    /// SUB-SPEC D2/D3: sign a promotion-commit announcement `body` (the promote_id) under
+    /// our leaf key over `PROMO_COMMIT_CONTEXT` — the committer broadcasts this so members
+    /// finalize the promotion locally (persistence + retention).
+    pub fn sign_promo_commit(&self, body: &[u8]) -> Result<Vec<u8>> {
+        let sk = self
+            .my_sig
+            .as_ref()
+            .ok_or(CryptoError::Malformed("group has no leaf signing key"))?;
+        Ok(sk.sign(&promo_commit_transcript(self.epoch, self.me, body)))
+    }
+    /// Verify a promotion-commit announcement under `leaf`'s bound key. Fail-closed on an
+    /// unknown leaf; uses the current epoch's transcript.
+    pub fn verify_promo_commit(&self, leaf: u32, body: &[u8], sig: &[u8]) -> bool {
+        match self.leaf_sig_keys.get(&leaf) {
+            Some(pk) => pk.verify(&promo_commit_transcript(self.epoch, leaf, body), sig).is_ok(),
+            None => false,
+        }
+    }
+
     pub fn encrypt_signed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let my_sig = self
             .my_sig
@@ -1108,7 +1456,16 @@ impl TreeKemGroup {
         let (key, nonce) = kdf_mk(&mk_seed); // key: Zeroizing
         let n = self.send_n;
         let aad = msg_aad(self.epoch, self.me, n);
-        let ct = aead_seal(&key, &nonce, plaintext, &aad)?;
+        // F-16: pad the plaintext to a bucket boundary BEFORE the AEAD so the relay /
+        // observer sees a quantized ciphertext length. Unpadded when pad_bucket == 0.
+        let padded;
+        let body: &[u8] = if self.pad_bucket > 0 {
+            padded = talkrypt_wire::pad_to_bucket(plaintext, self.pad_bucket);
+            &padded
+        } else {
+            plaintext
+        };
+        let ct = aead_seal(&key, &nonce, body, &aad)?;
         let sig = my_sig.sign(&sig_transcript(self.epoch, self.me, n, &ct));
         self.send_chain = *next;
         self.send_n += 1;
@@ -1153,7 +1510,14 @@ impl TreeKemGroup {
         if epoch != self.epoch {
             return Err(CryptoError::DecryptionFailed);
         }
-        self.decrypt_body(epoch, leaf, n, &ct)
+        let body = self.decrypt_body(epoch, leaf, n, &ct)?;
+        // F-16: strip the length-bucket pad the sender applied (both share the
+        // descriptor's pad setting). A malformed pad is a decrypt failure, not a panic.
+        if self.pad_bucket > 0 {
+            talkrypt_wire::unpad_bucket(&body).ok_or(CryptoError::DecryptionFailed)
+        } else {
+            Ok(body)
+        }
     }
 
     /// Decrypt an **unsigned** (v1) group message. Forgeable by any member; used
@@ -1220,6 +1584,19 @@ impl TreeKemGroup {
 fn derive_parent_secret(child: &Secret) -> Secret {
     expand(child, b"talkrypt-treekem-parent")
 }
+
+/// Derive a STABLE per-membership leaf signature seed from a member's identity
+/// root secret (`key`) and a stable per-group id (`salt`, e.g. the invite token).
+/// Deterministic: the same `(identity, group)` yields the same leaf signing key
+/// across rejoins (recognizable + recoverable); a different group yields an
+/// unlinkable key (the KDF output reveals nothing about the root or other groups).
+/// Feeding a private root through the KDF means the derived public keys of one
+/// member across different groups cannot be correlated.
+pub fn derive_leaf_sig_seed(identity_root: &[u8; 32], group_id: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    crate::kdf::mac_kdf(identity_root, group_id, b"talkrypt-leaf-sig-derive-v1", &mut out);
+    out
+}
 fn derive_commit_secret(root: &Secret) -> Secret {
     expand(root, b"talkrypt-treekem-commit")
 }
@@ -1278,6 +1655,23 @@ fn open_secret(rsecret: &RatchetSecret, blob: &[u8]) -> Result<Secret> {
 mod tests {
     use super::*;
 
+    /// SUB-SPEC D2: promote/consent signatures verify under the signer's leaf, reject a
+    /// tampered body and an unknown leaf, and are DOMAIN-SEPARATED (a promote sig must
+    /// not verify as a consent) — the property GroupAuth Thm 6 requires.
+    #[test]
+    fn promote_consent_sign_verify_and_domain_separation() {
+        let g = TreeKemGroup::create_with(KemProfile::pq_pure());
+        let body = b"promote-body";
+        let psig = g.sign_promote(body).unwrap();
+        assert!(g.verify_promote(0, body, &psig), "own leaf verifies its promote sig");
+        assert!(!g.verify_promote(0, b"tampered", &psig), "a different body must not verify");
+        assert!(!g.verify_consent(0, body, &psig), "promote sig must not verify under consent ctx");
+        assert!(!g.verify_promote(99, body, &psig), "unknown leaf fails closed");
+        let csig = g.sign_consent(body).unwrap();
+        assert!(g.verify_consent(0, body, &csig));
+        assert!(!g.verify_promote(0, body, &csig), "consent sig must not verify under promote ctx");
+    }
+
     /// Miri-verified: `TreeKemGroup::drop` zeroes its `epoch_secret`. Built with
     /// empty maps so it runs under Miri without PQ keygen. SECURITY-AUDIT F-3.
     #[test]
@@ -1297,6 +1691,8 @@ mod tests {
             leaf_sig_keys: HashMap::new(),
             leaf_pops: HashMap::new(),
             my_sig: None,
+            pending_update: None,
+            pad_bucket: 0,
         };
         unsafe {
             crate::assert_drop_zeroes(
@@ -1646,6 +2042,38 @@ mod tests {
         assert_eq!(a.decrypt_verified(&msg2).unwrap(), b"hi back");
     }
 
+    /// SECURITY-AUDIT F-16: with a length bucket set, two DIFFERENT-length messages
+    /// in the same bucket produce the SAME on-wire ciphertext length (what the relay /
+    /// observer sees), and each still round-trips to its exact plaintext.
+    #[test]
+    fn f16_padding_quantizes_ciphertext_length_and_round_trips() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        a.set_pad_bucket(256);
+        b.set_pad_bucket(256);
+
+        let short = a.encrypt_signed(b"hi").unwrap();
+        let long = a.encrypt_signed(&vec![b'x'; 200]).unwrap();
+        // Both plaintexts fall in the first 256-byte bucket → identical wire length.
+        assert_eq!(short.len(), long.len(), "distinct lengths pad to one bucket size");
+        // Each still decrypts to its exact plaintext (pad stripped).
+        assert_eq!(b.decrypt_verified(&short).unwrap(), b"hi");
+        assert_eq!(b.decrypt_verified(&long).unwrap(), vec![b'x'; 200]);
+
+        // A larger message crosses into a bigger bucket (still quantized, not exact).
+        let bigger = a.encrypt_signed(&vec![b'y'; 500]).unwrap();
+        assert!(bigger.len() > short.len());
+        assert_eq!(b.decrypt_verified(&bigger).unwrap(), vec![b'y'; 500]);
+
+        // Without padding (default), the two lengths differ — the leak F-16 closes.
+        let mut c = TreeKemGroup::create();
+        let mut d = add_member(&mut c, &mut []);
+        let s2 = c.encrypt_signed(b"hi").unwrap();
+        let l2 = c.encrypt_signed(&vec![b'x'; 200]).unwrap();
+        assert_ne!(s2.len(), l2.len(), "unpadded lengths leak the plaintext size");
+        assert_eq!(d.decrypt_verified(&s2).unwrap(), b"hi");
+    }
+
     /// A v2 receiver rejects a v1 (unsigned) message on the trust boundary.
     #[test]
     fn unsigned_message_rejected_by_verified_path() {
@@ -1673,6 +2101,240 @@ mod tests {
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(1_000_000);
         assert!(Commit::decode(KemProfile::pq_pure(), &w.into_vec()).is_err());
+    }
+
+    /// SECURITY-AUDIT T-4: a member self-rekeys via a host-committed Update PROPOSAL
+    /// (fork-free). The member proposes (without advancing its epoch); the host
+    /// commits; ALL members — proposer, host, and a third member — converge on the
+    /// same new group secret. The member's KEM and signing keys rotate, so a message
+    /// forged with its OLD signing key is rejected afterward (member auth-PCS).
+    #[test]
+    fn member_proposed_update_is_committed_by_host_without_fork() {
+        // Three members: a (host/committer), b (proposer), c (third member).
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        assert_eq!(a.group_secret(), b.group_secret());
+        assert_eq!(a.group_secret(), c.group_secret());
+        let before = a.group_secret();
+        let b_leaf = b.my_leaf();
+
+        // Capture b's OLD signing key (a pre-rekey compromise).
+        let old_seed = b.my_sig.as_ref().unwrap().export_secret();
+        let old_sig = crate::identity::IdentityKeyPair::from_secret_bytes(old_seed);
+
+        // b proposes a self-rekey; it does NOT advance its own epoch yet.
+        let epoch_before = b.epoch;
+        let proposal = b.propose_update().unwrap();
+        assert_eq!(b.epoch, epoch_before, "proposing must not advance the proposer");
+
+        // The host commits it (authenticating the proposer as b's leaf); everyone
+        // (incl. b) applies the SAME commit.
+        let commit = a.commit_update(b_leaf, &proposal).unwrap();
+        b.apply_commit(&commit).unwrap();
+        c.apply_commit(&commit).unwrap();
+
+        // No fork: all three converge on a NEW group secret.
+        assert_eq!(a.group_secret(), b.group_secret(), "host and proposer converge");
+        assert_eq!(a.group_secret(), c.group_secret(), "third member converges too");
+        assert_ne!(a.group_secret(), before, "rekey injected fresh entropy");
+        assert_eq!(a.member_count(), 3, "update changes no membership");
+
+        // Messaging still works, and b signs with its NEW key.
+        let m = b.encrypt_signed(b"after member rekey").unwrap();
+        assert_eq!(a.decrypt_verified(&m).unwrap(), b"after member rekey");
+        assert_eq!(c.decrypt_verified(&m).unwrap(), b"after member rekey");
+
+        // Member auth-PCS: a message forged with b's OLD signing key is rejected.
+        let epoch = b.epoch;
+        let chain = sender_chain(&b.group_secret(), b_leaf);
+        let (_n, mk) = kdf_ck(&chain);
+        let (k, no) = kdf_mk(&mk);
+        let aad = msg_aad(epoch, b_leaf, 0);
+        let ct = aead_seal(&k, &no, b"forged old key", &aad).unwrap();
+        let sig = old_sig.sign(&sig_transcript(epoch, b_leaf, 0, &ct));
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_u8(GROUP_MSG_V2);
+        w.put_u32(epoch); w.put_u32(b_leaf); w.put_u32(0);
+        w.put_bytes(&ct); w.put_bytes(&sig);
+        assert!(matches!(a.decrypt_verified(&w.into_vec()), Err(CryptoError::BadSignature)));
+    }
+
+    /// SECURITY-AUDIT T-4 (leaf-hijack defense): `commit_update` binds the proposal to
+    /// the authenticated proposer's leaf. A member cannot make the host apply an
+    /// `Update` that rewrites ANOTHER member's leaf keys — even with a valid PoP on the
+    /// substituted key — so it can never seize a victim's leaf.
+    #[test]
+    fn commit_update_rejects_leaf_hijack() {
+        let mut a = TreeKemGroup::create(); // host / committer
+        let mut b = add_member(&mut a, &mut []); // victim
+        let c = add_member(&mut a, &mut [&mut b]); // attacker (a real member)
+        let b_leaf = b.my_leaf();
+        let c_leaf = c.my_leaf();
+        assert_ne!(b_leaf, c_leaf);
+
+        // Attacker c forges an Update targeting b's leaf, with keys c controls and a
+        // VALID proof-of-possession (so only the leaf binding can reject it).
+        let kp = LeafKeyPair::generate_with(a.profile);
+        let package = kp.key_package();
+        let forged = Proposal::Update {
+            leaf: b_leaf,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+            // Auth is irrelevant here: commit_update rejects on the proposer↔leaf
+            // mismatch BEFORE the proposal is ever applied/authorized.
+            auth: Vec::new(),
+        };
+        let mut w = talkrypt_wire::Writer::new();
+        forged.put(&mut w);
+        let bytes = w.into_vec();
+
+        // The host authenticated the proposal as c's session (c_leaf); it claims
+        // b_leaf → refused, and b's signing key is untouched.
+        let b_sig_before = a.leaf_sig_public(b_leaf).cloned();
+        assert!(matches!(
+            a.commit_update(c_leaf, &bytes),
+            Err(CryptoError::Malformed(_))
+        ));
+        assert_eq!(
+            a.leaf_sig_public(b_leaf).cloned(),
+            b_sig_before,
+            "victim leaf signing key must be untouched by a rejected hijack"
+        );
+    }
+
+    /// SECURITY-AUDIT (T-2 leaf-hijack via sig_update): a commit's `sig_update` may
+    /// rotate ONLY the committer's own leaf. A malicious committer that tampers a
+    /// commit's sig_update to target a victim's leaf — with a key + valid PoP it
+    /// controls — must be rejected; otherwise it overwrites the victim's signing key
+    /// and can forge messages as the victim. This bypasses `commit_update` entirely
+    /// (raw crafted commit bytes applied via `apply_commit`).
+    #[test]
+    fn sig_update_cannot_rotate_another_members_leaf() {
+        let mut a = TreeKemGroup::create(); // committer
+        let mut b = add_member(&mut a, &mut []); // victim
+        let b_leaf = b.my_leaf();
+        let b_key_before = b.leaf_sig_public(b_leaf).cloned();
+
+        // a produces a legit self-update commit, then tampers sig_update to point at
+        // b's leaf with a fresh key a controls + a valid PoP for it.
+        let mut commit = a.update().unwrap();
+        let attacker = crate::identity::IdentityKeyPair::generate();
+        let attacker_pub = attacker.public().clone();
+        let pop = attacker.sign(&pop_transcript(&attacker_pub));
+        commit.sig_update = Some((b_leaf, attacker_pub, pop));
+
+        // b must refuse the tampered commit (committer leaf = a's leaf != b_leaf).
+        assert!(matches!(b.apply_commit(&commit), Err(CryptoError::Malformed(_))));
+        assert_eq!(
+            b.leaf_sig_public(b_leaf).cloned(),
+            b_key_before,
+            "a sig_update targeting another leaf must not rewrite it"
+        );
+    }
+
+    /// SECURITY-AUDIT (Update authorization): an `Update` that rewrites a leaf's
+    /// signing key must be authorized by that leaf's CURRENT key. A fabricated Update
+    /// for a victim's leaf — attacker key + valid PoP but signed by the WRONG current
+    /// key — must be rejected at apply time, even in a raw commit that never went
+    /// through `commit_update`.
+    #[test]
+    fn update_without_current_key_authorization_is_rejected() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []); // victim
+        let mut c = add_member(&mut a, &mut [&mut b]); // a member that will apply it
+        let b_leaf = b.my_leaf();
+        let b_key_before = c.leaf_sig_public(b_leaf).cloned();
+
+        // Forge an Update for b's leaf: a key the attacker controls, a valid PoP, but
+        // an auth signed by a key that is NOT b's current leaf key.
+        let kp = LeafKeyPair::generate_with(a.profile);
+        let package = kp.key_package();
+        let wrong = crate::identity::IdentityKeyPair::generate();
+        let bad_auth = wrong.sign(&update_auth_transcript(
+            b_leaf,
+            &package.leaf_public,
+            &package.sig_public,
+        ));
+        let forged = Proposal::Update {
+            leaf: b_leaf,
+            leaf_public: package.leaf_public,
+            sig_public: package.sig_public,
+            pop: package.pop,
+            auth: bad_auth,
+        };
+
+        assert!(matches!(
+            c.apply_proposals(&[forged]),
+            Err(CryptoError::BadSignature)
+        ));
+        assert_eq!(
+            c.leaf_sig_public(b_leaf).cloned(),
+            b_key_before,
+            "an Update not authorized by the leaf's current key must not rewrite it"
+        );
+    }
+
+    /// LeafSigMode: a DERIVED leaf signature key is deterministic per (identity,
+    /// group) — recognizable + recoverable across rejoins — and unlinkable across
+    /// groups; an EPHEMERAL leaf key differs every generation. Only the signature
+    /// key is derived; the KEM leaf key stays fresh (it rotates every commit).
+    #[test]
+    fn derived_leaf_sig_key_is_stable_per_group_and_unlinkable_across_groups() {
+        let profile = KemProfile::pq_pure();
+        let identity = crate::identity::IdentityKeyPair::generate();
+        let root = identity.export_secret();
+        let group_a: &[u8] = b"invite-token-A";
+        let group_b: &[u8] = b"invite-token-B";
+
+        // Same (identity, group) -> same signing key across independent joins.
+        let k1 = LeafKeyPair::generate_derived(profile, &root, group_a);
+        let k2 = LeafKeyPair::generate_derived(profile, &root, group_a);
+        assert_eq!(
+            k1.key_package().sig_public.sig_vk,
+            k2.key_package().sig_public.sig_vk,
+            "derived leaf sig key must be stable across rejoins of the same group"
+        );
+
+        // Different group -> unlinkable key; different identity -> different key.
+        let k3 = LeafKeyPair::generate_derived(profile, &root, group_b);
+        assert_ne!(
+            k1.key_package().sig_public.sig_vk,
+            k3.key_package().sig_public.sig_vk,
+            "derived leaf sig key must differ across groups (unlinkable)"
+        );
+        let other = crate::identity::IdentityKeyPair::generate();
+        let k4 = LeafKeyPair::generate_derived(profile, &other.export_secret(), group_a);
+        assert_ne!(
+            k1.key_package().sig_public.sig_vk,
+            k4.key_package().sig_public.sig_vk
+        );
+
+        // Only the SIGNATURE key is derived; the KEM leaf key stays fresh.
+        assert_ne!(
+            k1.key_package().leaf_public.encode(),
+            k2.key_package().leaf_public.encode(),
+            "the KEM leaf key must stay random even when the sig key is derived"
+        );
+
+        // Ephemeral leaf keys differ every generation.
+        let e1 = LeafKeyPair::generate_with(profile);
+        let e2 = LeafKeyPair::generate_with(profile);
+        assert_ne!(
+            e1.key_package().sig_public.sig_vk,
+            e2.key_package().sig_public.sig_vk,
+            "ephemeral leaf sig keys must differ every generation"
+        );
+
+        // The founder path (create_derived) is stable per (identity, group) too.
+        let g1 = TreeKemGroup::create_derived(profile, &root, group_a);
+        let g2 = TreeKemGroup::create_derived(profile, &root, group_a);
+        assert_eq!(
+            g1.leaf_sig_public(0).map(|k| k.sig_vk.clone()),
+            g2.leaf_sig_public(0).map(|k| k.sig_vk.clone()),
+            "a derived founder leaf sig key must be stable per (identity, group)"
+        );
     }
 
     /// SECURITY-AUDIT T-2: `update()` rotates the caller's leaf SIGNING key, giving
@@ -1749,6 +2411,93 @@ mod tests {
         w2.put_bytes(&attacker.public().sig_vk);
         w2.put_bytes(&forged_pop);
         assert!(KeyPackage::decode(profile, &w2.into_vec()).is_ok());
+    }
+
+    /// SECURITY-AUDIT T-3 (mitigation mechanism, proof-of-concept). Demonstrates
+    /// the leaf-key<->account binding that closes the malicious-committer residual:
+    /// a member's tree-bound leaf signature key, when certified by its account via
+    /// an IdentityChain segment, passes `belongs_to_account`; a SUBSTITUTED key
+    /// (what a hostile committer would bind) does NOT. This is the check the engine
+    /// performs in *linked* mode; pure pseudonyms (no account) skip it by design.
+    #[test]
+    fn leaf_sig_key_binds_to_account_and_rejects_substitution() {
+        use crate::account::{belongs_to_account, IdentityChain};
+        const NOW: u64 = 1_700_000_000;
+
+        // A member joins; read its tree-bound leaf signature public key.
+        let mut host = TreeKemGroup::create();
+        let member = add_member(&mut host, &mut []);
+        let leaf = member.my_leaf();
+        let leaf_sig_pub = host.leaf_sig_public(leaf).expect("bound leaf sig key").clone();
+
+        // The member's account certifies its device, and the device certifies the
+        // leaf signature key as a segment: account -> device -> leaf_sig_key.
+        let account = crate::identity::IdentityKeyPair::generate();
+        let device = crate::identity::IdentityKeyPair::generate();
+        let chain = IdentityChain::device(&account, device.public(), "device:app", NOW, NOW + 3600)
+            .extend(&device, &leaf_sig_pub, "segment:leaf", NOW, NOW + 3600);
+
+        // The binding check the engine runs in linked mode: the leaf's tree-bound
+        // sig key must belong to the presented account. It does.
+        assert!(belongs_to_account(account.public(), &chain, &leaf_sig_pub, NOW));
+
+        // A malicious committer would substitute a key IT controls. That key is not
+        // certified by the member's account, so the same check REJECTS it.
+        let substituted = crate::identity::IdentityKeyPair::generate();
+        assert!(!belongs_to_account(account.public(), &chain, substituted.public(), NOW));
+
+        // And a DIFFERENT account cannot claim the member's real leaf key.
+        let other_account = crate::identity::IdentityKeyPair::generate();
+        assert!(!belongs_to_account(other_account.public(), &chain, &leaf_sig_pub, NOW));
+    }
+
+    /// SECURITY-AUDIT T-3 — full leaf-signature-CERTIFICATE flow (the exact objects
+    /// the engine exchanges). A member's DEVICE certifies its leaf signature key;
+    /// the cert round-trips on the wire; a receiver verifies the signature, checks
+    /// the cert's subject equals the member's tree-bound leaf sig key, and checks
+    /// the issuer is the device bound to that leaf. A cert from a DIFFERENT (hostile
+    /// committer's) device is rejected. This binds the leaf key to the authenticated
+    /// device (which the presentation binds to the account), closing T-3 for linked
+    /// members. The engine wiring is: emit this cert on join, verify on receipt.
+    #[test]
+    fn leaf_sig_certificate_binds_leaf_key_to_device() {
+        use crate::account::SignedCert;
+        const NOW: u64 = 1_700_000_000;
+
+        // Member joins; its tree-bound leaf sig key and its own view of it agree.
+        let mut host = TreeKemGroup::create();
+        let member = add_member(&mut host, &mut []);
+        let leaf = member.my_leaf();
+        let tree_key = host.leaf_sig_public(leaf).expect("tree leaf key").clone();
+        assert_eq!(member.my_leaf_sig_public().unwrap(), tree_key, "own == tree view");
+
+        // The member's DEVICE (its handshake identity) certifies its leaf sig key.
+        let device = crate::identity::IdentityKeyPair::generate();
+        let cert = SignedCert::issue(&device, &tree_key, "leaf-sig", NOW, NOW + 3600);
+
+        // Wire round-trip (this is Frame::LeafSigCert's payload).
+        let wire = cert.encode();
+        let got = SignedCert::decode(&wire).expect("decodes");
+
+        // Receiver checks: (1) signature valid, (2) in validity window, (3) subject
+        // is exactly the tree's leaf sig key, (4) issuer is the member's device.
+        assert!(got.verify_signature().is_ok());
+        assert!(got.valid_at(NOW));
+        assert_eq!(got.cert.subject, tree_key, "cert must certify the tree leaf key");
+        assert_eq!(got.issuer, *device.public(), "issuer is the member's device");
+
+        // A hostile committer certifying the leaf key with ITS OWN device does not
+        // match the member's authenticated device fp, so the receiver rejects it.
+        let hostile_device = crate::identity::IdentityKeyPair::generate();
+        let forged = SignedCert::issue(&hostile_device, &tree_key, "leaf-sig", NOW, NOW + 3600);
+        assert!(forged.verify_signature().is_ok(), "forged cert is self-consistent...");
+        assert_ne!(forged.issuer, *device.public(), "...but issuer != member's device -> rejected");
+
+        // A cert whose subject is NOT the tree key (substitution attempt) is caught
+        // by the subject check.
+        let wrong_subject = crate::identity::IdentityKeyPair::generate();
+        let bad = SignedCert::issue(&device, wrong_subject.public(), "leaf-sig", NOW, NOW + 3600);
+        assert_ne!(bad.cert.subject, tree_key, "subject != tree key -> rejected");
     }
 
     // ---- Property-based verification of the G1/G2 leaf-signature invariants.

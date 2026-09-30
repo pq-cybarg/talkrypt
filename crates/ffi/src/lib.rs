@@ -263,6 +263,19 @@ fn parse_fp_hex(s: &str) -> Option<[u8; 48]> {
     Some(out)
 }
 
+/// Parse a 64-hex-char string into a 32-byte id (D2 promote_id).
+fn parse_id32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Parse 64 hex chars into a 32-byte seed.
 fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
     let s = s.trim();
@@ -373,6 +386,67 @@ pub enum FfiEvent {
     Disconnected {
         fingerprint: String,
     },
+    /// D1 store-and-forward: an outbox frame was delivered (its ack arrived).
+    /// `gossip_id` is the hex ciphertext id — a delivery receipt.
+    Delivered {
+        gossip_id: String,
+    },
+    /// D1 store-and-forward: `count` oldest un-acked outbox frames were evicted
+    /// (cap or TTL) — surfaced so a capped drop is never silent.
+    OutboxDropped {
+        count: u32,
+    },
+    /// SUB-SPEC D2: a verified promotion was proposed — prompt the user to consent.
+    PromoteProposed {
+        by: String,
+        promote_id: String,
+        target_tier: u8,
+        retention_mode: u8,
+        picked: Vec<String>,
+    },
+    /// SUB-SPEC D2: the promotion committed — this chat is now persistent.
+    Promoted {
+        promote_id: String,
+    },
+    /// SUB-SPEC D2: the promotion was aborted; the chat stays ephemeral.
+    PromoteAborted {
+        promote_id: String,
+    },
+    /// SUB-SPEC A / #68: a nearby device is beaconing this chat over local radio and we
+    /// decrypted it (pre-session discovery). `source` is a coarse backend handle or empty.
+    BeaconSeen {
+        channel: String,
+        source: String,
+    },
+    /// A peer's resolved self-declared name (SUB-SPEC A). `label` is empty when the
+    /// chat's trust policy suppressed it; `account_fingerprint` is empty unless the
+    /// name is account-linked; `caveat` is a non-empty hint (e.g. a collision warning).
+    Name {
+        from: String,
+        account_fingerprint: String,
+        label: String,
+        tier: String,
+        seq: u64,
+        caveat: String,
+        /// Short safety number for this peer — always shown on tap and whenever the
+        /// label is empty (suppressed). The honest fallback a spoofable name can't hide.
+        safety_number: String,
+    },
+    /// SUB-SPEC B: a peer disclosed grouping linkage. `subject` is a leaf fp hex;
+    /// `grouping` is a short id for the grouping (hosts aggregate subjects sharing it).
+    Linkage {
+        subject: String,
+        grouping: String,
+        verdict: bool,
+    },
+    /// SUB-SPEC C: a subject's vouch standing changed. `weightedScore` may be negative
+    /// when inflation was rejected (antibody); `vouched` gates the tint. Display-only.
+    Vouch {
+        subject: String,
+        weighted_score: i64,
+        vouched: bool,
+        inflation_rejected: bool,
+    },
     Error {
         message: String,
     },
@@ -382,12 +456,79 @@ fn hex_fp(fp: &[u8; 48]) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Parse a 64-char hex string into a 32-byte seed (SUB-SPEC B grouping root).
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Parse a 96-char hex string into a 48-byte fingerprint (SUB-SPEC C vouch target).
+fn parse_hex48(s: &str) -> Option<[u8; 48]> {
+    let s = s.trim();
+    if s.len() != 96 {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// SUB-SPEC B: the honest distinct-people estimate surfaced to clients.
+#[derive(uniffi::Record)]
+pub struct FfiSybilCount {
+    pub distinct_accounts: u32,
+    pub distinct_groupings: u32,
+    pub isolated: u32,
+    pub min_distinct_people: u32,
+}
+
 /// A persisted contact (account public key + remembered name + friend label).
 #[derive(uniffi::Record)]
 pub struct ContactRecord {
     pub account_pubkey_hex: String,
     pub name: String,
     pub friend: bool,
+}
+
+/// A learned alternate route to a peer (SECURITY-AUDIT A-1): the peer's device
+/// fingerprint (hex) and its advertised reachable endpoints.
+#[derive(uniffi::Record)]
+pub struct FfiRoute {
+    pub fingerprint: String,
+    pub endpoints: Vec<String>,
+}
+
+/// SUB-SPEC D at-rest: one retained chat message decoded from sealed history, for
+/// redisplay after a restart (see [`TalkryptClient::load_history`]).
+/// One saved name from the user's name book (SUB-SPEC A), for a picker UI.
+#[derive(uniffi::Record)]
+pub struct FfiNameEntry {
+    /// Stable local handle used with `use_name` / `remove_name`.
+    pub id: String,
+    /// The callsign shown to peers.
+    pub label: String,
+    /// True if this name is account-linked (verified), false if bare.
+    pub linked: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct FfiHistoryRecord {
+    /// Sender account/leaf fingerprint (hex).
+    pub from_hex: String,
+    /// Unix seconds when this node sent/received it (sort key).
+    pub ts: u64,
+    pub text: String,
+    /// Classification banner if the message carried a marking, else `None`.
+    pub marking: Option<String>,
 }
 
 /// The result of a successful device link (the new-device side). Persist
@@ -439,6 +580,59 @@ fn map_event(e: Event) -> FfiEvent {
         Event::Disconnected { fingerprint } => FfiEvent::Disconnected {
             fingerprint: hex_fp(&fingerprint),
         },
+        Event::Name {
+            from,
+            account_fingerprint,
+            label,
+            tier,
+            seq,
+            caveat,
+            safety_number,
+        } => FfiEvent::Name {
+            from: hex_fp(&from),
+            account_fingerprint: account_fingerprint.map(|f| hex_fp(&f)).unwrap_or_default(),
+            label: label.unwrap_or_default(),
+            tier: format!("{tier:?}"),
+            seq,
+            caveat: caveat.unwrap_or_default(),
+            safety_number,
+        },
+        Event::Linkage { subject, grouping_pub, verdict } => FfiEvent::Linkage {
+            subject: hex_fp(&subject),
+            // A short, stable id for the grouping (the full per-chat grouping pub is
+            // large); clients aggregate subjects sharing this id.
+            grouping: grouping_pub.iter().take(8).map(|b| format!("{b:02x}")).collect(),
+            verdict,
+        },
+        Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => FfiEvent::Vouch {
+            subject: hex_fp(&subject),
+            weighted_score,
+            vouched,
+            inflation_rejected,
+        },
+        Event::Delivered { gossip_id } => FfiEvent::Delivered {
+            gossip_id: gossip_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::OutboxDropped { count } => FfiEvent::OutboxDropped { count: count as u32 },
+        Event::PromoteProposed { by, promote_id, target_tier, retention_mode, picked } => {
+            FfiEvent::PromoteProposed {
+                by: hex_fp(&by),
+                promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+                target_tier,
+                retention_mode,
+                picked: picked.iter().map(|fp| hex_fp(fp)).collect(),
+            }
+        }
+        Event::Promoted { promote_id } => FfiEvent::Promoted {
+            promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::PromoteAborted { promote_id } => FfiEvent::PromoteAborted {
+            promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+        },
+        Event::BeaconSeen { channel, source } => FfiEvent::BeaconSeen {
+            channel,
+            source: source.unwrap_or_default(),
+        },
         Event::Error(message) => FfiEvent::Error { message },
     }
 }
@@ -450,6 +644,18 @@ fn posture_from(s: &str) -> Option<KemProfile> {
         "hybrid" => Some(KemProfile::hybrid()),
         "pq-pure-compact" | "compact" => Some(KemProfile::pq_pure_compact()),
         _ => None,
+    }
+}
+
+/// Parse a host-baseline name-trust policy string (SUB-SPEC A §5). `None`/empty/
+/// unknown falls back to the SignalStyle default. Set at chat creation, it travels
+/// in the descriptor/invite so joiners inherit it (a viewer may still tighten it).
+fn name_policy_from(s: Option<&str>) -> talkrypt_core::nametrust::NameTrustPolicy {
+    use talkrypt_core::nametrust::NameTrustPolicy;
+    match s.map(|v| v.to_ascii_lowercase()).as_deref() {
+        Some("warn") => NameTrustPolicy::WarnOnCollision,
+        Some("suppress") => NameTrustPolicy::SuppressColliding,
+        _ => NameTrustPolicy::SignalStyle,
     }
 }
 
@@ -484,6 +690,7 @@ impl TalkryptClient {
         channel: String,
         posture: String,
         endpoint: Option<String>,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         let rt = rt();
         let profile = posture_from(&posture).unwrap_or_else(KemProfile::pq_pure);
@@ -491,13 +698,15 @@ impl TalkryptClient {
         let suite = SuiteRegistry::with_defaults()
             .get(&suite_id)
             .map_err(FfiError::from)?;
-        let desc = ChatDescriptor::new(
+        let mut desc = ChatDescriptor::new(
             TopologyKind::P2P,
             Persistence::Ephemeral,
             &suite_id,
             vec![listen.clone()],
             channel,
         );
+        // Host-baseline name-trust policy (travels in the invite; joiners inherit it).
+        desc.name_trust_policy = name_policy_from(name_policy.as_deref());
         let transport = Arc::new(TcpTransport::new(&listen));
         let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc);
         rt.block_on(core.host()).map_err(FfiError::from)?;
@@ -524,10 +733,11 @@ impl TalkryptClient {
         channel: String,
         posture: String,
         state_dir: String,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "tor"))]
         {
-            let _ = (channel, posture, state_dir);
+            let _ = (channel, posture, state_dir, name_policy);
             Err(FfiError::Failed(
                 "this build has Tor disabled; rebuild the FFI with --features tor".into(),
             ))
@@ -544,13 +754,14 @@ impl TalkryptClient {
             // a fresh onion service. Arti needs a writable state dir; on Android
             // the app passes a persistent path (its filesDir).
             let arti = shared_tor(&state_dir)?;
-            let desc = ChatDescriptor::new(
+            let mut desc = ChatDescriptor::new(
                 TopologyKind::P2P,
                 Persistence::Ephemeral,
                 &suite_id,
                 vec![],
                 channel,
             );
+            desc.name_trust_policy = name_policy_from(name_policy.as_deref());
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti.clone(), desc);
             rt.block_on(core.host()).map_err(FfiError::from)?;
             // Put the published .onion into the invite so peers can dial it.
@@ -644,10 +855,11 @@ impl TalkryptClient {
         posture: String,
         state_dir: String,
         mnemonic: String,
+        name_policy: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "nym"))]
         {
-            let _ = (channel, posture, state_dir, mnemonic);
+            let _ = (channel, posture, state_dir, mnemonic, name_policy);
             Err(FfiError::Failed(
                 "this build has Nym disabled; rebuild the FFI with --features nym".into(),
             ))
@@ -674,13 +886,14 @@ impl TalkryptClient {
             // node bridge transports: as committer it fans out group ciphertext to
             // every member across Nym AND Tor, and gossip re-floods so several
             // interconnected bridges merge into one chat without duplicates.
-            let desc = ChatDescriptor::new(
+            let mut desc = ChatDescriptor::new(
                 TopologyKind::Hub,
                 Persistence::Ephemeral,
                 &suite_id,
                 vec![],
                 channel,
             );
+            desc.name_trust_policy = name_policy_from(name_policy.as_deref());
             let (core, rx) =
                 Core::new_group(IdentityKeyPair::generate(), suite, Arc::new(multi), desc, true);
             core.enable_gossip();
@@ -954,6 +1167,460 @@ impl TalkryptClient {
             .map_err(FfiError::from)
     }
 
+    /// Rotate this node's group leaf key for **post-compromise security**
+    /// (SECURITY-AUDIT T-2): fresh ML-KEM path secrets AND a fresh ML-DSA-87 leaf
+    /// signing key are generated and the resulting commit is broadcast, so a prior
+    /// key compromise no longer lets an adversary read new messages or forge as us
+    /// once the group applies it. Host-driven today; a no-op off a group or for a
+    /// non-host member (member-initiated update is a follow-up). Safe to call
+    /// periodically (e.g. on a timer or after suspected exposure).
+    pub fn self_update(&self) -> Result<(), FfiError> {
+        self.rt
+            .block_on(self.core.self_update())
+            .map_err(FfiError::from)
+    }
+
+    /// SUB-SPEC D2: propose promoting this ephemeral chat to persistent. `picked` are hex
+    /// account fingerprints to carry over; `consent_rule` 0=unanimous/1=opt-in/2=host-
+    /// mandate; `retention_mode` 0=fresh/1=carry/2=carry-from-point. `carry_from_secs` is
+    /// the D3 CarryFromPoint marker (unix seconds; 0 for fresh/carry). Returns the hex
+    /// promote_id that consents reference.
+    pub fn propose_promote(
+        &self,
+        target_tier: u8,
+        retention_mode: u8,
+        consent_rule: u8,
+        picked: Vec<String>,
+        onion: String,
+        carry_from_secs: u64,
+    ) -> Option<String> {
+        let picked_fps: Vec<[u8; 48]> = picked.iter().filter_map(|s| parse_fp_hex(s)).collect();
+        self.rt
+            .block_on(self.core.propose_promote(target_tier, retention_mode, consent_rule, picked_fps, onion, carry_from_secs))
+            .ok()
+            .map(|id| id.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// SUB-SPEC D2: consent to (or decline) the pending promotion `promote_id` (hex).
+    pub fn respond_promote(&self, promote_id: String, accept: bool) {
+        if let Some(id) = parse_id32(&promote_id) {
+            let _ = self.rt.block_on(self.core.respond_promote(id, accept));
+        }
+    }
+
+    /// The account fingerprint (hex) cryptographically bound to a group `leaf`
+    /// (SECURITY-AUDIT T-3), or `None` if that leaf is an unverified pseudonym. A
+    /// `Some` value is unforgeable by the host, so the UI can show a "verified
+    /// account" badge vs. a pseudonymous sender.
+    pub fn group_leaf_account(&self, leaf: u32) -> Option<String> {
+        self.core.group_leaf_account(leaf).map(|fp| hex_fp(&fp))
+    }
+
+    /// D1 store-and-forward: turn this chat's persistent outbox on/off. When on,
+    /// outgoing group messages are queued until delivered (acked) and re-sent on
+    /// reconnect, so a member that was offline catches up.
+    pub fn set_persistence(&self, on: bool) {
+        self.core.set_persistence(on);
+    }
+
+    /// SUB-SPEC D3: erase this chat's sealed history + drop the in-memory backlog. Backs
+    /// the Delete affordance and return-to-ephemeral (D3 invariant 4, recoverable).
+    pub fn purge_history(&self) {
+        self.core.purge_history();
+    }
+
+    /// SUB-SPEC D at-rest (restart survival): back this chat's outbox AND sealed history
+    /// with an on-disk [`talkrypt_core::SealedFileStore`] rooted at `dir`, so un-acked
+    /// messages and consented history survive an app/phone restart. Custody REUSES the
+    /// device's identity factors: a `passphrase` and/or a hardware `wrapper` (StrongBox /
+    /// Secure Enclave / Keystore). A passphrase alone is allowed (fully PQ-safe). A hardware
+    /// wrapper is device-binding; per the QROM/L5 at-rest rule a hardware-ONLY store is
+    /// allowed only if the wrapper attests a symmetric ≥256-bit wrap (`HardwareKeyWrapper::
+    /// qrom_safe`) — a classical (RSA/ECC) secure element must be PAIRED WITH A PASSPHRASE,
+    /// whose Argon2id key keeps the stored AES-256-GCM contents L5/QROM-safe even if the
+    /// hardware wrap is later broken. At least one factor is required. (This message-data
+    /// store does not offer the classical weak-tier opt-out; use a passphrase or a symmetric
+    /// wrapper.) Rehydrates the outbox for this chat immediately. Call
+    /// once, right after opening the chat and before `set_persistence(true)`.
+    pub fn enable_at_rest(
+        &self,
+        dir: String,
+        passphrase: Option<String>,
+        wrapper: Option<Box<dyn HardwareKeyWrapper>>,
+    ) -> Result<(), FfiError> {
+        let pass = passphrase.filter(|p| !p.is_empty());
+        if pass.is_none() && wrapper.is_none() {
+            return Err(FfiError::Failed(
+                "at-rest custody requires a passphrase and/or a hardware wrapper".into(),
+            ));
+        }
+        let bridge = wrapper.map(WrapperBridge);
+        let store = talkrypt_core::SealedFileStore::open(
+            std::path::Path::new(&dir),
+            pass.as_deref().map(|s| s.as_bytes()),
+            bridge.as_ref().map(|b| b as &dyn talkrypt_core::KeyWrapper),
+        )
+        .map_err(FfiError::from)?;
+        let store = std::sync::Arc::new(store);
+        self.core.set_outbox_store(store.clone());
+        self.core.set_history_store(store);
+        Ok(())
+    }
+
+    /// SUB-SPEC D at-rest: the sealed history retained for this chat, decoded for redisplay
+    /// after a restart (empty unless a promotion carried history and `enable_at_rest` — or a
+    /// sealed history store — is set). Not ordered; sort by `ts` for display.
+    pub fn load_history(&self) -> Vec<FfiHistoryRecord> {
+        self.core
+            .load_history()
+            .into_iter()
+            .map(|r| FfiHistoryRecord {
+                from_hex: hex_fp(&r.from),
+                ts: r.ts,
+                text: r.text,
+                marking: r.marking.map(|m| m.banner()),
+            })
+            .collect()
+    }
+
+    /// SUB-SPEC A / #68: drive pre-session presence over a host radio `backend` (BLE /
+    /// Wi-Fi / any custom link). Under `policy` we advertise this chat's sealed beacon and
+    /// scan for nearby ones — decrypting only those matching our invite and surfacing them as
+    /// `FfiEvent::BeaconSeen`. Returns the [`FfiBeacon`] handle: keep it, and call
+    /// `deliver_beacon` on it from your radio's scan callback. Call once per chat.
+    pub fn start_local_presence(
+        &self,
+        backend: Box<dyn LocalBeaconBackend>,
+        policy: AdvertisePolicy,
+    ) -> std::sync::Arc<FfiBeacon> {
+        let bridge = std::sync::Arc::new(FfiBeacon {
+            backend,
+            feed: std::sync::Mutex::new(None),
+        });
+        let beacon: std::sync::Arc<dyn talkrypt_transport::LocalBeacon> = bridge.clone();
+        self.rt
+            .block_on(self.core.start_local_presence(beacon, policy.into()));
+        bridge
+    }
+
+    /// Carry this group's chat messages over a LoRa mesh node (Meshtastic /
+    /// Meshcore) reached through a host `backend` (BLE / USB-serial), in ADDITION
+    /// to the primary transport. `channel` is the mesh channel index our
+    /// encapsulated frames are transmitted on. Returns the [`FfiMeshNode`] handle:
+    /// keep it, and call `deliver_packet` on it from your radio's receive callback
+    /// so inbound frames reach the engine. Received group frames surface as the
+    /// usual `FfiEvent::Message` (self-authenticating; no new trust). Call once per
+    /// chat. Foreign-traffic classification and native "downgrade" send are not yet
+    /// exposed here (see docs/mesh-lora-backend.md).
+    pub fn start_mesh_messaging(
+        &self,
+        backend: Box<dyn MeshNodeBackend>,
+        channel: u8,
+    ) -> std::sync::Arc<FfiMeshNode> {
+        let bridge = std::sync::Arc::new(FfiMeshNode {
+            backend,
+            feed: std::sync::Mutex::new(None),
+        });
+        let node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode> = bridge.clone();
+        let policy = talkrypt_transport::mesh::MeshPolicy {
+            channel,
+            ..Default::default()
+        };
+        self.rt
+            .block_on(self.core.start_mesh_messaging(node, policy));
+        bridge
+    }
+
+    /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
+    /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
+    pub fn keeper_mode(&self, on: bool) {
+        self.core.keeper_mode(on);
+    }
+
+    /// D1: re-send any un-acked outbox backlog to connected peers (idempotent).
+    pub fn flush_outbox(&self) {
+        self.rt.block_on(self.core.flush_outbox());
+    }
+
+    /// D1 Layer-B: run this (always-on) node as an anchor mailbox — accept deposits for
+    /// offline recipients and serve them on fetch. Holds opaque ciphertext only.
+    pub fn anchor_mode(&self, on: bool) {
+        self.core.anchor_mode(on);
+    }
+
+    /// D1 Layer-B: ask connected anchors for any mail buffered for us (call on wake).
+    pub fn fetch_mailbox(&self) {
+        self.rt.block_on(self.core.fetch_mailbox());
+    }
+
+    /// Advertise this node's reachable routes to the group (SECURITY-AUDIT A-1) —
+    /// its multi-homed endpoint set (e.g. `[onion, nym, lan]`), signed and gossiped
+    /// so peers can reach it directly and reconnect via it if the host drops.
+    pub fn advertise_routes(&self, endpoints: Vec<String>) {
+        self.rt.block_on(self.core.advertise_routes(endpoints));
+    }
+
+    /// Reconnect over learned alternate routes when partitioned (SECURITY-AUDIT
+    /// A-1). Returns the fingerprint (hex) reconnected to, or `None` if still
+    /// connected or no route worked. Safe to call on every disconnect / on a timer.
+    pub fn reconnect(&self) -> Option<String> {
+        self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+    }
+
+    /// Set (or clear) this node's leading self-declared **name** for the chat
+    /// (SUB-SPEC A). An empty `label` clears it. This is a *bare* (unverified) name;
+    /// peers see it over your messages, tinted per the chat's trust policy. Call
+    /// [`announce_presence`](Self::announce_presence) (or set a cadence) to broadcast.
+    pub fn set_leading_name(&self, label: String) {
+        if label.is_empty() {
+            self.core.set_leading_name(None);
+        } else {
+            self.core
+                .set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                    id: label.clone(),
+                    label,
+                    backing: talkrypt_core::presence::NameBacking::Bare,
+                }));
+        }
+    }
+
+    /// Set an ACCOUNT-LINKED (verified) leading name (SUB-SPEC A). Builds an
+    /// account→this-device certificate so peers resolve this callsign at the Linked
+    /// tier — insider-unforgeable, unlike a bare name. Also saved to the name book
+    /// (id = label). Call [`announce_presence`](Self::announce_presence) to broadcast.
+    /// Mirrors [`present_account`](Self::present_account) but for the CQ name path.
+    pub fn set_linked_leading_name(&self, account: Arc<Account>, label: String) {
+        let chain = IdentityChain::device(
+            &account.kp,
+            self.core.identity_public(),
+            "device:app",
+            now_secs(),
+            self_present_expiry(),
+        );
+        let entry = talkrypt_core::presence::NameEntry {
+            id: label.clone(),
+            label,
+            backing: talkrypt_core::presence::NameBacking::Account { chain },
+        };
+        self.core.add_name(entry.clone());
+        self.core.set_leading_name(Some(entry));
+    }
+
+    /// Broadcast a fresh CQ of the current leading name to the chat now.
+    pub fn announce_presence(&self) {
+        self.rt.block_on(async {
+            let _ = self.core.announce_presence().await;
+        });
+    }
+
+    // ----- SUB-SPEC A: name book (multiple callsigns; persistence is the host's job) --
+
+    /// Save a bare name to the book WITHOUT switching to it (`id` is a stable local
+    /// handle; reusing an id replaces that entry). Account-linked names are added via
+    /// the link flow, not here.
+    pub fn add_bare_name(&self, id: String, label: String) {
+        self.core.add_name(talkrypt_core::presence::NameEntry {
+            id,
+            label,
+            backing: talkrypt_core::presence::NameBacking::Bare,
+        });
+    }
+
+    /// Switch the leading name to a saved book entry (by id) and announce it. Returns
+    /// false if no entry with that id exists.
+    pub fn use_name(&self, id: String) -> bool {
+        self.rt.block_on(async { self.core.use_name(&id).await.is_ok() })
+    }
+
+    /// Remove a saved name from the book. If it was the active leading name, the
+    /// leading name is also cleared. Returns whether an entry was removed.
+    pub fn remove_name(&self, id: String) -> bool {
+        self.core.remove_name(&id)
+    }
+
+    /// The id of the active leading name, or empty string if none is set.
+    pub fn leading_name_id(&self) -> String {
+        self.core.leading_name_id().unwrap_or_default()
+    }
+
+    /// List the saved names (id, label, whether account-linked) for a picker UI.
+    pub fn list_names(&self) -> Vec<FfiNameEntry> {
+        self.core
+            .name_book()
+            .entries
+            .into_iter()
+            .map(|e| FfiNameEntry {
+                id: e.id,
+                label: e.label,
+                linked: matches!(e.backing, talkrypt_core::presence::NameBacking::Account { .. }),
+            })
+            .collect()
+    }
+
+    /// Opaque, encoded snapshot of the name book for the host to persist. Pair with
+    /// [`load_name_book`](Self::load_name_book) at startup.
+    pub fn name_book_blob(&self) -> Vec<u8> {
+        self.core.name_book().encode()
+    }
+
+    /// Restore a name book previously saved via [`name_book_blob`](Self::name_book_blob).
+    /// Ignores a malformed blob (leaves the book unchanged). Does not switch the
+    /// leading name; call [`use_name`](Self::use_name).
+    pub fn load_name_book(&self, blob: Vec<u8>) {
+        if let Ok(book) = talkrypt_core::presence::NameBook::decode(&blob) {
+            self.core.load_name_book(book);
+        }
+    }
+
+    /// Configure the CQ auto re-beacon (SUB-SPEC A): `periodic_secs == 0` disables the
+    /// periodic timer (manual/on-join announcements still fire). Clamped to a floor.
+    pub fn set_presence_cadence(&self, periodic_secs: u64, on_message_id: bool) {
+        let periodic = if periodic_secs == 0 {
+            None
+        } else {
+            Some(periodic_secs)
+        };
+        // A periodic cadence spawns a timer task, which needs a Tokio runtime in
+        // context. uniffi calls arrive on arbitrary host threads, so enter the
+        // runtime explicitly (else the spawn panics off-runtime).
+        let _guard = self.rt.enter();
+        self.core
+            .set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                periodic_secs: periodic,
+                on_message_id,
+            });
+    }
+
+    /// Current periodic CQ interval in seconds (0 = periodic off). Lets a UI toggle
+    /// one cadence field without clobbering the other.
+    pub fn presence_cadence_secs(&self) -> u64 {
+        self.core.presence_cadence().periodic_secs.unwrap_or(0)
+    }
+
+    /// Whether the on-message name-id (mode 3) is enabled.
+    pub fn presence_cadence_on_message_id(&self) -> bool {
+        self.core.presence_cadence().on_message_id
+    }
+
+    /// Viewer-local name-trust policy override (SUB-SPEC A §5): "signal" | "warn" |
+    /// "suppress" tightens how homoglyph/collision names render; "" (empty) drops the
+    /// override and follows the chat baseline. A viewer can only TIGHTEN the chat
+    /// policy, never loosen it. Unknown non-empty values are ignored.
+    pub fn set_name_trust_policy(&self, policy: String) {
+        use talkrypt_core::nametrust::NameTrustPolicy;
+        let p = match policy.as_str() {
+            "" => None,
+            "signal" => Some(NameTrustPolicy::SignalStyle),
+            "warn" => Some(NameTrustPolicy::WarnOnCollision),
+            "suppress" => Some(NameTrustPolicy::SuppressColliding),
+            _ => return,
+        };
+        self.core.set_name_trust_policy(p);
+    }
+
+    // ----- SUB-SPEC B: linkage disclosure + opsec (Task 11) -----
+
+    /// Set the linkage-disclosure opsec mode: "clean" | "selective" | "transparent"
+    /// | "transparent-hide". Unknown values are ignored (mode unchanged).
+    pub fn set_opsec_mode(&self, mode: String) {
+        use talkrypt_core::linkage::OpsecMode;
+        let m = match mode.as_str() {
+            "clean" => OpsecMode::Clean,
+            "selective" => OpsecMode::Selective,
+            "transparent" => OpsecMode::Transparent { hide: false },
+            "transparent-hide" => OpsecMode::Transparent { hide: true },
+            _ => return,
+        };
+        self.core.set_opsec_mode(m);
+    }
+
+    /// Set the persistent grouping root (32-byte hex), shared across the user's
+    /// sessions so a viewer can aggregate their leaves into one grouping. No-op on
+    /// a malformed seed.
+    pub fn set_grouping_root(&self, seed_hex: String) {
+        if let Some(seed) = parse_hex32(&seed_hex) {
+            self.core.set_grouping_root(seed);
+        }
+    }
+
+    /// Define a grouping of the user's name-entry ids; returns its stable id.
+    pub fn define_grouping(&self, name_ids: Vec<String>) -> String {
+        self.core.define_grouping(&name_ids)
+    }
+
+    /// Disclose a grouping to the chat now (account-hidden). No-op under opsec Clean.
+    pub fn present_grouping(&self, id: String) {
+        self.rt.block_on(async { self.core.present_grouping(&id).await });
+    }
+
+    /// Auto-disclose the grouping on join (vs just the leading name).
+    pub fn show_all_identities(&self, on: bool) {
+        self.core.show_all_identities(on);
+    }
+
+    // ---- SUB-SPEC C: vouching (display-only; never gates access) --------------
+
+    /// Vouch for a peer's account (durable trust). `fp_hex` = 96-char account fp.
+    pub fn vouch_for_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// Vouch for a peer's bare per-chat leaf (minimal, opsec-clean). `fp_hex` = leaf fp.
+    pub fn vouch_for_leaf(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Leaf(fp)).await
+            });
+        }
+    }
+
+    /// Withdraw a vouch for an account (additive-only: only removes a positive hint).
+    pub fn revoke_vouch_account(&self, fp_hex: String) {
+        if let Some(fp) = parse_hex48(&fp_hex) {
+            self.rt.block_on(async {
+                self.core.revoke_vouch(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+            });
+        }
+    }
+
+    /// User-scope vouch threshold (viewer's own bar, stricter-only vs the chat).
+    pub fn set_vouch_threshold_count(&self, count: u32) {
+        self.core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(count));
+    }
+
+    /// The current weighted vouch score for a subject (may be negative when the
+    /// antibody rejected inflation; display snaps to neutral).
+    pub fn vouch_score(&self, fp_hex: String) -> i64 {
+        parse_hex48(&fp_hex).map(|fp| self.core.vouch_decision(fp).weighted_score).unwrap_or(0)
+    }
+
+    /// The honest distinct-people estimate for the chat (SUB-SPEC B sybil-count).
+    pub fn sybil_estimate(&self) -> FfiSybilCount {
+        let s = self.core.sybil_estimate();
+        FfiSybilCount {
+            distinct_accounts: s.distinct_accounts as u32,
+            distinct_groupings: s.distinct_groupings as u32,
+            isolated: s.isolated as u32,
+            min_distinct_people: s.min_distinct_people as u32,
+        }
+    }
+
+    /// Learned alternate routes per peer (SECURITY-AUDIT A-1): pairs of
+    /// (device-fingerprint hex, endpoints). A reconnect flow tries these when the
+    /// original host endpoint is dead, so a member is no longer partitioned by the
+    /// founding host going offline.
+    pub fn known_routes(&self) -> Vec<FfiRoute> {
+        self.core
+            .known_routes()
+            .into_iter()
+            .map(|(fp, endpoints)| FfiRoute { fingerprint: hex_fp(&fp), endpoints })
+            .collect()
+    }
+
     /// The shareable invite URI for this chat (carries the `.onion` for a Tor
     /// host).
     pub fn invite_uri(&self) -> String {
@@ -1145,6 +1812,12 @@ pub trait HardwareKeyWrapper: Send + Sync {
     fn wrap(&self, kek: Vec<u8>) -> Result<Vec<u8>, FfiError>;
     /// Unwrap a blob previously produced by [`HardwareKeyWrapper::wrap`].
     fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError>;
+    /// QROM/L5 attestation: return `true` ONLY if this secure element wraps with a symmetric
+    /// ≥256-bit key (e.g. an AES-256 Keystore/StrongBox/SE key), so the stored wrapped-KEK is
+    /// quantum-safe at rest and a hardware-ONLY seal is permitted. Return `false` (the safe
+    /// default) for a classical RSA/ECC wrap — then a passphrase is required (or the caller
+    /// must explicitly accept the weak tier).
+    fn qrom_safe(&self) -> bool;
 }
 
 /// Bridges a host [`HardwareKeyWrapper`] to the core [`talkrypt_core::KeyWrapper`]
@@ -1162,6 +1835,9 @@ impl talkrypt_core::KeyWrapper for WrapperBridge {
             .unwrap(wrapped.to_vec())
             .map_err(|e| talkrypt_core::WrapError(e.to_string()))
     }
+    fn qrom_safe(&self) -> bool {
+        self.0.qrom_safe()
+    }
 }
 
 impl From<talkrypt_core::CustodyTier> for CustodyTier {
@@ -1174,10 +1850,216 @@ impl From<talkrypt_core::CustodyTier> for CustodyTier {
     }
 }
 
-/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase`,
-/// a hardware `wrapper`, or both (two-factor). With a wrapper the blob is
-/// `HardwareBacked` and cannot be opened off this device; with only a passphrase
-/// it is `SoftwareSealed`. At least one factor is required.
+// ---------------------------------------------------------------------------
+// SUB-SPEC A / #68 — host-supplied local-radio beacon backend (BLE / Wi-Fi / etc.).
+// ---------------------------------------------------------------------------
+
+/// Granularity of the pre-session presence beacon (mirrors
+/// [`talkrypt_core::advert::AdvertisePolicy`]). `Off` = do not advertise (scan only).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdvertisePolicy {
+    Off,
+    Fingerprint,
+    Full,
+}
+
+impl From<AdvertisePolicy> for talkrypt_core::advert::AdvertisePolicy {
+    fn from(p: AdvertisePolicy) -> Self {
+        match p {
+            AdvertisePolicy::Off => talkrypt_core::advert::AdvertisePolicy::Off,
+            AdvertisePolicy::Fingerprint => talkrypt_core::advert::AdvertisePolicy::Fingerprint,
+            AdvertisePolicy::Full => talkrypt_core::advert::AdvertisePolicy::Full,
+        }
+    }
+}
+
+/// A host radio backend (Android/Apple BLE, Linux BlueZ, Wi-Fi Aware, a USB-C link,
+/// anything). The host implements this; talkrypt drives it. It only ever moves OPAQUE,
+/// pre-sealed beacon bytes — never keys or plaintext. `advertise` starts/replaces the
+/// broadcast; `stop` goes dark. Observed nearby beacons are pushed back IN via
+/// [`FfiBeacon::deliver_beacon`] (a push model, since a callback can't return a stream).
+#[uniffi::export(callback_interface)]
+pub trait LocalBeaconBackend: Send + Sync {
+    fn advertise(&self, blob: Vec<u8>) -> Result<(), FfiError>;
+    fn stop(&self) -> Result<(), FfiError>;
+}
+
+/// The engine-side handle for a host beacon backend, returned by
+/// [`TalkryptClient::start_local_presence`]. Bridges the host [`LocalBeaconBackend`] to the
+/// core [`talkrypt_transport::LocalBeacon`] seam, and gives the host `deliver_beacon` to feed
+/// in what its radio observes.
+#[derive(uniffi::Object)]
+pub struct FfiBeacon {
+    backend: Box<dyn LocalBeaconBackend>,
+    feed: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<talkrypt_transport::Seen>>>,
+}
+
+#[async_trait::async_trait]
+impl talkrypt_transport::LocalBeacon for FfiBeacon {
+    async fn advertise(&self, blob: Vec<u8>) -> talkrypt_transport::Result<()> {
+        self.backend
+            .advertise(blob)
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn stop(&self) -> talkrypt_transport::Result<()> {
+        self.backend
+            .stop()
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn scan(&self) -> talkrypt_transport::Result<talkrypt_transport::BeaconScan> {
+        let (scan, tx) = talkrypt_transport::BeaconScan::channel();
+        *self.feed.lock().unwrap() = Some(tx);
+        Ok(scan)
+    }
+}
+
+#[uniffi::export]
+impl FfiBeacon {
+    /// The host calls this from its radio's scan callback with an observed OPAQUE beacon
+    /// (and an optional coarse source handle). talkrypt tries to decrypt it with the chat
+    /// invite and, on success, emits `Event::BeaconSeen`. No-op before scanning has started.
+    pub fn deliver_beacon(&self, blob: Vec<u8>, source: Option<String>) {
+        if let Some(tx) = self.feed.lock().unwrap().as_ref() {
+            let _ = tx.send(talkrypt_transport::Seen { blob, source });
+        }
+    }
+}
+
+/// A host LoRa-mesh node backend (a phone talking to a T-Deck / node over BLE, a
+/// desktop over USB-serial, etc.). The host implements this; talkrypt drives it.
+/// It only ever moves OPAQUE, already-sealed fragment bytes — never keys or
+/// plaintext. `mtu` is the usable application-payload bytes per packet (talkrypt
+/// sizes its fragments to fit); `send` transmits one packet on a channel. Inbound
+/// packets are pushed back IN via [`FfiMeshNode::deliver_packet`] (a push model,
+/// since a callback can't return a stream).
+#[uniffi::export(callback_interface)]
+pub trait MeshNodeBackend: Send + Sync {
+    fn mtu(&self) -> u32;
+    fn send(&self, channel: u8, payload: Vec<u8>) -> Result<(), FfiError>;
+}
+
+/// The engine-side handle for a host mesh backend, returned by
+/// [`TalkryptClient::start_mesh_messaging`]. Bridges the host [`MeshNodeBackend`]
+/// to the core [`talkrypt_transport::mesh::MeshNode`] seam, and gives the host
+/// `deliver_packet` to feed in what its radio receives.
+#[derive(uniffi::Object)]
+pub struct FfiMeshNode {
+    backend: Box<dyn MeshNodeBackend>,
+    feed: std::sync::Mutex<
+        Option<tokio::sync::mpsc::UnboundedSender<talkrypt_transport::mesh::MeshPacket>>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl talkrypt_transport::mesh::MeshNode for FfiMeshNode {
+    fn mtu(&self) -> usize {
+        self.backend.mtu() as usize
+    }
+    async fn send(&self, channel: u8, payload: &[u8]) -> talkrypt_transport::Result<()> {
+        self.backend
+            .send(channel, payload.to_vec())
+            .map_err(|e| talkrypt_transport::TransportError::Io(e.to_string()))
+    }
+    async fn subscribe(&self) -> talkrypt_transport::Result<talkrypt_transport::mesh::MeshInbox> {
+        let (inbox, tx) = talkrypt_transport::mesh::MeshInbox::channel();
+        *self.feed.lock().unwrap() = Some(tx);
+        Ok(inbox)
+    }
+}
+
+#[uniffi::export]
+impl FfiMeshNode {
+    /// The host calls this from its radio's receive callback with one inbound mesh
+    /// packet: the `channel` it arrived on, the OPAQUE `payload` bytes, and an
+    /// optional coarse `from` node id (indicative only, never an identity).
+    /// talkrypt reassembles talkrypt fragments and processes each recovered group
+    /// frame through the self-authenticating path (surfacing `Event::Message`);
+    /// non-talkrypt bytes are dropped. No-op before messaging has started.
+    pub fn deliver_packet(&self, channel: u8, payload: Vec<u8>, from: Option<u32>) {
+        if let Some(tx) = self.feed.lock().unwrap().as_ref() {
+            let _ = tx.send(talkrypt_transport::mesh::MeshPacket {
+                channel,
+                payload,
+                from,
+            });
+        }
+    }
+}
+
+/// A Meshtastic `PRIVATE_APP` payload recovered from a `FromRadio` frame.
+#[derive(uniffi::Record)]
+pub struct MeshtasticRxFfi {
+    pub channel: u8,
+    pub from: Option<u32>,
+    pub payload: Vec<u8>,
+}
+
+/// Encode a talkrypt fragment as a Meshtastic `ToRadio` protobuf (`PRIVATE_APP`,
+/// broadcast) on `channel` — the raw bytes a BLE host writes to the node's ToRadio
+/// characteristic (BLE needs no Stream API framing; GATT frames each write). Lets a
+/// host implement a Meshtastic `MeshNodeBackend` as a dumb BLE pipe, reusing the
+/// verified Rust codec instead of a Kotlin/Swift protobuf.
+#[uniffi::export]
+pub fn meshtastic_encode_toradio(channel: u8, payload: Vec<u8>) -> Vec<u8> {
+    talkrypt_transport::mesh::meshtastic::encode_toradio(channel, &payload)
+}
+
+/// Parse a Meshtastic `FromRadio` protobuf (one GATT read); return its `PRIVATE_APP`
+/// payload with the channel + coarse sender if it carries one, else `None` (config /
+/// text / other ports). Forward a returned payload to
+/// [`FfiMeshNode::deliver_packet`]. Never panics on malformed bytes.
+#[uniffi::export]
+pub fn meshtastic_parse_fromradio(bytes: Vec<u8>) -> Option<MeshtasticRxFfi> {
+    talkrypt_transport::mesh::meshtastic::parse_fromradio(&bytes).map(|rx| MeshtasticRxFfi {
+        channel: rx.channel,
+        from: rx.from,
+        payload: rx.payload,
+    })
+}
+
+/// A Meshcore channel message recovered from a companion frame — the opaque
+/// talkrypt fragment already base64-decoded out of the UTF-8 text field.
+#[derive(uniffi::Record)]
+pub struct MeshcoreRxFfi {
+    pub channel: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Build a Meshcore `CMD_APP_START` companion payload identifying `app_name` — a
+/// BLE host writes this to the RX characteristic once on connect (the node replies
+/// with its self-info). Reuses the verified Rust codec so the host does no protocol
+/// byte-twiddling.
+#[uniffi::export]
+pub fn meshcore_encode_app_start(app_name: String) -> Vec<u8> {
+    talkrypt_transport::mesh::meshcore::encode_app_start(app_name.as_bytes())
+}
+
+/// Build a Meshcore `CMD_SEND_CHANNEL_TXT_MSG` companion payload carrying a talkrypt
+/// fragment (base64-wrapped for the UTF-8 text field) on `channel` — the raw bytes a
+/// BLE host writes to the RX characteristic (over BLE each write is one frame; no
+/// serial length prefix).
+#[uniffi::export]
+pub fn meshcore_encode_channel_text(channel: u8, payload: Vec<u8>) -> Vec<u8> {
+    talkrypt_transport::mesh::meshcore::encode_channel_text_b64(channel, &payload)
+}
+
+/// Parse a Meshcore companion channel-message frame (one BLE notification) and
+/// base64-decode its text back to the opaque talkrypt fragment; `None` for other
+/// codes / truncated / non-base64. Forward a returned payload to
+/// [`FfiMeshNode::deliver_packet`]. Never panics.
+#[uniffi::export]
+pub fn meshcore_parse_channel_recv(bytes: Vec<u8>) -> Option<MeshcoreRxFfi> {
+    talkrypt_transport::mesh::meshcore::parse_channel_recv_b64(&bytes)
+        .map(|(channel, payload)| MeshcoreRxFfi { channel, payload })
+}
+
+/// Seal `secret` bytes into a portable at-rest envelope. Supply a `passphrase` (fully
+/// PQ-safe, `SoftwareSealed`), or a hardware `wrapper` for a `HardwareBacked`, device-bound
+/// blob. Per the QROM/L5 baseline a CLASSICAL hardware wrapper alone is refused (its
+/// wrapped-KEK is quantum-recoverable at rest) — pair it with a passphrase, unless the
+/// wrapper attests a symmetric ≥256-bit wrap via `HardwareKeyWrapper::qrom_safe`, in which
+/// case hardware-only is QROM-safe and allowed. `unseal_secret` stays permissive so a
+/// pre-existing hardware-only blob can still be read and re-sealed with a passphrase.
 #[uniffi::export]
 pub fn seal_secret(
     secret: Vec<u8>,
@@ -1223,6 +2105,10 @@ fn seal_bytes(
         wrapper: bridge
             .as_ref()
             .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+        // Baseline QROM-safe: no weak opt-out here. A host whose secure element does a
+        // symmetric (QROM-safe) wrap attests it via HardwareKeyWrapper::qrom_safe, which
+        // lets hardware-only sealing through; otherwise a passphrase is required.
+        ..Default::default()
     };
     talkrypt_core::seal(secret, opts).map_err(FfiError::from)
 }
@@ -1313,10 +2199,13 @@ impl Account {
     }
 
     /// Seal this account's seed at rest into a portable envelope, **without**
-    /// exposing the seed to the host. Prefer this over persisting `seed_hex()`:
-    /// pass a hardware `wrapper` (Android StrongBox / Secure Enclave) for a
-    /// `HardwareBacked` blob bound to this device, and/or a `passphrase` for
-    /// two-factor custody. Reload with [`Account::from_sealed`].
+    /// exposing the seed to the host. Prefer this over persisting `seed_hex()`.
+    /// Pass a `passphrase` (fully PQ-safe), optionally WITH a hardware `wrapper`
+    /// (Android StrongBox / Secure Enclave) for a `HardwareBacked`, device-bound
+    /// blob. Per the QROM/L5 rule a hardware wrapper ALONE is refused (a non-PQ
+    /// secure element may wrap the seed with quantum-breakable classical crypto),
+    /// so a passphrase is required whenever a wrapper is used. Reload with
+    /// [`Account::from_sealed`].
     pub fn seal(
         &self,
         passphrase: Option<String>,
@@ -1758,6 +2647,73 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The FFI beacon bridge forwards advertise/stop to the host backend and feeds
+    /// `deliver_beacon` pushes into the scan stream the core drives.
+    #[tokio::test]
+    async fn ffi_beacon_bridge_forwards_and_feeds_scan() {
+        use talkrypt_transport::LocalBeacon;
+        struct Fake(std::sync::Arc<std::sync::Mutex<(Vec<Vec<u8>>, bool)>>);
+        impl LocalBeaconBackend for Fake {
+            fn advertise(&self, blob: Vec<u8>) -> Result<(), FfiError> {
+                self.0.lock().unwrap().0.push(blob);
+                Ok(())
+            }
+            fn stop(&self) -> Result<(), FfiError> {
+                self.0.lock().unwrap().1 = true;
+                Ok(())
+            }
+        }
+        let state = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), false)));
+        let bridge = FfiBeacon {
+            backend: Box::new(Fake(state.clone())),
+            feed: std::sync::Mutex::new(None),
+        };
+        // advertise + stop forward to the host backend.
+        LocalBeacon::advertise(&bridge, b"blob".to_vec()).await.unwrap();
+        LocalBeacon::stop(&bridge).await.unwrap();
+        assert_eq!(state.lock().unwrap().0, vec![b"blob".to_vec()]);
+        assert!(state.lock().unwrap().1);
+        // scan opens a channel; deliver_beacon (host radio callback) feeds it.
+        let mut scan = LocalBeacon::scan(&bridge).await.unwrap();
+        bridge.deliver_beacon(b"seen".to_vec(), Some("mac:1".into()));
+        let s = scan.next().await.unwrap();
+        assert_eq!(s.blob, b"seen");
+        assert_eq!(s.source.as_deref(), Some("mac:1"));
+    }
+
+    /// The FFI mesh bridge reports the backend MTU, forwards `send` to the host
+    /// backend, and feeds `deliver_packet` pushes into the inbox the core drives.
+    #[tokio::test]
+    async fn ffi_mesh_node_bridge_forwards_and_feeds_inbox() {
+        use talkrypt_transport::mesh::MeshNode;
+        struct Fake(std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u8>)>>>);
+        impl MeshNodeBackend for Fake {
+            fn mtu(&self) -> u32 {
+                233
+            }
+            fn send(&self, channel: u8, payload: Vec<u8>) -> Result<(), FfiError> {
+                self.0.lock().unwrap().push((channel, payload));
+                Ok(())
+            }
+        }
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bridge = FfiMeshNode {
+            backend: Box::new(Fake(sent.clone())),
+            feed: std::sync::Mutex::new(None),
+        };
+        // mtu + send forward to the host backend.
+        assert_eq!(MeshNode::mtu(&bridge), 233);
+        MeshNode::send(&bridge, 2, b"frag".to_vec().as_slice()).await.unwrap();
+        assert_eq!(sent.lock().unwrap().as_slice(), &[(2u8, b"frag".to_vec())]);
+        // subscribe opens the inbox; deliver_packet (host radio callback) feeds it.
+        let mut inbox = MeshNode::subscribe(&bridge).await.unwrap();
+        bridge.deliver_packet(2, b"inbound".to_vec(), Some(0xabcd));
+        let p = inbox.next().await.unwrap();
+        assert_eq!(p.channel, 2);
+        assert_eq!(p.payload, b"inbound");
+        assert_eq!(p.from, Some(0xabcd));
+    }
+
     /// Two segments of one account both resolve to that account (a contact who
     /// pinned it recognizes both), yet they authenticate with distinct leaf keys
     /// — mutually unlinkable contextual identities. Exercises the exact surface
@@ -1784,7 +2740,7 @@ mod tests {
         // A host pins the account; the "work" segment joins and resolves AS the
         // account (contact = true), proving the segment belongs to the account.
         let host =
-            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None, None)
                 .expect("host");
         host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
         let joiner =
@@ -1873,7 +2829,7 @@ mod tests {
         // host→joiner identity travels the reactive responder path (the exact
         // on-device scenario that surfaced "identity chain did not bind").
         let host =
-            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None)
+            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None, None)
                 .expect("host");
         let host_account = Account::generate();
         host.present_account(host_account.clone(), Some("bob".into()));
@@ -1940,7 +2896,7 @@ mod tests {
     #[test]
     fn ffi_host_join_send_receive() {
         let addr = "127.0.0.1:19922".to_string();
-        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None).expect("host");
+        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None, None).expect("host");
         let uri = host.invite_uri();
         assert!(uri.starts_with("talkrypt://"));
         assert!(!host.safety_number().is_empty());
@@ -1965,12 +2921,121 @@ mod tests {
         assert_eq!(joiner.peer_count(), 1);
     }
 
+    /// SUB-SPEC A (§6 FFI): the name book add/list/select/remove + persistence blob
+    /// round-trip through the FFI, as an Android/iOS picker would drive it.
+    #[test]
+    fn ffi_name_book_add_list_select_and_persist() {
+        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None, None)
+            .expect("host");
+        c.add_bare_name("home".into(), "Tango".into());
+        c.add_bare_name("work".into(), "Foxtrot".into());
+        let names = c.list_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|e| !e.linked));
+        assert_eq!(c.leading_name_id(), "", "nothing active until we pick one");
+
+        // Select one → it becomes the active leading name.
+        assert!(c.use_name("work".into()));
+        assert_eq!(c.leading_name_id(), "work");
+        assert!(!c.use_name("ghost".into()), "unknown id is a clean false");
+
+        // Persist and restore into a fresh client.
+        let blob = c.name_book_blob();
+        let c2 =
+            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None, None)
+                .expect("host2");
+        assert!(c2.list_names().is_empty());
+        c2.load_name_book(blob);
+        assert_eq!(c2.list_names().len(), 2);
+        assert!(c2.use_name("home".into()));
+        assert_eq!(c2.leading_name_id(), "home");
+
+        // Removing the active name clears the leading pointer.
+        assert!(c2.remove_name("home".into()));
+        assert_eq!(c2.leading_name_id(), "");
+        assert_eq!(c2.list_names().len(), 1);
+    }
+
+    /// SUB-SPEC A (§6 FFI): an account-linked leading name set over the FFI resolves
+    /// at the verified Linked tier on the peer, and is saved to the name book.
+    #[test]
+    fn ffi_linked_leading_name_resolves_at_linked_tier() {
+        let host =
+            TalkryptClient::host("127.0.0.1:19942".into(), "#lname".into(), "pq-pure".into(), None, None)
+                .expect("host");
+        let joiner = TalkryptClient::join(host.invite_uri()).expect("join");
+        let account = Account::generate();
+        joiner.set_linked_leading_name(account, "Victor".into());
+        joiner.announce_presence();
+        // The host resolves the joiner's name at the verified Linked tier.
+        let mut tier = None;
+        for _ in 0..50 {
+            while let Some(ev) = host.poll_event() {
+                if let FfiEvent::Name { label, tier: t, .. } = ev {
+                    if label == "Victor" {
+                        tier = Some(t);
+                    }
+                }
+            }
+            if tier.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            tier.as_deref(),
+            Some("Linked"),
+            "an account-linked leading name resolves at the Linked tier"
+        );
+        // It is saved to the book, flagged as linked.
+        assert!(joiner
+            .list_names()
+            .iter()
+            .any(|e| e.label == "Victor" && e.linked));
+    }
+
+    /// SUB-SPEC A (§6 FFI): the CQ cadence getters let a UI toggle one field without
+    /// clobbering the other (round-trips through set_presence_cadence).
+    #[test]
+    fn ffi_presence_cadence_getters_roundtrip() {
+        let c = TalkryptClient::host("127.0.0.1:19943".into(), "#cad".into(), "pq-pure".into(), None, None)
+            .expect("host");
+        assert_eq!(c.presence_cadence_secs(), 0);
+        assert!(!c.presence_cadence_on_message_id());
+        // Turn on the on-message id while leaving periodic off.
+        c.set_presence_cadence(0, true);
+        assert_eq!(c.presence_cadence_secs(), 0);
+        assert!(c.presence_cadence_on_message_id());
+        // Turn on periodic (clamped to the 60s floor) while preserving on-message.
+        c.set_presence_cadence(300, c.presence_cadence_on_message_id());
+        assert_eq!(c.presence_cadence_secs(), 300);
+        assert!(c.presence_cadence_on_message_id());
+    }
+
+    /// SUB-SPEC A (§5): a host-baseline name-trust policy set at creation travels in
+    /// the invite/descriptor, so joiners inherit it (they may still tighten locally).
+    #[test]
+    fn ffi_host_baseline_name_policy_travels_in_invite() {
+        use talkrypt_core::nametrust::NameTrustPolicy;
+        let warn = TalkryptClient::host(
+            "127.0.0.1:19945".into(), "#pol".into(), "pq-pure".into(), None, Some("warn".into()),
+        ).expect("host");
+        let d = ChatDescriptor::from_uri(&warn.invite_uri()).expect("decode invite");
+        assert_eq!(d.name_trust_policy, NameTrustPolicy::WarnOnCollision);
+        // Default (None) stays SignalStyle.
+        let dflt = TalkryptClient::host(
+            "127.0.0.1:19946".into(), "#pol2".into(), "pq-pure".into(), None, None,
+        ).expect("host");
+        let d2 = ChatDescriptor::from_uri(&dflt.invite_uri()).expect("decode invite");
+        assert_eq!(d2.name_trust_policy, NameTrustPolicy::SignalStyle);
+    }
+
     /// Multi-session foundation: two independent chats run at once and don't
     /// cross-talk — the assumption the Android session manager relies on.
     #[test]
     fn two_concurrent_chats_are_independent() {
-        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None).expect("host a");
-        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None).expect("host b");
+        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None, None).expect("host a");
+        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None, None).expect("host b");
         let ja = TalkryptClient::join(a.invite_uri()).expect("join a");
         let jb = TalkryptClient::join(b.invite_uri()).expect("join b");
         ja.send("alpha".into()).expect("send a");
@@ -2009,6 +3074,7 @@ mod tests {
             "#ep".into(),
             "pq-pure".into(),
             Some("127.0.0.1:19933".into()),
+            None,
         )
         .expect("host");
         // The invite carries the advertised endpoint, not the 0.0.0.0 bind addr.
@@ -2040,7 +3106,7 @@ mod tests {
     /// never in the URI text, so a substring check on the URI always fails).
     #[test]
     fn invite_is_onion_detects_endpoint_kind() {
-        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None)
+        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None, None)
             .expect("lan host");
         assert!(!invite_is_onion(lan.invite_uri()), "LAN invite is not onion");
         // A naive substring check on the URI text wrongly reports false even for onions.
@@ -2051,6 +3117,7 @@ mod tests {
             "#x".into(),
             "pq-pure".into(),
             Some("abcdefghij234567.onion:9779".into()),
+            None,
         )
         .expect("onion-advertised host");
         assert!(invite_is_onion(onionish.invite_uri()), "onion endpoint detected");
@@ -2073,36 +3140,48 @@ mod tests {
         fn unwrap(&self, wrapped: Vec<u8>) -> Result<Vec<u8>, FfiError> {
             Ok(wrapped.iter().map(|b| b ^ self.pad).collect())
         }
+        fn qrom_safe(&self) -> bool {
+            // Models a CLASSICAL secure element (the conservative default): hardware-only
+            // sealing through it therefore requires a passphrase.
+            false
+        }
     }
 
     #[test]
-    fn account_hardware_seal_roundtrip_via_callback() {
+    fn account_hardware_seal_via_callback_requires_passphrase_qrom_l5() {
         let account = Account::generate();
         let seed = account.seed_hex();
 
-        // Seal hardware-backed (device wrapper, no passphrase).
-        let blob = account
-            .seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A })))
-            .expect("seal");
-        assert_eq!(
-            sealed_tier(blob.clone()).unwrap(),
-            CustodyTier::HardwareBacked
+        // QROM/L5: a classical secure element alone is quantum-breakable at rest, so a
+        // hardware-wrapper-ONLY seal is refused — a passphrase is required alongside it.
+        assert!(
+            account.seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A }))).is_err(),
+            "hardware-only account seal must be refused (QROM/L5)"
         );
 
-        // Reload on the same "device" → same seed, same identity.
+        // Two-factor (passphrase + device wrapper) is HardwareBacked and round-trips.
+        let blob = account
+            .seal(Some("pass".into()), Some(Box::new(FakeSecureElement { pad: 0x5A })))
+            .expect("seal");
+        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::HardwareBacked);
+
+        // Reload on the same "device" with the passphrase → same seed, same identity.
         let reloaded = Account::from_sealed(
             blob.clone(),
-            None,
+            Some("pass".into()),
             Some(Box::new(FakeSecureElement { pad: 0x5A })),
         )
         .expect("from_sealed");
         assert_eq!(reloaded.seed_hex(), seed);
         assert_eq!(reloaded.public_hex(), account.public_hex());
 
-        // A different "device" cannot open it.
-        assert!(
-            Account::from_sealed(blob, None, Some(Box::new(FakeSecureElement { pad: 0x11 }))).is_err()
-        );
+        // A different "device" cannot open it, even with the right passphrase.
+        assert!(Account::from_sealed(
+            blob,
+            Some("pass".into()),
+            Some(Box::new(FakeSecureElement { pad: 0x11 }))
+        )
+        .is_err());
     }
 
     #[test]

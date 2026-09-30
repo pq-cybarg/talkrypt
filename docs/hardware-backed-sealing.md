@@ -151,3 +151,25 @@ with no secure-element backend rejects the tier with a clear "rebuild with
 - `crates/helper/src/store.rs` — the `HardwareBacked` tier produces and reloads
   the shared envelope via a mock secure element, and errors cleanly with no
   backend (2 tests).
+
+## On-device verification (Android emulator)
+
+Verified end to end on the Android emulator, whose `AndroidKeyStore` stands in for
+a real StrongBox/TEE secure element (software-backed keystore; the `KeystoreWrapper`
+code path is identical). A persistent chat's store was inspected on disk and across
+a restart:
+
+- **Custody tier is the OS keystore.** The app header shows `🔒 OS_KEYSTORE`,
+  i.e. `ChatStore` wrapped the seal KEK with a non-exportable `AndroidKeyStore` AES
+  key (`KeystoreWrapper`), not a passphrase-only tier.
+- **The persisted blob is genuine ciphertext.** `files/chats/<id>.tkc` begins with
+  the `TKS1` sealed-envelope magic followed by high-entropy AES-256-GCM ciphertext;
+  `strings` over the file finds **only** the `TKS1` magic — no channel names, no
+  message text, no metadata in the clear.
+- **It unseals across a restart.** After force-stopping and relaunching, the sealed
+  chat reloads into the chat list (title/metadata restored) with no unseal error —
+  proving the keystore-wrapped KEK persists and the decrypt path works on-device.
+
+The one gap versus a real device is StrongBox hardware custody of the wrapping key
+(the emulator's keystore is software-backed); the seal/unseal logic, envelope
+format, and no-plaintext-at-rest guarantee are the same.

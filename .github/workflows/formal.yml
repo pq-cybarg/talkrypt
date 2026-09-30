@@ -1,0 +1,151 @@
+# Machine-checked formal verification (SECURITY-AUDIT G1/G2/G3/G4/T-1/T-2).
+#
+# Two independent proof engines:
+#   * Kani (bounded model checker) — proves the untrusted-input wire decoders are
+#     TOTAL and memory-safe on ALL inputs (no panic/over-read/over-allocate).
+#   * F* — machine-checks the group-message authentication theorems (no-forgery,
+#     PoP soundness, auth-PCS) by reduction to ML-DSA-87 EUF-CMA (FIPS 204).
+name: formal
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    paths:
+      - "crates/crypto/**"
+      - "crates/wire/**"
+      - "crates/transport/**"
+      - "formal/**"
+      - ".github/workflows/formal.yml"
+  pull_request:
+    paths:
+      - "crates/crypto/**"
+      - "crates/wire/**"
+      - "crates/transport/**"
+      - "formal/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kani:
+    name: Kani — decoder totality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      - name: Prove wire decoder (talkrypt-wire) is total
+        run: cargo kani -p talkrypt-wire
+      - name: Prove group-message + membership decoders are total
+        run: cargo kani -p talkrypt-crypto
+      - name: Prove the Sub-spec B predicate decoder is total (core)
+        # Only the flat, structurally-simple core decoders are CBMC-tractable; run the
+        # proven harness by name (a whole-crate `cargo kani -p talkrypt-core` would also
+        # pick up intractable decoders like Marking — see SECURITY-AUDIT R-6).
+        run: cargo kani -p talkrypt-core --harness linkage::proofs::predicate_decode_never_panics
+      - name: Prove the Sub-spec C vouch decoders are total (core)
+        # Flat decoders are CBMC-tractable; run the proven harnesses by name (a
+        # whole-crate `cargo kani -p talkrypt-core` would also pick up intractable
+        # decoders — see SECURITY-AUDIT §5). Each verifies in ~3 s of solve time.
+        run: |
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_target_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_policy_decode_never_panics
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouch_decode_never_panics
+      - name: Prove the Sub-spec C antibody invariant + decay bounds (extracted kernels)
+        # Invariant 1 ("never Vouched below neutral") + age_decay bounds, proven on the
+        # PURE heap-free kernels — the CBMC-intractable HashMap grouping in `evaluate` is
+        # irrelevant to these guarantees, so extracting them makes the proof trivial.
+        run: |
+          cargo kani -p talkrypt-core --harness vouch::proofs::vouched_implies_non_negative_score
+          cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window10
+          cargo kani -p talkrypt-core --harness vouch::proofs::age_decay_bounded_window64
+      - name: Prove the D1 store-and-forward decoders are total (core)
+        # Flat frames (DeliveryAck: capped [u8;32] batch; MailboxPut: fixed fp + one
+        # length-prefixed blob) — CBMC-tractable, proven no-panic on all hostile inputs.
+        run: |
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::delivery_ack_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::mailbox_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::queue_sync_decode_never_panics
+      - name: Prove the D2/D3 promotion decoders are total (core)
+        # PromoteBody flat framing (capped picked list + length-prefixed onion bytes + the
+        # D3 carry_from_secs u64 marker) via decode_flat / ConsentBody — proven no-panic on
+        # all hostile inputs. decode_flat EXCLUDES the onion String::from_utf8, a std,
+        # panic-free boundary that is CBMC-intractable for the same reason Marking is
+        # (R-6); the full decode just layers that one from_utf8 on top. The D2/D3
+        # PromoteCommit frame (tag 19) carries an opaque signed blob (get_vec, like
+        # Promote/Consent) — no new decoder to prove.
+        run: |
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::promote_body_decode_never_panics
+          cargo kani -p talkrypt-core --harness engine::d1_proofs::consent_body_decode_never_panics
+      - name: Prove the mesh (LoRa) decoders are total (transport)
+        # The talkrypt-over-mesh fragment header + reliable-transport packet header are
+        # flat + fixed-offset — CBMC-tractable, proven no-panic and in-bounds on all
+        # hostile mesh input. The stateful reassembler / ARQ (nested heap) are covered
+        # by the unit tests, not Kani, per the FV posture (chunk flat decoders only).
+        run: |
+          cargo kani -p talkrypt-transport --harness mesh::frag::proofs::parse_fragment_never_panics_and_is_bounded
+          cargo kani -p talkrypt-transport --harness mesh::transport::proofs::parse_packet_never_panics_and_is_bounded
+
+  fstar:
+    name: "F* — auth theorems"
+    # Pin 22.04 (glibc 2.35) to match the prebuilt Z3 4.13.3 Linux asset.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      # F*'s official prebuilt binary is self-contained: it bundles its own Z3 and
+      # runs on python3 — so no opam, no ancient F* (2022.01.15), no python2.7 depext,
+      # and no separate Z3 install. Pin an exact release for reproducibility.
+      - name: Install F* (official self-contained binary)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o fstar.tar.gz \
+            https://github.com/FStarLang/FStar/releases/download/v2026.07.05/fstar-v2026.07.05-Linux-x86_64.tar.gz
+          tar xzf fstar.tar.gz
+          fstarbin="$(find "$PWD" -type f -name fstar.exe | head -1)"
+          test -n "$fstarbin"
+          echo "$(dirname "$fstarbin")" >> "$GITHUB_PATH"
+      - name: Verify GroupAuth.fst
+        run: |
+          fstar.exe --version
+          make -C formal fstar
+
+  easycrypt:
+    name: "EasyCrypt — QROM reductions"
+    # Pin 22.04 (glibc 2.35) to match the prebuilt Z3 4.13.3 Linux asset.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      # EasyCrypt's why3 supports Z3 in the ^4.13 range; install 4.13.3 and expose it.
+      - name: Install Z3 4.13.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o z3.zip \
+            https://github.com/Z3Prover/z3/releases/download/z3-4.13.3/z3-4.13.3-x64-glibc-2.35.zip
+          unzip -q z3.zip
+          z3bin="$(find . -type f -path '*/bin/z3' | head -1)"
+          test -n "$z3bin"
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3-4.13.3
+          sudo install -m 0755 "$z3bin" /usr/local/bin/z3
+          z3 --version
+      - name: Install EasyCrypt + Alt-Ergo (via opam)
+        run: |
+          # EasyCrypt is NOT in the default opam repo ("No package named easycrypt"),
+          # so pin it from its release tag first, then install. --confirm-level=unsafe-yes
+          # lets opam install system depexts itself. Alt-Ergo is EasyCrypt's primary SMT
+          # prover (driven via why3, alongside the Z3 installed above).
+          sudo apt-get update && sudo apt-get install -y opam
+          # EasyCrypt's build uses Sys.ocaml_release, which needs OCaml >= 4.14; the
+          # system OCaml on ubuntu-22.04 is 4.13.1, so create the switch with 4.14.
+          opam init --disable-sandboxing -y --compiler=4.14.2
+          opam pin add -yn easycrypt https://github.com/EasyCrypt/easycrypt.git#r2026.06
+          opam install --confirm-level=unsafe-yes easycrypt alt-ergo
+      - name: Configure provers and verify the QROM reductions
+        run: |
+          eval $(opam env)
+          easycrypt why3config
+          make -C formal easycrypt

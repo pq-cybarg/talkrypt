@@ -90,4 +90,29 @@ cp "$ROOT/scripts/verify.sh" "$ROOT/scripts/verify.ps1" . 2>/dev/null || true
   echo "NOT FIPS-validated · NOT CSfC-accredited · NOT NSA-approved · NOT audited."
 } > MANIFEST.txt
 
+# --- PQ release signature (SECURITY-AUDIT F-8) -------------------------------
+# If a release secret key is available, sign SHA256SUMS with the project's own
+# ML-DSA-87 release key so integrity chains artifact -> SHA-256 -> signed manifest
+# -> the published release public key (a signing authority the project controls,
+# not a bare checksum). `TALKRYPT_RELEASE_SK` is a 64-hex seed OR a path to a file
+# holding it; keep it offline / in a CI secret. Skipped (with a notice) when unset.
+if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
+  RELSIGN="$ROOT/target/release/talkrypt-relsign"
+  [[ -x "$RELSIGN" ]] || RELSIGN="$ROOT/target/debug/talkrypt-relsign"
+  if [[ ! -x "$RELSIGN" ]]; then
+    ( cd "$ROOT" && cargo build -q -p talkrypt-relsign ) && RELSIGN="$ROOT/target/debug/talkrypt-relsign"
+  fi
+  if [[ -x "$RELSIGN" ]]; then
+    "$RELSIGN" sign SHA256SUMS "$TALKRYPT_RELEASE_SK" >/dev/null
+    # Publish the verify key alongside; its TRUST ANCHOR is the copy committed to
+    # the repo (docs/RELEASE_PUBKEY.hex) — a bundled copy is convenience only.
+    [[ -f "$ROOT/docs/RELEASE_PUBKEY.hex" ]] && cp "$ROOT/docs/RELEASE_PUBKEY.hex" .
+    echo "==> signed SHA256SUMS -> SHA256SUMS.sig (ML-DSA-87 release key)"
+  else
+    echo "WARNING: TALKRYPT_RELEASE_SK set but talkrypt-relsign unavailable — SHA256SUMS.sig NOT written."
+  fi
+else
+  echo "note: TALKRYPT_RELEASE_SK unset — release is checksum-only (unsigned). See docs/PACKAGING.md."
+fi
+
 echo "==> hashed ${#ARTIFACTS[@]} artifact(s) in $OUT/ (SHA-256 + SHA3-256); wrote SHA256SUMS, SHA3-256SUMS, MANIFEST.txt"

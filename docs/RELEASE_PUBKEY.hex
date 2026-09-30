@@ -1,0 +1,12 @@
+# talkrypt release public key (ML-DSA-87) — SECURITY-AUDIT F-8.
+#
+# This is the TRUST ANCHOR for release-artifact signatures. The maintainer runs
+# `talkrypt-relsign keygen` ONCE, keeps the SEED offline / in the CI secret
+# TALKRYPT_RELEASE_SK, and commits the PUBKEY hex below (on the line after this
+# comment block, whitespace-only otherwise). Verifiers pin THIS repo copy — never
+# the copy bundled in a downloaded release (a MITM could swap both).
+#
+# Until a real release key is published, this file is an unfilled placeholder and
+# signature verification is advisory (verify.sh reports it as not-checked).
+#
+# PUBKEY (2592-byte ML-DSA-87 verify key, hex; replace this line):

@@ -82,7 +82,7 @@ async fn init_tor<R: Fn() + Clone + Send + 'static>(
         .map_err(|e| format!("tor bootstrap failed: {e}"))
     })
     .await
-    .map(|t| t.clone())
+    .cloned()
 }
 
 /// Connect the shared Nym mixnet transport at most once and reuse it for every
@@ -123,7 +123,7 @@ async fn init_nym(
             .map_err(|e| format!("nym connect failed: {e}"))
     })
     .await
-    .map(|t| t.clone())
+    .cloned()
 }
 
 /// Build the network transport for a host/join action.
@@ -138,6 +138,10 @@ async fn init_nym(
 /// * Otherwise a fresh TCP transport bound to `listen` is used (same-Wi-Fi fast
 ///   path).
 #[allow(unused_variables)]
+// Eight distinct dependencies (id, two transport toggles, listen addr, UI sender,
+// two shared-transport cells, repaint callback); bundling them into a struct would
+// add indirection for this single internal call site with no clarity gain.
+#[allow(clippy::too_many_arguments)]
 async fn make_transport<R: Fn() + Clone + Send + 'static>(
     id: u64,
     use_tor: bool,
@@ -205,7 +209,7 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.inactive.bg_fill = FIELD;
     v.widgets.inactive.weak_bg_fill = FIELD;
     v.widgets.inactive.corner_radius = r;
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, FG);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, FG);
     v.widgets.hovered.bg_fill = PEER_BUBBLE;
     v.widgets.hovered.weak_bg_fill = PEER_BUBBLE;
     v.widgets.hovered.corner_radius = r;
@@ -282,6 +286,17 @@ enum Cmd {
     Send {
         id: u64,
         text: String,
+    },
+    /// Set (and CQ-announce) this session's leading self-declared name (SUB-SPEC A).
+    /// An empty label clears it.
+    SetName {
+        id: u64,
+        label: String,
+    },
+    /// Toggle the periodic CQ re-beacon (SUB-SPEC A). `secs == 0` disables it.
+    SetCadence {
+        id: u64,
+        secs: u64,
     },
     /// Re-dial a joined session whose transport dropped (the host stays listening
     /// on its onion/port, so the joiner just re-runs the initiator handshake).
@@ -506,6 +521,37 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     }
                 }
             }
+            Cmd::SetName { id, label } => {
+                if let Some(c) = cores.get(&id) {
+                    if label.is_empty() {
+                        c.set_leading_name(None);
+                        let _ = ui_tx.send(UiEvt::Status { id, text: "name cleared".into() });
+                    } else {
+                        c.set_leading_name(Some(talkrypt_core::presence::NameEntry {
+                            id: label.clone(),
+                            label: label.clone(),
+                            backing: talkrypt_core::presence::NameBacking::Bare,
+                        }));
+                        let _ = c.announce_presence().await;
+                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("calling as \"{label}\"") });
+                    }
+                }
+            }
+            Cmd::SetCadence { id, secs } => {
+                if let Some(c) = cores.get(&id) {
+                    let cur = c.presence_cadence();
+                    c.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                        periodic_secs: (secs > 0).then_some(secs),
+                        on_message_id: cur.on_message_id,
+                    });
+                    let text = if secs > 0 {
+                        format!("CQ every {secs}s")
+                    } else {
+                        "CQ periodic off".into()
+                    };
+                    let _ = ui_tx.send(UiEvt::Status { id, text });
+                }
+            }
             Cmd::Reconnect { id } => {
                 // A joined session re-dials its host (which is still listening on
                 // the same onion/port). A host has nothing to re-dial — it just
@@ -545,6 +591,36 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let who = username.unwrap_or_else(|| short(&account_fingerprint));
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
                 }
+                Event::Name { from, label, tier, caveat, safety_number, .. } => {
+                    // SUB-SPEC A NameRender: honest tier badge, always-available safety
+                    // number, and any collision caveat. A suppressed name (label None)
+                    // still surfaces via its safety number + the caveat.
+                    let badge = match tier {
+                        talkrypt_core::nametrust::NameTier::Linked => "\u{1F517} ", // 🔗
+                        talkrypt_core::nametrust::NameTier::RegistryConfirmed => "\u{2713} ", // ✓
+                        talkrypt_core::nametrust::NameTier::Bare => "",
+                    };
+                    let head = match label {
+                        Some(l) => format!("{badge}{} is calling as \"{l}\" [{safety_number}]", short(&from)),
+                        None => format!("{} [{safety_number}]", short(&from)),
+                    };
+                    let text = match caveat {
+                        Some(c) => format!("{head} \u{26a0} {c}"), // ⚠
+                        None => head,
+                    };
+                    let _ = ui_tx.send(UiEvt::Status { id, text });
+                }
+                Event::Linkage { .. } => {} // SUB-SPEC B (UI: Task 13)
+                Event::Vouch { subject, vouched, .. } if vouched => {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
+                }
+                Event::Vouch { .. } => {} // below threshold / withdrawn — no status line
+                Event::Delivered { .. } => {} // D1 delivery receipt (UI later)
+                Event::OutboxDropped { count } => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! outbox dropped {count} un-acked message(s)") }); }
+                Event::PromoteProposed { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion proposed".into() }); }
+                Event::Promoted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promoted — chat is persistent".into() }); }
+                Event::PromoteAborted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion aborted".into() }); }
+                Event::BeaconSeen { source, .. } => { let via = source.map(|s| format!(" ({s})")).unwrap_or_default(); let _ = ui_tx.send(UiEvt::Status { id, text: format!("nearby device beaconing this channel{via}") }); }
                 Event::Error(m) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! {m}") }); }
             }
             on_event();
@@ -632,6 +708,8 @@ struct App {
     join_input: String,
     // ----- chat screen -----
     msg_input: String,
+    name_input: String, // SUB-SPEC A: leading self-declared name draft
+    cq_periodic: bool,  // SUB-SPEC A: periodic CQ re-beacon toggle (active session)
     show_invite: bool, // toggles the invite/QR panel inside a chat
     notice: String,    // transient form message on the new-chat screen
     tor_progress: Option<f32>, // global Tor bootstrap fraction while < 1.0
@@ -651,6 +729,8 @@ impl App {
             channel_input: "#general".into(),
             posture: "pq-pure".into(),
             access: "open".into(),
+            name_input: String::new(),
+            cq_periodic: false,
             persistence: "Persistent".into(), // default Persistent, matching mobile
             // Tor on by default whenever this build can do Tor; a LAN-only
             // (--no-default-features) build starts unchecked.
@@ -1002,6 +1082,31 @@ impl App {
                 }
             });
         ui.add_space(8.0);
+        // Name row (SUB-SPEC A): declare + CQ-announce a self-declared name for this chat.
+        ui.horizontal(|ui| {
+            let nr = ui.add(
+                egui::TextEdit::singleline(&mut self.name_input)
+                    .hint_text("Your name (CQ)")
+                    .desired_width(160.0),
+            );
+            let set = ui.button("Set name").clicked()
+                || (nr.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if set {
+                let _ = self.cmd_tx.send(Cmd::SetName {
+                    id,
+                    label: self.name_input.trim().to_string(),
+                });
+            }
+            // Periodic CQ toggle: re-beacon the name every 5 min so late joiners /
+            // reconnects resolve us without a fresh roster-grow (SUB-SPEC A §4).
+            if ui.checkbox(&mut self.cq_periodic, "CQ 5m").changed() {
+                let _ = self.cmd_tx.send(Cmd::SetCadence {
+                    id,
+                    secs: if self.cq_periodic { 300 } else { 0 },
+                });
+            }
+        });
+        ui.add_space(4.0);
         // Message row: padded field + a Send button the SAME height.
         ui.horizontal(|ui| {
             let send_w = 64.0;

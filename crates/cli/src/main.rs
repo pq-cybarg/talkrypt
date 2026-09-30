@@ -151,6 +151,21 @@ enum Cmd {
         /// emulator advertise the host alias 10.0.2.2). Ignored with --tor.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Self-declared leading callsign for this chat (SUB-SPEC A). Set before
+        /// any peer connects so the on-join CQ auto-announce carries it — the
+        /// non-interactive equivalent of `/name <callsign>`. Bare (not
+        /// account-linked); use `/name link` in-session for a linked name.
+        #[arg(long)]
+        name: Option<String>,
+        /// How joiners resolve self-declared name collisions (SUB-SPEC A). Travels
+        /// in the invite so every joiner honors the host's choice: `signal`
+        /// (default — never trust a name for identity; show it verbatim and rely
+        /// on the safety number), `warn` (flag colliding names with a caveat), or
+        /// `suppress` (hide a later collider's label, show its fingerprint).
+        #[arg(long)]
+        name_policy: Option<String>,
+        #[command(flatten)]
+        mesh: MeshArgs,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -179,6 +194,14 @@ enum Cmd {
         /// Requires a `--features tor` build.
         #[arg(long)]
         tor: bool,
+        /// Self-declared leading callsign for this chat (SUB-SPEC A). Set before
+        /// dialing so the on-join CQ auto-announce carries it — the
+        /// non-interactive equivalent of `/name <callsign>`. Bare (not
+        /// account-linked); use `/name link` in-session for a linked name.
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        mesh: MeshArgs,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -381,6 +404,9 @@ async fn main() {
             require_registry,
             tor,
             endpoint,
+            name,
+            name_policy,
+            mesh,
         } => {
             run_host(HostArgs {
                 listen,
@@ -401,6 +427,9 @@ async fn main() {
                 require_registry,
                 tor,
                 endpoint,
+                name,
+                name_policy,
+                mesh,
             })
             .await
         }
@@ -413,7 +442,9 @@ async fn main() {
             chain,
             password,
             tor,
-        } => run_join(&uri, group, account, username, device, chain, password, tor).await,
+            name,
+            mesh,
+        } => run_join(&uri, group, account, username, device, chain, password, tor, name, mesh).await,
         Cmd::Registry { listen, channel, tor } => run_registry(listen, channel, tor).await,
         Cmd::LinkOffer {
             listen,
@@ -559,6 +590,111 @@ struct HostArgs {
     require_registry: Option<String>,
     tor: bool,
     endpoint: Option<String>,
+    name: Option<String>,
+    name_policy: Option<String>,
+    mesh: MeshArgs,
+}
+
+/// Shared `--mesh-*` flags for `host` / `join`: optionally carry messages over a
+/// LoRa mesh via a USB-serial Meshtastic / Meshcore node (feature `mesh-radio`).
+#[derive(clap::Args, Clone)]
+struct MeshArgs {
+    /// Also carry this chat's messages over a LoRa mesh via a USB-serial node at
+    /// this port (e.g. /dev/tty.usbserial-0001). Off unless set. Requires a build
+    /// with `--features mesh-radio`.
+    #[arg(long)]
+    mesh_serial: Option<String>,
+    /// Mesh firmware on the node: meshtastic (default) | meshcore.
+    #[arg(long, default_value = "meshtastic")]
+    mesh_kind: String,
+    /// Serial baud for the mesh node (Meshtastic uses 115200).
+    #[arg(long, default_value_t = 115200)]
+    mesh_baud: u32,
+    /// Mesh channel index to transmit talkrypt fragments on.
+    #[arg(long, default_value_t = 0)]
+    mesh_channel: u8,
+    /// LoRa modem preset for airtime estimation (duty-cycle pacing): shortturbo |
+    /// shortfast | shortslow | mediumfast | mediumslow | longfast (default) |
+    /// longmoderate | longslow.
+    #[arg(long, default_value = "longfast")]
+    mesh_preset: String,
+    /// Duty-cycle limit as a fraction of airtime (e.g. 0.01 for the EU868 1% cap).
+    /// When set, transmissions are paced to respect it (plus `--mesh-min-gap`);
+    /// omit for no duty-cycle pacing.
+    #[arg(long)]
+    mesh_duty_cycle: Option<f64>,
+    /// Minimum gap between mesh transmissions, ms (protects the node's TX queue).
+    #[arg(long, default_value_t = 250)]
+    mesh_min_gap_ms: u64,
+}
+
+/// Parse a `--mesh-preset` name to a Meshtastic modem preset (default LongFast).
+#[cfg(feature = "mesh-radio")]
+fn parse_mesh_preset(s: &str) -> talkrypt_transport::mesh::MeshtasticPreset {
+    use talkrypt_transport::mesh::MeshtasticPreset::*;
+    match s.to_ascii_lowercase().as_str() {
+        "shortturbo" => ShortTurbo,
+        "shortfast" => ShortFast,
+        "shortslow" => ShortSlow,
+        "mediumfast" => MediumFast,
+        "mediumslow" => MediumSlow,
+        "longmoderate" => LongModerate,
+        "longslow" => LongSlow,
+        _ => LongFast,
+    }
+}
+
+/// If `--mesh-serial` was given, open the serial mesh node and start carrying this
+/// chat's messages over it (in addition to the primary transport). A no-op when
+/// unset; errors clearly when set in a build without the `mesh-radio` feature.
+async fn maybe_start_mesh(core: &Core, mesh: &MeshArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(port) = mesh.mesh_serial.clone() else {
+        return Ok(());
+    };
+    #[cfg(feature = "mesh-radio")]
+    {
+        use talkrypt_transport::mesh::{
+            AirtimeBudget, MeshNode, MeshPolicy, MeshcoreSerial, MeshtasticSerial, PacedMeshNode,
+        };
+        let mut node: std::sync::Arc<dyn MeshNode> = match mesh.mesh_kind.as_str() {
+            "meshcore" => MeshcoreSerial::open(&port, mesh.mesh_baud).await?,
+            "meshtastic" => MeshtasticSerial::open(&port, mesh.mesh_baud).await?,
+            other => {
+                return Err(format!("unknown --mesh-kind '{other}' (meshtastic|meshcore)").into())
+            }
+        };
+        // Optional duty-cycle pacing: wrap the node so transmissions respect the
+        // configured airtime budget + min-gap for the chosen modem preset.
+        let paced = if let Some(duty) = mesh.mesh_duty_cycle {
+            let preset = parse_mesh_preset(&mesh.mesh_preset);
+            let budget = AirtimeBudget::new(3_600_000, duty, mesh.mesh_min_gap_ms);
+            node = std::sync::Arc::new(PacedMeshNode::new(node, preset, budget));
+            format!(", paced {}% duty / {} ms gap", duty * 100.0, mesh.mesh_min_gap_ms)
+        } else {
+            String::new()
+        };
+        core.start_mesh_messaging(
+            node,
+            MeshPolicy {
+                channel: mesh.mesh_channel,
+                ..Default::default()
+            },
+        )
+        .await;
+        println!(
+            "mesh: {} on {port} @ {} baud (channel {}{}) — messages also ride the LoRa mesh",
+            mesh.mesh_kind, mesh.mesh_baud, mesh.mesh_channel, paced
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "mesh-radio"))]
+    {
+        let _ = core;
+        Err(format!(
+            "--mesh-serial {port} requires a build with `--features mesh-radio`"
+        )
+        .into())
+    }
 }
 
 // ----- account identity helpers (username accounts over device keys) -----
@@ -952,6 +1088,9 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         require_registry,
         tor,
         endpoint,
+        name,
+        name_policy,
+        mesh,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -1001,6 +1140,10 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     desc.group = group;
     desc.channel_marking = channel_marking;
+    if let Some(p) = &name_policy {
+        desc.name_trust_policy = parse_name_policy(p)?;
+        println!("name-collision policy: {p}");
+    }
     if let Some(pw) = &password {
         desc.password = Some(ChannelPassword::new(pw.clone()));
         println!("channel password: set (Argon2id-gated; not carried in the invite)");
@@ -1070,6 +1213,9 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
             hex(&blob)
         );
     }
+
+    // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
+    maybe_start_mesh(&core, &mesh).await?;
     // Show the invite as a scannable QR for in-person joining.
     println!("scan to join (or copy the URI above):\n");
     print_qr(&desc.to_uri());
@@ -1077,6 +1223,10 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
     load_contacts(&core); // restore recognized accounts from previous sessions
+    // SUB-SPEC A: arm the leading name before any peer connects, so the host's
+    // on-join CQ auto-announce (fired in reader_loop when a joiner registers)
+    // carries it hands-free.
+    set_bare_leading_name(&core, &name);
     println!("\nwaiting for peers — type a message + enter to send. /help for commands.\n");
 
     repl(core, rx, ReplState::new(account_kp, username)).await
@@ -1091,6 +1241,8 @@ async fn run_join(
     chain: Option<String>,
     password: Option<String>,
     tor: bool,
+    name: Option<String>,
+    mesh: MeshArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let mut desc = ChatDescriptor::from_uri(uri)?;
@@ -1135,12 +1287,18 @@ async fn run_join(
         core.identity_public().safety_number()
     );
 
+    // SUB-SPEC A: arm the leading name BEFORE dialing, so the joiner's on-join
+    // CQ auto-announce (fired inside establish/register) carries it hands-free.
+    set_bare_leading_name(&core, &name);
     let strategy = for_kind(desc.topology);
     strategy.establish(&core, &desc.endpoints).await?;
     println!(
         "connected to {} peer(s). /help for commands.\n",
         core.peer_count()
     );
+
+    // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
+    maybe_start_mesh(&core, &mesh).await?;
 
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
@@ -1345,6 +1503,23 @@ commands:
   /access open|contacts|friends  set who may join this channel
   /allow <fp>                    admit one specific account
   /deny <fp>                     revoke an account's access
+  names + CQ beacon (self-declared display names):
+  /name <callsign>               set a bare self-declared name and announce it
+  /name link <callsign>          set an account-linked (verified) name (needs /account)
+  /name new <callsign>           save a name to your book without switching to it
+  /name list                     list saved names (* = active)
+  /name use <id>                 switch your leading name to a saved one and announce
+  /name off                      clear your leading name
+  /opsec clean|selective|transparent [hide]   linkage-disclosure policy (SUB-SPEC B)
+  /grouping new <name-id...>      define + disclose a grouping of your names (account-hidden)
+  /showall on|off                disclose your grouping automatically on join
+  /sybil                         show the honest distinct-people estimate
+  /vouch <fp> | /unvouch <fp>    vouch / withdraw for an account fp (SUB-SPEC C; display-only)
+  /vouchpolicy count <n>         your own vouch-tint threshold (stricter-only)
+  /vouches                       list heard vouches (subject, score, standing)
+  /cq                            re-announce your name to the chat now
+  /cq periodic <mins>|off        auto re-beacon your name on a timer
+  /cq onmsg on|off               stamp a name-id on each message (rename detection)
   registry (username discovery):
   /register <registry-uri>       publish username->account to a registry
   /resolve <name> <uri>[ <uri>…] [add]
@@ -1414,6 +1589,61 @@ async fn repl(
                 }
                 Event::Disconnected { fingerprint } => {
                     println!("\r* peer disconnected: {}", short_fp(&fingerprint));
+                }
+                Event::Delivered { gossip_id } => {
+                    let id: String = gossip_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* delivered {id}");
+                }
+                Event::OutboxDropped { count } => {
+                    eprintln!("\r! outbox: {count} un-acked message(s) dropped (cap/TTL)");
+                }
+                Event::PromoteProposed { by, promote_id, target_tier, retention_mode, picked } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!(
+                        "\r* promotion proposed by {} (tier {target_tier}, retention {retention_mode}, {} members) — /consent {id} yes|no",
+                        short_fp(&by),
+                        picked.len()
+                    );
+                }
+                Event::Promoted { promote_id } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* promoted {id} — chat is now persistent");
+                }
+                Event::PromoteAborted { promote_id } => {
+                    let id: String = promote_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    println!("\r* promotion {id} aborted — chat stays ephemeral");
+                }
+                Event::BeaconSeen { channel, source } => {
+                    let via = source.map(|s| format!(" ({s})")).unwrap_or_default();
+                    println!("\r* nearby: a device on {channel} is beaconing{via}");
+                }
+                Event::Name { from, label, tier, caveat, .. } => {
+                    if let Some(label) = label {
+                        // Badge the trust tier so a verified (account-linked /
+                        // registry-confirmed) name is visually distinct from a bare
+                        // one; the caveat carries any collision warning (SUB-SPEC A).
+                        let badge = match tier {
+                            talkrypt_core::nametrust::NameTier::Linked => "🔗 ",
+                            talkrypt_core::nametrust::NameTier::RegistryConfirmed => "✓ ",
+                            talkrypt_core::nametrust::NameTier::Bare => "",
+                        };
+                        let cav = caveat.map(|c| format!(" ({c})")).unwrap_or_default();
+                        println!("\r* {} is calling as {badge}\"{label}\"{cav}", short_fp(&from));
+                    }
+                }
+                Event::Linkage { subject, verdict, .. } => {
+                    // SUB-SPEC B: a peer disclosed grouping linkage (account-hidden).
+                    if verdict {
+                        println!("\r* {} disclosed grouping linkage", short_fp(&subject));
+                    }
+                }
+                Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => {
+                    // SUB-SPEC C: a subject's vouch standing changed (display-only).
+                    if inflation_rejected {
+                        println!("\r* {} vouch inflation rejected (sybil) — neutral", short_fp(&subject));
+                    } else if vouched {
+                        println!("\r\u{2733} {} vouched (score {weighted_score})", short_fp(&subject));
+                    }
                 }
                 Event::Error(e) => eprintln!("\r! {e}"),
             }
@@ -1513,7 +1743,289 @@ async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &str) {
         "register" => cmd_register(core, state, arg).await,
         "revoke" => cmd_revoke(core, state, arg).await,
         "resolve" => cmd_resolve(core, arg).await,
+        "name" => cmd_name(core, state, arg).await,
+        "cq" => {
+            let a = arg.trim();
+            if a.is_empty() {
+                core.announce_presence().await.ok();
+                println!("CQ — announced your name to the chat");
+            } else if let Some(rest) = a.strip_prefix("periodic") {
+                let rest = rest.trim();
+                let secs = if rest == "off" || rest.is_empty() {
+                    None
+                } else {
+                    rest.parse::<u64>().ok().map(|m| m * 60)
+                };
+                let cur = core.presence_cadence();
+                core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                    periodic_secs: secs,
+                    on_message_id: cur.on_message_id,
+                });
+                match secs {
+                    Some(s) => println!("CQ cadence: every {} min", s / 60),
+                    None => println!("CQ cadence: off (manual /cq only)"),
+                }
+            } else if let Some(rest) = a.strip_prefix("onmsg") {
+                // Stamp a name-id on every outgoing message so peers detect a rename
+                // they missed and drop the stale name (SUB-SPEC A §4 mode 3).
+                let on = matches!(rest.trim(), "on" | "" | "true");
+                let cur = core.presence_cadence();
+                core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+                    periodic_secs: cur.periodic_secs,
+                    on_message_id: on,
+                });
+                println!("CQ on-message name-id: {}", if on { "on" } else { "off" });
+            } else {
+                println!("usage: /cq   |   /cq periodic <minutes>|off   |   /cq onmsg on|off");
+            }
+        }
+        "opsec" => cmd_opsec(core, arg),
+        "grouping" => cmd_grouping(core, arg).await,
+        "showall" => match arg.trim() {
+            "on" => {
+                core.show_all_identities(true);
+                println!("show-all: on — your grouping is disclosed on join");
+            }
+            "off" => {
+                core.show_all_identities(false);
+                println!("show-all: off");
+            }
+            _ => println!("usage: /showall on|off"),
+        },
+        "sybil" => {
+            let s = core.sybil_estimate();
+            println!(
+                "sybil estimate: >= {} distinct people ({} accounts, {} groupings, {} isolated)",
+                s.min_distinct_people, s.distinct_accounts, s.distinct_groupings, s.isolated
+            );
+        }
+        // SUB-SPEC C: vouching (display-only; never gates access).
+        "vouch" => cmd_vouch(core, arg, true).await,
+        "unvouch" => cmd_vouch(core, arg, false).await,
+        "vouches" => {
+            let sum = core.vouch_summary();
+            if sum.is_empty() {
+                println!("no vouches heard yet");
+            } else {
+                for (subject, score, vouched) in sum {
+                    let fp: String = subject.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    let tag = if vouched { "✳ vouched" } else if score < 0 { "inflation-rejected (neutral)" } else { "below threshold" };
+                    println!("  {fp}  score {score}  {tag}");
+                }
+            }
+        }
+        "vouchpolicy" => match arg.trim().split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["count", n] => match n.parse::<u32>() {
+                Ok(c) => {
+                    core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(c));
+                    println!("vouch threshold (yours): weighted score >= {c}");
+                }
+                Err(_) => println!("usage: /vouchpolicy count <n>"),
+            },
+            _ => println!("usage: /vouchpolicy count <n>"),
+        },
         other => println!("unknown command: /{other} (try /help)"),
+    }
+}
+
+/// `/vouch <fp>` / `/unvouch <fp>` — cast or withdraw a vouch for a 96-char hex
+/// account fp (SUB-SPEC C). Additive-only, display-only; never gates access.
+async fn cmd_vouch(core: &Core, arg: &str, on: bool) {
+    let fp_hex = arg.trim();
+    let mut fp = [0u8; 48];
+    if fp_hex.len() != 96
+        || (0..48).any(|i| {
+            match u8::from_str_radix(&fp_hex[i * 2..i * 2 + 2], 16) {
+                Ok(b) => { fp[i] = b; false }
+                Err(_) => true,
+            }
+        })
+    {
+        println!("usage: /{} <96-char-hex-account-fp>", if on { "vouch" } else { "unvouch" });
+        return;
+    }
+    let target = talkrypt_core::vouch::VouchTarget::Account(fp);
+    if on {
+        core.vouch_for(target).await;
+        println!("vouched for {}", &fp_hex[..8]);
+    } else {
+        core.revoke_vouch(target).await;
+        println!("withdrew vouch for {}", &fp_hex[..8]);
+    }
+}
+
+/// Map an `/opsec` argument to an [`OpsecMode`] (SUB-SPEC B linkage disclosure).
+fn parse_opsec(s: &str) -> Result<talkrypt_core::linkage::OpsecMode, String> {
+    use talkrypt_core::linkage::OpsecMode;
+    let mut it = s.trim().split_whitespace();
+    match it.next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "clean" => Ok(OpsecMode::Clean),
+        "selective" => Ok(OpsecMode::Selective),
+        "transparent" => Ok(OpsecMode::Transparent { hide: it.next() == Some("hide") }),
+        other => Err(format!(
+            "unknown opsec mode {other:?} (use clean | selective | transparent [hide])"
+        )),
+    }
+}
+
+/// `/opsec clean|selective|transparent [hide]` — set the linkage-disclosure policy.
+fn cmd_opsec(core: &Core, arg: &str) {
+    match parse_opsec(arg) {
+        Ok(m) => {
+            core.set_opsec_mode(m);
+            println!("opsec mode: {m:?}");
+        }
+        Err(e) => println!("{e}"),
+    }
+}
+
+/// `/grouping new <name-id...>` — define a grouping of your names and disclose it
+/// (account-hidden); `/grouping <id>` re-discloses an existing one.
+async fn cmd_grouping(core: &Core, arg: &str) {
+    let arg = arg.trim();
+    if let Some(rest) = arg.strip_prefix("new ") {
+        let ids: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
+        if ids.is_empty() {
+            println!("usage: /grouping new <name-id> [<name-id>...]");
+            return;
+        }
+        let id = core.define_grouping(&ids);
+        println!("grouping {id} defined ({} members)", ids.len());
+        core.present_grouping(&id).await;
+        println!("grouping disclosed to the chat (account-hidden)");
+    } else if arg.is_empty() || arg == "show" {
+        println!("usage: /grouping new <name-id...>   (define + disclose a grouping)");
+    } else {
+        core.present_grouping(&arg.to_string()).await;
+        println!("grouping disclosed");
+    }
+}
+
+/// Set a bare (non-account-linked) leading name from a `--name` flag, BEFORE the
+/// session connects, so the on-join CQ auto-announce (SUB-SPEC A) carries it. No
+/// explicit announce here — `register()`/`establish` emit the presence frame as
+/// part of the join handshake.
+fn set_bare_leading_name(core: &Core, name: &Option<String>) {
+    use talkrypt_core::presence::{NameBacking, NameEntry};
+    if let Some(label) = name {
+        let label = label.trim();
+        if label.is_empty() {
+            return;
+        }
+        core.set_leading_name(Some(NameEntry {
+            id: label.to_string(),
+            label: label.to_string(),
+            backing: NameBacking::Bare,
+        }));
+        println!("leading name \"{label}\" (bare) — will auto-announce on join");
+    }
+}
+
+/// Map a `--name-policy` string to a [`NameTrustPolicy`] (SUB-SPEC A). The policy
+/// is baked into the invite descriptor so every joiner resolves name collisions
+/// the same way the host chose.
+fn parse_name_policy(s: &str) -> Result<talkrypt_core::nametrust::NameTrustPolicy, String> {
+    use talkrypt_core::nametrust::NameTrustPolicy;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "signal" | "signal-style" | "signalstyle" => Ok(NameTrustPolicy::SignalStyle),
+        "warn" | "warn-on-collision" => Ok(NameTrustPolicy::WarnOnCollision),
+        "suppress" | "suppress-colliding" => Ok(NameTrustPolicy::SuppressColliding),
+        other => Err(format!(
+            "unknown --name-policy {other:?} (use signal | warn | suppress)"
+        )),
+    }
+}
+
+/// `/name <callsign>` (bare) | `/name link <callsign>` (account-linked) |
+/// `/name new <callsign>` (save without switching) | `/name list` |
+/// `/name use <id>` (switch to a saved name) | `/name off`.
+/// Manages the self-declared name book and the leading name for this chat (SUB-SPEC A).
+async fn cmd_name(core: &Core, state: &ReplState, arg: &str) {
+    use talkrypt_core::presence::{NameBacking, NameEntry};
+    let arg = arg.trim();
+    if arg.is_empty() {
+        println!(
+            "usage: /name <callsign> | /name link <callsign> | /name new <callsign> | /name list | /name use <id> | /name off"
+        );
+        return;
+    }
+    if arg == "off" {
+        core.set_leading_name(None);
+        println!("leading name cleared");
+        return;
+    }
+    if arg == "list" {
+        let book = core.name_book();
+        if book.entries.is_empty() {
+            println!("(name book empty — /name <callsign> to add one)");
+            return;
+        }
+        let active = core.leading_name_id();
+        for e in &book.entries {
+            let tier = match e.backing {
+                NameBacking::Account { .. } => "account-linked",
+                NameBacking::Bare => "bare",
+            };
+            let mark = if active.as_deref() == Some(e.id.as_str()) { "* " } else { "  " };
+            println!("{mark}{}  \"{}\"  ({tier})", e.id, e.label);
+        }
+        return;
+    }
+    if let Some(id) = arg.strip_prefix("use ") {
+        let id = id.trim();
+        match core.use_name(id).await {
+            Ok(()) => println!("switched leading name to \"{id}\" and announced"),
+            Err(e) => println!("! {e}"),
+        }
+        return;
+    }
+    // The remaining forms all define a name. `new` saves it to the book WITHOUT
+    // switching; `link` makes it account-backed; a bare callsign sets + announces.
+    let (save_only, rest) = match arg.strip_prefix("new ") {
+        Some(rest) => (true, rest.trim()),
+        None => (false, arg),
+    };
+    let (label, backing) = if let Some(label) = rest.strip_prefix("link ") {
+        let label = label.trim().to_string();
+        match &state.account {
+            Some(acct) => {
+                let chain = IdentityChain::device(
+                    acct,
+                    core.identity_public(),
+                    "device:cli",
+                    now_secs(),
+                    0,
+                );
+                (label, NameBacking::Account { chain })
+            }
+            None => {
+                println!("! /name link needs an account (/account new|load) — using a bare name");
+                (label, NameBacking::Bare)
+            }
+        }
+    } else {
+        (rest.to_string(), NameBacking::Bare)
+    };
+    if label.is_empty() {
+        println!("usage: /name <callsign> | /name new <callsign> | /name [new] link <callsign>");
+        return;
+    }
+    let linked = matches!(backing, NameBacking::Account { .. });
+    let entry = NameEntry { id: label.clone(), label: label.clone(), backing };
+    // Always save to the book so it shows in `/name list` and can be re-selected.
+    core.add_name(entry.clone());
+    if save_only {
+        println!(
+            "saved \"{label}\" to the name book ({}); /name use {label} to switch",
+            if linked { "account-linked" } else { "bare" }
+        );
+    } else {
+        core.set_leading_name(Some(entry));
+        core.announce_presence().await.ok();
+        println!(
+            "name set to \"{label}\" ({}) and announced",
+            if linked { "account-linked" } else { "bare" }
+        );
     }
 }
 
@@ -1781,5 +2293,37 @@ async fn cmd_resolve(core: &Core, arg: &str) {
             "'{name}' did NOT resolve consistently — registries disagreed or none answered \
              (do not trust this name)"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use talkrypt_core::nametrust::NameTrustPolicy;
+
+    #[test]
+    fn name_policy_parses_all_forms() {
+        assert_eq!(parse_name_policy("signal").unwrap(), NameTrustPolicy::SignalStyle);
+        assert_eq!(parse_name_policy("SignalStyle").unwrap(), NameTrustPolicy::SignalStyle);
+        assert_eq!(parse_name_policy(" WARN ").unwrap(), NameTrustPolicy::WarnOnCollision);
+        assert_eq!(parse_name_policy("warn-on-collision").unwrap(), NameTrustPolicy::WarnOnCollision);
+        assert_eq!(parse_name_policy("suppress").unwrap(), NameTrustPolicy::SuppressColliding);
+        assert_eq!(parse_name_policy("suppress-colliding").unwrap(), NameTrustPolicy::SuppressColliding);
+    }
+
+    #[test]
+    fn name_policy_rejects_unknown() {
+        let e = parse_name_policy("trustme").unwrap_err();
+        assert!(e.contains("signal | warn | suppress"), "message guides the user: {e}");
+    }
+
+    #[test]
+    fn opsec_parses_all_forms() {
+        use talkrypt_core::linkage::OpsecMode;
+        assert_eq!(parse_opsec("clean").unwrap(), OpsecMode::Clean);
+        assert_eq!(parse_opsec("selective").unwrap(), OpsecMode::Selective);
+        assert_eq!(parse_opsec("transparent").unwrap(), OpsecMode::Transparent { hide: false });
+        assert_eq!(parse_opsec("transparent hide").unwrap(), OpsecMode::Transparent { hide: true });
+        assert!(parse_opsec("sneaky").is_err());
     }
 }

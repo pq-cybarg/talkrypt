@@ -25,6 +25,10 @@ default = []
 fips = ["talkrypt-crypto/fips"]
 # Run over real Tor (Arti): onion hosting + dialing. Pulls the large Arti tree.
 tor = ["talkrypt-transport/tor"]
+# Carry messages over a LoRa mesh via a USB-serial Meshtastic / Meshcore node
+# (`--mesh-serial`). Pulls tokio-serial; off by default so the plain CLI has no
+# serial/udev dependency.
+mesh-radio = ["talkrypt-transport/mesh-radio"]
 # Enable classification handling-markings (off in consumer builds; on in builds
 # intended for that audience). Receiving/displaying a marking always works; this
 # gates *originating* a channel classification.

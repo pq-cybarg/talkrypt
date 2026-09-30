@@ -6,6 +6,7 @@
 //! stack is testable over the in-memory loopback transport.
 
 pub mod advert;
+pub mod atrest;
 pub mod b32;
 pub mod csfc;
 pub mod custody;
@@ -14,20 +15,29 @@ pub mod descriptor;
 pub mod engine;
 pub mod error;
 pub mod handshake;
+pub mod history;
+pub mod keeper;
+pub mod linkage;
 pub mod linking;
 pub mod marking;
+pub mod nametrust;
+pub mod outbox;
+pub mod presence;
 pub mod registry;
 pub mod relay;
 pub mod seal;
+pub mod vouch;
 
 pub use advert::{build_advertisement, open_advertisement, AdvertStore, AdvertisePolicy};
 pub use custody::{Capabilities, CustodyTier};
 pub use seal::{seal, tier_of, unseal, KeyWrapper, SealOptions, WrapError};
 pub use marking::{Classification, Marking};
 pub use descriptor::{ChannelPassword, ChatDescriptor, Persistence, TopologyKind, URI_SCHEME};
-pub use engine::{AccessPolicy, Core, Event, GroupRole};
+pub use engine::{AccessPolicy, Core, Event, GroupRole, LeafSigMode};
 pub use contacts::{Contact, ContactStore, Presentation, Resolved};
 pub use linking::{LinkClient, LinkHost, Linked};
 pub use registry::{resolve_across, RegistryClient, RegistryServer};
 pub use error::{CoreError, Result};
+pub use history::{HistoryRecord, HistoryStore, InMemoryHistory};
+pub use atrest::SealedFileStore;
 pub use relay::RelayHub;
