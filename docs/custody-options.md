@@ -81,30 +81,38 @@ never in the confidentiality TCB. The built-in macOS Secure Enclave (5) is a fin
 classical device-binding gate *with* a passphrase backstop, but only worth its
 Apple-provisioning cost as part of the macOS distribution/notarization decision.
 
-## Roadmap — planned, not yet built
-
-### Permissive-security hardening mode (SIP-off compensation)
+## Permissive-security hardening mode (SIP-off compensation) — BUILT
 
 For users who choose option **5c** (disable SIP/AMFI to use the built-in Enclave
-without an Apple identity), re-provide — in our own code — the integrity
-protections SIP/AMFI would have enforced, so they are not left exposed:
+without an Apple identity), talkrypt re-provides — in its own code — the integrity
+protections SIP/AMFI would have enforced. **Mechanism implemented and tested**
+(`crates/helper/src/harden.rs`, `crates/crypto/src/attest.rs`,
+`crypto::mem::deny_debugger`); the only remaining step is *release wiring* (embed
+the trusted release public key and ship the detached signature so
+[`talkrypt_crypto::attest::verify_self`] runs at launch).
 
-- **PQ self-integrity attestation.** At launch, verify the app binary **and** the
-  key-custody helper against an **ML-DSA-87** signature using the existing
-  `crates/relsign` mechanism (artifact → SHA-256 → signed manifest → trusted
-  pubkey). Refuse to run / refuse to unseal if the signature doesn't match — our
-  own code-integrity check replacing the one AMFI stops enforcing. This is *better*
-  than Apple's check: it's post-quantum and not tied to Apple's PKI.
-- **Anti-debug / anti-inject process hardening.** Extend `crypto::mem::harden_process`
-  to macOS: `ptrace(PT_DENY_ATTACH)`, check `csops` flags, sanitize `DYLD_*`
-  injection env vars, refuse to run under a debugger. (`harden_process` already does
-  core-dump suppression everywhere and `PR_SET_DUMPABLE` on Linux/Android.)
-- **Launch-time posture report.** Surface in the UI whether SIP is off and whether
-  the self-attestation passed, so the user sees exactly which protections are
-  self-enforced vs. OS-enforced.
+- **PQ self-integrity attestation — done.** `talkrypt_crypto::attest::{verify_bytes,
+  verify_file, verify_self}` verify a binary against an **ML-DSA-87** signature under
+  a trusted key (same primitive as `crates/relsign`), exposed as a library for a
+  launch-time check. `harden(Some(SelfAttest { pubkey, signature }))` returns
+  `self_attested: Some(bool)`; the caller refuses to unseal on `Some(false)`. This
+  is *better* than Apple's check — post-quantum, bound to a key the user trusts, not
+  Apple's PKI. Tested end-to-end by signing the running test binary and self-verifying.
+- **Anti-debug / anti-inject — done.** `crypto::mem::deny_debugger()` issues
+  `ptrace(PT_DENY_ATTACH)` on macOS (non-dumpable already blocks ptrace on
+  Linux/Android); `harden()` scans for `DYLD_*` / `LD_PRELOAD` loader-injection env
+  vars and reports any set. `harden_process` still does core-dump suppression
+  everywhere.
+- **Posture report — done.** `PostureReport { hardening, debugger_denied,
+  injection_env, self_attested }` + `is_acceptable()` so the UI can show exactly
+  which protections are self-enforced, and callers can gate unseal on it.
 
-Build after threat-model sign-off. Tracked as a task; captured here so it sits
-alongside the custody backends rather than as a loose thread.
+Remaining (release engineering): embed the release ML-DSA-87 pubkey + ship the
+detached executable signature, and call `harden(Some(..))` from the desktop/helper
+entry points in permissive mode; optionally add programmatic SIP-status detection
+for the posture display.
+
+## Roadmap — not yet built
 
 ### Also deferred
 
