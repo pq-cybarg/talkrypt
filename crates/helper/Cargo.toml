@@ -31,10 +31,19 @@ tpm = []
 # injected by the host, so this feature has no extra build/runtime deps.
 sealsq = []
 
+# macOS hardware KEK wrappers (`macos_hw`): a Keychain-AES wrapper (tested) and a
+# Secure-Enclave ECIES wrapper (compile-checked; needs a signed build with the
+# SE entitlement to run). Pulls the raw Security/CoreFoundation FFI it needs.
+macos-se = ["dep:security-framework-sys", "dep:core-foundation", "dep:core-foundation-sys"]
+
 # macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
 # (no entitlement needed, unlike Secure Enclave).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
+# Raw FFI for the Secure-Enclave / Keychain KEK wrappers (macos-se feature).
+security-framework-sys = { version = "2.17", optional = true }
+core-foundation = { version = "0.9", optional = true }
+core-foundation-sys = { version = "0.8", optional = true }
 
 # Linux OS-keystore custody tier — the desktop Secret Service (D-Bus), via the
 # pure-Rust zbus backend (no system libdbus needed).

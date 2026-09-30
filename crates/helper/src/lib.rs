@@ -27,6 +27,8 @@ pub mod parity;
 pub mod pqse;
 pub mod protocol;
 pub mod sddl;
+#[cfg(all(target_os = "macos", feature = "macos-se"))]
+pub mod macos_hw;
 #[cfg(target_os = "linux")]
 pub mod secretservice;
 pub mod server;
