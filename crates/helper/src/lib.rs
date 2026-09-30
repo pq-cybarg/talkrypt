@@ -23,6 +23,8 @@ pub mod frame;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod parity;
+#[cfg(feature = "sealsq")]
+pub mod pqse;
 pub mod protocol;
 pub mod sddl;
 #[cfg(target_os = "linux")]

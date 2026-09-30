@@ -25,6 +25,12 @@ zeroize.workspace = true
 # TPM (or swtpm) and tpm2-tools at runtime. Linux-targeted.
 tpm = []
 
+# Post-quantum secure-element custody: exposes the `pqse` module (ML-KEM-1024
+# KEK wrapper for SEALSQ / WISeKey QS7001 & VaultIC and any PQ secure element).
+# Crypto is pure Rust (talkrypt-crypto ML-KEM); a concrete chip driver is
+# injected by the host, so this feature has no extra build/runtime deps.
+sealsq = []
+
 # macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
 # (no entitlement needed, unlike Secure Enclave).
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -39,13 +39,24 @@ impl KeyStore {
         }
     }
 
-    /// Construct with an explicit hardware wrapper (used by tests to exercise the
-    /// `HardwareBacked` path with a mock secure element on any platform).
-    #[cfg(test)]
-    fn with_hw(dir: impl Into<PathBuf>, hw: HwWrapper) -> Self {
+    /// Construct with an explicit, caller-supplied hardware [`KeyWrapper`] for the
+    /// `HardwareBacked` tier — the custom-custody seam.
+    ///
+    /// This is how an operator plugs a backend the built-in platform detection
+    /// does not cover: a PKCS#11 HSM, a YubiKey (PIV), a smartcard, or a
+    /// post-quantum secure element (SEALSQ / WISeKey QS7001, via
+    /// [`crate::pqse::PqSeWrapper`] behind the `sealsq` feature). The wrapper only
+    /// wraps/unwraps the random 32-byte KEK; the seal envelope and its QROM/L5
+    /// policy are unchanged, so a wrapper that attests
+    /// [`talkrypt_core::KeyWrapper::qrom_safe`] (e.g. a PQ chip) unlocks the
+    /// hardware-only L5 tier, while a classical one is still held to the
+    /// passphrase requirement.
+    ///
+    /// [`KeyWrapper`]: talkrypt_core::KeyWrapper
+    pub fn with_wrapper(dir: impl Into<PathBuf>, wrapper: HwWrapper) -> Self {
         Self {
             dir: dir.into(),
-            hw: Some(hw),
+            hw: Some(wrapper),
         }
     }
 
@@ -58,17 +69,20 @@ impl KeyStore {
         ))?;
         let secret = secret.to_vec();
         tokio::task::spawn_blocking(move || {
+            // Honor the wrapper's own attestation. A PQ secure element (SEALSQ /
+            // WISeKey QS7001 — ML-KEM wrap) is `qrom_safe`, so its hardware-only
+            // seal is genuinely quantum-safe at rest and the core accepts it with
+            // no weak opt-in. A CLASSICAL backend (TPM/SE SRK is RSA/ECC) yields a
+            // device-bound but NOT quantum-safe blob; the core refuses that
+            // hardware-only unless we explicitly accept the weak tier. Callers
+            // wanting QROM-safe at rest on classical hardware add a passphrase.
+            let weak = !hw.qrom_safe();
             talkrypt_core::seal(
                 &secret,
                 talkrypt_core::SealOptions {
                     passphrase: None,
                     wrapper: Some(hw.as_ref()),
-                    // This helper's HardwareBacked tier is deliberately the hardware-BOUND
-                    // classical tier (a TPM/SE SRK is RSA/ECC, so the blob is device-bound but
-                    // NOT quantum-safe at rest). Explicitly opt into the QROM weak tier — the
-                    // core baseline refuses a classical hardware-only seal otherwise. Callers
-                    // wanting QROM-safe at rest add a passphrase (or use a symmetric wrapper).
-                    allow_weak_hardware_only: true,
+                    allow_weak_hardware_only: weak,
                 },
             )
             .map_err(HelperError::from)
@@ -403,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn hardware_backed_uses_shared_core_envelope() {
         let dir = tmp();
-        let store = KeyStore::with_hw(&dir, Arc::new(MockSe(0x5A)));
+        let store = KeyStore::with_wrapper(&dir, Arc::new(MockSe(0x5A)));
         store.ensure_dir().await.unwrap();
 
         let secret = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f";
@@ -425,6 +439,36 @@ mod tests {
         assert_eq!(tier, CustodyTier::HardwareBacked);
         assert_eq!(got, secret);
 
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// End-to-end: a PQ secure element (SEALSQ) injected via `with_wrapper`
+    /// custodies a seed at the `HardwareBacked` tier with NO passphrase — the
+    /// QROM/L5 hardware-only tier a classical wrapper is refused. Round-trips
+    /// through the full `KeyStore` put/get path.
+    #[cfg(feature = "sealsq")]
+    #[tokio::test]
+    async fn pq_secure_element_hardware_only_roundtrip() {
+        use crate::pqse::{MockPqSecureElement, PqSeWrapper};
+        let dir = tmp();
+        let wrapper = Arc::new(PqSeWrapper::new(Arc::new(MockPqSecureElement::new())));
+        let store = KeyStore::with_wrapper(&dir, wrapper);
+        store.ensure_dir().await.unwrap();
+
+        let seed = b"\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f";
+        store
+            .put("id", CustodyTier::HardwareBacked, seed)
+            .await
+            .unwrap();
+        let on_disk = tokio::fs::read(store.sealed_path("id").unwrap()).await.unwrap();
+        assert_eq!(
+            talkrypt_core::tier_of(&on_disk).unwrap(),
+            CustodyTier::HardwareBacked
+        );
+        assert!(on_disk.windows(seed.len()).all(|w| w != seed));
+        let (tier, got) = store.get("id").await.unwrap();
+        assert_eq!(tier, CustodyTier::HardwareBacked);
+        assert_eq!(got, seed);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
