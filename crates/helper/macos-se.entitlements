@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the macOS Secure-Enclave KEK wrapper (the `macos-se` feature,
+  crates/helper/src/macos_hw.rs).
+
+  Minting a Secure-Enclave key registers a reference in the data-protection
+  keychain, which requires the `keychain-access-groups` entitlement. That
+  entitlement is RESTRICTED: `amfid` only honors it when it is authorized by an
+  Apple-issued provisioning profile (a paid Developer ID, or a free personal-team
+  profile from Xcode signed in with an Apple ID). A self-signed / ad-hoc
+  signature carrying this entitlement is killed on launch (SIGKILL), so the
+  Enclave path cannot be exercised without real provisioning — see
+  docs/hardware-backed-sealing.md.
+
+  Replace <TEAMID> with your Apple Team Identifier. Sign with:
+    codesign --force --sign "Apple Development: you (XXXX)" \
+      --entitlements crates/helper/macos-se.entitlements <binary>
+-->
+<plist version="1.0">
+<dict>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>$(AppIdentifierPrefix)com.talkrypt.helper</string>
+  </array>
+  <key>com.apple.application-identifier</key>
+  <string>$(AppIdentifierPrefix)com.talkrypt.helper</string>
+</dict>
+</plist>

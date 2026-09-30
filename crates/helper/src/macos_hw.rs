@@ -262,25 +262,82 @@ mod se {
         let mut gen_err: CFErrorRef = std::ptr::null_mut();
         let key = unsafe { SecKeyCreateRandomKey(params.as_concrete_TypeRef(), &mut gen_err) };
         if key.is_null() {
-            if !gen_err.is_null() {
-                unsafe { CFRelease(gen_err as CFTypeRef) };
-            }
-            return Err(cf_err(
+            let detail = if gen_err.is_null() {
+                "no CFError".to_string()
+            } else {
+                let e = unsafe { core_foundation::error::CFError::wrap_under_create_rule(gen_err) };
+                e.to_string()
+            };
+            return Err(cf_err(&format!(
                 "SecKeyCreateRandomKey failed (needs a signed build with the \
-                 Secure-Enclave entitlement)",
-            ));
+                 Secure-Enclave entitlement): {detail}"
+            )));
         }
         Ok(unsafe { SecKey::wrap_under_create_rule(key) })
     }
 
-    /// Is a usable Secure Enclave key reachable (loadable or mintable) right now?
-    pub fn available() -> bool {
-        load_or_create().is_ok()
+    /// Mint a **non-permanent** Secure Enclave key (not written to the keychain).
+    /// Needs only a code signature — not the `keychain-access-groups` entitlement
+    /// that permanent storage requires — so it can exercise real Enclave ECIES on
+    /// a dev machine. For a self-test / capability probe only; a non-persisted key
+    /// is useless for at-rest custody across restarts.
+    fn create_ephemeral() -> Result<SecKey, WrapError> {
+        let ac = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
+            kSecAccessControlPrivateKeyUsage,
+        )
+        .map_err(|_| cf_err("SecAccessControlCreateWithFlags failed"))?;
+        let key_size = CFNumber::from(256i32);
+        // Private-key attrs WITHOUT kSecAttrIsPermanent → nothing is added to the
+        // keychain, so no entitlement is needed.
+        let priv_attrs = CFMutableDictionary::from_CFType_pairs(&[(
+            unsafe { kSecAttrAccessControl }.to_void(),
+            ac.to_void(),
+        )])
+        .to_immutable();
+        let params = CFMutableDictionary::from_CFType_pairs(&[
+            (
+                unsafe { kSecAttrKeyType }.to_void(),
+                unsafe { kSecAttrKeyTypeECSECPrimeRandom }.to_void(),
+            ),
+            (unsafe { kSecAttrKeySizeInBits }.to_void(), key_size.to_void()),
+            (
+                unsafe { kSecAttrTokenID }.to_void(),
+                unsafe { kSecAttrTokenIDSecureEnclave }.to_void(),
+            ),
+            (unsafe { kSecPrivateKeyAttrs }.to_void(), priv_attrs.to_void()),
+        ])
+        .to_immutable();
+        let mut gen_err: CFErrorRef = std::ptr::null_mut();
+        let key = unsafe { SecKeyCreateRandomKey(params.as_concrete_TypeRef(), &mut gen_err) };
+        if key.is_null() {
+            let detail = if gen_err.is_null() {
+                "no CFError".to_string()
+            } else {
+                let e = unsafe { core_foundation::error::CFError::wrap_under_create_rule(gen_err) };
+                e.to_string()
+            };
+            return Err(cf_err(&format!("ephemeral SE keygen failed: {detail}")));
+        }
+        Ok(unsafe { SecKey::wrap_under_create_rule(key) })
     }
 
-    /// Wrap `kek` to the SE key via ECIES.
-    pub fn wrap(kek: &[u8]) -> Result<Vec<u8>, WrapError> {
-        let priv_key = load_or_create()?;
+    /// Exercise the real Secure Enclave ECIES wrap/unwrap on an ephemeral SE key:
+    /// encrypt `kek` to the key's public half and decrypt with the Enclave,
+    /// asserting the round-trip. Proves the hardware path without needing the
+    /// permanent-storage entitlement. Returns `Ok(())` on a verified round-trip.
+    pub fn ephemeral_hardware_selftest(kek: &[u8]) -> Result<(), WrapError> {
+        let key = create_ephemeral()?;
+        let ct = wrap_with(&key, kek)?;
+        let pt = unwrap_with(&key, &ct)?;
+        if pt != kek {
+            return Err(cf_err("ephemeral SE round-trip mismatch"));
+        }
+        Ok(())
+    }
+
+    /// ECIES-encrypt `kek` to `priv_key`'s public half.
+    fn wrap_with(priv_key: &SecKey, kek: &[u8]) -> Result<Vec<u8>, WrapError> {
         let pub_ref = unsafe { SecKeyCopyPublicKey(priv_key.as_concrete_TypeRef()) };
         if pub_ref.is_null() {
             return Err(cf_err("SecKeyCopyPublicKey failed"));
@@ -302,13 +359,11 @@ mod se {
             }
             return Err(cf_err("SecKeyCreateEncryptedData failed"));
         }
-        let ct = unsafe { CFData::wrap_under_create_rule(ct) };
-        Ok(ct.to_vec())
+        Ok(unsafe { CFData::wrap_under_create_rule(ct) }.to_vec())
     }
 
-    /// Unwrap an ECIES blob with the SE private key.
-    pub fn unwrap(wrapped: &[u8]) -> Result<Vec<u8>, WrapError> {
-        let priv_key = load_or_create()?;
+    /// ECIES-decrypt `wrapped` with `priv_key`.
+    fn unwrap_with(priv_key: &SecKey, wrapped: &[u8]) -> Result<Vec<u8>, WrapError> {
         let ctd = CFData::from_buffer(wrapped);
         let mut err: CFErrorRef = std::ptr::null_mut();
         let pt = unsafe {
@@ -325,8 +380,31 @@ mod se {
             }
             return Err(cf_err("SecKeyCreateDecryptedData failed"));
         }
-        let pt = unsafe { CFData::wrap_under_create_rule(pt) };
-        Ok(pt.to_vec())
+        Ok(unsafe { CFData::wrap_under_create_rule(pt) }.to_vec())
+    }
+
+    /// Is a usable Secure Enclave key reachable (loadable or mintable) right now?
+    pub fn available() -> bool {
+        load_or_create().is_ok()
+    }
+
+    /// Can the Secure Enclave mint a key and perform ECIES at all (ignoring the
+    /// permanent-storage entitlement)? True on a code-signed dev build on Enclave
+    /// hardware; false on an unsigned build or a Mac without an Enclave.
+    pub fn hardware_usable() -> bool {
+        ephemeral_hardware_selftest(&[0u8; 32]).is_ok()
+    }
+
+    /// Wrap `kek` to the persistent SE key via ECIES.
+    pub fn wrap(kek: &[u8]) -> Result<Vec<u8>, WrapError> {
+        let priv_key = load_or_create()?;
+        wrap_with(&priv_key, kek)
+    }
+
+    /// Unwrap an ECIES blob with the persistent SE private key.
+    pub fn unwrap(wrapped: &[u8]) -> Result<Vec<u8>, WrapError> {
+        let priv_key = load_or_create()?;
+        unwrap_with(&priv_key, wrapped)
     }
 }
 
@@ -343,10 +421,27 @@ impl SecureEnclaveWrapper {
         SecureEnclaveWrapper
     }
 
-    /// Whether a Secure Enclave key can be loaded or minted right now (false on
-    /// an unsigned build lacking the entitlement, or hardware without an Enclave).
+    /// Whether the persistent SE-backed key can be loaded or minted right now —
+    /// i.e. the full production path works. False on a build without the
+    /// `keychain-access-groups` entitlement (permanent storage), or hardware with
+    /// no Enclave.
     pub fn available() -> bool {
         se::available()
+    }
+
+    /// Whether the Secure Enclave can mint a key and perform ECIES **at all**,
+    /// ignoring the permanent-storage entitlement. True on a code-signed dev
+    /// build on Enclave hardware even when [`available`](Self::available) is false
+    /// (no keychain entitlement). Useful to validate the hardware ECIES path.
+    pub fn hardware_usable() -> bool {
+        se::hardware_usable()
+    }
+
+    /// Run a real Secure Enclave ECIES wrap/unwrap round-trip on an ephemeral
+    /// Enclave key and verify it. `Ok(())` proves the hardware path; errors carry
+    /// the underlying `CFError`.
+    pub fn hardware_selftest() -> Result<(), WrapError> {
+        se::ephemeral_hardware_selftest(&[0x42u8; 32])
     }
 }
 
@@ -428,19 +523,30 @@ mod tests {
         let _ = crate::keychain::delete(&format!("tk-test-seal-{}", std::process::id()));
     }
 
+    /// REAL Secure Enclave ECIES round-trip on this machine's Enclave.
+    ///
+    /// `#[ignore]` — a default `cargo test` reports this as **ignored**, never a
+    /// pass, because the Enclave is unreachable from an unsigned binary. It does
+    /// NOT skip-and-pass. Run it for real on a **code-signed** build:
+    ///
+    /// ```text
+    /// cargo test -p talkrypt-helper --features macos-se --no-run
+    /// codesign --force --sign "<Apple Development identity>" \
+    ///   --entitlements crates/helper/macos-se.entitlements <lib-test-binary>
+    /// <lib-test-binary> --ignored secure_enclave_hardware_ecies_roundtrip --nocapture
+    /// ```
+    ///
+    /// Minting an SE key registers a keychain reference, which needs the
+    /// `keychain-access-groups` entitlement and therefore a real provisioning
+    /// profile (ad-hoc signing + that entitlement is killed by amfid). When run
+    /// on a properly signed build this exercises the Enclave and fails loudly if
+    /// the hardware path is broken — see `docs/hardware-backed-sealing.md`.
     #[test]
-    fn secure_enclave_roundtrip_if_available() {
-        // Runtime-gated: only a signed build with the SE entitlement can mint an
-        // Enclave key. Skip (pass) otherwise — this path is compile-checked here,
-        // runtime-validated only in a signed app bundle.
-        if !SecureEnclaveWrapper::available() {
-            eprintln!("secure_enclave_roundtrip_if_available: SE unreachable, skipping");
-            return;
-        }
-        let w = SecureEnclaveWrapper::new();
-        assert!(!w.qrom_safe());
-        let kek = [0x5au8; 32];
-        let blob = w.wrap(&kek).unwrap();
-        assert_eq!(w.unwrap(&blob).unwrap(), kek.to_vec());
+    #[ignore = "needs a code-signed build with the Secure-Enclave/keychain entitlement; run with --ignored"]
+    fn secure_enclave_hardware_ecies_roundtrip() {
+        // No skip: reaching here (via --ignored) means we intend to hit hardware.
+        // A failure to reach the Enclave is a real failure, with the CFError.
+        SecureEnclaveWrapper::hardware_selftest().expect("SE ECIES round-trip");
+        assert!(!SecureEnclaveWrapper::new().qrom_safe());
     }
 }
