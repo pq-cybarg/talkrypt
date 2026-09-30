@@ -59,6 +59,14 @@ base64 = "0.22"
 # tokio-serial for the USB-serial link to a Meshtastic / Meshcore node. The mesh
 # protocol codecs are hand-written (no prost/protoc) and always compiled.
 tokio-serial = { version = "5.4", optional = true }
+# --- optional: Meshtastic MQTT-gateway ingest (enabled by the `mesh-mqtt` feature) ---
+# rumqttc is the async MQTT client for the real broker connection; the ServiceEnvelope
+# codec + node logic are always compiled + tested over an in-memory broker. Use the
+# platform-native TLS stack (`use-native-tls`) rather than rumqttc's default rustls:
+# rumqttc pins `rustls-webpki = 0.102.8` (RUSTSEC-2026-0049, CRL-matching; fixed only
+# in the semver-incompatible 0.103.10), so native-tls KEEPS a TLS-broker capability
+# while dropping the vulnerable crate. Platform TLS = SChannel/SecureTransport/OpenSSL.
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-native-tls"] }
 
 [features]
 default = []
@@ -68,6 +76,8 @@ tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-rtcompat
 nym = ["dep:nym-sdk", "dep:nym-credentials-interface", "dep:nym-credentials"]
 # Real LoRa-mesh serial adapters (Meshtastic / Meshcore over USB-serial).
 mesh-radio = ["dep:tokio-serial"]
+# Meshtastic MQTT-gateway ingest (bridge talkrypt-over-mesh via an MQTT broker).
+mesh-mqtt = ["dep:rumqttc"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
