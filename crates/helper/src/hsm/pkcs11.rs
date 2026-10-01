@@ -17,7 +17,7 @@
 //! and plug the resulting token via
 //! [`crate::store::KeyStore::with_wrapper`]`(dir, Arc::new(HsmKeyWrapper::new(Arc::new(token))))`.
 
-use cryptoki::context::{CInitializeArgs, Pkcs11};
+use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
@@ -78,7 +78,7 @@ impl Pkcs11Token {
     pub fn open(cfg: Pkcs11Config) -> Result<Self, WrapError> {
         let ctx = Pkcs11::new(&cfg.module_path)
             .map_err(|e| WrapError(format!("pkcs11: load module {}: {e}", cfg.module_path)))?;
-        ctx.initialize(CInitializeArgs::OsThreads)
+        ctx.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
             .map_err(|e| WrapError(format!("pkcs11: initialize: {e}")))?;
         Ok(Self { cfg, ctx })
     }
@@ -99,7 +99,7 @@ impl Pkcs11Token {
             .map_err(|e| WrapError(format!("pkcs11: open session: {e}")))?;
         if let Some(pin) = &self.cfg.user_pin {
             session
-                .login(UserType::User, Some(&AuthPin::new(pin.clone())))
+                .login(UserType::User, Some(&AuthPin::from(pin.clone())))
                 .map_err(|e| WrapError(format!("pkcs11: login: {e}")))?;
         }
         Ok(session)
