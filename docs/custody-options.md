@@ -107,10 +107,19 @@ the trusted release public key and ship the detached signature so
   injection_env, self_attested }` + `is_acceptable()` so the UI can show exactly
   which protections are self-enforced, and callers can gate unseal on it.
 
-Remaining (release engineering): embed the release ML-DSA-87 pubkey + ship the
-detached executable signature, and call `harden(Some(..))` from the desktop/helper
-entry points in permissive mode; optionally add programmatic SIP-status detection
-for the posture display.
+**Wired into the helper entry point.** `talkrypt-helper` now runs `ensure_self_tested`
++ `ensure_hardened` on startup (baseline, matching the CLI), and — when
+`TALKRYPT_HARDEN` is set — runs `harden::from_env()` and **refuses to start** if the
+posture is unacceptable. Configure self-attestation with `TALKRYPT_ATTEST_PUBKEY`
+and `TALKRYPT_ATTEST_SIG` (hex, or a path to a file of hex — e.g. `relsign`'s
+`.sig`). Verified end-to-end: `LD_PRELOAD` set → refuses (`injection_env`); bogus
+attestation → refuses (`self_attested: Some(false)`); `debugger_denied` and
+`core_dumps_disabled` observed true on an Apple M5.
+
+Remaining (release engineering, non-blocking): embed the trusted release pubkey in
+the shipped build + publish the detached executable signature so attestation is on
+by default; wire the same `harden()` call into the desktop GUI entry point; and
+optionally add programmatic SIP-status detection for the posture display.
 
 ## Roadmap — not yet built
 

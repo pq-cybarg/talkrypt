@@ -99,6 +99,59 @@ pub fn harden(attest: Option<SelfAttest<'_>>) -> PostureReport {
     }
 }
 
+/// Env var that opts a process into permissive-security hardening at startup.
+pub const HARDEN_ENV: &str = "TALKRYPT_HARDEN";
+/// Env var holding the trusted ML-DSA-87 public key (hex, or a path to a file of
+/// hex) for launch-time self-attestation.
+pub const ATTEST_PUBKEY_ENV: &str = "TALKRYPT_ATTEST_PUBKEY";
+/// Env var holding the detached signature over this executable (hex, or a path).
+pub const ATTEST_SIG_ENV: &str = "TALKRYPT_ATTEST_SIG";
+
+/// Read an env var as hex bytes. The value may be the hex itself, or a path to a
+/// file containing hex (matching `talkrypt-relsign`'s output). Returns `None` if
+/// unset/empty; `None` on a decode error (treated as "no material provided").
+fn env_hex(name: &str) -> Option<Vec<u8>> {
+    let raw = std::env::var(name).ok().filter(|s| !s.trim().is_empty())?;
+    let text = match std::fs::read_to_string(raw.trim()) {
+        Ok(file) => file, // it was a path
+        Err(_) => raw,    // it was the hex itself
+    };
+    hex_decode(text.trim())
+}
+
+/// Minimal hex decoder (lower/upper), or `None` on any non-hex / odd length.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for pair in b.chunks_exact(2) {
+        out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
+    }
+    Some(out)
+}
+
+/// Apply the hardening pass configured from the environment. Runs self-attestation
+/// when both [`ATTEST_PUBKEY_ENV`] and [`ATTEST_SIG_ENV`] are set (hex or a path).
+/// Entry points call this when [`HARDEN_ENV`] is set and refuse to proceed if
+/// [`PostureReport::is_acceptable`] is false.
+pub fn from_env() -> PostureReport {
+    match (env_hex(ATTEST_PUBKEY_ENV), env_hex(ATTEST_SIG_ENV)) {
+        (Some(pubkey), Some(signature)) => harden(Some(SelfAttest {
+            pubkey: &pubkey,
+            signature: &signature,
+        })),
+        _ => harden(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +185,31 @@ mod tests {
             pubkey: &kp.public().sig_vk,
             signature: &sig,
         }));
+        assert_eq!(r.self_attested, Some(true));
+    }
+
+    #[test]
+    fn hex_decode_roundtrips_and_rejects_junk() {
+        assert_eq!(hex_decode("00ff1A"), Some(vec![0x00, 0xff, 0x1a]));
+        assert_eq!(hex_decode(""), Some(vec![]));
+        assert_eq!(hex_decode("abc"), None); // odd length
+        assert_eq!(hex_decode("zz"), None); // non-hex
+    }
+
+    #[test]
+    fn from_env_attests_when_material_is_set_as_hex() {
+        // Sign the running binary, hand the pubkey+sig to from_env as hex, and
+        // confirm the launch-time attestation passes through the env path.
+        let exe = std::env::current_exe().unwrap();
+        let image = std::fs::read(&exe).unwrap();
+        let kp = IdentityKeyPair::generate();
+        let sig = kp.sign(&image);
+        let to_hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        std::env::set_var(ATTEST_PUBKEY_ENV, to_hex(&kp.public().sig_vk));
+        std::env::set_var(ATTEST_SIG_ENV, to_hex(&sig));
+        let r = from_env();
+        std::env::remove_var(ATTEST_PUBKEY_ENV);
+        std::env::remove_var(ATTEST_SIG_ENV);
         assert_eq!(r.self_attested, Some(true));
     }
 
