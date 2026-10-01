@@ -52,12 +52,17 @@ mkdir -p android/app/src/main/jniLibs/arm64-v8a
 cp target/aarch64-linux-android/release/libtalkrypt_ffi.so \
    android/app/src/main/jniLibs/arm64-v8a/
 
-# 2. uniffi Kotlin bindings — from the UNSTRIPPED host debug dylib (the release
-#    build strips the metadata section uniffi-bindgen needs).
+# 2. uniffi Kotlin bindings — from the UNSTRIPPED host debug library (the
+#    release build strips the metadata section uniffi-bindgen needs). The
+#    host library extension differs per OS (macOS .dylib, Linux .so).
 cargo build -p talkrypt-ffi
+case "$(uname -s)" in
+  Darwin) HOST_LIB=target/debug/libtalkrypt_ffi.dylib ;;
+  *)      HOST_LIB=target/debug/libtalkrypt_ffi.so ;;
+esac
 rm -rf /tmp/tk-bindings && mkdir -p /tmp/tk-bindings
 cargo run -q -p talkrypt-ffi --bin uniffi-bindgen -- generate \
-    --library target/debug/libtalkrypt_ffi.dylib --language kotlin \
+    --library "$HOST_LIB" --language kotlin \
     --out-dir /tmp/tk-bindings --no-format
 mkdir -p android/app/src/main/kotlin/uniffi
 cp -R /tmp/tk-bindings/uniffi/* android/app/src/main/kotlin/uniffi/

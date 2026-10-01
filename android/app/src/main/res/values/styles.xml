@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Platform-only dark theme (no AndroidX/Material Components). Fixes the
+         white launch flash, light DeviceDefault dialogs, and stock widget tint:
+         Theme.Material is always-dark, dialogs/spinners inherit it, and
+         colorAccent tints CheckBoxes/EditText cursors to the design system's
+         accent. forceDarkAllowed=false stops API 29+ force-dark repainting our
+         already-dark UI. -->
+    <style name="Theme.Talkrypt" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/tk_bg</item>
+        <item name="android:colorBackground">@color/tk_bg</item>
+        <item name="android:statusBarColor">@color/tk_bg</item>
+        <item name="android:navigationBarColor">@color/tk_bg</item>
+        <item name="android:colorAccent">@color/tk_accent</item>
+        <item name="android:textColorPrimary">@color/tk_fg</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+    </style>
+</resources>
