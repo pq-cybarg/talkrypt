@@ -20,6 +20,7 @@ pub mod beacon;
 pub mod error;
 pub mod group;
 pub mod grouping;
+pub mod harden;
 pub mod hash;
 pub mod hybrid;
 pub mod identity;

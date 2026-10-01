@@ -86,7 +86,7 @@ Apple-provisioning cost as part of the macOS distribution/notarization decision.
 For users who choose option **5c** (disable SIP/AMFI to use the built-in Enclave
 without an Apple identity), talkrypt re-provides — in its own code — the integrity
 protections SIP/AMFI would have enforced. **Mechanism implemented and tested**
-(`crates/helper/src/harden.rs`, `crates/crypto/src/attest.rs`,
+(`crates/crypto/src/harden.rs`, `crates/crypto/src/attest.rs`,
 `crypto::mem::deny_debugger`); the only remaining step is *release wiring* (embed
 the trusted release public key and ship the detached signature so
 [`talkrypt_crypto::attest::verify_self`] runs at launch).
@@ -107,19 +107,22 @@ the trusted release public key and ship the detached signature so
   injection_env, self_attested }` + `is_acceptable()` so the UI can show exactly
   which protections are self-enforced, and callers can gate unseal on it.
 
-**Wired into the helper entry point.** `talkrypt-helper` now runs `ensure_self_tested`
-+ `ensure_hardened` on startup (baseline, matching the CLI), and — when
-`TALKRYPT_HARDEN` is set — runs `harden::from_env()` and **refuses to start** if the
-posture is unacceptable. Configure self-attestation with `TALKRYPT_ATTEST_PUBKEY`
-and `TALKRYPT_ATTEST_SIG` (hex, or a path to a file of hex — e.g. `relsign`'s
-`.sig`). Verified end-to-end: `LD_PRELOAD` set → refuses (`injection_env`); bogus
-attestation → refuses (`self_attested: Some(false)`); `debugger_denied` and
-`core_dumps_disabled` observed true on an Apple M5.
+**Wired into the helper AND desktop entry points.** `talkrypt_crypto::harden` is a
+shared seam (so every entry point — CLI, desktop GUI, custody helper, FFI — uses
+one implementation). Both `talkrypt-helper` and `talkrypt-desktop` now run
+`ensure_self_tested` + `ensure_hardened` on startup (baseline, matching the CLI),
+and — when `TALKRYPT_HARDEN` is set — run `harden::from_env()` and **refuse to
+start** if the posture is unacceptable. Configure self-attestation with
+`TALKRYPT_ATTEST_PUBKEY` and `TALKRYPT_ATTEST_SIG` (hex, or a path to a file of
+hex — e.g. `relsign`'s `.sig`). Verified end-to-end on an Apple M5, for both
+binaries: `LD_PRELOAD` set → refuses (`injection_env`); bogus attestation →
+refuses (`self_attested: Some(false)`); `debugger_denied` and `core_dumps_disabled`
+observed true.
 
 Remaining (release engineering, non-blocking): embed the trusted release pubkey in
 the shipped build + publish the detached executable signature so attestation is on
-by default; wire the same `harden()` call into the desktop GUI entry point; and
-optionally add programmatic SIP-status detection for the posture display.
+by default; and optionally add programmatic SIP-status detection for the posture
+display.
 
 ## Roadmap — not yet built
 

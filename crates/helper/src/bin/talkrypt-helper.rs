@@ -1,7 +1,8 @@
 //! `talkrypt-helper` — run the key-custody helper, listening on the default
 //! per-user IPC endpoint until terminated.
 
-use talkrypt_helper::{endpoint, harden, Helper, HelperError, KeyStore, Result};
+use talkrypt_crypto::harden;
+use talkrypt_helper::{endpoint, Helper, HelperError, KeyStore, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
