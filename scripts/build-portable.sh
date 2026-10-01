@@ -97,6 +97,12 @@ for b in "${built[@]}"; do
   sz=$(du -h "$b" | cut -f1)
   echo "  $b  ($sz)"
 done
+
+# Launch-attestation sidecars: if a release signing key is available, write a
+# detached <binary>.sig next to each so the hardening mode can verify the binary
+# at startup (no-op without TALKRYPT_RELEASE_SK). See docs/custody-options.md.
+echo
+bash "$(dirname "$0")/sign-binaries.sh" "${built[@]}"
 echo
 echo "These are self-contained. Hand one to a peer (USB, AirDrop, the in-app"
 echo "P2P share, or any channel) and it runs with no install or dependencies."

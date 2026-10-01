@@ -187,6 +187,26 @@ identical; the only difference is *which* public key a verifier trusts.
   signature cannot be checked in pure shell, so this step needs the tool; it is
   advisory (skipped, reported) when the tool or a real key is absent.
 
+### Launch-attestation sidecars (self-integrity)
+
+Separate from the *manifest* signature above, each shipped **executable** can carry
+a detached `<binary>.sig` (ML-DSA-87) that the binary verifies against its
+compiled-in release key (`docs/RELEASE_PUBKEY.hex`) **at startup** when run with
+`TALKRYPT_HARDEN=1` — an in-process, post-quantum integrity check independent of
+the OS code-signature stack (for hosts with SIP/AMFI relaxed; see
+`docs/custody-options.md`).
+
+- **Sign:** `TALKRYPT_RELEASE_SK=<seed> bash scripts/sign-binaries.sh <file|dir>...`
+  writes a `<binary>.sig` next to each executable. `build-portable.sh` calls it
+  automatically for the portable binaries (no-op without the key). Installer
+  packaging (`package.sh`) should invoke it per staged binary directory before
+  archiving so the sidecar travels inside each `.app` / `.deb` / `.zip`.
+- **Verify (at runtime):** set `TALKRYPT_HARDEN=1`; the binary resolves the key
+  from `TALKRYPT_ATTEST_PUBKEY` (else the embedded release key) and the signature
+  from `TALKRYPT_ATTEST_SIG` (else the `<binary>.sig` sidecar), and **refuses to
+  start** on a mismatch. Inactive-by-default until `docs/RELEASE_PUBKEY.hex` holds
+  a real key and a sidecar is shipped.
+
 **Still no OS code-signing authority:** macOS bundles remain ad-hoc (`codesign -s -`)
 and un-notarized and the `.deb`s remain unsigned — those need an Apple Developer ID /
 notarization and a Debian archive key respectively, deliberately out of scope. The

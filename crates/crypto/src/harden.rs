@@ -137,12 +137,68 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Apply the hardening pass configured from the environment. Runs self-attestation
-/// when both [`ATTEST_PUBKEY_ENV`] and [`ATTEST_SIG_ENV`] are set (hex or a path).
+/// ML-DSA-87 verifying-key length (category 5), for a sanity guard on the
+/// embedded release key.
+const ML_DSA_87_VK_LEN: usize = 2592;
+
+/// The project's committed release public key (ML-DSA-87), embedded at build time
+/// from `docs/RELEASE_PUBKEY.hex`. `None` while that file is an unfilled
+/// placeholder (comments only). This is the trust anchor for launch-time
+/// self-attestation when no key is supplied via the environment — verifiers pin
+/// *this* compiled-in copy, not a downloaded one.
+pub fn release_pubkey() -> Option<Vec<u8>> {
+    parse_hex_with_comments(include_str!("../../../docs/RELEASE_PUBKEY.hex"))
+}
+
+/// Parse a hex blob that may be interleaved with `#` comment lines and whitespace
+/// (the `RELEASE_PUBKEY.hex` / `relsign` format). `None` unless it decodes to a
+/// plausible ML-DSA-87 verifying key.
+fn parse_hex_with_comments(text: &str) -> Option<Vec<u8>> {
+    let hex: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(|l| l.chars().filter(|c| !c.is_whitespace()))
+        .collect();
+    if hex.is_empty() {
+        return None;
+    }
+    let bytes = hex_decode(&hex)?;
+    (bytes.len() == ML_DSA_87_VK_LEN).then_some(bytes)
+}
+
+/// The detached signature shipped next to this executable (`<exe>.sig`), if
+/// present — `relsign`'s hex output, or raw signature bytes. The default
+/// self-attestation signature when none is supplied via the environment.
+fn release_sidecar_sig() -> Option<Vec<u8>> {
+    let exe = std::env::current_exe().ok()?;
+    let mut p = exe.into_os_string();
+    p.push(".sig");
+    let raw = std::fs::read(std::path::PathBuf::from(p)).ok()?;
+    // Prefer hex (relsign writes hex); fall back to raw bytes.
+    if let Ok(text) = std::str::from_utf8(&raw) {
+        if let Some(decoded) = hex_decode(text.trim()) {
+            return Some(decoded);
+        }
+    }
+    Some(raw)
+}
+
+/// Apply the hardening pass configured from the environment, falling back to the
+/// embedded release key + a `<exe>.sig` sidecar. Self-attestation runs when a
+/// public key AND a signature are both resolved:
+///
+/// 1. `TALKRYPT_ATTEST_PUBKEY` / `TALKRYPT_ATTEST_SIG` (hex or a path) take
+///    precedence — for testing or a custom trust anchor.
+/// 2. Otherwise the compiled-in [`release_pubkey`] + the `<exe>.sig` sidecar are
+///    used, so attestation is **on by default** once a release key is published
+///    and a signature is shipped next to the binary.
+///
 /// Entry points call this when [`HARDEN_ENV`] is set and refuse to proceed if
 /// [`PostureReport::is_acceptable`] is false.
 pub fn from_env() -> PostureReport {
-    match (env_hex(ATTEST_PUBKEY_ENV), env_hex(ATTEST_SIG_ENV)) {
+    let pubkey = env_hex(ATTEST_PUBKEY_ENV).or_else(release_pubkey);
+    let signature = env_hex(ATTEST_SIG_ENV).or_else(release_sidecar_sig);
+    match (pubkey, signature) {
         (Some(pubkey), Some(signature)) => harden(Some(SelfAttest {
             pubkey: &pubkey,
             signature: &signature,
@@ -206,6 +262,29 @@ mod tests {
         std::env::remove_var(ATTEST_PUBKEY_ENV);
         std::env::remove_var(ATTEST_SIG_ENV);
         assert_eq!(r.self_attested, Some(true));
+    }
+
+    #[test]
+    fn parse_hex_with_comments_strips_comments_and_guards_length() {
+        // A real ML-DSA-87 vk (2592 bytes), prefixed by comment + blank lines.
+        let kp = IdentityKeyPair::generate();
+        let vk = &kp.public().sig_vk;
+        assert_eq!(vk.len(), ML_DSA_87_VK_LEN);
+        let hex: String = vk.iter().map(|b| format!("{b:02x}")).collect();
+        let file = format!("# a comment\n#another\n\n{hex}\n");
+        assert_eq!(parse_hex_with_comments(&file).as_deref(), Some(vk.as_slice()));
+        // Comments only (the current placeholder shape) → None.
+        assert_eq!(parse_hex_with_comments("# just a comment\n#\n"), None);
+        // Wrong length (not a vk) → None.
+        assert_eq!(parse_hex_with_comments("00ff"), None);
+    }
+
+    #[test]
+    fn committed_release_pubkey_is_an_unfilled_placeholder() {
+        // Documents current state: docs/RELEASE_PUBKEY.hex has no key yet, so the
+        // embedded trust anchor is absent and attestation is env-only until it is
+        // published. Update this test when a real release key lands.
+        assert_eq!(release_pubkey(), None);
     }
 
     #[test]
