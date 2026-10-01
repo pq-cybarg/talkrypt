@@ -97,6 +97,13 @@ archive_target() {
     cp "$reldir/$name$ext" "$pkgdir/" 2>/dev/null || true
     strip "$pkgdir/$name$ext" 2>/dev/null || true
   done
+  # Launch-attestation sidecars next to each binary (self-integrity; see
+  # docs/custody-testing-status.md). Only when a release key is present, so
+  # unsigned packaging stays byte-identical. Must run AFTER strip (the signature
+  # is over the final, stripped bytes the user runs).
+  if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
+    bash "$ROOT/scripts/sign-binaries.sh" "$pkgdir"
+  fi
   cp README.md LICENSE "$pkgdir/" 2>/dev/null || true
   cat > "$pkgdir/USAGE.txt" <<EOF
 talkrypt $VERSION ($GITREV) — post-quantum E2E encrypted chat
@@ -152,6 +159,11 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 open -a Terminal "$DIR/talkrypt-bin"
 EOF
   chmod +x "$app/Contents/MacOS/talkrypt" "$app/Contents/MacOS/talkrypt-bin"
+  # Launch-attestation sidecar for the real CLI inside the bundle (talkrypt-bin
+  # is what `current_exe()` resolves to). No-op without a release key.
+  if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
+    bash "$ROOT/scripts/sign-binaries.sh" "$app/Contents/MacOS/talkrypt-bin"
+  fi
   cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -214,6 +226,10 @@ build_deb() {
     cp "$reldir/$name" "$d/usr/bin/" 2>/dev/null || true
     strip "$d/usr/bin/$name" 2>/dev/null || true
   done
+  # Launch-attestation sidecars in /usr/bin (no-op without a release key).
+  if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
+    bash "$ROOT/scripts/sign-binaries.sh" "$d/usr/bin"
+  fi
   cp README.md LICENSE "$d/usr/share/doc/$pkg/" 2>/dev/null || true
   # App icon (hicolor theme; see scripts/gen-icons.sh).
   cp "$ROOT/assets/icons/talkrypt-256.png" "$d/usr/share/icons/hicolor/256x256/apps/talkrypt.png" 2>/dev/null || true

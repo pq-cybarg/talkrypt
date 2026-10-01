@@ -5,6 +5,10 @@ rest with a device's secure element, on every platform, through one shared
 format. This is recommendation **R-8** of [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md)
 (see §3b) and finding **F-15**.
 
+> For the full menu of custody backends (external HSM/PKCS#11, SEALSQ PQ chip,
+> macOS Secure-Enclave reach options, the permissive-security hardening plan) and
+> their trust/PQ/attribution trade-offs, see [`custody-options.md`](custody-options.md).
+
 ## What it does — and the honest limit
 
 A secure element wraps a random **KEK** with a non-exportable, user-presence-
@@ -33,12 +37,29 @@ The sealed-envelope codec and the wrap/unwrap trait live **once** in
 
 Each host plugs its platform backend into that one seam:
 
-| Host | Backend | Entry point |
-| --- | --- | --- |
-| Android | Keystore / **StrongBox** | FFI `HardwareKeyWrapper` callback |
-| iOS | **Secure Enclave** | FFI `HardwareKeyWrapper` callback |
-| Desktop (Linux) | **TPM 2.0** | helper `HardwareBacked` tier → same core codec |
-| Desktop (macOS/Win) | OS keystore (no SE PQ) | software-sealed, or host-provided wrapper |
+| Host | Backend | Entry point | QROM-safe wrap? |
+| --- | --- | --- | --- |
+| Android | Keystore / **StrongBox** | FFI `HardwareKeyWrapper` callback | no (classical) → passphrase |
+| iOS | **Secure Enclave** | FFI `HardwareKeyWrapper` callback | no (classical) → passphrase |
+| Desktop (Linux) | **TPM 2.0** | helper `HardwareBacked` tier → same core codec | no (classical) → passphrase |
+| Desktop (macOS) | **Secure Enclave** (ECIES) or **Keychain-AES** | helper `macos_hw` (`macos-se` feature) | SE no / Keychain-AES **yes** |
+| Desktop (Win) | OS keystore (no SE PQ) | software-sealed, or host-provided wrapper | — |
+| Any | **SEALSQ / WISeKey QS7001** (PQ secure element) | helper `pqse::PqSeWrapper` (`sealsq` feature) | **yes** (ML-KEM-1024) |
+| Any | Custom HSM / PKCS#11 / YubiKey / smartcard | `KeyStore::with_wrapper(dir, Arc<dyn KeyWrapper>)` | per wrapper's `qrom_safe()` |
+
+### QROM / L5 rule (PQ-at-rest inside a non-PQ HSM)
+
+A classical secure element wraps the KEK with RSA/ECC, so the **wrapped-KEK stored
+at rest is quantum-recoverable**. The core therefore **refuses a hardware-only
+seal** for a wrapper that does not attest `KeyWrapper::qrom_safe()` unless the
+caller sets `allow_weak_hardware_only`; the intended path is to add a passphrase,
+whose Argon2id-256 key is mixed into the KEK so the AES-256-GCM contents stay
+post-quantum-safe even if the classical wrap is later broken. That is how
+**"PQ security inside a non-PQ HSM"** is achieved. A wrapper that *does* attest
+`qrom_safe()` — a symmetric ≥256-bit wrap (Keychain-AES), or an **ML-KEM** wrap
+(SEALSQ) — unlocks a passphrase-less hardware-only L5 seal. The helper's
+`hw_seal` honors this automatically: `allow_weak_hardware_only` is set only when
+`!wrapper.qrom_safe()`.
 
 ## KEK model (unified)
 
@@ -140,6 +161,73 @@ validated against swtpm in [`linux-tpm-test.sh`](linux-tpm-test.sh)). A build
 with no secure-element backend rejects the tier with a clear "rebuild with
 --features tpm" error rather than silently downgrading.
 
+### PQ secure element — SEALSQ / WISeKey (`sealsq` feature)
+
+Unlike every classical secure element, a **post-quantum secure element** (SEALSQ
+QS7001, VaultIC, or any chip that decapsulates **ML-KEM-1024** on-die) makes the
+*hardware wrap itself* post-quantum: the KEK is encapsulated to the chip's ML-KEM
+public key, so the wrapped-KEK at rest is not quantum-recoverable. `pqse::PqSeWrapper`
+attests `qrom_safe() = true`, so it enables a **hardware-only, passphrase-less
+L5/QROM** seal — the one hardware path that is PQ at rest end to end, overcoming
+the "PQC not in secure elements" limit for the chips that actually do PQC. The
+crypto is the audited `talkrypt-crypto` ML-KEM-1024; a concrete chip driver
+implements the two-call `PqSecureElement` transport seam (`encapsulation_key` +
+`decapsulate`) and is injected via `KeyStore::with_wrapper`. `MockPqSecureElement`
+(an in-software ML-KEM key) makes the wrap/unwrap path fully testable without
+silicon. It still does not custody the ML-DSA-87 *signing* key — no shipping
+secure element signs ML-DSA — so this is at-rest KEK custody, not in-use signing.
+
+### macOS — Secure Enclave and Keychain-AES (`macos-se` feature)
+
+`crates/helper/src/macos_hw.rs` offers two macOS backends, plugged via
+`KeyStore::with_wrapper`:
+
+- **`KeychainAesWrapper` (tested here).** A random AES-256 wrapping key custodied
+  in the login Keychain; the KEK is wrapped with AES-256-GCM. Symmetric ≥256-bit
+  ⇒ `qrom_safe() = true` (passphrase-optional QROM seal). The wrapping key is
+  *OS-keystore-grade* — readable by this process, protected by the Keychain (whose
+  own class keys are SE-protected on Apple-silicon Macs) — **not** a Secure-Enclave
+  non-exportable key. Needs no entitlement.
+- **`SecureEnclaveWrapper` (compile-checked; provisioning-gated to run).** A
+  non-exportable P-256 key minted in the Secure Enclave; the KEK is wrapped with
+  ECIES (`SecKeyCreate{Encrypted,Decrypted}Data`). Classical ⇒ `qrom_safe() = false`,
+  so the seam requires a passphrase (PQ-at-rest as above).
+
+**Running the Secure Enclave path is gated by Apple provisioning, empirically
+confirmed on an Apple M5:**
+
+- Minting an SE key (even a non-permanent one) registers a data-protection-keychain
+  reference, which requires the **restricted** `keychain-access-groups` entitlement.
+- Signed **without** the entitlement (ad-hoc, or a self-signed ECDSA P-384/SHA-384
+  identity): `SecKeyCreateRandomKey` returns `OSStatus -34018 errSecMissingEntitlement`
+  — but note the **Enclave is actually reached** (a live `<SecKeyRef:('com.apple.setoken')>`
+  is produced; the key is created, only its keychain registration fails).
+- Signed **with** the entitlement on a self-signed identity: `amfid` **SIGKILLs**
+  the process on launch, because a restricted entitlement is honored only when
+  authorized by an **Apple-issued provisioning profile** (a paid Developer ID, or
+  a free personal-team profile from Xcode signed into an Apple ID).
+
+There is **no PQ option at the platform layer**: `codesign`/`amfid` verify only
+RSA/ECDSA code-signing certs — not XMSS/LMS (RFC 8391 / SP 800-208) or ML-DSA — so
+a PQ-signed code-signing cert cannot be verified by macOS regardless of hardware
+hash acceleration. talkrypt does PQ signing for *its own* release artifacts
+(`crates/relsign`, ML-DSA); the OS code-signing layer is a separate, classical,
+Apple-controlled trust anchor. To run the SE test for real, build + sign with a
+provisioned Apple Development identity and `crates/helper/macos-se.entitlements`:
+
+```sh
+cargo test -p talkrypt-helper --features macos-se --no-run   # note the lib test binary path
+codesign --force --sign "Apple Development: <you>" \
+  --entitlements crates/helper/macos-se.entitlements <lib-test-binary>
+<lib-test-binary> --ignored secure_enclave_hardware_ecies_roundtrip --nocapture
+```
+
+The SE test is `#[ignore]` so a plain `cargo test` reports it **ignored** (never a
+skip masquerading as a pass); under `--ignored` it exercises real hardware and
+fails loudly (with the `CFError`) if the Enclave is unreachable. `KeyStore` never
+auto-selects the SE wrapper, so an unprovisioned build falls back cleanly to
+`KeychainAesWrapper` / software sealing rather than erroring.
+
 ## Tests
 
 - `crates/core/src/seal.rs` — envelope round-trips (software / hardware /
@@ -149,8 +237,17 @@ with no secure-element backend rejects the tier with a clear "rebuild with
   over a Rust mock of the `HardwareKeyWrapper` callback, incl. two-factor and
   wrong-device (3 tests).
 - `crates/helper/src/store.rs` — the `HardwareBacked` tier produces and reloads
-  the shared envelope via a mock secure element, and errors cleanly with no
-  backend (2 tests).
+  the shared envelope via a mock secure element, errors cleanly with no backend,
+  and (with `--features sealsq`) round-trips a seed through an injected PQ chip at
+  the hardware-only QROM tier.
+- `crates/helper/src/pqse.rs` (`sealsq`) — PQ secure-element wrap/unwrap:
+  round-trip, a different chip cannot unwrap (ML-KEM implicit reject), tamper,
+  bad header, encapsulation-key length guard, and a hardware-only QROM seal
+  through the core (8 tests).
+- `crates/helper/src/macos_hw.rs` (`macos-se`) — `KeychainAesWrapper` round-trip
+  + tamper + hardware-only QROM seal (2 tests, run here); the real
+  `SecureEnclaveWrapper` ECIES round-trip is `#[ignore]` (runs only on a
+  provisioned signed build — see the macOS section above).
 
 ## On-device verification (Android emulator)
 

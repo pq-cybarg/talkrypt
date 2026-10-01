@@ -1,10 +1,31 @@
 //! `talkrypt-helper` — run the key-custody helper, listening on the default
 //! per-user IPC endpoint until terminated.
 
-use talkrypt_helper::{endpoint, Helper, KeyStore, Result};
+use talkrypt_crypto::harden;
+use talkrypt_helper::{endpoint, Helper, HelperError, KeyStore, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Baseline, like the CLI: run the power-on self-test (FIPS POST) and apply
+    // RAM-capture hardening before touching any key material.
+    talkrypt_crypto::ensure_self_tested();
+    talkrypt_crypto::ensure_hardened();
+
+    // Opt-in permissive-security hardening (for a host running with SIP/AMFI
+    // relaxed): anti-debug + injection-env scan + optional PQ self-attestation.
+    // Refuse to start if the posture is unacceptable (loader-injection env set,
+    // or a requested self-attestation failed).
+    if std::env::var_os(harden::HARDEN_ENV).is_some() {
+        let posture = harden::from_env();
+        eprintln!("talkrypt-helper: hardening posture: {posture:?}");
+        if !posture.is_acceptable() {
+            return Err(HelperError::Unsupported(
+                "hardening posture unacceptable (loader-injection env set, or \
+                 self-attestation failed) — refusing to start",
+            ));
+        }
+    }
+
     let store = KeyStore::new(endpoint::default_store_dir());
     store.ensure_dir().await?;
 

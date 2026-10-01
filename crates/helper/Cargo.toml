@@ -18,6 +18,9 @@ talkrypt-wire.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "fs", "process"] }
 thiserror.workspace = true
 zeroize.workspace = true
+# External-HSM (PKCS#11) driver — off by default, enabled by the `pkcs11` feature.
+# Loads the vendor PKCS#11 module at runtime; no build-time C dependency.
+cryptoki = { version = "0.12.1", optional = true }
 
 [features]
 # HardwareBacked custody tier via a TPM 2.0, sealing through the `tpm2-tools`
@@ -25,10 +28,30 @@ zeroize.workspace = true
 # TPM (or swtpm) and tpm2-tools at runtime. Linux-targeted.
 tpm = []
 
+# Post-quantum secure-element custody: exposes the `pqse` module (ML-KEM-1024
+# KEK wrapper for SEALSQ / WISeKey QS7001 & VaultIC and any PQ secure element).
+# Crypto is pure Rust (talkrypt-crypto ML-KEM); a concrete chip driver is
+# injected by the host, so this feature has no extra build/runtime deps.
+sealsq = []
+
+# macOS hardware KEK wrappers (`macos_hw`): a Keychain-AES wrapper (tested) and a
+# Secure-Enclave ECIES wrapper (compile-checked; needs a signed build with the
+# SE entitlement to run). Pulls the raw Security/CoreFoundation FFI it needs.
+macos-se = ["dep:security-framework-sys", "dep:core-foundation", "dep:core-foundation-sys"]
+
+# External-HSM custody via a PKCS#11 token (YubiKey PIV, Nitrokey, SoftHSM,
+# Thales/Utimaco/AWS CloudHSM). Enables the cryptoki-backed driver in
+# `hsm::pkcs11`; the generic `hsm` seam + mock are always available without it.
+pkcs11 = ["dep:cryptoki"]
+
 # macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
 # (no entitlement needed, unlike Secure Enclave).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
+# Raw FFI for the Secure-Enclave / Keychain KEK wrappers (macos-se feature).
+security-framework-sys = { version = "2.17", optional = true }
+core-foundation = { version = "0.9", optional = true }
+core-foundation-sys = { version = "0.8", optional = true }
 
 # Linux OS-keystore custody tier — the desktop Secret Service (D-Bus), via the
 # pure-Rust zbus backend (no system libdbus needed).

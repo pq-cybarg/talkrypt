@@ -20,11 +20,16 @@ pub mod custody;
 pub mod endpoint;
 pub mod error;
 pub mod frame;
+pub mod hsm;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod parity;
+#[cfg(feature = "sealsq")]
+pub mod pqse;
 pub mod protocol;
 pub mod sddl;
+#[cfg(all(target_os = "macos", feature = "macos-se"))]
+pub mod macos_hw;
 #[cfg(target_os = "linux")]
 pub mod secretservice;
 pub mod server;

@@ -1179,6 +1179,26 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
+    // Baseline, like the CLI/helper: FIPS power-on self-test + RAM-capture
+    // hardening before any key material is touched.
+    talkrypt_crypto::ensure_self_tested();
+    talkrypt_crypto::ensure_hardened();
+
+    // Opt-in permissive-security hardening (host with SIP/AMFI relaxed): anti-debug
+    // + loader-injection scan + optional PQ self-attestation. Refuse to start on an
+    // unacceptable posture. Applies to both the GUI and headless paths.
+    if std::env::var_os(talkrypt_crypto::harden::HARDEN_ENV).is_some() {
+        let posture = talkrypt_crypto::harden::from_env();
+        eprintln!("talkrypt: hardening posture: {posture:?}");
+        if !posture.is_acceptable() {
+            eprintln!(
+                "talkrypt: hardening posture unacceptable (loader-injection env set, \
+                 or self-attestation failed) — refusing to start"
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Headless driver path: no window, scriptable over argv + stdin/stdout.
     let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--headless") {

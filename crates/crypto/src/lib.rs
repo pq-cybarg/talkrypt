@@ -15,10 +15,12 @@
 
 pub mod account;
 pub mod aead;
+pub mod attest;
 pub mod beacon;
 pub mod error;
 pub mod group;
 pub mod grouping;
+pub mod harden;
 pub mod hash;
 pub mod hybrid;
 pub mod identity;
@@ -42,7 +44,7 @@ pub use group::{GroupSession, MemberId};
 pub use grouping::{verify_grouping_cert, GroupingKey};
 pub use hybrid::{KemPosture, KemProfile};
 pub use identity::{IdentityKeyPair, IdentityPublic, FINGERPRINT_LEN};
-pub use mem::{ensure_hardened, harden_process, HardeningReport, LockedBox};
+pub use mem::{deny_debugger, ensure_hardened, harden_process, HardeningReport, LockedBox};
 pub use noise::NoiseSession;
 pub use ratchet::{Session, MAX_SKIP};
 pub use rng::{fill_secure, health_check_entropy};

@@ -140,6 +140,51 @@ pub fn ensure_hardened() {
     });
 }
 
+/// Best-effort **anti-debug**: refuse debugger (`ptrace`) attachment to this
+/// process. On macOS issues `ptrace(PT_DENY_ATTACH)`; on Linux/Android the
+/// non-dumpable flag from [`harden_process`] already blocks same-uid ptrace, so
+/// this reasserts it. Returns whether an anti-debug control is in effect.
+/// Idempotent — the underlying one-shot syscall runs at most once per process.
+///
+/// **Use with care:** once denied, a later debugger attach *terminates* the
+/// process (that is the point). Intended for the **permissive-security hardening
+/// mode** — when the OS (macOS SIP/AMFI) is not enforcing code integrity, this is
+/// one of the protections talkrypt re-provides itself. Not called by default.
+pub fn deny_debugger() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not yet tried, 1 = applied, 2 = failed. Makes the one-shot syscall
+    // idempotent and safe to call from multiple entry points.
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let applied = deny_debugger_once();
+    STATE.store(if applied { 1 } else { 2 }, Ordering::Relaxed);
+    applied
+}
+
+#[cfg(all(target_os = "macos", not(miri)))]
+fn deny_debugger_once() -> bool {
+    // PT_DENY_ATTACH (pid/addr/data ignored): refuse ptrace attach to self.
+    unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) == 0 }
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
+fn deny_debugger_once() -> bool {
+    // Non-dumpable blocks same-uid ptrace + /proc/<pid>/mem; reassert it.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 }
+}
+
+#[cfg(any(
+    miri,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn deny_debugger_once() -> bool {
+    false
+}
+
 // --- platform shims: best-effort, return nothing, never fail loudly ---
 
 #[cfg(all(unix, not(miri)))]
