@@ -30,7 +30,7 @@ Legend:
 | **Custom `with_wrapper` seam** | ✅ | `store.rs` HardwareBacked put/get via a mock SE; `hw_seal` honours `qrom_safe()` (weak-tier opt-in only when `!qrom_safe`). |
 | **macOS Keychain-AES** (`macos-se`, `qrom_safe`) | ✅ 🔬 | 2 unit tests (roundtrip + tamper, hardware-only QROM seal) run on this Mac; uses the real login Keychain (same path as the pre-existing `keychain` test). |
 | **macOS Secure Enclave** (`macos-se`, ECIES, classical) | 🧱 | Compiles; `#[ignore]` hardware test. The Enclave **is reached** (live `com.apple.setoken` `SecKeyRef`), but key *registration* needs the restricted `keychain-access-groups` entitlement: signed-without-it → `OSStatus -34018`; self-signed-with-it → `amfid` SIGKILL. Runs only on an Apple-**provisioned** signed build. Verified these outcomes empirically on M5. |
-| **External HSM / PKCS#11** (`pkcs11`, cryptoki) | ✅ 🧱 | Generic `HsmToken` seam + envelope: 6 unit tests (roundtrip, qrom passthrough, wrong-token, tamper, bad header, **hardware-only QROM seal + classical-needs-passphrase**) via `MockHsmToken`. The `cryptoki` `Pkcs11Token` driver is 🧱 — compiles, but no token/SoftHSM in CI to run it. |
+| **External HSM / PKCS#11** (`pkcs11`, cryptoki) | ✅ 🔬 | Generic `HsmToken` seam + envelope: 6 unit tests (roundtrip, qrom passthrough, wrong-token, tamper, bad header, **hardware-only QROM seal + classical-needs-passphrase**) via `MockHsmToken`. The `cryptoki` `Pkcs11Token` driver is **runtime-validated against SoftHSM2** (env-gated `#[ignore]` integration test `pkcs11_token_gcm_roundtrip_against_real_module` — generate AES-256 key → wrap → unwrap → tamper-reject through the real module). **Bug found + fixed by this validation:** the first cut used `CKM_AES_KEY_WRAP_PAD` via `C_Encrypt`, which PKCS#11 defines only for `C_WrapKey` on key *objects* — invalid for arbitrary data and rejected by real tokens; switched to **`CKM_AES_GCM`** (valid `C_Encrypt` mechanism, AEAD, `qrom_safe`). Compile-check could not catch this; SoftHSM did. |
 | **Linux TPM 2.0** (`tpm`, pre-existing) | 🧱 here | Validated against swtpm in `docs/linux-tpm-test.sh` (Linux); not exercised on this macOS host. |
 | **Windows TPM / CNG** (`windows-tpm`, NCrypt RSA-OAEP, classical) | 🧱 | `CngWrapper` via the TPM-backed Platform Crypto Provider; `qrom_safe=false` → passphrase-gated. **Compile-checked against `x86_64-pc-windows-gnu`** (clean `cargo check` + no warnings); no Windows host/TPM here to run it. `available()` probes; never auto-selected. |
 
@@ -57,7 +57,9 @@ builds. clippy clean; scripts `bash -n` clean.
 ## Known-unvalidated (need external parts, not code)
 
 - macOS Secure Enclave **runtime** — needs an Apple-provisioned signed build.
-- `cryptoki` PKCS#11 driver — needs a token or SoftHSM.
+- `cryptoki` PKCS#11 driver — **runtime-validated against SoftHSM2** (software
+  token). Re-run on a hardware token (YubiKey/YubiHSM/CloudHSM) to confirm
+  vendor-module quirks. SoftHSM recipe is in the `pkcs11.rs` `it` test module.
 - Real **SEALSQ** chip driver — needs vendor SDK + silicon.
 - Windows TPM/CNG wrapper **runtime** — built + compile-checked; needs a Windows host with a TPM.
 - Launch-attestation **on by default** — needs a published `RELEASE_PUBKEY.hex`

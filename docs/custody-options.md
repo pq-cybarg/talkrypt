@@ -36,7 +36,7 @@ proven across the wrapper tests:
 | 3 | Linux TPM 2.0 | helper `tpm` | none | hardware | no → passphrase | shipped |
 | 4 | macOS **Keychain-AES** | helper `macos-se` | none | login Keychain | **yes** (AES-256) | shipped (tested) |
 | 5 | macOS **Secure Enclave** (ECIES) | helper `macos-se` | **Apple provisioning** | Enclave | no → passphrase | shipped (compile-checked; run needs signed+provisioned build) |
-| 6 | **External HSM / PKCS#11** (YubiKey, SoftHSM, CloudHSM) | helper `pkcs11` | **none** | token you own | **yes** (AES-256 key-wrap) | shipped (compile-checked) |
+| 6 | **External HSM / PKCS#11** (YubiKey, SoftHSM, CloudHSM) | helper `pkcs11` | **none** | token you own | **yes** (AES-256-GCM) | shipped (validated vs SoftHSM2) |
 | 7 | **SEALSQ / WISeKey PQ chip** (ML-KEM) | helper `sealsq` | **none** | chip you own | **yes** (ML-KEM-1024) | shipped (tested via mock) |
 | 8 | Custom (smartcard / cloud KMS / anything) | `KeyStore::with_wrapper` | depends | depends | per wrapper | shipped (seam) |
 | 9 | **Windows TPM via CNG** (NCrypt RSA-OAEP, Platform Crypto Provider) | helper `windows-tpm` | none | TPM | no → passphrase | shipped (compile-checked vs windows target) |
