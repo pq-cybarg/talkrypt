@@ -32,6 +32,7 @@ Legend:
 | **macOS Secure Enclave** (`macos-se`, ECIES, classical) | 🧱 | Compiles; `#[ignore]` hardware test. The Enclave **is reached** (live `com.apple.setoken` `SecKeyRef`), but key *registration* needs the restricted `keychain-access-groups` entitlement: signed-without-it → `OSStatus -34018`; self-signed-with-it → `amfid` SIGKILL. Runs only on an Apple-**provisioned** signed build. Verified these outcomes empirically on M5. |
 | **External HSM / PKCS#11** (`pkcs11`, cryptoki) | ✅ 🧱 | Generic `HsmToken` seam + envelope: 6 unit tests (roundtrip, qrom passthrough, wrong-token, tamper, bad header, **hardware-only QROM seal + classical-needs-passphrase**) via `MockHsmToken`. The `cryptoki` `Pkcs11Token` driver is 🧱 — compiles, but no token/SoftHSM in CI to run it. |
 | **Linux TPM 2.0** (`tpm`, pre-existing) | 🧱 here | Validated against swtpm in `docs/linux-tpm-test.sh` (Linux); not exercised on this macOS host. |
+| **Windows TPM / CNG** (`windows-tpm`, NCrypt RSA-OAEP, classical) | 🧱 | `CngWrapper` via the TPM-backed Platform Crypto Provider; `qrom_safe=false` → passphrase-gated. **Compile-checked against `x86_64-pc-windows-gnu`** (clean `cargo check` + no warnings); no Windows host/TPM here to run it. `available()` probes; never auto-selected. |
 
 ## Permissive-security hardening (`talkrypt_crypto::harden`, `attest`, `mem`)
 
@@ -58,6 +59,6 @@ builds. clippy clean; scripts `bash -n` clean.
 - macOS Secure Enclave **runtime** — needs an Apple-provisioned signed build.
 - `cryptoki` PKCS#11 driver — needs a token or SoftHSM.
 - Real **SEALSQ** chip driver — needs vendor SDK + silicon.
-- Windows TPM/CNG wrapper — not built (seam ready).
+- Windows TPM/CNG wrapper **runtime** — built + compile-checked; needs a Windows host with a TPM.
 - Launch-attestation **on by default** — needs a published `RELEASE_PUBKEY.hex`
   + shipped `<exe>.sig` (maintainer/opsec action).

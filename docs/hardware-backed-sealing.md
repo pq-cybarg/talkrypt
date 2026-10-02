@@ -43,7 +43,7 @@ Each host plugs its platform backend into that one seam:
 | iOS | **Secure Enclave** | FFI `HardwareKeyWrapper` callback | no (classical) → passphrase |
 | Desktop (Linux) | **TPM 2.0** | helper `HardwareBacked` tier → same core codec | no (classical) → passphrase |
 | Desktop (macOS) | **Secure Enclave** (ECIES) or **Keychain-AES** | helper `macos_hw` (`macos-se` feature) | SE no / Keychain-AES **yes** |
-| Desktop (Win) | OS keystore (no SE PQ) | software-sealed, or host-provided wrapper | — |
+| Desktop (Win) | **TPM via CNG** (NCrypt RSA-OAEP) | helper `windows_cng` (`windows-tpm` feature) | no (classical) → passphrase |
 | Any | **SEALSQ / WISeKey QS7001** (PQ secure element) | helper `pqse::PqSeWrapper` (`sealsq` feature) | **yes** (ML-KEM-1024) |
 | Any | Custom HSM / PKCS#11 / YubiKey / smartcard | `KeyStore::with_wrapper(dir, Arc<dyn KeyWrapper>)` | per wrapper's `qrom_safe()` |
 
