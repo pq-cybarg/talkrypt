@@ -38,6 +38,8 @@ pub mod store;
 pub mod tpm;
 #[cfg(windows)]
 pub mod wincred;
+#[cfg(all(windows, feature = "windows-tpm"))]
+pub mod windows_cng;
 #[cfg(windows)]
 pub mod winpipe;
 

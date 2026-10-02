@@ -44,6 +44,11 @@ macos-se = ["dep:security-framework-sys", "dep:core-foundation", "dep:core-found
 # `hsm::pkcs11`; the generic `hsm` seam + mock are always available without it.
 pkcs11 = ["dep:cryptoki"]
 
+# Windows CNG/TPM custody (`windows_cng`): a KEK wrapper backed by a TPM-held RSA
+# key via the Microsoft Platform Crypto Provider. Windows-only; the NCrypt
+# bindings come from the always-present windows-sys dep (Win32_Security_Cryptography).
+windows-tpm = []
+
 # macOS OS-keystore (Keychain) custody tier — login keychain generic passwords
 # (no entitlement needed, unlike Secure Enclave).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -65,6 +70,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
     "Win32_System_Threading",
     "Win32_System_Pipes",
     "Win32_System_Memory",

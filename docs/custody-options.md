@@ -39,6 +39,7 @@ proven across the wrapper tests:
 | 6 | **External HSM / PKCS#11** (YubiKey, SoftHSM, CloudHSM) | helper `pkcs11` | **none** | token you own | **yes** (AES-256 key-wrap) | shipped (compile-checked) |
 | 7 | **SEALSQ / WISeKey PQ chip** (ML-KEM) | helper `sealsq` | **none** | chip you own | **yes** (ML-KEM-1024) | shipped (tested via mock) |
 | 8 | Custom (smartcard / cloud KMS / anything) | `KeyStore::with_wrapper` | depends | depends | per wrapper | shipped (seam) |
+| 9 | **Windows TPM via CNG** (NCrypt RSA-OAEP, Platform Crypto Provider) | helper `windows-tpm` | none | TPM | no → passphrase | shipped (compile-checked vs windows target) |
 
 ### macOS Secure Enclave — the ways to reach it (option 5 variants)
 
@@ -128,7 +129,10 @@ display.
 
 ### Also deferred
 
-- **Windows TPM/CNG** wrapper (the `with_wrapper` seam accepts it).
+- **Windows TPM/CNG** wrapper — BUILT (`helper windows_cng`, feature `windows-tpm`):
+  compile-checked against `x86_64-pc-windows-gnu`; needs a Windows host with a TPM
+  to runtime-validate (RSA-OAEP via the Platform Crypto Provider; `qrom_safe=false`
+  → passphrase-gated, like the macOS SE path).
 - **A real SEALSQ vendor driver** behind `pqse::PqSecureElement` (PKCS#11/APDU).
 - **PKCS#11 RSA-OAEP / EC mechanisms** (classical `qrom_safe=false`) in
   `hsm::pkcs11` for tokens without a symmetric key; AES-Key-Wrap-Pad is wired today.
