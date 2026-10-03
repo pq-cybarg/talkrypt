@@ -76,7 +76,17 @@ adb -s emulator-5556 shell am start -a android.intent.action.VIEW \
 ## Validation status
 
 Design + scripts written and self-checked (Python import + rotation unit check;
-`bash -n`). **Not yet run end-to-end** — needs real devices attached + emulators
-booted (the Seeker is currently unplugged per memory `test-hardware-and-emulation`).
-Run the recipe above once hardware is connected to confirm a live emulator↔phone
-talkrypt session; capture the result here when done.
+`bash -n`). The round-robin *real-device* fan-out still needs attached hardware to
+run end-to-end (Seeker unplugged per memory `test-hardware-and-emulation`).
+
+**Emulator ↔ Mac-native session: VERIFIED (2026-10).** The underlying
+reachability primitive — an Android emulator reaching a Mac-native talkrypt host —
+was proven directly: `target/debug/talkrypt host --listen <Mac-LAN-IP>:9779`
+(the CLI advertises the `--listen` value **verbatim** in the invite, so bind the
+Mac's routable LAN IP, which the emulator reaches via its NAT — `0.0.0.0`/
+`127.0.0.1` are *not* usable from the guest), then deep-link-join on the emulator
+(`am start -a VIEW -d "<invite>" com.talkrypt.app` → tap "Join as pseudonym").
+Result: a connected pairwise session (host `* peer connected`, emulator
+`● online · connected`) with **bidirectional messages delivered and correctly
+attributed** (Mac→emulator and emulator→Mac). This confirms the emulator→Mac-host
+leg every bridge topology above depends on.
