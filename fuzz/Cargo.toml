@@ -86,5 +86,11 @@ path = "fuzz_targets/suite_scheme.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "seal_envelope"
+path = "fuzz_targets/seal_envelope.rs"
+test = false
+doc = false
+
 [profile.release]
 debug = 1
