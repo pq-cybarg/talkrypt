@@ -9,7 +9,8 @@ identity-attestation** as a condition of use or distribution.
 > project's own source (forum/blog/mailing-list/issue tracker) and cited inline;
 > rows marked **[REPORTED]** are from secondary coverage and still need a primary
 > source. This is a **live 2025–2026 controversy** — re-review quarterly.
-> First primary-source pass: 2026-10-04.
+> First primary-source pass: 2026-10-04. Round-3 pass (same day) resolved MX,
+> Garuda, Adenix, GrapheneOS; only SecureBlue remains without a primary source.
 
 ## Legal + technical context
 - **California AB 1043** (Digital Age Assurance) and **Colorado SB26-051** (Age
@@ -40,8 +41,10 @@ decision**). In-scope ≠ a Tier — the gate decides.
 | **System76 / Pop!_OS** | "Pop!_OS and the COSMIC Desktop Environment **will not include Age Verification or Age Attestation**"; ignores the systemd `birthDate`; led the open-source-exemption lobbying | **[PRIMARY]** [System76 blog, 2026-05-26](https://system76.com/blog/post/co-and-ca-exempt-open-source-from-age-attestation) + [opposition post](https://blog.system76.com/post/system76-on-age-verification/) | **PASS** (supersedes the earlier "may comply" secondary report — that was wrong) |
 | **Whonix / Kicksecure** | explored a privacy-preserving age-API, hit heavy pushback, **reversed**: "do not expect to add an age API… this assessment may become more definite later"; dev: "unlikely" | **[PRIMARY]** [Whonix forum](https://forums.whonix.org/t/whonix-adding-age-verification/22969) | **PASS (hedged)** — currently refusing; "may become more definite," so re-review |
 | **Parrot OS** | official blog "We don't want your ID": "will not proactively implement any Age Verification"; nothing until legally forced, and even then "intentionally porous and easily bypassed" | **[PRIMARY]** [parrotsec.org, 2026-04-02](https://parrotsec.org/blog/2026-04-02-our-statement-about-age-verification/) | **PASS** |
-| MX Linux | strong community opposition + a "MX install ≠ 'account creation'" legal reading; **no official project policy yet** | [REPORTED] [MX forum](https://forum.mxlinux.org/viewtopic.php?t=88365) | PASS? — NEEDS-PRIMARY (forum only) |
-| Garuda, Adenix | reported independent no-implement determinations | [REPORTED] [itsfoss](https://itsfoss.com/news/distros-response-age-verification-laws/) | PASS? — NEEDS-PRIMARY-SOURCE |
+| **MX Linux** | team statement in the official weekly update: "no one on the team at MX wants to implement something like age verification"; "wait and observe" pending court challenges; redirects users to lobby lawmakers, not the distro | **[PRIMARY-ish]** MX weekly update, quoted verbatim by [linuxiac](https://linuxiac.com/mx-linux-takes-clear-stance-against-age-verification-requirements/) / [Linux Journal](https://www.linuxjournal.com/content/mx-linux-pushes-back-against-age-verification-stand-privacy-and-open-source-principles) | **PASS (hedged)** — official team channel, but "wait and observe" not an absolute charter; re-review |
+| **Garuda Linux** | official forum announcement: "Garuda Linux will not implement any age verification measures, since Garuda Linux's legal jurisdictions have no laws mandating age verification" (infra in FI/DE/AT); if ever legally forced, only minimal self-declaration ("a checkbox like 'I am legally an adult'"), never third-party ID | **[PRIMARY]** [Garuda forum announcement](https://forum.garudalinux.org/t/a-statement-on-age-verification-the-state-of-the-community-discourse/47652) | **PASS (hedged — jurisdictional)** — refusal is contingent on no EU/local mandate; would do minimal self-declaration if forced |
+| **Adenix GNU/Linux** | strongest stance: founder J. Mazzullo — distro "will NOT have any age checks" and is "not for use in California or any other regions with age verification laws that affect operating systems"; asked Debian for a root-removable age package + region blacklist | **[PRIMARY]** founder statement on [debian-legal, 2026-03](https://lists.debian.org/debian-legal/2026/03/msg00022.html) + project site | **PASS** (explicit, unconditional refusal) |
+| **GrapheneOS** | official X post (2026-03-20): "GrapheneOS will remain usable by anyone around the world without requiring personal information, identification or an account… If GrapheneOS devices can't be sold in a region due to their regulations, so be it"; proposes OS child-profile checks instead of per-app ID. Canadian non-profit (GrapheneOS Foundation) | **[PRIMARY]** GrapheneOS official account, 2026-03-20; corroborated by [Privacy Guides](https://www.privacyguides.org/news/2026/03/23/grapheneos-wont-implement-age-verification/) | **PASS** (restores the earlier verdict — the X post IS a primary dev statement; the round-2 downgrade to UNKNOWN was wrong) |
 | Devuan, Artix | systemd-free → no `birthDate`/userdb age plumbing (structural immunity) + init-freedom ethos | [structural] | PASS? — confirm a governance statement |
 | ~~Omarchy~~ | — | — | **EXCLUDED by project decision** |
 
@@ -57,8 +60,7 @@ decision**). In-scope ≠ a Tier — the gate decides.
 |---|---|---|---|
 | **Fedora** | **no decision** — active debate (store birth-date file vs group-flags vs manual; whether OSS is even covered) | **[PRIMARY]** [Fedora Discussion](https://discussion.fedoraproject.org/t/regarding-age-verification/184976) | UNDECIDED (pivotal — Qubes + others wait on it) |
 | **Ubuntu / Canonical** | official: "no decisions made," under legal review; installer/systemd prototypes are an **external contributor**, not Canonical | **[PRIMARY]** [Ubuntu Discourse](https://discourse.ubuntu.com/t/ubuntus-response-to-californias-digital-age-assurance-act-ab-1043/77948) | UNDECIDED (community has a "must not implement" petition thread — not official) |
-| GrapheneOS | **no official dev statement found**; may be a *technical* question (Google enforcement sits below the GrapheneOS layer), not a policy choice | [REPORTED] (unconfirmed) | UNKNOWN — NEEDS-PRIMARY-SOURCE (corrects the tracker's "won't comply") |
-| SecureBlue | intended to comply | [REPORTED] tracker | FAIL? — NEEDS-PRIMARY-SOURCE |
+| SecureBlue | "reported comply" — but the only trace is a **secondary/circular** report (no SecureBlue issue, FAQ, or statement found); claim is unsubstantiated | [REPORTED] (unconfirmed, likely circular) | UNKNOWN — NEEDS-PRIMARY-SOURCE (do not record as FAIL without a source) |
 | Arch, SUSE | publicly silent | [REPORTED] [itsfoss](https://itsfoss.com/news/distros-response-age-verification-laws/) | UNDECIDED |
 
 ## Privacy / opsec / throwaway distros (purpose reference; orthogonal to the gate)
@@ -69,9 +71,22 @@ Minimal/DIY: **Arch**, **Alpine**, **Gentoo**. systemd-free (sidestep `birthDate
 *Privacy-focused ≠ gate-pass* — Whonix/Tails were the clearest example (both explored or are weighing an age API).
 
 ## Remaining step-1 work
-Primary-confirmed so far: **Zorin, System76/Pop!_OS, Parrot** (PASS), **Whonix**
-(PASS-hedged), **Fedora, Ubuntu/Canonical, Debian, Tails** (undecided). Still
-`NEEDS-PRIMARY-SOURCE`: **MX** (forum-only), **Garuda**, **Adenix**,
-**GrapheneOS** (no dev statement located), **SecureBlue**. A useful aggregator to
-watch: the "OSS Anti-Surveillance" tracker on Ubuntu Discourse. Promote/demote the
-Gate column as each is confirmed, with date.
+Primary-confirmed **PASS**: **Zorin, System76/Pop!_OS, Parrot, Adenix,
+GrapheneOS**; **PASS (hedged)**: **MX, Garuda, Whonix** (each refusing now, but
+with a stated "if forced / wait-and-see" caveat). Primary-confirmed
+**undecided**: **Fedora, Ubuntu/Canonical, Debian, Tails** (and **Qubes** via
+Fedora). 
+
+Round-3 pass (2026-10-04) resolved MX, Garuda, Adenix, and GrapheneOS from
+`NEEDS-PRIMARY-SOURCE` — and **restored GrapheneOS to PASS** (the round-2
+downgrade to UNKNOWN was wrong: the 2026-03-20 X post is a primary dev
+statement). 
+
+Only `NEEDS-PRIMARY-SOURCE` left: **SecureBlue** (the lone "comply" claim is a
+circular/secondary report with no locatable primary source — recorded as UNKNOWN,
+**not** FAIL). Structural-but-governance-unconfirmed: **Devuan, Artix** (systemd-
+free immunity is real; a project governance statement would upgrade them to a
+non-hedged PASS). A useful aggregator to watch: the "DoesItAgeVerify" and
+"Linux-Age-Verification-Stance" trackers (secondary — always re-confirm against
+the project's own channel). Promote/demote the Gate column as each is confirmed,
+with date.
