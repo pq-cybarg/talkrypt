@@ -75,10 +75,28 @@ drop-in, or an Arch PKGBUILD `prepare()` patch), then rebuild.
 layer, so the `birthDate` field does not exist on them at all. If OS-level
 age-signalling is in your threat model, a systemd-free base is the cleanest answer.
 
+## The proposed cross-desktop API: `org.freedesktop.AgeVerification1`
+The mechanism under debate (proposed on the freedesktop/Debian/Fedora/Ubuntu
+lists) is a D-Bus interface **`org.freedesktop.AgeVerification1`** exposing one of
+four **self-declared** brackets (<13, 13–16, 16–18, 18+) — explicitly *not*
+verified (a suggested rename is "declaration"), and **optional** per distro
+([debian-devel](https://lists.debian.org/debian-devel/2026/03/msg00016.html)). If
+a distro ships it, neutralize by masking/removing the providing unit and refusing
+to install the package:
+```sh
+# Detect:
+busctl --no-pager list 2>/dev/null | grep -i AgeVerification1 || echo "not present"
+# If a systemd unit provides it, mask it (admin):
+systemctl list-unit-files 2>/dev/null | grep -iE 'age-?verif|age-?assur'
+# sudo systemctl mask <that-unit>.service
+```
+`scripts/privacy/audit-age-signals.sh` checks for this interface by name.
+
 ## General hardening (any distro)
 - **Deny the query path.** The privacy risk is a user-space program (including
   browser JS via some bridge) reading an age signal. Prefer apps/stores that do
-  not query userdb for age; audit new "age/parental" settings an update adds.
+  not query userdb or `org.freedesktop.AgeVerification1`; audit new "age/parental"
+  settings an update adds.
 - **Amnesic/throwaway for sensitive sessions.** A live, amnesic system (**Tails**,
   **Kodachi**) carries no persistent user record to stamp with a birth date.
 - **Track your distro's stance.** See the classification log
