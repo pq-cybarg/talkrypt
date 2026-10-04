@@ -90,3 +90,18 @@ Result: a connected pairwise session (host `* peer connected`, emulator
 `● online · connected`) with **bidirectional messages delivered and correctly
 attributed** (Mac→emulator and emulator→Mac). This confirms the emulator→Mac-host
 leg every bridge topology above depends on.
+
+**Group (TreeKEM) cross-device also verified — and surfaced + fixed a real FFI
+bug.** Repeating the test against a `talkrypt host --group` host initially failed:
+the emulator connected at the transport layer but never became a keyed group
+member (`1 members`, no group messages crossing), while a Mac-native
+`talkrypt join --group` against the same host worked — isolating the fault to the
+FFI join path. Root cause: `TalkryptClient::join`/`join_tor` always built a
+*pairwise* `Core::new`, ignoring the invite's `desc.group`, so a group invite was
+silently joined pairwise and never performed the TreeKEM member-add. Fixed to
+branch on `desc.group` → `Core::new_group(.., false)` (mirroring the CLI/desktop).
+After rebuilding the APK and re-testing: the emulator joins as a keyed TreeKEM
+member and **signed group messages flow both ways with correct attribution**
+(`decrypt_verified` per-leaf ML-DSA). Tip for the on-device retest: `adb shell pm
+clear com.talkrypt.app` for a clean slate between runs — stale session state
+caused spurious non-connects.
