@@ -9,8 +9,9 @@ identity-attestation** as a condition of use or distribution.
 > project's own source (forum/blog/mailing-list/issue tracker) and cited inline;
 > rows marked **[REPORTED]** are from secondary coverage and still need a primary
 > source. This is a **live 2025–2026 controversy** — re-review quarterly.
-> First primary-source pass: 2026-10-04. Round-3 pass (same day) resolved MX,
-> Garuda, Adenix, GrapheneOS; only SecureBlue remains without a primary source.
+> First primary-source pass: 2026-10-04. Rounds 3–4 (same day) resolved MX,
+> Garuda, Adenix, GrapheneOS, Devuan, and Artix; only SecureBlue remains without
+> a primary source (recorded UNKNOWN). See the final gate roster at the bottom.
 
 ## Legal + technical context
 - **California AB 1043** (Digital Age Assurance) and **Colorado SB26-051** (Age
@@ -45,7 +46,8 @@ decision**). In-scope ≠ a Tier — the gate decides.
 | **Garuda Linux** | official forum announcement: "Garuda Linux will not implement any age verification measures, since Garuda Linux's legal jurisdictions have no laws mandating age verification" (infra in FI/DE/AT); if ever legally forced, only minimal self-declaration ("a checkbox like 'I am legally an adult'"), never third-party ID | **[PRIMARY]** [Garuda forum announcement](https://forum.garudalinux.org/t/a-statement-on-age-verification-the-state-of-the-community-discourse/47652) | **PASS (hedged — jurisdictional)** — refusal is contingent on no EU/local mandate; would do minimal self-declaration if forced |
 | **Adenix GNU/Linux** | strongest stance: founder J. Mazzullo — distro "will NOT have any age checks" and is "not for use in California or any other regions with age verification laws that affect operating systems"; asked Debian for a root-removable age package + region blacklist | **[PRIMARY]** founder statement on [debian-legal, 2026-03](https://lists.debian.org/debian-legal/2026/03/msg00022.html) + project site | **PASS** (explicit, unconditional refusal) |
 | **GrapheneOS** | official X post (2026-03-20): "GrapheneOS will remain usable by anyone around the world without requiring personal information, identification or an account… If GrapheneOS devices can't be sold in a region due to their regulations, so be it"; proposes OS child-profile checks instead of per-app ID. Canadian non-profit (GrapheneOS Foundation) | **[PRIMARY]** GrapheneOS official account, 2026-03-20; corroborated by [Privacy Guides](https://www.privacyguides.org/news/2026/03/23/grapheneos-wont-implement-age-verification/) | **PASS** (restores the earlier verdict — the X post IS a primary dev statement; the round-2 downgrade to UNKNOWN was wrong) |
-| Devuan, Artix | systemd-free → no `birthDate`/userdb age plumbing (structural immunity) + init-freedom ethos | [structural] | PASS? — confirm a governance statement |
+| **Devuan** | systemd-free (structural immunity — no `birthDate`/userdb layer exists) **+** founder Denis "Jaromil" Roio: Devuan "will remove age verification" inherited from upstreams | **[PRIMARY-ish]** founder statement, relayed by [newinlinux](https://www.newinlinux.com/which-linux-distributions-do-age-verification/) / Lunduke (read via relay, not the original post) | **PASS** (structural immunity + founder refusal) |
+| **Artix** | systemd-free (structural immunity) **+** developer Christos Nouskas ("nous") on the official Artix forum, 2026-03-07: **"We'll NEVER require any verification or identification from the user"** (the most unconditional wording of any distro) | **[PRIMARY-ish]** [Artix forum thread](https://forum.artixlinux.org/index.php/topic,9360.msg55966.html) (dev statement; forum was 503 at verification time — corroborated verbatim w/ attribution+date by Lunduke / [grigio.org](https://grigio.org/linux-distros-resistance-against-age-verification-laws/)) | **PASS** (structural immunity + unconditional "NEVER" refusal) |
 | ~~Omarchy~~ | — | — | **EXCLUDED by project decision** |
 
 ### Bucket B — undecided / deliberating (Tier-3 until resolved)
@@ -82,11 +84,22 @@ Round-3 pass (2026-10-04) resolved MX, Garuda, Adenix, and GrapheneOS from
 downgrade to UNKNOWN was wrong: the 2026-03-20 X post is a primary dev
 statement). 
 
-Only `NEEDS-PRIMARY-SOURCE` left: **SecureBlue** (the lone "comply" claim is a
-circular/secondary report with no locatable primary source — recorded as UNKNOWN,
-**not** FAIL). Structural-but-governance-unconfirmed: **Devuan, Artix** (systemd-
-free immunity is real; a project governance statement would upgrade them to a
-non-hedged PASS). A useful aggregator to watch: the "DoesItAgeVerify" and
+Round-4 pass (2026-10-04) upgraded **Devuan** (founder refusal) and **Artix**
+(dev "NEVER" statement) from structural-immunity-only to full **PASS**, and
+confirmed that **SecureBlue has no locatable primary source at all** — its lone
+"comply" claim is circular (it traces back to *this repo's* own earlier PR). The
+age-verification gate is therefore **effectively closed**: every in-scope distro
+now has a primary-grounded verdict except SecureBlue, which is recorded as
+**UNKNOWN** and must **not** be packaged first-class until it issues its own
+statement. A useful aggregator to watch: the "DoesItAgeVerify" and
 "Linux-Age-Verification-Stance" trackers (secondary — always re-confirm against
 the project's own channel). Promote/demote the Gate column as each is confirmed,
 with date.
+
+### Final gate roster (2026-10-04)
+- **PASS (first-class eligible):** Zorin, System76/Pop!_OS, Parrot, Adenix,
+  GrapheneOS, Devuan, Artix.
+- **PASS (hedged — eligible, re-review):** MX, Garuda, Whonix/Kicksecure.
+- **UNDECIDED (Tier-3 until resolved):** Fedora (→ Qubes inherits), Ubuntu/
+  Canonical, Debian, Tails, Arch, SUSE.
+- **UNKNOWN (no primary source; do not first-class):** SecureBlue.
