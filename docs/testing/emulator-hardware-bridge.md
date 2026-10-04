@@ -105,3 +105,25 @@ member and **signed group messages flow both ways with correct attribution**
 (`decrypt_verified` per-leaf ML-DSA). Tip for the on-device retest: `adb shell pm
 clear com.talkrypt.app` for a clean slate between runs — stale session state
 caused spurious non-connects.
+
+### Cross-emulator-type matrix (group chat, 2026-10)
+
+After the FFI group-join fix, the emulator↔Mac-native **group** (TreeKEM) session
+was re-validated across four distinct emulator types — each: install APK →
+deep-link join a `talkrypt host --group` → keyed member → **bidirectional signed
+group messages, correctly attributed**. UI coords differ wildly per type, so the
+driver **parses the button/input bounds** from the `uiautomator` dump (never
+hardcodes):
+
+| Emulator type | API | Resolution / density | Pseudonym-button coords | Group round-trip |
+| --- | --- | --- | --- | --- |
+| small phone (`talkrypt_peer`) | 35 | 320×640 @ 160 | ~160,408 | ✅ |
+| Pixel 7 (`tk_phone`) | 35 | 1080×2400 @ 420 | 540,941 | ✅ |
+| tablet (`tk_tablet`) | 35 | 2560×1600 @ 320 | 1280,572 | ✅ |
+| Pixel 7, **Android 13** (`tk_api33`) | **33** | 1080×2400 @ 420 | 540,941 | ✅ |
+
+So the Android client + the group path work across **form factor** (tiny phone →
+tablet) and **OS version** (API 33 ↔ 35). Create more types with
+`avdmanager create avd -n <name> -k "system-images;android-<N>;google_apis;arm64-v8a" -d <profile>`
+(`sdkmanager "system-images;android-<N>;..."` first for a new API). The `tk_*`
+AVDs are left in place for reuse; delete with `avdmanager delete avd -n <name>`.
