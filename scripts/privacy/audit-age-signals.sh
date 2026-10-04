@@ -43,11 +43,17 @@ for d in /etc/userdb /run/userdb /run/host/userdb; do
   fi
 done
 
-# 4. Heuristic: an age/parental daemon on the bus or in services.
+# 4. The proposed cross-desktop interface org.freedesktop.AgeVerification1
+#    (self-declared age brackets), plus any age/parental daemon on the bus.
 if command -v busctl >/dev/null 2>&1; then
-  if busctl --no-pager list 2>/dev/null | grep -iE 'age|parental|ageverif' | grep -q .; then
+  if busctl --no-pager list 2>/dev/null | grep -qi 'AgeVerification1'; then
+    say "[WARN] org.freedesktop.AgeVerification1 is present on the bus:"
+    busctl --no-pager list 2>/dev/null | grep -i 'AgeVerification1' | sed 's/^/        /'
+    found=1
+  fi
+  if busctl --no-pager list 2>/dev/null | grep -iE 'age|parental|ageassur' | grep -vi 'AgeVerification1' | grep -q .; then
     say "[WARN] a bus name mentioning age/parental is present:"
-    busctl --no-pager list 2>/dev/null | grep -iE 'age|parental|ageverif' | sed 's/^/        /'
+    busctl --no-pager list 2>/dev/null | grep -iE 'age|parental|ageassur' | grep -vi 'AgeVerification1' | sed 's/^/        /'
     found=1
   fi
 fi
