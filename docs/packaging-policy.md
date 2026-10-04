@@ -64,4 +64,12 @@ Until a distro is verified against step 1 with a citation, it is treated as
 First-class targets: **amd64, arm64, armv7** (per #532). A Tier-1 pipeline
 builds and signs all three where the distro supports them.
 
+## See also
+- [`distro-age-verification-log.md`](distro-age-verification-log.md) — per-distro
+  classification research log (reported stances + `NEEDS-PRIMARY-SOURCE` flags)
+  feeding the gate above.
+- [`privacy/age-verification-removal.md`](privacy/age-verification-removal.md) +
+  `scripts/privacy/audit-age-signals.sh` — user-autonomy tooling to audit/remove
+  OS-level age-signal plumbing (systemd `birthDate`), complementing Ageless Linux.
+
 NOT certified / NOT audited — see the project README.
