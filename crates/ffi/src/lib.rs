@@ -790,7 +790,17 @@ impl TalkryptClient {
             .get_by_scheme_hash(&desc.scheme_hash())
             .map_err(FfiError::from)?;
         let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
-        let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, transport, desc.clone());
+        // The invite descriptor declares group mode (mirrors the CLI/desktop):
+        // a `--group` TreeKEM chat must be joined as a MEMBER (`new_group(..,
+        // false)`), not pairwise — otherwise the client connects at the transport
+        // layer but never performs the TreeKEM member-add, so no group messages
+        // ever cross (surfaced by the emulator↔Mac-native group test).
+        let id = IdentityKeyPair::generate();
+        let (core, rx) = if desc.group {
+            Core::new_group(id, suite, transport, desc.clone(), false)
+        } else {
+            Core::new(id, suite, transport, desc.clone())
+        };
         rt.block_on(async {
             for_kind(desc.topology)
                 .establish(&core, &desc.endpoints)
@@ -827,7 +837,13 @@ impl TalkryptClient {
                 .map_err(FfiError::from)?;
             // Reuse the shared, warm Arti client (no per-chat cold bootstrap).
             let arti = shared_tor(&state_dir)?;
-            let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti, desc.clone());
+            // Group invites join as a TreeKEM member (see `join`).
+            let id = IdentityKeyPair::generate();
+            let (core, rx) = if desc.group {
+                Core::new_group(id, suite, arti, desc.clone(), false)
+            } else {
+                Core::new(id, suite, arti, desc.clone())
+            };
             rt.block_on(async {
                 for_kind(desc.topology)
                     .establish(&core, &desc.endpoints)
