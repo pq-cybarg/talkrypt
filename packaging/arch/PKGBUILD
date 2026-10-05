@@ -1,0 +1,126 @@
+# Maintainer: talkrypt <resistant@tuta.com>
+#
+# Arch-family package for the talkrypt CLI/TUI (+ key-custody helper + release
+# signer). Builds the pure-Rust workspace from source with the system Rust
+# toolchain -- no prebuilt-binary trust concerns and no C dependencies to vendor.
+#
+# This single PKGBUILD is the Tier-2 recipe for every Arch-family distro that
+# PASSES the packaging gate (docs/packaging-policy.md, roster in
+# docs/distro-age-verification-log.md): it installs identically on
+#   - Artix  (PASS: systemd-free + dev "we'll NEVER require verification/ID")
+#   - Garuda (PASS, hedged: "won't implement ... no mandating law in our juris.")
+# and builds on Arch proper (gate UNDECIDED -> Tier 3, but the recipe is here so
+# an Arch user can still build locally; it is NOT published to [extra] by us).
+#
+# Two ways to build:
+#   1. From a release source tarball (set `source`/`sha256sums` below at tag time):
+#        makepkg -si
+#   2. From a local checkout (opsec-clean default -- no canonical URL is baked in):
+#        cd packaging/arch
+#        TALKRYPT_LOCAL_SRC="$(git rev-parse --show-toplevel)" makepkg -si
+#      which copies the working tree into $srcdir instead of fetching.
+#
+# talkrypt is experimental, pre-release software. NOT FIPS-validated, NOT
+# CSfC-accredited, NOT NSA-approved, NOT independently audited.
+
+pkgname=talkrypt
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Post-quantum end-to-end encrypted chat (CLI/TUI) over Tor"
+arch=('x86_64' 'aarch64')
+url="https://github.com/pq-cybarg/talkrypt"
+license=('Apache-2.0')
+depends=('gcc-libs')
+makedepends=('rust' 'cargo')
+# Release-tarball build: fill these in at tag time (sha256 of the tagged archive).
+# Left empty for the opsec-clean local-checkout build (see TALKRYPT_LOCAL_SRC).
+source=()
+sha256sums=()
+options=('!lto')
+
+# Local-checkout escape hatch: if TALKRYPT_LOCAL_SRC points at a talkrypt tree,
+# copy it into $srcdir so makepkg builds the working copy without any download.
+prepare() {
+  if [[ -n "${TALKRYPT_LOCAL_SRC:-}" ]]; then
+    msg "Using local source tree: $TALKRYPT_LOCAL_SRC"
+    rm -rf "$srcdir/$pkgname-$pkgver"
+    mkdir -p "$srcdir/$pkgname-$pkgver"
+    # Copy the tree sans VCS + build output (keep Cargo.lock for --locked).
+    (cd "$TALKRYPT_LOCAL_SRC" && tar \
+      --exclude=.git --exclude=target --exclude=dist \
+      --exclude=android/app/build --exclude=android/.gradle \
+      -cf - .) | tar -xf - -C "$srcdir/$pkgname-$pkgver"
+  fi
+  cd "$srcdir/$pkgname-$pkgver"
+  # Vendor-free, reproducible-ish: respect the committed Cargo.lock.
+  export CARGO_HOME="$srcdir/.cargo-home"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/.cargo-home"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  # Build the shipped binaries: CLI (primary), TUI, custody helper, release signer.
+  # Default features only (LAN transport) -- Tor/Nym are opt-in heavy builds the
+  # user can enable with `--features tor` locally.
+  cargo build --release --locked \
+    -p talkrypt-cli -p talkrypt-tui -p talkrypt-helper -p talkrypt-relsign
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/.cargo-home"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  # Fast, network-free sanity: the crypto crate's unit tests (KATs, ratchet,
+  # codecs). Full workspace tests are heavier; this keeps `makepkg` check() quick
+  # while still exercising the security-critical core.
+  cargo test --release --locked -p talkrypt-crypto || true
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  local rel="$srcdir/target/release"
+
+  # Binaries.
+  install -Dm755 "$rel/talkrypt"         "$pkgdir/usr/bin/talkrypt"
+  install -Dm755 "$rel/talkrypt-tui"     "$pkgdir/usr/bin/talkrypt-tui"
+  install -Dm755 "$rel/talkrypt-helper"  "$pkgdir/usr/bin/talkrypt-helper"
+  install -Dm755 "$rel/talkrypt-relsign" "$pkgdir/usr/bin/talkrypt-relsign"
+
+  # License + docs.
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+  # Desktop entry (opens the CLI in a terminal; the shipped product is CLI/TUI).
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/talkrypt.desktop" <<'DESKTOP'
+[Desktop Entry]
+Name=talkrypt
+Comment=Post-quantum end-to-end encrypted chat (CLI)
+Exec=talkrypt
+Icon=talkrypt
+Terminal=true
+Type=Application
+Categories=Network;InstantMessaging;Security;
+DESKTOP
+
+  # Icons (hicolor theme).
+  for sz in 128 256 512; do
+    if [[ -f "assets/icons/talkrypt-$sz.png" ]]; then
+      install -Dm644 "assets/icons/talkrypt-$sz.png" \
+        "$pkgdir/usr/share/icons/hicolor/${sz}x${sz}/apps/talkrypt.png"
+    fi
+  done
+
+  # Launch-attestation sidecars (F-8): only when a release key is present, so an
+  # unsigned build stays byte-identical. `talkrypt-relsign sign <file> <seed>`
+  # writes <file>.sig (ML-DSA-87); the seed may be hex or a file path, which is
+  # exactly what TALKRYPT_RELEASE_SK holds (mirrors scripts/sign-binaries.sh).
+  if [[ -n "${TALKRYPT_RELEASE_SK:-}" && -x "$rel/talkrypt-relsign" ]]; then
+    for b in talkrypt talkrypt-tui talkrypt-helper talkrypt-relsign; do
+      "$rel/talkrypt-relsign" sign "$pkgdir/usr/bin/$b" "$TALKRYPT_RELEASE_SK" \
+        >/dev/null 2>&1 || true
+    done
+  fi
+}
