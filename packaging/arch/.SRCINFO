@@ -1,0 +1,18 @@
+# Generated to match ./PKGBUILD. On a build host, regenerate with:
+#   cd packaging/arch && makepkg --printsrcinfo > .SRCINFO
+# (Required before AUR submission; the `source`/`sha256sums` arrays must be
+# populated with a real tagged tarball first -- see the PKGBUILD header.)
+pkgbase = talkrypt
+	pkgdesc = Post-quantum end-to-end encrypted chat (CLI/TUI) over Tor
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/pq-cybarg/talkrypt
+	arch = x86_64
+	arch = aarch64
+	license = Apache-2.0
+	makedepends = rust
+	makedepends = cargo
+	depends = gcc-libs
+	options = !lto
+
+pkgname = talkrypt

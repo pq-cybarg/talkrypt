@@ -49,15 +49,39 @@ For each candidate distro (the named list in [`ROADMAP.md`](ROADMAP.md)):
 Until a distro is verified against step 1 with a citation, it is treated as
 **Tier 3** (source-build), not assumed eligible.
 
-## Per-distro classification (TO BE FILLED FROM PRIMARY SOURCES)
+## Per-distro classification (primary-sourced, 2026-10-04)
 
-| Distro | Gate (cite) | Packaging | Tier | Reviewed |
+Populated from the research log (full citations in
+[`distro-age-verification-log.md`](distro-age-verification-log.md)); recipes in
+[`packaging-recipes.md`](packaging-recipes.md). Every verdict below is backed by
+the project's own channel.
+
+| Distro | Gate | Format | Tier | Reviewed |
 |---|---|---|---|---|
-| _(each distro from ROADMAP)_ | _pending verification_ | — | 3 (default) | — |
+| Zorin OS | PASS | deb | 2 | 2026-10-04 |
+| System76 / Pop!_OS | PASS | deb | 2 | 2026-10-04 |
+| Parrot OS | PASS | deb | 2 | 2026-10-04 |
+| Adenix GNU/Linux | PASS | deb | 2 | 2026-10-04 |
+| Devuan | PASS | deb | 2 | 2026-10-04 |
+| Artix | PASS | pacman | 2 | 2026-10-04 |
+| GrapheneOS | PASS | apk | 2 | 2026-10-04 |
+| MX Linux | PASS (hedged) | deb | 2 | 2026-10-04 |
+| Garuda | PASS (hedged) | pacman | 2 | 2026-10-04 |
+| Whonix / Kicksecure | PASS (hedged) | deb | 2 | 2026-10-04 |
+| Fedora (→ Qubes) | UNDECIDED | — | 3 | 2026-10-04 |
+| Ubuntu / Canonical | UNDECIDED | — | 3 | 2026-10-04 |
+| Debian | UNDECIDED | — | 3 | 2026-10-04 |
+| Tails | UNDECIDED | — | 3 | 2026-10-04 |
+| Arch, SUSE | UNDECIDED | — | 3 | 2026-10-04 |
+| SecureBlue | UNKNOWN (no primary source) | — | 3 | 2026-10-04 |
 
-> Deliberately left unfilled: classifying a distro's political commitment is a
-> factual claim about that project and must cite a primary source, not be
-> guessed. Populating this table is the remaining work of #533.
+> A PASS distro sits at **Tier 2** until a signed CI publishing pipeline exists
+> for its format (then Tier 1); see the promotion checklist in
+> [`packaging-recipes.md`](packaging-recipes.md). UNDECIDED/UNKNOWN distros stay
+> **Tier 3** (source build) with no shipped recipe until their verdict changes —
+> this includes deliberately **not** shipping an `.rpm` while Fedora is
+> unresolved. "Hedged" PASS means the project currently refuses but stated a
+> "if legally forced / wait-and-see" caveat — eligible, re-review on change.
 
 ## Architectures
 
@@ -65,9 +89,12 @@ First-class targets: **amd64, arm64, armv7** (per #532). A Tier-1 pipeline
 builds and signs all three where the distro supports them.
 
 ## See also
+- [`packaging-recipes.md`](packaging-recipes.md) — the concrete per-distro
+  recipe map (format, tier, exact build command) for the PASS set, plus the
+  Tier-1 (signed CI) promotion checklist.
 - [`distro-age-verification-log.md`](distro-age-verification-log.md) — per-distro
-  classification research log (reported stances + `NEEDS-PRIMARY-SOURCE` flags)
-  feeding the gate above.
+  classification research log (primary-sourced stances + the one remaining
+  `NEEDS-PRIMARY-SOURCE`) feeding the gate above.
 - [`privacy/age-verification-removal.md`](privacy/age-verification-removal.md) +
   `scripts/privacy/audit-age-signals.sh` — user-autonomy tooling to audit/remove
   OS-level age-signal plumbing (systemd `birthDate`), complementing Ageless Linux.
