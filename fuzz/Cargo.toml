@@ -92,5 +92,11 @@ path = "fuzz_targets/seal_envelope.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "treekem_parser"
+path = "fuzz_targets/treekem_parser.rs"
+test = false
+doc = false
+
 [profile.release]
 debug = 1

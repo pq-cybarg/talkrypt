@@ -23,6 +23,11 @@ parser/serializer disagreement.
 | `ratchet_header` | per-message DR header, all 3 KEM profiles | `ratchet::fuzz_header_roundtrip` |
 | `beacon_body` | always-encrypted scheme beacon | `beacon::fuzz_beacon_roundtrip` |
 | `suite_scheme` | scheme fingerprint + registry match | `scheme_hash` / `get_by_scheme_hash` |
+| `linkage_parser` | ZK-linkage predicate/proof/payload | `Predicate`/`LinkageProof`/`LinkagePayload::decode` |
+| `presence_parser` | SUB-SPEC A presence + classification marking | `NamePresence`/`NameBook`/`Marking::decode` |
+| `vouch_parser` | vouch target/vouch/policy codecs | `VouchTarget`/`Vouch`/`VouchPolicy::decode` |
+| `seal_envelope` | `TKS1` at-rest sealed-envelope blob (R-8 custody) | `talkrypt_core::seal::{tier_of, unseal}` |
+| `treekem_parser` | group-layer decoders, all 3 KEM profiles (F-19) | `KeyPackage`/`Commit`/`Welcome::decode` |
 
 The two crate-private codecs (`ratchet::Header`, `beacon::BeaconBody`) are
 reached through thin wrappers exposed only under `talkrypt-crypto`'s `fuzzing`
