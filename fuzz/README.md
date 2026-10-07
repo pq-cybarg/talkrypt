@@ -28,6 +28,7 @@ parser/serializer disagreement.
 | `vouch_parser` | vouch target/vouch/policy codecs | `VouchTarget`/`Vouch`/`VouchPolicy::decode` |
 | `seal_envelope` | `TKS1` at-rest sealed-envelope blob (R-8 custody) | `talkrypt_core::seal::{tier_of, unseal}` |
 | `treekem_parser` | group-layer decoders, all 3 KEM profiles (F-19) | `KeyPackage`/`Commit`/`Welcome::decode` |
+| `mesh_parsers` | foreign mesh ingest: Meshtastic/MQTT/Meshcore (F-20/F-22) | `parse_fromradio`/`parse_meshpacket`/`parse_service_envelope`/`parse_channel_recv_b64` |
 
 The two crate-private codecs (`ratchet::Header`, `beacon::BeaconBody`) are
 reached through thin wrappers exposed only under `talkrypt-crypto`'s `fuzzing`

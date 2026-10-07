@@ -111,30 +111,44 @@ fn each_field(buf: &[u8], mut f: impl FnMut(Field<'_>)) {
                 f(Field::Varint(field, v));
             }
             5 => {
-                if pos + 4 > buf.len() {
+                // All end offsets use `checked_add`: the length-delimited varint
+                // below is attacker-controlled up to u64::MAX, and `pos + len`
+                // would wrap past the `> buf.len()` guard and panic the slice
+                // index (process abort under `panic = "abort"`). The sibling
+                // `mqtt.rs` parser already guards this way; mirror it everywhere.
+                let Some(end) = pos.checked_add(4) else {
+                    return;
+                };
+                if end > buf.len() {
                     return;
                 }
                 let v = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
-                pos += 4;
+                pos = end;
                 f(Field::Fixed32(field, v));
             }
             1 => {
                 // fixed64 — skip.
-                if pos + 8 > buf.len() {
+                let Some(end) = pos.checked_add(8) else {
+                    return;
+                };
+                if end > buf.len() {
                     return;
                 }
-                pos += 8;
+                pos = end;
             }
             2 => {
                 let Some(len) = get_varint(buf, &mut pos) else {
                     return;
                 };
                 let len = len as usize;
-                if pos + len > buf.len() {
+                let Some(end) = pos.checked_add(len) else {
+                    return;
+                };
+                if end > buf.len() {
                     return;
                 }
-                f(Field::Bytes(field, &buf[pos..pos + len]));
-                pos += len;
+                f(Field::Bytes(field, &buf[pos..end]));
+                pos = end;
             }
             _ => return, // groups / unknown wire types — stop.
         }
@@ -426,6 +440,24 @@ mod tests {
         assert_eq!(rx.channel, 5);
         assert_eq!(rx.from, Some(0x1234_5678));
         assert_eq!(rx.payload, payload);
+    }
+
+    #[test]
+    fn oversized_length_delimited_field_does_not_panic() {
+        // Round-2 pentest regression: a protobuf length-delimited field (wire
+        // type 2) whose length varint is u64::MAX made `pos + len` wrap past the
+        // bounds guard, panicking the slice index — a remotely-reachable,
+        // pre-auth process abort (reachable over Meshtastic MQTT). The decoder
+        // must now reject it (checked_add) and return None, never panic.
+        let evil = [
+            0x0a, // field 1, wire type 2 (length-delimited)
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, // len = u64::MAX
+        ];
+        assert!(parse_fromradio(&evil).is_none());
+        assert!(parse_meshpacket(&evil).is_none());
+        // Also exercise the fixed32/fixed64 arms at a truncated boundary.
+        assert!(parse_fromradio(&[0x0d, 0x00]).is_none()); // field 1, wire 5 (fixed32), truncated
+        assert!(parse_fromradio(&[0x09, 0x00]).is_none()); // field 1, wire 1 (fixed64), truncated
     }
 
     #[test]
