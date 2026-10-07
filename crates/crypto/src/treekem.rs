@@ -280,6 +280,19 @@ pub struct Commit {
     /// security for AUTHENTICATION: a leaked leaf signing key stops verifying once
     /// the member updates. Receivers verify the PoP and rebind the leaf's key.
     sig_update: Option<(u32, IdentityPublic, Vec<u8>)>,
+    /// Committer authentication (SECURITY-AUDIT F-17). An ML-DSA-87 signature by
+    /// the committer's *pre-commit* leaf signing key over
+    /// `COMMIT_AUTH_CONTEXT | from_epoch | committer_leaf | encode_body()` — i.e.
+    /// every authenticated field of this commit (proposals, path, pub_updates,
+    /// ciphertexts, new_capacity, sig_update), bound to the epoch it applies from
+    /// and to the committing leaf. Verified in `apply_commit` BEFORE any state
+    /// mutation, against the committer leaf's tree-bound key. Without it, a
+    /// malicious member (or a relay re-stamping `from`) could broadcast a forged
+    /// `Commit` — a `Remove`/phantom-`Add` — that every receiver applied blindly,
+    /// since the broadcast-commit path has no other sender authentication.
+    /// Empty only for commits built without a signing key (test-only groups);
+    /// `apply_commit` rejects an empty/invalid signature.
+    commit_sig: Vec<u8>,
 }
 
 /// Everything a joiner needs to enter the group at the post-commit epoch.
@@ -491,6 +504,18 @@ fn verify_pop(sig_public: &IdentityPublic, pop: &[u8]) -> Result<()> {
 /// PoP or a group-message signature (or vice versa).
 const UPDATE_AUTH_CONTEXT: &[u8] = b"talkrypt-treekem-leaf-update-v2";
 
+/// Domain-separation prefix for a whole-`Commit` AUTHENTICATION signature
+/// (SECURITY-AUDIT F-17). Distinct from every other context so a commit
+/// signature can never be replayed as a PoP, update-auth, or message signature.
+const COMMIT_AUTH_CONTEXT: &[u8] = b"talkrypt-treekem-commit-v1";
+
+/// The group's host/committer is, by construction, always leaf 0: `create_with_sig`
+/// seeds the founder at leaf 0, joiners occupy leaves > 0, and the host is never
+/// removed or reassigned. Members accept a broadcast `Commit` only from this leaf
+/// (SECURITY-AUDIT F-17): a member performs self-rekey by PROPOSING an `Update` to
+/// the host (T-4), never by broadcasting its own commit.
+const HOST_LEAF: u32 = 0;
+
 /// The bytes a member signs with its **current** leaf signing key to AUTHORIZE
 /// rotating its leaf to a new `(leaf_public, sig_public)`:
 /// `UPDATE_AUTH_CONTEXT | leaf | new_leaf_public | new_sig_vk`. Verified against the
@@ -506,6 +531,20 @@ fn update_auth_transcript(
     w.put_u32(leaf);
     w.put_bytes(&leaf_public.encode());
     w.put_bytes(&sig_public.sig_vk);
+    w.into_vec()
+}
+
+/// The bytes the committer signs (and a receiver verifies) to AUTHENTICATE a whole
+/// `Commit` (SECURITY-AUDIT F-17): `COMMIT_AUTH_CONTEXT | from_epoch | committer_leaf
+/// | body`, where `body` is `Commit::encode_body()` — every authenticated field
+/// except the signature itself. Binding `from_epoch` stops a commit being replayed
+/// into a different epoch; binding `committer_leaf` pins which leaf's key must sign.
+fn commit_auth_transcript(from_epoch: u32, committer_leaf: u32, body: &[u8]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(COMMIT_AUTH_CONTEXT);
+    w.put_u32(from_epoch);
+    w.put_u32(committer_leaf);
+    w.put_bytes(body);
     w.into_vec()
 }
 
@@ -539,7 +578,10 @@ fn get_count(r: &mut talkrypt_wire::Reader, min_elem_bytes: usize) -> Result<u32
 }
 
 impl Commit {
-    pub fn encode(&self) -> Vec<u8> {
+    /// The authenticated body — every field EXCEPT `commit_sig`. This is exactly
+    /// what the committer signs (via `commit_auth_transcript`) and what a receiver
+    /// re-serializes to verify, so the signature covers the whole commit.
+    fn encode_body(&self) -> Vec<u8> {
         let mut w = talkrypt_wire::Writer::new();
         w.put_u32(self.proposals.len() as u32);
         for p in &self.proposals {
@@ -573,10 +615,26 @@ impl Commit {
         w.into_vec()
     }
 
+    pub fn encode(&self) -> Vec<u8> {
+        // body ++ the committer signature (F-17). Keeping the sig last and
+        // length-prefixed means an old/short blob still decodes (to an empty sig,
+        // which `apply_commit` then rejects) rather than panicking the decoder.
+        let mut w = talkrypt_wire::Writer::new();
+        w.put_bytes(&self.encode_body());
+        w.put_bytes(&self.commit_sig);
+        w.into_vec()
+    }
+
     pub fn decode(profile: KemProfile, bytes: &[u8]) -> Result<Commit> {
         let mut r = talkrypt_wire::Reader::new(bytes);
-        let c = Self::read(profile, &mut r)?;
+        // `encode` wraps the body in its own length prefix, then the signature.
+        let body = r.get_bytes()?;
+        let commit_sig = r.get_vec()?;
         r.finish()?;
+        let mut br = talkrypt_wire::Reader::new(body);
+        let mut c = Self::read(profile, &mut br)?;
+        br.finish()?;
+        c.commit_sig = commit_sig;
         Ok(c)
     }
 
@@ -632,6 +690,9 @@ impl Commit {
             ciphertexts,
             new_capacity,
             sig_update,
+            // Overwritten by `decode` from the trailing signature field; `read`
+            // only parses the body.
+            commit_sig: Vec::new(),
         })
     }
 }
@@ -958,7 +1019,7 @@ impl TreeKemGroup {
             pop: kp.pop.clone(),
         }];
         self.apply_proposals(&proposals)?;
-        let commit = self.rekey_path(proposals)?;
+        let commit = self.rekey_path(proposals, None)?;
 
         let welcome = Welcome {
             capacity: self.capacity,
@@ -986,7 +1047,7 @@ impl TreeKemGroup {
     pub fn remove(&mut self, leaf: u32) -> Result<Commit> {
         let proposals = vec![Proposal::Remove { leaf }];
         self.apply_proposals(&proposals)?;
-        self.rekey_path(proposals)
+        self.rekey_path(proposals, None)
     }
 
     /// **Self-update** (the MLS `Update` operation): re-key ONLY this member's own
@@ -1061,21 +1122,24 @@ impl TreeKemGroup {
         }
         let proposals = vec![prop];
         self.apply_proposals(&proposals)?;
-        self.rekey_path(proposals)
+        self.rekey_path(proposals, None)
     }
 
     pub fn update(&mut self) -> Result<Commit> {
-        let mut commit = self.rekey_path(Vec::new())?;
         // Rotate our leaf SIGNING key too (SECURITY-AUDIT T-2): a compromised leaf
         // signing key stops verifying after this update — post-compromise security
         // for authentication, not just for the epoch (confidentiality) secret.
+        // Generate the new key FIRST and hand the sig_update to `rekey_path` so the
+        // commit signature (F-17) covers it; `rekey_path` signs with our CURRENT
+        // (pre-rotation) key, then we rotate below so the old key stops verifying.
         let new_sig = IdentityKeyPair::generate();
         let new_pub = new_sig.public().clone();
         let pop = new_sig.sign(&pop_transcript(&new_pub));
-        self.leaf_sig_keys.insert(self.me, new_pub.clone());
-        self.leaf_pops.insert(self.me, pop.clone());
+        let commit =
+            self.rekey_path(Vec::new(), Some((self.me, new_pub.clone(), pop.clone())))?;
+        self.leaf_sig_keys.insert(self.me, new_pub);
+        self.leaf_pops.insert(self.me, pop);
         self.my_sig = Some(new_sig);
-        commit.sig_update = Some((self.me, new_pub, pop));
         Ok(commit)
     }
 
@@ -1170,7 +1234,15 @@ impl TreeKemGroup {
     /// Re-key the committer's path: fresh secrets leaf->root, encrypt each
     /// ancestor's path secret to the resolution of its copath, set the new
     /// epoch secret. Returns the broadcastable `Commit`.
-    fn rekey_path(&mut self, proposals: Vec<Proposal>) -> Result<Commit> {
+    fn rekey_path(
+        &mut self,
+        proposals: Vec<Proposal>,
+        sig_update: Option<(u32, IdentityPublic, Vec<u8>)>,
+    ) -> Result<Commit> {
+        // The epoch this commit applies FROM (bound into the signature, F-17).
+        // Captured before the increment below so it matches a receiver's current
+        // epoch at verify time.
+        let from_epoch = self.epoch;
         let path = self.path_to_root(self.me);
         let mut path_secrets = vec![[0u8; 32]; path.len()];
         crate::rng::fill_secure(&mut path_secrets[0]); // F-4: health-gated keygen entropy
@@ -1204,36 +1276,72 @@ impl TreeKemGroup {
         self.epoch_secret = commit_secret;
         self.reset_epoch();
 
-        Ok(Commit {
+        let mut commit = Commit {
             proposals,
             pub_updates,
             path,
             ciphertexts,
             new_capacity: self.capacity,
-            sig_update: None,
-        })
+            sig_update,
+            commit_sig: Vec::new(),
+        };
+        // Authenticate the whole commit with the committer's CURRENT (pre-rotation)
+        // leaf signing key (F-17). `update()` rotates `my_sig` only AFTER this
+        // returns, so the signature verifies against the key receivers still have
+        // bound for this leaf. committer_leaf == self.me == commit.path.first().
+        if let Some(signer) = &self.my_sig {
+            commit.commit_sig =
+                signer.sign(&commit_auth_transcript(from_epoch, self.me, &commit.encode_body()));
+        }
+        Ok(commit)
     }
 
     /// Apply a commit produced by another member; advances to its epoch.
     pub fn apply_commit(&mut self, commit: &Commit) -> Result<()> {
+        // --- Committer authentication + authorization (SECURITY-AUDIT F-17) ---
+        // BEFORE touching any state: (1) identify the committing leaf from the
+        // commit's own path (it re-keys the committer's leaf→root path, so
+        // path[0] is that leaf); (2) require it to be the group host — a member
+        // self-rekeys by PROPOSING to the host, never by broadcasting its own
+        // commit (T-4), so a non-host commit is always forged/unauthorized; and
+        // (3) verify the committer's ML-DSA-87 signature over the whole commit,
+        // bound to this epoch, against the host leaf's tree-bound signing key.
+        // This closes the forged-`Commit` injection (a `Remove`/phantom-`Add` from
+        // any member or a `from`-restamping relay) that the broadcast-commit path
+        // otherwise applied with no sender authentication.
+        let committer_leaf = match commit.path.first() {
+            Some(n) if n.span == 1 => n.lo,
+            _ => return Err(CryptoError::Malformed("commit path does not start at a leaf")),
+        };
+        if committer_leaf != HOST_LEAF {
+            return Err(CryptoError::Malformed(
+                "only the host leaf may broadcast a commit",
+            ));
+        }
+        let host_key = self
+            .leaf_sig_keys
+            .get(&HOST_LEAF)
+            .ok_or(CryptoError::Malformed("no host signing key bound"))?;
+        host_key
+            .verify(
+                &commit_auth_transcript(self.epoch, committer_leaf, &commit.encode_body()),
+                &commit.commit_sig,
+            )
+            .map_err(|_| CryptoError::BadSignature)?;
+
         if commit.new_capacity > self.capacity {
             self.capacity = commit.new_capacity;
             self.occupied.resize(self.capacity as usize, false);
         }
         self.apply_proposals(&commit.proposals)?;
         // Apply an optional leaf-signature-key rotation (SECURITY-AUDIT T-2). The
-        // new key must carry a valid PoP; the committer may only rotate its OWN leaf.
-        // A commit's path starts at the committer's own leaf, so bind sig_update to
-        // it: WITHOUT this check a malicious committer could set sig_update to a
-        // victim's leaf (with a key + valid PoP it controls), overwrite the victim's
-        // signing key, and forge messages as the victim (a G1 regression) while
-        // locking the victim out. The leaf must be occupied. Rebinds the verifying
-        // key so the old key stops verifying from this epoch on.
+        // new key must carry a valid PoP; the committer may only rotate its OWN leaf
+        // (== the already-verified committer_leaf above). WITHOUT this a malicious
+        // committer could set sig_update to a victim's leaf (with a key + valid PoP
+        // it controls), overwrite the victim's signing key, and forge messages as
+        // the victim (a G1 regression) while locking the victim out. The leaf must
+        // be occupied. Rebinds the verifying key so the old key stops verifying.
         if let Some((leaf, sig_public, pop)) = &commit.sig_update {
-            let committer_leaf = match commit.path.first() {
-                Some(n) if n.span == 1 => n.lo,
-                _ => return Err(CryptoError::Malformed("commit path does not start at a leaf")),
-            };
             if *leaf != committer_leaf {
                 return Err(CryptoError::Malformed(
                     "sig_update may only rotate the committer's own leaf",
@@ -1804,6 +1912,102 @@ mod tests {
         assert!(c.decrypt(&m).is_err());
     }
 
+    // --- SECURITY-AUDIT F-17: group Commit authentication/authorization ---
+
+    #[test]
+    fn f17_forged_commit_from_non_host_member_is_rejected() {
+        // A malicious MEMBER (leaf != host) crafts a commit — as the pentest
+        // described: the broadcast-commit path must reject it because only the
+        // host (leaf 0) may commit. Here `b` (leaf 1) produces a self-rekey commit
+        // (which in the real protocol it would only ever send as a PROPOSAL) and
+        // tries to inject it into another member `c`.
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        assert_ne!(b.my_leaf(), HOST_LEAF, "b must be a non-host member");
+
+        let forged = b.update().unwrap();
+        let err = c.apply_commit(&forged);
+        assert!(
+            err.is_err(),
+            "a commit from a non-host leaf must be rejected, got {err:?}"
+        );
+        // c's state is untouched — it still shares the epoch with the host.
+        assert_eq!(a.group_secret(), c.group_secret());
+    }
+
+    #[test]
+    fn f17_tampered_commit_signature_is_rejected() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut commit = a.remove(b.my_leaf()).unwrap();
+        // Flip a byte of the committer signature: verification must fail.
+        assert!(!commit.commit_sig.is_empty(), "host commit must be signed");
+        commit.commit_sig[0] ^= 0xFF;
+        assert!(matches!(
+            b.apply_commit(&commit),
+            Err(CryptoError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn f17_tampered_commit_body_is_rejected() {
+        // Mutating any authenticated field invalidates the signature over the body.
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut commit = a.update().unwrap();
+        commit.new_capacity = commit.new_capacity.wrapping_add(1);
+        assert!(
+            b.apply_commit(&commit).is_err(),
+            "a commit with a mutated body must not verify"
+        );
+    }
+
+    #[test]
+    fn f17_unsigned_commit_is_rejected() {
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut commit = a.update().unwrap();
+        commit.commit_sig.clear();
+        assert!(matches!(
+            b.apply_commit(&commit),
+            Err(CryptoError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn f17_commit_replayed_into_wrong_epoch_is_rejected() {
+        // The signature binds `from_epoch`, so a commit cannot be replayed into a
+        // different epoch. Applying the same (epoch-0) commit twice fails the
+        // second time, since the group has advanced to epoch 1.
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let commit = a.update().unwrap();
+        b.apply_commit(&commit).unwrap(); // first application: epoch 0 -> 1
+        assert!(matches!(
+            b.apply_commit(&commit), // replay at epoch 1: transcript epoch mismatches
+            Err(CryptoError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn f17_host_commit_still_applies_and_round_trips() {
+        // Regression: the legitimate host path (add/remove/update) still works
+        // end-to-end through encode/decode + apply_commit.
+        for profile in [
+            KemProfile::hybrid(),
+            KemProfile::pq_pure(),
+            KemProfile::pq_pure_compact(),
+        ] {
+            let mut a = TreeKemGroup::create_with(profile);
+            let mut b = add_member(&mut a, &mut []);
+            let commit = a.update().unwrap();
+            let wire = Commit::decode(a.profile(), &commit.encode()).unwrap();
+            b.apply_commit(&wire).unwrap();
+            assert_eq!(a.group_secret(), b.group_secret());
+        }
+    }
+
     #[test]
     fn commit_and_welcome_wire_roundtrip() {
         let mut a = TreeKemGroup::create();
@@ -1893,13 +2097,16 @@ mod tests {
         let mut a = TreeKemGroup::create();
         let mut b = add_member(&mut a, &mut []);
         let stale = a.encrypt(b"pre-update epoch").unwrap();
-        // B heals via a self-update; both advance past the captured epoch.
-        let commit = b.update().unwrap();
-        a.apply_commit(&commit).unwrap();
+        // The host heals via a self-update; both advance past the captured epoch.
+        // (A member cannot broadcast its own commit — F-17; it proposes to the
+        // host, which commits. The PCS staleness property is the same either way.)
+        let commit = a.update().unwrap();
+        b.apply_commit(&commit).unwrap();
         assert!(
             a.decrypt(&stale).is_err(),
             "a message from the pre-update epoch must not decrypt after healing"
         );
+        assert_eq!(a.group_secret(), b.group_secret());
     }
 
     // ---- Remote-DoS regression tests (SECURITY-AUDIT: crafted Commit/Welcome) ----
@@ -1975,16 +2182,23 @@ mod tests {
     #[test]
     fn commit_with_out_of_range_leaf_is_rejected_not_panic() {
         let mut a = TreeKemGroup::create();
+        // The commit BODY (what `encode` length-wraps before the signature).
+        let mut body = talkrypt_wire::Writer::new();
+        body.put_u32(1); // one proposal ...
+        body.put_u8(1); //   Remove
+        body.put_u32(u32::MAX); //   leaf far past capacity  <-- malicious
+        body.put_u32(0); // pub_updates
+        body.put_u32(0); // path
+        body.put_u32(0); // ciphertexts
+        body.put_u32(0); // new_capacity (within bound)
+        body.put_u8(0); // sig_update: None (T-2 wire field)
+        // Wrap in the F-17 envelope: body ++ (empty) committer signature.
         let mut w = talkrypt_wire::Writer::new();
-        w.put_u32(1); // one proposal ...
-        w.put_u8(1); //   Remove
-        w.put_u32(u32::MAX); //   leaf far past capacity  <-- malicious
-        w.put_u32(0); // pub_updates
-        w.put_u32(0); // path
-        w.put_u32(0); // ciphertexts
-        w.put_u32(0); // new_capacity (within bound, so we reach apply_proposals)
-        w.put_u8(0); // sig_update: None (T-2 wire field)
+        w.put_bytes(&body.into_vec());
+        w.put_bytes(&[]); // no committer signature
         let commit = Commit::decode(a.profile(), &w.into_vec()).expect("decodes");
+        // Rejected (empty path ⇒ no committer leaf; and the signature is absent),
+        // and crucially does not panic on the out-of-range Remove leaf.
         assert!(a.apply_commit(&commit).is_err());
     }
 
@@ -2225,8 +2439,11 @@ mod tests {
         let pop = attacker.sign(&pop_transcript(&attacker_pub));
         commit.sig_update = Some((b_leaf, attacker_pub, pop));
 
-        // b must refuse the tampered commit (committer leaf = a's leaf != b_leaf).
-        assert!(matches!(b.apply_commit(&commit), Err(CryptoError::Malformed(_))));
+        // b must refuse the tampered commit. With F-17 the whole commit is signed,
+        // so mutating `sig_update` after signing is caught by the committer-signature
+        // check (BadSignature) even before the sig_update-leaf binding — a strictly
+        // stronger rejection. Either rejection is acceptable; the key must be intact.
+        assert!(b.apply_commit(&commit).is_err());
         assert_eq!(
             b.leaf_sig_public(b_leaf).cloned(),
             b_key_before,
