@@ -13,6 +13,9 @@ talkrypt-wire = { path = "../crates/wire" }
 talkrypt-core = { path = "../crates/core" }
 # `fuzzing` exposes thin wrappers around the crate-private ratchet/beacon decoders.
 talkrypt-crypto = { path = "../crates/crypto", features = ["fuzzing"] }
+# Mesh/transport foreign-protocol decoders (Meshtastic/MQTT/Meshcore) parse
+# untrusted radio/broker bytes before any talkrypt auth — fuzz them too (round-2).
+talkrypt-transport = { path = "../crates/transport" }
 
 [[bin]]
 name = "wire_reader"
@@ -95,6 +98,12 @@ doc = false
 [[bin]]
 name = "treekem_parser"
 path = "fuzz_targets/treekem_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mesh_parsers"
+path = "fuzz_targets/mesh_parsers.rs"
 test = false
 doc = false
 

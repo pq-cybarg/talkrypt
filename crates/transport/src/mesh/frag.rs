@@ -86,8 +86,13 @@ pub fn parse_fragment(packet: &[u8]) -> Option<Fragment<'_>> {
     let msg_id = u16::from_be_bytes([packet[4], packet[5]]);
     let frag_index = u16::from_be_bytes([packet[6], packet[7]]);
     let frag_count = u16::from_be_bytes([packet[8], packet[9]]);
-    // A count of zero, or an index at/beyond the count, is malformed.
-    if frag_count == 0 || frag_index >= frag_count {
+    // A count of zero, or an index at/beyond the count, is malformed. Also reject
+    // a count past MAX_FRAGMENTS (the same bound the encoder enforces): without it
+    // a single 11-byte fragment with frag_count = 0xFFFF makes the reassembler
+    // pre-allocate a 65535-slot `vec![None; count]` (~1.5 MiB) whose slot overhead
+    // is not counted against `max_bytes` — a memory-amplification DoS from a
+    // trivially small packet. Bounding here keeps decode symmetric with encode.
+    if frag_count == 0 || frag_index >= frag_count || frag_count as usize > MAX_FRAGMENTS {
         return None;
     }
     Some(Fragment {
