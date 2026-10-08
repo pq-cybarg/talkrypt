@@ -41,6 +41,22 @@ use crate::{
 /// Virtual onion port the chat protocol uses.
 const ONION_PORT: u16 = 9100;
 
+/// A Tor dial target must be an onion service — its host (everything before the
+/// final `:port`) must end in `.onion` (SECURITY-AUDIT F-23). Arti's `connect`
+/// would otherwise treat a clearnet `host:port` as an **exit-circuit**
+/// destination: an unauthenticated `talkrypt://` invite listing
+/// `evil.clearnet.example:443` (alone or multi-homed alongside a real `.onion`)
+/// would make a "Tor" client open an exit connection to the attacker's server and
+/// write the first handshake frame to it — an online-confirmation + handshake
+/// fingerprint leak to a clearnet observer, breaking the onion-only posture a Tor
+/// user assumes (message plaintext stays sealed, but the metadata break is real).
+/// A malformed/non-canonical onion still goes to Tor's onion resolver (it fails to
+/// resolve), never an exit, so the `.onion` suffix is the sufficient gate.
+fn is_onion_target(target: &str) -> bool {
+    let host = target.rsplit_once(':').map(|(h, _)| h).unwrap_or(target);
+    host.ends_with(".onion")
+}
+
 fn io<E: std::fmt::Display>(e: E) -> TransportError {
     TransportError::Io(e.to_string())
 }
@@ -336,6 +352,13 @@ impl Transport for ArtiTransport {
         } else {
             format!("{endpoint}:{ONION_PORT}")
         };
+        // SECURITY-AUDIT F-23: onion-only. Refuse any non-`.onion` target so an
+        // attacker-supplied invite can never make Arti open a clearnet exit circuit.
+        if !is_onion_target(&target) {
+            return Err(io(format!(
+                "refusing non-onion Tor dial target {target:?}: Arti dials onion services only"
+            )));
+        }
         let ds = self
             .client
             .connect(target.as_str())
@@ -362,6 +385,22 @@ impl Transport for ArtiTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onion_only_dial_guard_rejects_clearnet_targets() {
+        // SECURITY-AUDIT F-23: only `.onion` hosts may be dialed over Tor.
+        assert!(is_onion_target(
+            "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:9100"
+        ));
+        assert!(is_onion_target("short.onion")); // suffix is the gate; Arti validates the rest
+        // Clearnet / IP / IPv6 targets must be refused — these would be exit dials.
+        assert!(!is_onion_target("evil.clearnet.example:443"));
+        assert!(!is_onion_target("1.2.3.4:443"));
+        assert!(!is_onion_target("[::1]:443"));
+        assert!(!is_onion_target("localhost:9100"));
+        // A clearnet host merely CONTAINING "onion" as a label is still clearnet.
+        assert!(!is_onion_target("onion.example.com:443"));
+    }
 
     /// Live end-to-end onion test. Requires network + several minutes for Tor
     /// bootstrap and descriptor publication. Run explicitly:
