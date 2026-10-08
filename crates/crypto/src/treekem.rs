@@ -928,6 +928,29 @@ impl TreeKemGroup {
     pub fn epoch(&self) -> u32 {
         self.epoch
     }
+
+    /// Sign arbitrary bytes with our leaf signing key **iff we are the host**
+    /// (leaf 0). The engine uses this to authenticate the `Roster` control frame
+    /// (SECURITY-AUDIT F-17): only the host may set the roster, and the signature
+    /// (not the sender fingerprint) is the authority, so it survives A-1
+    /// any-member bridging. Returns `None` for a non-host or a group with no
+    /// signing key.
+    pub fn sign_as_host(&self, msg: &[u8]) -> Option<Vec<u8>> {
+        if self.me != HOST_LEAF {
+            return None;
+        }
+        self.my_sig.as_ref().map(|s| s.sign(msg))
+    }
+
+    /// Verify a host-produced signature against the host leaf's tree-bound signing
+    /// key (the key every member learned, PoP-checked, from the Welcome and keeps
+    /// current through `sig_update`). Used by members to authenticate a `Roster`.
+    pub fn verify_host_sig(&self, msg: &[u8], sig: &[u8]) -> bool {
+        self.leaf_sig_keys
+            .get(&HOST_LEAF)
+            .map(|k| k.verify(msg, sig).is_ok())
+            .unwrap_or(false)
+    }
     pub fn member_count(&self) -> usize {
         self.occupied.iter().filter(|o| **o).count()
     }
@@ -1988,6 +2011,32 @@ mod tests {
             b.apply_commit(&commit), // replay at epoch 1: transcript epoch mismatches
             Err(CryptoError::BadSignature)
         ));
+    }
+
+    #[test]
+    fn f17_roster_sig_is_host_only_and_verifies() {
+        // Backs the engine's host-signed Roster (F-17 roster half): only the host
+        // (leaf 0) can produce a roster signature, every member can verify it
+        // against the host's tree-bound key, and a tampered signature is rejected.
+        let mut a = TreeKemGroup::create(); // host, leaf 0
+        let b = add_member(&mut a, &mut []); // member, leaf 1
+        assert_ne!(b.my_leaf(), HOST_LEAF);
+        let msg = b"ROSTER|epoch|entries";
+
+        let sig = a.sign_as_host(msg).expect("host can sign");
+        assert!(
+            b.sign_as_host(msg).is_none(),
+            "a member must not be able to sign as host"
+        );
+        assert!(a.verify_host_sig(msg, &sig), "host verifies its own roster sig");
+        assert!(b.verify_host_sig(msg, &sig), "member verifies the host roster sig");
+
+        // A tampered signature, a wrong message, and an empty sig are all rejected.
+        let mut bad = sig.clone();
+        bad[0] ^= 0xFF;
+        assert!(!b.verify_host_sig(msg, &bad));
+        assert!(!b.verify_host_sig(b"different-roster-bytes", &sig));
+        assert!(!b.verify_host_sig(msg, &[]));
     }
 
     #[test]

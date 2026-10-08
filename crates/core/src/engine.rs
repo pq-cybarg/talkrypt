@@ -132,6 +132,26 @@ pub enum Event {
 /// A frame carried inside the pairwise encrypted channel. `Chat` is a direct
 /// pairwise message (P2P/non-group); the rest coordinate TreeKEM group chat,
 /// where `GroupMsg` payloads are additionally encrypted under the group epoch.
+/// Domain-separation prefix for the host-signed `Roster` frame (SECURITY-AUDIT
+/// F-17). Distinct from every crypto-layer context so a roster signature can
+/// never be confused with a commit/message/PoP signature.
+const ROSTER_CONTEXT: &[u8] = b"talkrypt-roster-v1";
+
+/// The bytes the host signs (and a member verifies) to authenticate a `Roster`:
+/// `ROSTER_CONTEXT | epoch | entries`. The per-group leaf signing key already
+/// scopes this to the chat; `epoch` gives monotonic anti-replay.
+fn roster_transcript(epoch: u32, entries: &[(u32, [u8; 48])]) -> Vec<u8> {
+    let mut w = talkrypt_wire::Writer::new();
+    w.put_bytes(ROSTER_CONTEXT);
+    w.put_u32(epoch);
+    w.put_u32(entries.len() as u32);
+    for (leaf, fp) in entries {
+        w.put_u32(*leaf);
+        w.put_bytes(fp);
+    }
+    w.into_vec()
+}
+
 enum Frame {
     Chat {
         channel: String,
@@ -147,7 +167,16 @@ enum Frame {
     },
     GroupMsg(Vec<u8>),
     /// Full leaf→fingerprint roster snapshot, for message attribution.
-    Roster(Vec<(u32, [u8; 48])>),
+    /// **Host-authenticated (SECURITY-AUDIT F-17):** `sig` is the host leaf's
+    /// ML-DSA-87 signature over `ROSTER_CONTEXT | epoch | entries`. Only the host
+    /// may set the roster; the signature (not the sender fingerprint) is the
+    /// authority, so it survives A-1 any-member bridging. Members verify against
+    /// the host leaf's tree-bound key and reject a stale `epoch` (anti-replay).
+    Roster {
+        epoch: u32,
+        entries: Vec<(u32, [u8; 48])>,
+        sig: Vec<u8>,
+    },
     /// An encoded [`crate::contacts::Presentation`] — the peer's account→device
     /// certificate chain (+ optional username). Sent as the FIRST frame inside
     /// the encrypted session (never in the plaintext handshake) so the sensitive
@@ -248,13 +277,15 @@ impl Frame {
                 w.put_u8(4);
                 w.put_bytes(b);
             }
-            Frame::Roster(entries) => {
+            Frame::Roster { epoch, entries, sig } => {
                 w.put_u8(5);
+                w.put_u32(*epoch);
                 w.put_u32(entries.len() as u32);
                 for (leaf, fp) in entries {
                     w.put_u32(*leaf);
                     w.put_bytes(fp);
                 }
+                w.put_bytes(sig);
             }
             Frame::Identity(b) => {
                 w.put_u8(6);
@@ -339,6 +370,7 @@ impl Frame {
             },
             4 => Frame::GroupMsg(r.get_vec().ok()?),
             5 => {
+                let epoch = r.get_u32().ok()?;
                 let n = r.get_u32().ok()?;
                 if n > 100_000 {
                     return None;
@@ -354,7 +386,8 @@ impl Frame {
                     fp.copy_from_slice(fpv);
                     entries.push((leaf, fp));
                 }
-                Frame::Roster(entries)
+                let sig = r.get_vec().ok()?;
+                Frame::Roster { epoch, entries, sig }
             }
             6 => Frame::Identity(r.get_vec().ok()?),
             7 => Frame::AccessDenied(String::from_utf8(r.get_vec().ok()?).ok()?),
@@ -857,6 +890,9 @@ struct Inner {
     leaf_keypair: Mutex<Option<LeafKeyPair>>,
     /// leaf → member fingerprint, for attributing relayed group messages.
     roster: Mutex<HashMap<u32, [u8; 48]>>,
+    /// Highest roster `epoch` a member has applied, for monotonic anti-replay of
+    /// the host-signed `Roster` frame (SECURITY-AUDIT F-17).
+    last_roster_epoch: std::sync::atomic::AtomicU32,
     /// Commits received ahead of our epoch, keyed by the epoch they apply to.
     pending_commits: Mutex<BTreeMap<u32, Vec<u8>>>,
     /// In relayed mode, frames are wrapped in [`Routed`] and a non-member relay
@@ -1213,6 +1249,7 @@ impl Core {
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
             roster: Mutex::new(roster),
+            last_roster_epoch: std::sync::atomic::AtomicU32::new(0),
             pending_commits: Mutex::new(BTreeMap::new()),
             relayed,
             default_marking,
@@ -1720,12 +1757,9 @@ impl Core {
             Route::Broadcast,
         )
         .await;
-        route(
-            &self.inner,
-            Frame::Roster(roster_snapshot),
-            Route::Broadcast,
-        )
-        .await;
+        if let Some(frame) = signed_roster_frame(&self.inner, roster_snapshot).await {
+            route(&self.inner, frame, Route::Broadcast).await;
+        }
         Ok(())
     }
 
@@ -1912,7 +1946,10 @@ impl Core {
                 .iter()
                 .map(|(l, f)| (*l, *f))
                 .collect();
-            route(&self.inner, Frame::Roster(snapshot), Route::Broadcast).await;
+            // Only the host signs/sends a roster (F-17); a member skips (None).
+            if let Some(frame) = signed_roster_frame(&self.inner, snapshot).await {
+                route(&self.inner, frame, Route::Broadcast).await;
+            }
         }
         Ok(fp)
     }
@@ -3131,6 +3168,19 @@ async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame) {
     }
 }
 
+/// Build a host-signed [`Frame::Roster`] (SECURITY-AUDIT F-17). Locks the group,
+/// stamps the current epoch, and signs `ROSTER_CONTEXT | epoch | entries` with the
+/// host leaf key. Returns `None` if we are not the host (only the host may set the
+/// roster) or there is no group — callers simply skip the broadcast. The group lock
+/// must NOT be held by the caller (every call site releases it first).
+async fn signed_roster_frame(inner: &Arc<Inner>, entries: Vec<(u32, [u8; 48])>) -> Option<Frame> {
+    let g = inner.group.lock().await;
+    let grp = g.as_ref()?;
+    let epoch = grp.epoch();
+    let sig = grp.sign_as_host(&roster_transcript(epoch, &entries))?;
+    Some(Frame::Roster { epoch, entries, sig })
+}
+
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
 /// in a [`Routed`] envelope and sent to the single relay peer, which fans it
 /// out. In host-coordinated mode it is sent directly to the resolved peers.
@@ -3439,18 +3489,36 @@ async fn reader_loop(
             Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
                 handle_update_proposal(&inner, from, b).await;
             }
-            Some(Frame::Roster(entries)) if inner.role == GroupRole::Member => {
-                let grew = {
-                    let mut roster = inner.roster.lock().unwrap();
-                    let before = roster.len();
-                    *roster = entries.into_iter().collect();
-                    roster.len() > before
+            Some(Frame::Roster { epoch, entries, sig }) if inner.role == GroupRole::Member => {
+                // SECURITY-AUDIT F-17: authenticate the roster. Only the host may
+                // set it, so verify `sig` against the host leaf's tree-bound key
+                // (the signature — not the relay-stamped `from` — is the authority,
+                // so this survives A-1 any-member bridging), and reject a stale
+                // `epoch` (monotonic anti-replay of an older host-signed roster). A
+                // forged or stale roster is dropped; T-3 attribution stays
+                // authoritative regardless.
+                let verified = {
+                    let g = inner.group.lock().await;
+                    g.as_ref()
+                        .map(|grp| grp.verify_host_sig(&roster_transcript(epoch, &entries), &sig))
+                        .unwrap_or(false)
                 };
-                // A new member appeared — re-announce our leading name so they
-                // resolve us without us acting (SUB-SPEC A CQ beacon), debounced so a
-                // join burst coalesces into one CQ.
-                if grew {
-                    schedule_grow_reannounce(&inner);
+                use std::sync::atomic::Ordering;
+                let fresh = epoch >= inner.last_roster_epoch.load(Ordering::Relaxed);
+                if verified && fresh {
+                    inner.last_roster_epoch.store(epoch, Ordering::Relaxed);
+                    let grew = {
+                        let mut roster = inner.roster.lock().unwrap();
+                        let before = roster.len();
+                        *roster = entries.into_iter().collect();
+                        roster.len() > before
+                    };
+                    // A new member appeared — re-announce our leading name so they
+                    // resolve us without us acting (SUB-SPEC A CQ beacon), debounced
+                    // so a join burst coalesces into one CQ.
+                    if grew {
+                        schedule_grow_reannounce(&inner);
+                    }
                 }
             }
             Some(Frame::GroupMsg(b)) => {
@@ -4203,7 +4271,9 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
         Route::Broadcast,
     )
     .await;
-    route(inner, Frame::Roster(roster_snapshot), Route::Broadcast).await;
+    if let Some(frame) = signed_roster_frame(inner, roster_snapshot).await {
+        route(inner, frame, Route::Broadcast).await;
+    }
 
     // The roster just grew (a member joined) — re-announce our leading name so the
     // new member resolves us without us acting (SUB-SPEC A CQ beacon), debounced so a
