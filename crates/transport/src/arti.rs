@@ -41,6 +41,12 @@ use crate::{
 /// Virtual onion port the chat protocol uses.
 const ONION_PORT: u16 = 9100;
 
+/// Bounded backlog of accepted-but-not-yet-`accept()`ed inbound streams
+/// (SECURITY-AUDIT F-27). An unbounded queue let an attacker who knows the onion
+/// address flood inbound rendezvous faster than the app drains, growing memory
+/// without backpressure; a bounded channel makes the accept loop wait instead.
+const ACCEPT_BACKLOG: usize = 256;
+
 /// A Tor dial target must be an onion service — its host (everything before the
 /// final `:port`) must end in `.onion` (SECURITY-AUDIT F-23). Arti's `connect`
 /// would otherwise treat a clearnet `host:port` as an **exit-circuit**
@@ -273,7 +279,7 @@ impl Stream for ArtiStream {
 /// Listener that yields accepted onion-service connections.
 pub struct ArtiListener {
     endpoint: Endpoint,
-    rx: mpsc::UnboundedReceiver<DataStream>,
+    rx: mpsc::Receiver<DataStream>,
 }
 
 #[async_trait]
@@ -323,7 +329,8 @@ impl Transport for ArtiTransport {
         *self.onion_addr.lock().unwrap() = Some(onion.clone());
 
         // Pump inbound rendezvous → stream requests → accepted DataStreams.
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Bounded (F-27): a full backlog back-pressures the accept loop.
+        let (tx, rx) = mpsc::channel(ACCEPT_BACKLOG);
         tokio::spawn(async move {
             // Hold the service alive for as long as we are accepting.
             let _service = service;
@@ -331,7 +338,7 @@ impl Transport for ArtiTransport {
             while let Some(stream_request) = streams.next().await {
                 match stream_request.accept(Connected::new_empty()).await {
                     Ok(ds) => {
-                        if tx.send(ds).is_err() {
+                        if tx.send(ds).await.is_err() {
                             break;
                         }
                     }

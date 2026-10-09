@@ -27,6 +27,7 @@
 //! the pin and re-verify against this module if the SDK API shifts.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nym_sdk::mixnet::{MixnetClient, MixnetStream, Recipient};
@@ -38,6 +39,15 @@ use crate::{
     Endpoint, FrameReader, FrameWriter, Listener, Result, Stream, Transport, TransportError,
     TransportStatus,
 };
+
+/// Bounded backlog of accepted inbound mixnet streams (SECURITY-AUDIT F-27).
+const ACCEPT_BACKLOG: usize = 256;
+
+/// Upper bound on establishing one outbound mixnet stream (SECURITY-AUDIT F-24).
+/// `open_stream` is a mixnet round-trip to the (attacker-nameable) recipient held
+/// under the shared client mutex; without a bound a silent recipient would stall
+/// the mutex and head-of-line-block every other dial on the singleton client.
+const OPEN_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn io<E: std::fmt::Display>(e: E) -> TransportError {
     TransportError::Io(e.to_string())
@@ -256,7 +266,7 @@ impl Stream for NymStream {
 /// Listener that yields accepted inbound mixnet streams.
 pub struct NymListener {
     endpoint: Endpoint,
-    rx: mpsc::UnboundedReceiver<MixnetStream>,
+    rx: mpsc::Receiver<MixnetStream>,
 }
 
 #[async_trait]
@@ -283,12 +293,12 @@ impl Transport for NymTransport {
                 .listener()
                 .map_err(|e| io(format!("nym listener: {e}")))?
         };
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(ACCEPT_BACKLOG); // F-27: bounded backlog
         tokio::spawn(async move {
             // MixnetListener::accept yields `Some(stream)` per inbound peer and
             // `None` when the client shuts down (the listener is drained).
             while let Some(s) = mix_listener.accept().await {
-                if tx.send(s).is_err() {
+                if tx.send(s).await.is_err() {
                     break;
                 }
             }
@@ -307,9 +317,11 @@ impl Transport for NymTransport {
             .map_err(|e| io(format!("bad nym address {addr}: {e}")))?;
         let stream = {
             let mut guard = self.client.lock().await;
-            guard
-                .open_stream(recipient, None)
+            // F-24: bound the round-trip so a silent recipient can't pin the
+            // shared client mutex and head-of-line-block other dials.
+            tokio::time::timeout(OPEN_STREAM_TIMEOUT, guard.open_stream(recipient, None))
                 .await
+                .map_err(|_| io(format!("nym open_stream to {addr} timed out")))?
                 .map_err(|e| io(format!("nym open_stream to {addr}: {e}")))?
         };
         Ok(Box::new(NymStream::new(stream)))

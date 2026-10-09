@@ -132,6 +132,13 @@ pub enum Event {
 /// A frame carried inside the pairwise encrypted channel. `Chat` is a direct
 /// pairwise message (P2P/non-group); the rest coordinate TreeKEM group chat,
 /// where `GroupMsg` payloads are additionally encrypted under the group epoch.
+/// Upper bound on a single dial + first-handshake round-trip (SECURITY-AUDIT
+/// F-26). An endpoint that accepts but never completes the handshake — e.g. an
+/// attacker-owned socket named by an unauthenticated invite — must not hang
+/// `connect()`/`establish()` forever. Generous enough for a slow first-contact
+/// onion dial and descriptor fetch.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Domain-separation prefix for the host-signed `Roster` frame (SECURITY-AUDIT
 /// F-17). Distinct from every crypto-layer context so a roster signature can
 /// never be confused with a commit/message/PoP signature.
@@ -1850,14 +1857,25 @@ impl Core {
 
     /// Dial a peer endpoint and run the initiator handshake.
     pub async fn connect(&self, endpoint: &str) -> Result<[u8; 48]> {
-        let mut stream = self.inner.transport.dial(&endpoint.to_string()).await?;
-        let hs = handshake::initiate(
-            stream.as_mut(),
-            &self.inner.identity,
-            self.inner.suite.as_ref(),
-            self.inner.root0,
+        // F-26: bound the dial and the first-handshake round-trip (both go to the
+        // attacker-nameable socket) so a stalling endpoint can't hang us forever.
+        let mut stream = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            self.inner.transport.dial(&endpoint.to_string()),
         )
-        .await?;
+        .await
+        .map_err(|_| crate::error::CoreError::Handshake("dial timed out"))??;
+        let hs = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            handshake::initiate(
+                stream.as_mut(),
+                &self.inner.identity,
+                self.inner.suite.as_ref(),
+                self.inner.root0,
+            ),
+        )
+        .await
+        .map_err(|_| crate::error::CoreError::Handshake("handshake timed out"))??;
         let fp = hs.peer_identity.fingerprint();
         register(&self.inner, stream, hs, true);
 
