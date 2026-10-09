@@ -137,7 +137,7 @@ pub struct MultiListener {
     /// All legs' endpoints joined by [`ENDPOINT_DELIM`]; expand with
     /// [`split_endpoints`] to advertise the multi-homed invite.
     endpoint: Endpoint,
-    rx: mpsc::UnboundedReceiver<Box<dyn Stream>>,
+    rx: mpsc::Receiver<Box<dyn Stream>>,
 }
 
 #[async_trait]
@@ -156,7 +156,8 @@ impl Transport for MultiTransport {
         if self.legs.is_empty() {
             return Err(TransportError::Io("multi-transport has no legs".into()));
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Bounded fan-in backlog across all legs (SECURITY-AUDIT F-27).
+        let (tx, rx) = mpsc::channel::<Box<dyn Stream>>(256);
         let mut endpoints = Vec::new();
         let mut last_err: Option<TransportError> = None;
         for leg in &self.legs {
@@ -175,7 +176,7 @@ impl Transport for MultiTransport {
                 loop {
                     match inner.accept().await {
                         Ok(s) => {
-                            if tx.send(s).is_err() {
+                            if tx.send(s).await.is_err() {
                                 break;
                             }
                         }
