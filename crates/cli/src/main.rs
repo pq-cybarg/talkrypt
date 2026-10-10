@@ -1140,6 +1140,9 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     desc.group = group;
     desc.channel_marking = channel_marking;
+    // F-25: a Tor-hosted chat requires an anonymizing transport — bind it into the
+    // invite root so a joiner can't be downgraded to clearnet.
+    desc.require_anon = tor;
     if let Some(p) = &name_policy {
         desc.name_trust_policy = parse_name_policy(p)?;
         println!("name-collision policy: {p}");
@@ -1248,6 +1251,12 @@ async fn run_join(
     let mut desc = ChatDescriptor::from_uri(uri)?;
     if let Some(pw) = &password {
         desc.password = Some(ChannelPassword::new(pw.clone()));
+    }
+    // SECURITY-AUDIT F-25: an invite marked anonymity-required must not be joined
+    // over clearnet TCP. The flag is bound into the invite's root (tamper-evident),
+    // so refuse unless the user is routing over Tor.
+    if desc.require_anon && !tor {
+        return Err("this invite requires an anonymizing transport; re-run with --tor".into());
     }
     // Resolve the chat's scheme by its fingerprint — this is the "receiver must
     // have a matching registered scheme to participate" check. A blank posture
