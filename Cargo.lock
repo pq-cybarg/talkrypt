@@ -10732,6 +10732,7 @@ name = "talkrypt-tui"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "qrcode",
  "ratatui",
  "talkrypt-core",
  "talkrypt-crypto",

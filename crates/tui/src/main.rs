@@ -12,7 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+/// What the input thread forwards to the event loop: a key press, or a bare
+/// redraw signal (e.g. a terminal resize) so the UI re-lays-out immediately
+/// instead of staying garbled until the next keypress.
+enum Input {
+    Key(KeyEvent),
+    Redraw,
+}
 
 use talkrypt_core::{ChatDescriptor, Core, Event as CoreEvent, Persistence, TopologyKind};
 use talkrypt_crypto::{dr_suite_id, IdentityKeyPair, KemProfile, SuiteRegistry};
@@ -97,8 +105,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("{topology} · hosting {listen} · {suite_id}"),
             );
             app.safety_number = core.identity_public().safety_number();
+            app.peers = core.peer_count();
             app.push(format!("hosting on {listen} — share this invite:"));
             app.push(desc.to_uri());
+            // Render the invite as a scannable QR so someone can join in person.
+            app.push_qr(&desc.to_uri());
             (core, rx, app)
         }
         Cmd::Join { uri } => {
@@ -121,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("joined · peers: {} · {suite_id}", core.peer_count()),
             );
             app.safety_number = core.identity_public().safety_number();
+            app.peers = core.peer_count();
             app.push(format!(
                 "joined chat {} ({} peers)",
                 desc.channel,
@@ -131,14 +143,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     app.push("type a message + Enter to send. /help for commands.".to_string());
 
-    // ----- key reader on a blocking thread -----
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<KeyCode>();
+    // ----- input reader on a blocking thread -----
+    // Forwards full key events (so modifiers like Ctrl are visible) AND resize
+    // events (as a redraw signal), instead of only key codes.
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Input>();
     std::thread::spawn(move || loop {
         if event::poll(Duration::from_millis(200)).unwrap_or(false) {
-            if let Ok(Event::Key(k)) = event::read() {
-                if k.kind == KeyEventKind::Press && key_tx.send(k.code).is_err() {
-                    break;
+            match event::read() {
+                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                    if key_tx.send(Input::Key(k)).is_err() {
+                        break;
+                    }
                 }
+                Ok(Event::Resize(_, _)) => {
+                    if key_tx.send(Input::Redraw).is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     });
@@ -154,7 +177,7 @@ async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     core: &Core,
     core_rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
-    key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<KeyCode>,
+    key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Input>,
     app: &mut App,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|f| ui(f, app))?;
@@ -198,33 +221,59 @@ async fn run(
                     Some(CoreEvent::Error(e)) => app.push(format!("! {e}")),
                     None => {}
                 }
-                app.status = format!("peers: {}", core.peer_count());
+                // Keep the stable status (topology · address · suite); only the
+                // live peer count changes.
+                app.peers = core.peer_count();
             }
             key = key_rx.recv() => {
                 match key {
-                    Some(KeyCode::Char(c)) => app.input.push(c),
-                    Some(KeyCode::Backspace) => { app.input.pop(); }
-                    Some(KeyCode::Esc) => break,
-                    Some(KeyCode::Enter) => {
-                        let line = std::mem::take(&mut app.input);
-                        let line = line.trim().to_string();
-                        if line.is_empty() {
-                        } else if let Some(cmd) = line.strip_prefix('/') {
-                            match cmd.split_whitespace().next().unwrap_or("") {
-                                "quit" | "q" => break,
-                                "help" => app.push("commands: /invite /verify /peers /quit"),
-                                "invite" => app.push(core.descriptor().to_uri()),
-                                "verify" => app.push(format!("safety number: {}", app.safety_number)),
-                                "peers" => app.push(format!("connected peers: {}", core.peer_count())),
-                                other => app.push(format!("unknown command: /{other}")),
+                    // Redraw-only signal (terminal resize): fall through to draw.
+                    Some(Input::Redraw) => {}
+                    Some(Input::Key(k)) => {
+                        // Ctrl-C / Ctrl-D: the universal "quit" reflex. Under raw
+                        // mode these arrive as a Char with the CONTROL modifier, not
+                        // a signal — handle them explicitly so they don't type a
+                        // literal 'c'/'d' into the message buffer.
+                        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                        match k.code {
+                            KeyCode::Char('c' | 'd') if ctrl => break,
+                            KeyCode::Char(c) => app.input.push(c),
+                            KeyCode::Backspace => { app.input.pop(); }
+                            KeyCode::Esc => break,
+                            KeyCode::PageUp => app.scroll_up(10),
+                            KeyCode::PageDown => app.scroll_down(10),
+                            KeyCode::Home => app.scroll_up(u16::MAX),
+                            KeyCode::End => app.scroll_offset = 0,
+                            KeyCode::Enter => {
+                                let line = std::mem::take(&mut app.input);
+                                let line = line.trim().to_string();
+                                // Sending returns the user to the newest line.
+                                app.scroll_offset = 0;
+                                if line.is_empty() {
+                                } else if let Some(cmd) = line.strip_prefix('/') {
+                                    match cmd.split_whitespace().next().unwrap_or("") {
+                                        "quit" | "q" => break,
+                                        "help" => app.push(
+                                            "commands: /help /invite /verify /peers /quit  |  keys: Enter send · Ctrl-C/Esc quit · PgUp/PgDn/Home/End scroll",
+                                        ),
+                                        "invite" => {
+                                            let uri = core.descriptor().to_uri();
+                                            app.push(uri.clone());
+                                            app.push_qr(&uri);
+                                        }
+                                        "verify" => app.push(format!("safety number: {}", app.safety_number)),
+                                        "peers" => app.push(format!("connected peers: {}", core.peer_count())),
+                                        other => app.push(format!("unknown command: /{other}")),
+                                    }
+                                } else if let Err(e) = core.send(&line).await {
+                                    app.push(format!("! send failed: {e}"));
+                                } else {
+                                    app.push(format!("me> {line}"));
+                                }
                             }
-                        } else if let Err(e) = core.send(&line).await {
-                            app.push(format!("! send failed: {e}"));
-                        } else {
-                            app.push(format!("me> {line}"));
+                            _ => {}
                         }
                     }
-                    Some(_) => {}
                     None => break,
                 }
             }

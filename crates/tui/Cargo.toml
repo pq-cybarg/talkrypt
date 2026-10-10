@@ -17,3 +17,4 @@ talkrypt-topology.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
+qrcode = { version = "0.14", default-features = false }

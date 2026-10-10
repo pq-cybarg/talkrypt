@@ -45,11 +45,13 @@ feedback) / **minor** / **polish**.
 - **MAJOR — no localization**: all strings hardcoded English, no `strings.xml`, RTL in `configChanges` but no resources.
 
 ### TUI (`crates/tui/src/{main,app}.rs`) — toy skeleton
-- **BLOCKER — Ctrl-C types a literal `c`** (`main.rs:139,205` read only `k.code`): the universal quit reflex inserts a char; only `Esc`/`/quit` exit, unadvertised.
-- **BLOCKER — no QR / invite onboarding**: host dumps the URI as plain scrollback text (`main.rs:100-102`), join shows nothing; the CLI's `print_qr()` is not used. The in-person QR join the product centers on is absent.
-- **MAJOR — resize doesn't redraw** (`Event::Resize` dropped at `main.rs:138`): screen stays garbled until the next keypress.
-- **MAJOR — wrapped lines hide newest messages** (`app.rs:57-60` counts logical not visual rows) and **no scrollback** (no PageUp/Down); history is unreachable.
-- **MAJOR — command surface is ~5 of the CLI's ~40** (`main.rs:213-219`): no contact/username/access/vouch/verify-account operations.
+> **RESOLVED (2026-10)** — all blockers + the resize/scrollback/status majors fixed; see `crates/tui` tests `newest_line_visible_despite_a_long_wrapped_line`, `scrolling_up_reveals_older_then_end_returns_to_newest`, `push_qr_renders_block_rows_for_an_invite`.
+- ~~**BLOCKER — Ctrl-C types a literal `c`**~~ **FIXED** — the input thread now forwards full `KeyEvent`s; Ctrl-C/Ctrl-D quit (the footer advertises it).
+- ~~**BLOCKER — no QR / invite onboarding**~~ **FIXED** — host (and `/invite`) render the invite as a scannable Unicode-half-block QR via `App::push_qr` (same `qrcode` crate as the CLI).
+- ~~**MAJOR — resize doesn't redraw**~~ **FIXED** — `Event::Resize` is forwarded as a redraw signal, so the layout refreshes immediately.
+- ~~**MAJOR — wrapped lines hide newest messages / no scrollback**~~ **FIXED** — the pane pre-wraps to visual rows and windows the tail (newest always visible); PgUp/PgDn/Home/End scroll, with a "[scrolled]" status hint.
+- ~~**MAJOR — status bar destroyed after first event**~~ **FIXED** — the rich prefix (topology · address · suite) is stable; only the live `peers:` count updates.
+- **MAJOR — command surface is ~5 of the CLI's ~40** — *still open* (deliberately deferred): contact/username/access/vouch/account-verify operations remain CLI-only; a dedicated follow-up (not a blocker to basic usability, which this pass restored).
 
 ## Recommended fix order (highest leverage first)
 
