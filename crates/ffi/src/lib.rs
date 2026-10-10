@@ -306,6 +306,12 @@ uniffi::setup_scaffolding!();
 pub enum FfiError {
     #[error("{0}")]
     Failed(String),
+    /// The invite requires an anonymizing transport (SECURITY-AUDIT F-25): it was
+    /// marked Tor/Nym-only and the plain clearnet `join` refuses it. A distinct
+    /// variant so the app can detect this cause and route to `join_tor`/`join_nym`
+    /// (and show the right prompt) rather than parsing an error string.
+    #[error("this invite requires an anonymizing transport; use join_tor or join_nym")]
+    RequiresAnonymizingTransport,
 }
 
 impl FfiError {
@@ -762,6 +768,9 @@ impl TalkryptClient {
                 channel,
             );
             desc.name_trust_policy = name_policy_from(name_policy.as_deref());
+            // F-25: a Tor-hosted chat REQUIRES an anonymizing transport — bind that
+            // into the invite's root so a MITM can't downgrade a joiner to clearnet.
+            desc.require_anon = true;
             let (core, rx) = Core::new(IdentityKeyPair::generate(), suite, arti.clone(), desc);
             rt.block_on(core.host()).map_err(FfiError::from)?;
             // Put the published .onion into the invite so peers can dial it.
@@ -784,6 +793,13 @@ impl TalkryptClient {
     pub fn join(uri: String) -> Result<Arc<Self>, FfiError> {
         let rt = rt();
         let desc = ChatDescriptor::from_uri(&uri).map_err(FfiError::from)?;
+        // F-25: refuse to join an anonymity-required chat over the plain clearnet
+        // TCP transport. The flag is bound into the invite's root, so this can't be
+        // stripped by a MITM to force a downgrade; the caller must use
+        // `join_tor`/`join_nym`. Prevents a real-IP leak from a downgraded invite.
+        if desc.require_anon {
+            return Err(FfiError::RequiresAnonymizingTransport);
+        }
         // Resolve the chat's scheme by fingerprint (handles blank/optional
         // posture and custom schemes); must be registered in this build.
         let suite = SuiteRegistry::with_defaults()
@@ -910,6 +926,8 @@ impl TalkryptClient {
                 channel,
             );
             desc.name_trust_policy = name_policy_from(name_policy.as_deref());
+            // F-25: a Nym/Tor-bridged chat requires an anonymizing transport.
+            desc.require_anon = true;
             let (core, rx) =
                 Core::new_group(IdentityKeyPair::generate(), suite, Arc::new(multi), desc, true);
             core.enable_gossip();
@@ -2633,6 +2651,18 @@ pub fn invite_has_nym(uri: String) -> bool {
         .unwrap_or(false)
 }
 
+/// True if the invite REQUIRES an anonymizing transport (SECURITY-AUDIT F-25):
+/// the host marked it Tor/Nym-only, and the flag is bound into the invite's root
+/// so it can't be stripped by a man-in-the-middle to force a clearnet downgrade.
+/// The plain `join` constructor refuses such an invite; the app must use
+/// `join_tor`/`join_nym`. False on a malformed URI or a non-anon invite.
+#[uniffi::export]
+pub fn invite_requires_anon(uri: String) -> bool {
+    ChatDescriptor::from_uri(&uri)
+        .map(|d| d.require_anon)
+        .unwrap_or(false)
+}
+
 /// Register `account` under `username` at the anchor at `uri` (you must hold the
 /// account key). The binding is self-signed by the account, so the anchor can't
 /// forge it. Blocking (runs its own runtime).
@@ -2662,6 +2692,29 @@ pub fn anchor_resolve(uri: String, username: String) -> Result<Option<String>, F
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// SECURITY-AUDIT F-25: an invite that requires an anonymizing transport must
+    /// be refused by the plain (clearnet TCP) `join`, before any dial — the caller
+    /// has to use `join_tor`/`join_nym`. The boolean helper exposes the same signal
+    /// so the app can route correctly without relying on the error.
+    #[test]
+    fn f25_require_anon_invite_refuses_plain_join() {
+        let uri = ChatDescriptor::new(
+            TopologyKind::P2P,
+            Persistence::Ephemeral,
+            "",
+            vec![],
+            "#anon",
+        )
+        .with_require_anon(true)
+        .to_uri();
+        assert!(invite_requires_anon(uri.clone()));
+        let err = TalkryptClient::join(uri)
+            .err()
+            .expect("plain join must refuse an anon-required invite");
+        // Typed cause — the app can match this to route to join_tor/join_nym.
+        assert!(matches!(err, FfiError::RequiresAnonymizingTransport));
+    }
 
     /// The FFI beacon bridge forwards advertise/stop to the host backend and feeds
     /// `deliver_beacon` pushes into the scan stream the core drives.

@@ -15,11 +15,17 @@ use crate::error::{CoreError, Result};
 
 pub const URI_SCHEME: &str = "talkrypt://";
 // v4 appended F-16 `message_padding` (SECURITY-AUDIT); v5 appends Sub-spec C
-// `vouch_policy`; v6 appends Sub-spec D2 `promotion`. All strictly append-only and read
-// only when `version` is high enough, so v1-v5 invites still parse.
-const DESCRIPTOR_VERSION: u16 = 6;
+// `vouch_policy`; v6 appends Sub-spec D2 `promotion`; v7 appends F-25
+// `require_anon`. All strictly append-only and read only when `version` is high
+// enough, so v1-v6 invites still parse.
+const DESCRIPTOR_VERSION: u16 = 7;
 const ROOT_SALT: &[u8] = b"talkrypt-root-v1";
 const PW_ROOT_SALT: &[u8] = b"talkrypt-pw-root-v1";
+/// Folded into `derive_root` ONLY when `require_anon` is set (SECURITY-AUDIT
+/// F-25), so a non-anon invite's root is byte-identical to pre-v7 (no interop
+/// break) while an anon invite's root is bound to the flag — tampering it fails
+/// the handshake closed.
+const ANON_ROOT_SALT: &[u8] = b"talkrypt-anon-root-v1";
 
 /// SUB-SPEC D2 (v6+): the persistent successor a promotion produced — its target tier
 /// (app-level) and stable onion, so a rejoining member reconnects to the right room.
@@ -161,6 +167,14 @@ pub struct ChatDescriptor {
     /// target tier + stable onion, so a rejoining member reconnects to the persistent
     /// room. `None` for an un-promoted (or v1-v5) chat.
     pub promotion: Option<PromotionMeta>,
+    /// SECURITY-AUDIT F-25 (v7+): the chat REQUIRES an anonymizing transport
+    /// (Tor/Nym) — a joiner must never fall back to clearnet TCP. The flag is
+    /// folded into [`Self::derive_root`] when set, so a man-in-the-middle who
+    /// strips the `.onion` (or flips this flag) to force a downgrade produces a
+    /// different root and fails the handshake closed. v1-v6 invites default
+    /// `false`. Set at creation (not late-bound like the onion endpoint), so both
+    /// sides agree on the root.
+    pub require_anon: bool,
     /// Optional out-of-band channel password. **In-memory only — never encoded
     /// into the invite URI.** When set, it is folded into [`Self::derive_root`]
     /// via Argon2id, so both the invite token *and* the password are required to
@@ -196,8 +210,16 @@ impl ChatDescriptor {
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
             promotion: None,
+            require_anon: false,
             password: None,
         }
+    }
+
+    /// Mark this chat as requiring an anonymizing transport (Tor/Nym); a joiner
+    /// must refuse a clearnet-TCP fallback (SECURITY-AUDIT F-25). Chainable.
+    pub fn with_require_anon(mut self, require: bool) -> Self {
+        self.require_anon = require;
+        self
     }
 
     /// Set (or clear) the out-of-band channel password. Chainable.
@@ -241,6 +263,15 @@ impl ChatDescriptor {
             self.resolved_suite_id().as_bytes(),
             &mut base,
         );
+        // F-25: when the chat requires an anonymizing transport, bind that policy
+        // into the root. Only applied when set, so a non-anon invite's root is
+        // byte-identical to pre-v7 (no interop break); an anon invite whose flag or
+        // onion a MITM alters derives a different root and fails the handshake.
+        if self.require_anon {
+            let mut a = [0u8; 32];
+            talkrypt_crypto::kdf::mac_kdf(&base, ANON_ROOT_SALT, b"require-anon", &mut a);
+            base = a;
+        }
         match &self.password {
             // Unprotected channel: the invite token alone derives the root.
             None => base,
@@ -315,6 +346,10 @@ impl ChatDescriptor {
                     w.put_bytes(m.onion.as_bytes());
                 }
             }
+        }
+        // v7+: F-25 require-anonymizing-transport flag (append-only after promotion).
+        if self.version >= 7 {
+            w.put_u8(self.require_anon as u8);
         }
         w.into_vec()
     }
@@ -395,6 +430,11 @@ impl ChatDescriptor {
         } else {
             None
         };
+        let require_anon = if version >= 7 {
+            r.get_u8()? != 0
+        } else {
+            false
+        };
         r.finish()
             .map_err(|_| CoreError::Malformed("trailing descriptor bytes"))?;
         Ok(Self {
@@ -414,6 +454,7 @@ impl ChatDescriptor {
             message_padding,
             vouch_policy,
             promotion,
+            require_anon,
             // The password is out-of-band; a parsed invite never carries it.
             password: None,
         })
@@ -524,6 +565,24 @@ mod tests {
     }
 
     #[test]
+    fn f25_require_anon_binds_the_root_and_round_trips() {
+        let base = sample();
+        let anon = base.clone().with_require_anon(true);
+        // The flag is bound into the root: a MITM who flips require_anon (or
+        // strips the onion to force a downgrade) derives a different root and
+        // fails the handshake closed.
+        assert_ne!(base.derive_root(), anon.derive_root());
+        // require_anon == false is byte-identical to a descriptor that never had
+        // the flag (no interop break for non-anon invites).
+        assert_eq!(base.derive_root(), base.clone().with_require_anon(false).derive_root());
+        // Both anon sides agree.
+        assert_eq!(anon.derive_root(), base.with_require_anon(true).derive_root());
+        // The flag round-trips through the v7 invite.
+        assert!(ChatDescriptor::from_uri(&anon.to_uri()).unwrap().require_anon);
+        assert!(!ChatDescriptor::from_uri(&sample().to_uri()).unwrap().require_anon);
+    }
+
+    #[test]
     fn password_is_never_serialized_into_the_uri() {
         let d = sample().with_password(Some(ChannelPassword::new("topsecret")));
         let uri = d.to_uri();
@@ -585,6 +644,7 @@ mod kat {
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
             promotion: None,
+            require_anon: false,
             password: None,
         };
         assert_eq!(
@@ -617,6 +677,7 @@ mod kat {
             message_padding: None,
             vouch_policy: crate::vouch::VouchPolicy::default(),
             promotion: None,
+            require_anon: false,
             password: None,
         };
         let back = ChatDescriptor::from_uri(&d.to_uri()).unwrap();
