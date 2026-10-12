@@ -59,6 +59,9 @@ pub fn run(args: &[String]) -> i32 {
             channel: channel.clone(),
             posture: posture.clone(),
             access: access.clone(),
+            // The headless driver hosts ephemeral chats (no seal passphrase prompt).
+            persistence: "Ephemeral".into(),
+            seal_pass: String::new(),
             use_tor: cfg.use_tor,
             use_nym: cfg.use_nym,
         },

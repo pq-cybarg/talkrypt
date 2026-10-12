@@ -24,16 +24,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 mod headless;
 
-/// Persistent Tor state dir (consensus/descriptor cache + onion keys). Reusing
-/// it across launches lets warm starts skip the directory bootstrap and keeps a
-/// stable `.onion`. Overridable via `TALKRYPT_TOR_STATE` — used to give two
-/// instances on one host separate dirs (Arti locks its state dir).
-#[cfg(any(feature = "tor", feature = "nym"))]
-fn tor_state_dir() -> std::path::PathBuf {
+/// The app-data base directory (`.../talkrypt`), platform-appropriate. Always
+/// compiled — both the (tor-gated) onion state dir and the persistent-chat store
+/// dir hang off it.
+fn app_data_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
-    if let Some(dir) = std::env::var_os("TALKRYPT_TOR_STATE") {
-        return PathBuf::from(dir);
-    }
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -43,7 +38,31 @@ fn tor_state_dir() -> std::path::PathBuf {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
     };
-    base.unwrap_or_else(std::env::temp_dir).join("talkrypt").join("tor")
+    base.unwrap_or_else(std::env::temp_dir).join("talkrypt")
+}
+
+/// Persistent Tor state dir (consensus/descriptor cache + onion keys). Reusing it
+/// across launches lets warm starts skip the directory bootstrap and keeps a
+/// stable `.onion`. Overridable via `TALKRYPT_TOR_STATE` (two instances on one
+/// host need separate dirs — Arti locks its state dir).
+#[cfg(any(feature = "tor", feature = "nym"))]
+fn tor_state_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("TALKRYPT_TOR_STATE") {
+        return std::path::PathBuf::from(dir);
+    }
+    app_data_dir().join("tor")
+}
+
+/// Per-chat directory for a persistent chat's sealed at-rest store, under the
+/// same app-data base as the Tor state. Keyed by a filesystem-safe form of the
+/// channel name so re-hosting the same channel re-opens its retained history.
+fn chat_store_dir(channel: &str) -> std::path::PathBuf {
+    let safe: String = channel
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let safe = if safe.is_empty() { "chat".to_string() } else { safe };
+    app_data_dir().join("chats").join(safe)
 }
 
 /// Bootstrap the shared Tor transport at most once and reuse it for every onion
@@ -274,6 +293,10 @@ enum Cmd {
         channel: String,
         posture: String,
         access: String,
+        /// "Ephemeral" | "Persistent" | "Always-on" (see the PERSISTENCE combo).
+        persistence: String,
+        /// At-rest seal passphrase for a persistent chat (empty for Ephemeral).
+        seal_pass: String,
         use_tor: bool,
         use_nym: bool,
     },
@@ -385,13 +408,26 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            Cmd::Host { id, channel, posture, access, use_tor, use_nym } => {
+            Cmd::Host { id, channel, posture, access, persistence, seal_pass, use_tor, use_nym } => {
                 // Posture selects the suite; access sets who's heard.
                 let suite_id = dr_suite_id(profile_from(&posture));
                 let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
                     Ok(s) => s,
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("bad posture: {e}") }); on_event(); continue; }
                 };
+                // Persistence tier: Ephemeral (no retention) / Persistent (sealed
+                // at-rest history + outbox, survives restart) / Always-on (Persistent
+                // PLUS keeper_mode — the host buffers-and-replays for offline members).
+                let persistent = persistence != "Ephemeral";
+                let always_on = persistence == "Always-on";
+                // A persistent chat seals its on-disk store with a passphrase (the
+                // same custody factor the core requires — fail closed, no plaintext
+                // retention). Validate BEFORE the expensive transport bootstrap.
+                if persistent && seal_pass.trim().is_empty() {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: "a persistent chat needs a seal passphrase (it encrypts the on-disk history)".into() });
+                    on_event();
+                    continue;
+                }
                 // TCP binds 0.0.0.0:LAN_PORT; Tor ignores the bind addr (the onion
                 // service picks its own virtual port).
                 let listen = format!("0.0.0.0:{LAN_PORT}");
@@ -404,10 +440,10 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                 let topology = if use_nym { TopologyKind::Hub } else { TopologyKind::P2P };
                 let desc = ChatDescriptor::new(
                     topology,
-                    Persistence::Ephemeral,
+                    if persistent { Persistence::Persistent } else { Persistence::Ephemeral },
                     &suite_id,
                     vec![listen.clone()],
-                    channel,
+                    &channel,
                 );
                 let (c, rx) = if use_nym {
                     let (c, rx) = Core::new_group(IdentityKeyPair::generate(), host_suite, transport, desc, true);
@@ -418,6 +454,38 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                 } else {
                     Core::new(IdentityKeyPair::generate(), host_suite, transport, desc)
                 };
+                // Wire at-rest persistence BEFORE host(): a passphrase-sealed
+                // SealedFileStore (AES-256-GCM, Argon2id KEK) backs both the outbox
+                // (so un-acked sends survive a restart) and the history (redisplayed
+                // on reopen). Keyed per-channel so the same chat re-opens its store.
+                if persistent {
+                    let dir = chat_store_dir(&channel);
+                    match talkrypt_core::SealedFileStore::open(&dir, Some(seal_pass.as_bytes()), None) {
+                        Ok(store) => {
+                            let store = std::sync::Arc::new(store);
+                            c.set_outbox_store(store.clone());
+                            c.set_history_store(store);
+                            c.set_persistence(true);
+                            if always_on {
+                                c.keeper_mode(true);
+                            }
+                            // Redisplay any history this chat retained from a prior run.
+                            for rec in c.load_history() {
+                                let _ = ui_tx.send(UiEvt::Line {
+                                    id,
+                                    mine: rec.from == c.identity_public().fingerprint(),
+                                    who: short(&rec.from),
+                                    text: rec.text,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiEvt::Status { id, text: format!("persistent store failed (wrong passphrase?): {e}") });
+                            on_event();
+                            continue;
+                        }
+                    }
+                }
                 match c.host().await {
                     // `host()` returns the listener endpoint: the dialable
                     // `.onion:port` over Tor, or the local bind over TCP.
@@ -456,7 +524,8 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         let mut d = c.descriptor().clone();
                         d.endpoints = endpoints;
                         let _ = ui_tx.send(UiEvt::Invite { id, uri: d.to_uri() });
-                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("hosting · {net} · {posture} · {access}") });
+                        let tier = if always_on { "always-on" } else if persistent { "persistent" } else { "ephemeral" };
+                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("hosting · {net} · {posture} · {access} · {tier}") });
                         spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
                         cores.insert(id, c);
                     }
@@ -703,6 +772,9 @@ struct App {
     posture: String,
     access: String,
     persistence: String,
+    /// At-rest seal passphrase typed for a persistent chat (never persisted in UI
+    /// state beyond the host action).
+    seal_pass_input: String,
     use_tor: bool,
     use_nym: bool,
     join_input: String,
@@ -731,7 +803,11 @@ impl App {
             access: "open".into(),
             name_input: String::new(),
             cq_periodic: false,
-            persistence: "Persistent".into(), // default Persistent, matching mobile
+            // Ephemeral by default on desktop: a persistent chat requires a seal
+            // passphrase (below), so don't impose that friction unless the user
+            // opts in. (The old "Persistent" default was a dead no-op.)
+            persistence: "Ephemeral".into(),
+            seal_pass_input: String::new(),
             // Tor on by default whenever this build can do Tor; a LAN-only
             // (--no-default-features) build starts unchecked.
             use_tor: cfg!(feature = "tor"),
@@ -924,6 +1000,22 @@ impl App {
             combo_section(ui, "POSTURE", "posture", &mut self.posture, &["pq-pure", "hybrid", "pq-pure-compact"]);
             combo_section(ui, "ACCESS", "access", &mut self.access, &["open", "contacts", "friends"]);
             combo_section(ui, "PERSISTENCE", "persistence", &mut self.persistence, &["Ephemeral", "Persistent", "Always-on"]);
+            // A persistent chat seals its history + outbox to disk; collect the
+            // passphrase that encrypts that store (fail-closed — no plaintext
+            // retention). Always-on additionally keeps-and-forwards for offline
+            // members. Only shown when the user opts into persistence.
+            if self.persistence != "Ephemeral" {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("SEAL PASSPHRASE (encrypts on-disk history)").size(12.0).strong().color(MUTED));
+                ui.add_space(6.0);
+                ui.add_sized(
+                    [ui.available_width(), 36.0],
+                    egui::TextEdit::singleline(&mut self.seal_pass_input)
+                        .password(true)
+                        .hint_text("required for a persistent chat")
+                        .margin(egui::Margin::symmetric(14, 8)),
+                );
+            }
             ui.add_space(16.0);
             ui.checkbox(
                 &mut self.use_tor,
@@ -944,6 +1036,8 @@ impl App {
                     channel: ch,
                     posture: self.posture.clone(),
                     access: self.access.clone(),
+                    persistence: self.persistence.clone(),
+                    seal_pass: self.seal_pass_input.clone(),
                     use_tor: self.use_tor,
                     use_nym: self.use_nym,
                 });
@@ -1212,4 +1306,24 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("talkrypt", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_store_dir_sanitizes_and_is_stable_per_channel() {
+        // Same channel -> same dir (so a re-hosted chat re-opens its sealed store).
+        assert_eq!(chat_store_dir("#general"), chat_store_dir("#general"));
+        // Distinct channels -> distinct dirs.
+        assert_ne!(chat_store_dir("#a"), chat_store_dir("#b"));
+        // Path-hostile characters are replaced; no separators leak into the leaf.
+        let d = chat_store_dir("../../etc/passwd");
+        let leaf = d.file_name().unwrap().to_string_lossy();
+        assert!(!leaf.contains('/') && !leaf.contains('.'));
+        assert!(leaf.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        // An all-symbol channel still yields a non-empty leaf.
+        assert!(!chat_store_dir("###").file_name().unwrap().is_empty());
+    }
 }
