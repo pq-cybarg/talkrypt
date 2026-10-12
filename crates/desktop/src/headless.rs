@@ -59,15 +59,18 @@ pub fn run(args: &[String]) -> i32 {
             channel: channel.clone(),
             posture: posture.clone(),
             access: access.clone(),
-            // The headless driver hosts ephemeral chats (no seal passphrase prompt).
+            // The headless driver hosts ephemeral chats (no seal passphrase prompt,
+            // fresh ephemeral identity).
             persistence: "Ephemeral".into(),
             seal_pass: String::new(),
+            identity: None,
             use_tor: cfg.use_tor,
             use_nym: cfg.use_nym,
         },
         Action::Join { uri } => Cmd::Join {
             id: SID,
             uri: uri.clone(),
+            identity: None,
             use_tor: cfg.use_tor,
             use_nym: cfg.use_nym,
         },
@@ -110,6 +113,7 @@ pub fn run(args: &[String]) -> i32 {
                     format!("< {who}: {text}")
                 }
             }
+            UiEvt::PeerIdentity { name, .. } => format!("IDENTITY {name}"),
         };
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
