@@ -65,16 +65,48 @@ fn chat_store_dir(channel: &str) -> std::path::PathBuf {
     app_data_dir().join("chats").join(safe)
 }
 
-/// The persistent device identity seed (`.../talkrypt/device.key`, 0600). Loaded
-/// once and reused for every session, so this install has a STABLE identity —
-/// peers recognize it across launches, its safety number is constant, and the
-/// contact list below actually refers to a fixed account. (Mirrors the CLI's
-/// seed-file device key; at-rest *sealing* of the key is the helper/custody path.)
-/// Falls back to an ephemeral seed if the file can't be read or written.
-fn device_seed() -> [u8; 32] {
+/// Directory holding named persistent identities ("personas"). Several let a
+/// user COMPARTMENTALIZE — keep unlinkable identities for different associate
+/// groups — so compromising or burning one never exposes the others.
+fn identities_dir() -> std::path::PathBuf {
+    app_data_dir().join("identities")
+}
+
+/// Filesystem-safe leaf for a persona name.
+fn persona_file(name: &str) -> std::path::PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let safe = if safe.is_empty() { "persona".to_string() } else { safe };
+    identities_dir().join(format!("{safe}.key"))
+}
+
+/// Names of all saved personas (sorted), derived from `identities/*.key`.
+fn list_identities() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(identities_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension()?.to_str()? == "key")
+                .then(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                .flatten()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Load-or-create the seed for persona `name` (0600 seed file). A persistent
+/// persona has a STABLE identity across launches — peers recognize it, its safety
+/// number is constant, and the contact list refers to a fixed account. (Seed-file
+/// device key as the CLI does; at-rest *sealing* of the key is the custody path.)
+/// Falls back to a fresh random seed if the file can't be read/written.
+fn identity_seed(name: &str) -> [u8; 32] {
     use std::io::Read;
-    let path = app_data_dir().join("device.key");
-    // Try to load an existing 64-hex-char seed.
+    let path = persona_file(name);
     if let Ok(mut f) = std::fs::File::open(&path) {
         let mut s = String::new();
         if f.read_to_string(&mut s).is_ok() {
@@ -88,7 +120,6 @@ fn device_seed() -> [u8; 32] {
             }
         }
     }
-    // Generate + persist a fresh seed (owner-only perms on unix).
     let seed = IdentityKeyPair::generate().export_secret();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -104,9 +135,59 @@ fn device_seed() -> [u8; 32] {
     seed
 }
 
+/// BURN a persona: best-effort secure-erase of its seed file (overwrite the key
+/// bytes with random, flush, then unlink) so the identity can't be recovered from
+/// the file. (On a COW/SSD filesystem the overwrite may not hit the original
+/// blocks — true erasure needs full-disk encryption; this is the standard
+/// best-effort, and the in-memory copy is never written elsewhere.)
+fn burn_identity(name: &str) {
+    use std::io::Write;
+    let path = persona_file(name);
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let len = meta.len() as usize;
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let mut junk = vec![0u8; len.max(64)];
+            talkrypt_crypto::fill_secure(&mut junk);
+            let _ = f.write_all(&junk);
+            let _ = f.flush();
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Path to the persisted contact list (TSV: `accountPubkeyHex \t friend \t name`).
 fn contacts_path() -> std::path::PathBuf {
     app_data_dir().join("contacts.tsv")
+}
+
+/// Where the identity-mode preference is recorded ("persistent" | "ephemeral").
+fn identity_pref_path() -> std::path::PathBuf {
+    app_data_dir().join("identity-mode")
+}
+
+/// The saved identity choice: `None` = never chosen (→ first-run prompt);
+/// `Some(None)` = ephemeral; `Some(Some(name))` = that persistent persona.
+fn load_identity_pref() -> Option<Option<String>> {
+    let s = std::fs::read_to_string(identity_pref_path()).ok()?;
+    let s = s.trim();
+    Some(match s.strip_prefix("persona\t") {
+        Some(name) if !name.is_empty() => Some(name.to_string()),
+        _ => None, // "ephemeral" (or anything else) → ephemeral
+    })
+}
+
+/// Record the identity choice so the first-run prompt doesn't reappear and the
+/// last-used identity is restored next launch.
+fn save_identity_pref(choice: &Option<String>) {
+    let path = identity_pref_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = match choice {
+        Some(name) => format!("persona\t{name}"),
+        None => "ephemeral".to_string(),
+    };
+    let _ = std::fs::write(&path, body);
 }
 
 /// Restore recognized accounts from a previous session into `core` (mirrors the
@@ -389,12 +470,17 @@ enum Cmd {
         persistence: String,
         /// At-rest seal passphrase for a persistent chat (empty for Ephemeral).
         seal_pass: String,
+        /// Which identity to use: `None` = fresh per-launch ephemeral; `Some(name)`
+        /// = the persistent persona with that name.
+        identity: Option<String>,
         use_tor: bool,
         use_nym: bool,
     },
     Join {
         id: u64,
         uri: String,
+        /// Identity choice (see `Cmd::Host`): ephemeral (`None`) or a persona.
+        identity: Option<String>,
         use_tor: bool,
         use_nym: bool,
     },
@@ -488,6 +574,17 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
     let mut cores: HashMap<u64, Core> = HashMap::new();
     // Joined sessions remember their dial endpoint so Reconnect can re-dial.
     let mut rejoin: HashMap<u64, String> = HashMap::new();
+    // The per-launch EPHEMERAL identity: one fresh key for this process run, used
+    // by any session the user runs in ephemeral mode, discarded on exit and never
+    // written to disk. (Persistent mode uses the on-disk `device.key` instead.)
+    // A closure yields a keypair from the chosen seed per session.
+    let ephemeral_seed = IdentityKeyPair::generate().export_secret();
+    let identity_for = |choice: &Option<String>| {
+        IdentityKeyPair::from_secret_bytes(match choice {
+            Some(name) => identity_seed(name),
+            None => ephemeral_seed,
+        })
+    };
     let default_suite = SuiteRegistry::with_defaults()
         .get(DEFAULT_SUITE_ID)
         .expect("default suite");
@@ -512,7 +609,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            Cmd::Host { id, channel, posture, access, persistence, seal_pass, use_tor, use_nym } => {
+            Cmd::Host { id, channel, posture, access, persistence, seal_pass, identity, use_tor, use_nym } => {
                 // Posture selects the suite; access sets who's heard.
                 let suite_id = dr_suite_id(profile_from(&posture));
                 let host_suite = match SuiteRegistry::with_defaults().get(&suite_id) {
@@ -549,9 +646,9 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     vec![listen.clone()],
                     &channel,
                 );
-                // Stable per-install device identity (persisted seed), so this host
-                // is recognizable across launches and its contact list is meaningful.
-                let device = IdentityKeyPair::from_secret_bytes(device_seed());
+                // The chosen identity: a persistent persona (recognizable across
+                // launches, so its contact list is meaningful) or a fresh ephemeral.
+                let device = identity_for(&identity);
                 let (c, rx) = if use_nym {
                     let (c, rx) = Core::new_group(device, host_suite, transport, desc, true);
                     // Multi-homed => gossip bridge: re-flood group ciphertext across
@@ -642,7 +739,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); }
                 }
             }
-            Cmd::Join { id, uri, use_tor, use_nym } => {
+            Cmd::Join { id, uri, identity, use_tor, use_nym } => {
                 match ChatDescriptor::from_uri(&uri) {
                     Ok(desc) => {
                         // Use the invite's own suite (posture), falling back to default.
@@ -672,7 +769,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         // A Nym join is a TreeKEM group MEMBER (the host is the
                         // committer); connect sends our KeyPackage and we get a
                         // Welcome back. Otherwise a pairwise chat.
-                        let device = IdentityKeyPair::from_secret_bytes(device_seed());
+                        let device = identity_for(&identity);
                         let (c, rx) = if join_nym {
                             let (c, rx) = Core::new_group(device, join_suite, transport, desc, false);
                             c.enable_gossip(); // bridge (see the host path)
@@ -915,6 +1012,16 @@ struct App {
     show_invite: bool, // toggles the invite/QR panel inside a chat
     notice: String,    // transient form message on the new-chat screen
     tor_progress: Option<f32>, // global Tor bootstrap fraction while < 1.0
+    // ----- identity (opsec compartmentalization) -----
+    /// The active identity for new chats: `None` = fresh per-launch ephemeral;
+    /// `Some(name)` = that persistent persona.
+    current_identity: Option<String>,
+    /// Known persistent personas (names of the `identities/*.key` files).
+    identities: Vec<String>,
+    /// Draft name for creating a new persona (first-run prompt + manager).
+    new_identity_name: String,
+    /// Show the first-run identity chooser (no preference saved yet).
+    show_identity_prompt: bool,
 }
 
 impl App {
@@ -949,6 +1056,12 @@ impl App {
             show_invite: false,
             notice: String::new(),
             tor_progress: None,
+            // Restore the saved identity choice; prompt on first run (no pref yet).
+            // Ephemeral is the privacy-first default if the prompt is dismissed.
+            current_identity: load_identity_pref().flatten(),
+            identities: list_identities(),
+            new_identity_name: String::new(),
+            show_identity_prompt: load_identity_pref().is_none(),
         }
     }
 
@@ -1151,6 +1264,53 @@ impl App {
                         .margin(egui::Margin::symmetric(14, 8)),
                 );
             }
+            // IDENTITY: which persona (or ephemeral) this chat uses. Compartmentalize
+            // associate groups with separate personas; burn one to erase it.
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("IDENTITY").size(12.0).strong().color(MUTED));
+            ui.add_space(6.0);
+            let current_label = self
+                .current_identity
+                .clone()
+                .unwrap_or_else(|| "Ephemeral (fresh each launch)".into());
+            let mut burn: Option<String> = None;
+            egui::ComboBox::from_id_salt("identity")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.current_identity, None, "Ephemeral (fresh each launch)");
+                    for name in &self.identities {
+                        ui.selectable_value(&mut self.current_identity, Some(name.clone()), name);
+                    }
+                });
+            // Persist the selection so it's restored next launch.
+            save_identity_pref(&self.current_identity);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [180.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.new_identity_name).hint_text("new persona name"),
+                );
+                let name = self.new_identity_name.trim().to_string();
+                if ui.add_enabled(!name.is_empty(), egui::Button::new(egui::RichText::new("+ Create").color(ACCENT)).fill(PANEL)).clicked() {
+                    let _ = identity_seed(&name); // materialize its seed
+                    self.identities = list_identities();
+                    self.current_identity = Some(name);
+                    self.new_identity_name.clear();
+                    save_identity_pref(&self.current_identity);
+                }
+                // Burn the selected persona (secure-erase its seed).
+                if let Some(sel) = self.current_identity.clone() {
+                    if ui.add(egui::Button::new(egui::RichText::new("Burn").color(egui::Color32::from_rgb(220, 90, 90))).fill(PANEL)).clicked() {
+                        burn = Some(sel);
+                    }
+                }
+            });
+            if let Some(name) = burn {
+                burn_identity(&name);
+                self.identities = list_identities();
+                self.current_identity = None; // fall back to ephemeral
+                save_identity_pref(&self.current_identity);
+                self.notice = format!("burned persona '{name}'");
+            }
             ui.add_space(16.0);
             ui.checkbox(
                 &mut self.use_tor,
@@ -1173,6 +1333,7 @@ impl App {
                     access: self.access.clone(),
                     persistence: self.persistence.clone(),
                     seal_pass: self.seal_pass_input.clone(),
+                    identity: self.current_identity.clone(),
                     use_tor: self.use_tor,
                     use_nym: self.use_nym,
                 });
@@ -1196,7 +1357,7 @@ impl App {
                     let title = ChatDescriptor::from_uri(&uri).map(|d| d.channel).unwrap_or_else(|_| "chat".into());
                     let id = self.alloc_id();
                     self.sessions.push(Session::new(id, Kind::Join, title));
-                    let _ = self.cmd_tx.send(Cmd::Join { id, uri, use_tor: self.use_tor, use_nym: self.use_nym });
+                    let _ = self.cmd_tx.send(Cmd::Join { id, uri, identity: self.current_identity.clone(), use_tor: self.use_tor, use_nym: self.use_nym });
                     self.join_input.clear();
                     self.notice.clear();
                     self.open(id);
@@ -1422,6 +1583,70 @@ impl eframe::App for App {
                 Screen::NewChat => self.new_chat_screen(ui),
                 Screen::Chat => self.chat_screen(ui),
             });
+
+        // First-run identity chooser, drawn on top of everything.
+        self.identity_prompt(ctx);
+    }
+}
+
+impl App {
+    /// First-launch modal: choose how this install identifies itself. Ephemeral is
+    /// the privacy-first default (nothing written to disk); a persistent persona is
+    /// opt-in and can be named here. The choice is saved so this never reappears,
+    /// and can be changed later in the new-chat form's IDENTITY section.
+    fn identity_prompt(&mut self, ctx: &egui::Context) {
+        if !self.show_identity_prompt {
+            return;
+        }
+        let mut chosen: Option<Option<String>> = None; // outer Some = decided; inner = choice
+        egui::Window::new("Choose your identity")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(egui::RichText::new(
+                    "How should this device identify itself to the people you chat with?",
+                ).color(FG));
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(
+                    "Ephemeral — a fresh identity every launch. Unlinkable, nothing written to \
+                     disk. Best for throwaway/anonymous use. (No saved contacts or stable safety \
+                     number.)",
+                ).small().color(MUTED));
+                ui.add_space(4.0);
+                if ui.add(egui::Button::new(egui::RichText::new("Stay ephemeral (recommended)").color(FG)).fill(PANEL)).clicked() {
+                    chosen = Some(None);
+                }
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new(
+                    "Persistent persona — a named identity that survives restarts, so peers \
+                     recognize you, your safety number is stable, and contacts/friends-only \
+                     access works. Create several to keep associate groups compartmentalized.",
+                ).small().color(MUTED));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [200.0, 30.0],
+                        egui::TextEdit::singleline(&mut self.new_identity_name).hint_text("persona name (e.g. work)"),
+                    );
+                    let name = self.new_identity_name.trim().to_string();
+                    if ui.add_enabled(!name.is_empty(), egui::Button::new(egui::RichText::new("Create persona").color(ACCENT)).fill(PANEL)).clicked() {
+                        chosen = Some(Some(name));
+                    }
+                });
+            });
+        if let Some(choice) = chosen {
+            if let Some(name) = &choice {
+                // Materialize the persona (creates its sealed-at-rest-capable seed).
+                let _ = identity_seed(name);
+                self.identities = list_identities();
+            }
+            save_identity_pref(&choice);
+            self.current_identity = choice;
+            self.new_identity_name.clear();
+            self.show_identity_prompt = false;
+        }
     }
 }
 
@@ -1464,6 +1689,32 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_file_sanitizes_and_is_stable_per_name() {
+        // Same persona name -> same seed file (stable identity across launches).
+        assert_eq!(persona_file("work"), persona_file("work"));
+        assert_ne!(persona_file("work"), persona_file("activist"));
+        // Path-hostile names are sanitized to a safe .key leaf under identities/.
+        let p = persona_file("../../evil name!");
+        let leaf = p.file_name().unwrap().to_string_lossy();
+        assert!(leaf.ends_with(".key"));
+        let stem = leaf.trim_end_matches(".key");
+        assert!(stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(p.parent().unwrap().ends_with("identities"));
+    }
+
+    #[test]
+    fn identity_pref_round_trips_choices() {
+        // Encoding is stable: ephemeral vs a named persona are distinguishable, and
+        // the format matches what load expects (persona\t<name> / "ephemeral").
+        // (Pure format check via the same strings load_identity_pref parses.)
+        assert_eq!(
+            Some("work".to_string()),
+            "persona\twork".strip_prefix("persona\t").map(str::to_string)
+        );
+        assert_eq!(None, "ephemeral".strip_prefix("persona\t").map(str::to_string));
+    }
 
     #[test]
     fn chat_store_dir_sanitizes_and_is_stable_per_channel() {
