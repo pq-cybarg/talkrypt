@@ -65,6 +65,98 @@ fn chat_store_dir(channel: &str) -> std::path::PathBuf {
     app_data_dir().join("chats").join(safe)
 }
 
+/// The persistent device identity seed (`.../talkrypt/device.key`, 0600). Loaded
+/// once and reused for every session, so this install has a STABLE identity —
+/// peers recognize it across launches, its safety number is constant, and the
+/// contact list below actually refers to a fixed account. (Mirrors the CLI's
+/// seed-file device key; at-rest *sealing* of the key is the helper/custody path.)
+/// Falls back to an ephemeral seed if the file can't be read or written.
+fn device_seed() -> [u8; 32] {
+    use std::io::Read;
+    let path = app_data_dir().join("device.key");
+    // Try to load an existing 64-hex-char seed.
+    if let Ok(mut f) = std::fs::File::open(&path) {
+        let mut s = String::new();
+        if f.read_to_string(&mut s).is_ok() {
+            let s = s.trim();
+            if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                let mut seed = [0u8; 32];
+                for (i, b) in seed.iter_mut().enumerate() {
+                    *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap_or(0);
+                }
+                return seed;
+            }
+        }
+    }
+    // Generate + persist a fresh seed (owner-only perms on unix).
+    let seed = IdentityKeyPair::generate().export_secret();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let hexs: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+    if std::fs::write(&path, &hexs).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    seed
+}
+
+/// Path to the persisted contact list (TSV: `accountPubkeyHex \t friend \t name`).
+fn contacts_path() -> std::path::PathBuf {
+    app_data_dir().join("contacts.tsv")
+}
+
+/// Restore recognized accounts from a previous session into `core` (mirrors the
+/// CLI), so contacts/friends-only access actually admits the right people.
+fn load_contacts(core: &Core) {
+    let Ok(text) = std::fs::read_to_string(contacts_path()) else {
+        return;
+    };
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let Some(pk) = parts[0].len().is_multiple_of(2)
+            .then(|| {
+                (0..parts[0].len() / 2)
+                    .map(|i| u8::from_str_radix(&parts[0][i * 2..i * 2 + 2], 16))
+                    .collect::<Result<Vec<u8>, _>>()
+                    .ok()
+            })
+            .flatten()
+        else {
+            continue;
+        };
+        let friend = parts[1] == "1";
+        let name = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        core.add_contact_bytes(pk, name, friend);
+    }
+}
+
+/// Persist the current contact list (0600 on unix). Called after any change.
+fn save_contacts(core: &Core) {
+    let path = contacts_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    for (pk, name, friend) in core.export_contacts() {
+        let pkhex: String = pk.iter().map(|b| format!("{b:02x}")).collect();
+        out.push_str(&format!("{}\t{}\t{}\n", pkhex, u8::from(friend), name.unwrap_or_default()));
+    }
+    if std::fs::write(&path, out).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
 /// Bootstrap the shared Tor transport at most once and reuse it for every onion
 /// session. A concurrent caller awaits the in-flight bootstrap instead of
 /// starting a second one — so a 2nd/3rd chat reuses the already-warm client.
@@ -326,6 +418,15 @@ enum Cmd {
     Reconnect {
         id: u64,
     },
+    /// Add the session's presented peer account to the persistent contact list
+    /// (optionally as a friend). Makes contacts/friends-only access usable: the
+    /// host builds a contact set from people it has actually talked to.
+    AddContact {
+        id: u64,
+        account_fp: [u8; 48],
+        name: String,
+        friend: bool,
+    },
 }
 
 /// Map a posture label to a KEM profile (mirrors the CLI / mobile postures).
@@ -346,6 +447,9 @@ enum UiEvt {
     Disconnected { id: u64, who: String },
     /// `mine = true` for our own echoed line; else an inbound peer message.
     Line { id: u64, mine: bool, who: String, text: String },
+    /// A peer presented its account identity — carries the account fingerprint +
+    /// display name so the chat can offer "Add contact / friend".
+    PeerIdentity { id: u64, account_fp: [u8; 48], name: String },
     /// Global Tor bootstrap progress (one shared client), `frac` in 0.0..=1.0.
     /// Only constructed on a Tor build (init_tor); harmless dead variant otherwise.
     #[cfg_attr(not(feature = "tor"), allow(dead_code))]
@@ -445,15 +549,21 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     vec![listen.clone()],
                     &channel,
                 );
+                // Stable per-install device identity (persisted seed), so this host
+                // is recognizable across launches and its contact list is meaningful.
+                let device = IdentityKeyPair::from_secret_bytes(device_seed());
                 let (c, rx) = if use_nym {
-                    let (c, rx) = Core::new_group(IdentityKeyPair::generate(), host_suite, transport, desc, true);
+                    let (c, rx) = Core::new_group(device, host_suite, transport, desc, true);
                     // Multi-homed => gossip bridge: re-flood group ciphertext across
                     // all transports, merging Nym/Tor islands into one chat.
                     c.enable_gossip();
                     (c, rx)
                 } else {
-                    Core::new(IdentityKeyPair::generate(), host_suite, transport, desc)
+                    Core::new(device, host_suite, transport, desc)
                 };
+                // Restore saved contacts so contacts/friends-only access admits the
+                // right accounts (and recognizes them by name).
+                load_contacts(&c);
                 // Wire at-rest persistence BEFORE host(): a passphrase-sealed
                 // SealedFileStore (AES-256-GCM, Argon2id KEK) backs both the outbox
                 // (so un-acked sends survive a restart) and the history (redisplayed
@@ -562,13 +672,15 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         // A Nym join is a TreeKEM group MEMBER (the host is the
                         // committer); connect sends our KeyPackage and we get a
                         // Welcome back. Otherwise a pairwise chat.
+                        let device = IdentityKeyPair::from_secret_bytes(device_seed());
                         let (c, rx) = if join_nym {
-                            let (c, rx) = Core::new_group(IdentityKeyPair::generate(), join_suite, transport, desc, false);
+                            let (c, rx) = Core::new_group(device, join_suite, transport, desc, false);
                             c.enable_gossip(); // bridge (see the host path)
                             (c, rx)
                         } else {
-                            Core::new(IdentityKeyPair::generate(), join_suite, transport, desc)
+                            Core::new(device, join_suite, transport, desc)
                         };
+                        load_contacts(&c);
                         match c.connect(&endpoint).await {
                             Ok(_) => {
                                 let _ = ui_tx.send(UiEvt::Status { id, text: format!("joined — connected to {endpoint}") });
@@ -587,6 +699,18 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     match c.send(&text).await {
                         Ok(_) => { let _ = ui_tx.send(UiEvt::Line { id, mine: true, who: "me".into(), text }); }
                         Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("send failed: {e}") }); }
+                    }
+                }
+            }
+            Cmd::AddContact { id, account_fp, name, friend } => {
+                if let Some(c) = cores.get(&id) {
+                    let name = (!name.trim().is_empty()).then(|| name.trim().to_string());
+                    if c.add_seen_contact(account_fp, name, friend) {
+                        save_contacts(c);
+                        let kind = if friend { "friend" } else { "contact" };
+                        let _ = ui_tx.send(UiEvt::Status { id, text: format!("added {kind} {}", short(&account_fp)) });
+                    } else {
+                        let _ = ui_tx.send(UiEvt::Status { id, text: "could not add contact (account not presented yet)".into() });
                     }
                 }
             }
@@ -659,6 +783,8 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                 Event::Identity { account_fingerprint, username, .. } => {
                     let who = username.unwrap_or_else(|| short(&account_fingerprint));
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("identity: {who}") });
+                    // Surface the account so the chat can offer "Add contact/friend".
+                    let _ = ui_tx.send(UiEvt::PeerIdentity { id, account_fp: account_fingerprint, name: who });
                 }
                 Event::Name { from, label, tier, caveat, safety_number, .. } => {
                     // SUB-SPEC A NameRender: honest tier badge, always-available safety
@@ -742,6 +868,9 @@ struct Session {
     invite: Option<String>,
     qr: Option<egui::TextureHandle>,
     status: String,
+    /// The peer's presented account (fingerprint + display name), if any — the
+    /// target of the chat's "Add contact / friend" affordance.
+    peer_account: Option<([u8; 48], String)>,
 }
 
 impl Session {
@@ -756,6 +885,7 @@ impl Session {
             invite: None,
             qr: None,
             status: "starting…".into(),
+            peer_account: None,
         }
     }
 }
@@ -878,6 +1008,11 @@ impl App {
                 UiEvt::Line { id, mine, who, text } => {
                     if let Some(s) = self.session_mut(id) {
                         s.transcript.push((mine, who, text));
+                    }
+                }
+                UiEvt::PeerIdentity { id, account_fp, name } => {
+                    if let Some(s) = self.session_mut(id) {
+                        s.peer_account = Some((account_fp, name));
                     }
                 }
                 UiEvt::TorProgress(frac) => {
@@ -1081,14 +1216,15 @@ impl App {
     fn chat_screen(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.active else { self.screen = Screen::Home; return };
         let Some(idx) = self.sessions.iter().position(|s| s.id == id) else { self.screen = Screen::Home; return };
-        let (title, connected, peers, invite, is_host) = {
+        let (title, connected, peers, invite, is_host, peer_account) = {
             let s = &self.sessions[idx];
-            (s.title.clone(), s.connected, s.peers, s.invite.clone(), matches!(s.kind, Kind::Host))
+            (s.title.clone(), s.connected, s.peers, s.invite.clone(), matches!(s.kind, Kind::Host), s.peer_account.clone())
         };
 
         let mut go_home = false;
         let mut toggle_invite = false;
         let mut do_reconnect = false;
+        let mut add_contact: Option<bool> = None; // Some(friend?)
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new(egui::RichText::new("< Back").color(FG)).fill(PANEL)).clicked() {
                 go_home = true;
@@ -1112,6 +1248,23 @@ impl App {
                 }
             });
         });
+        // Add-contact affordance: once a peer has presented its account, the host
+        // can save it as a contact/friend — which is what makes contacts/friends-
+        // only access usable (it builds the set from people you've talked to).
+        if let Some((_fp, name)) = &peer_account {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("peer account: {name}")).small().color(MUTED));
+                if ui.add(egui::Button::new(egui::RichText::new("Add contact").color(FG)).fill(PANEL)).clicked() {
+                    add_contact = Some(false);
+                }
+                if ui.add(egui::Button::new(egui::RichText::new("Add friend").color(ACCENT)).fill(PANEL)).clicked() {
+                    add_contact = Some(true);
+                }
+            });
+        }
+        if let (Some(friend), Some((fp, name))) = (add_contact, &peer_account) {
+            let _ = self.cmd_tx.send(Cmd::AddContact { id, account_fp: *fp, name: name.clone(), friend });
+        }
         if go_home {
             self.screen = Screen::Home;
             return;

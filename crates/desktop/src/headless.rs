@@ -110,6 +110,7 @@ pub fn run(args: &[String]) -> i32 {
                     format!("< {who}: {text}")
                 }
             }
+            UiEvt::PeerIdentity { name, .. } => format!("IDENTITY {name}"),
         };
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
