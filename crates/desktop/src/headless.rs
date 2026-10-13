@@ -113,6 +113,12 @@ pub fn run(args: &[String]) -> i32 {
                     format!("< {who}: {text}")
                 }
             }
+            UiEvt::Sent { text, .. } => format!("> me: {text}"),
+            UiEvt::Delivered { gid, .. } => {
+                let h: String = gid.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                format!("DELIVERED {h}")
+            }
+            UiEvt::Dropped { count, .. } => format!("DROPPED {count}"),
             UiEvt::PeerIdentity { name, .. } => format!("IDENTITY {name}"),
         };
         let _ = writeln!(out, "{line}");

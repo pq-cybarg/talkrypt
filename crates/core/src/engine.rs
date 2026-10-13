@@ -1975,7 +1975,7 @@ impl Core {
     /// Send `text`. In a plain chat this is a direct pairwise message to every
     /// peer; in a group chat it is encrypted once under the group epoch and
     /// fanned out (the host relays to all members).
-    pub async fn send(&self, text: &str) -> Result<()> {
+    pub async fn send(&self, text: &str) -> Result<[u8; 32]> {
         self.send_marked(text, self.inner.default_marking.clone())
             .await
     }
@@ -1983,8 +1983,13 @@ impl Core {
     /// Send `text` carrying an explicit (authenticated) classification marking.
     /// The marking travels inside the AEAD-protected payload — confidential and
     /// tamper-evident — for both pairwise and group messages.
-    pub async fn send_marked(&self, text: &str, marking: Option<Marking>) -> Result<()> {
-        match self.inner.role {
+    ///
+    /// Returns the message's **`gossip_id`** so a caller can correlate a later
+    /// [`Event::Delivered`] (the recipient's ack, group/persistent path) to this
+    /// exact message and show per-message delivery state. For a pairwise chat the
+    /// id is still returned (a stable local handle), though no ack is expected.
+    pub async fn send_marked(&self, text: &str, marking: Option<Marking>) -> Result<[u8; 32]> {
+        let gid = match self.inner.role {
             GroupRole::None => {
                 let frame = Frame::Chat {
                     channel: self.inner.descriptor.channel.clone(),
@@ -2003,6 +2008,7 @@ impl Core {
                         pending.lock().unwrap().push(payload.clone());
                     }
                 }
+                gossip_id(&payload)
             }
             GroupRole::Host | GroupRole::Member => {
                 // SUB-SPEC A §4 mode 3: when the on-message-id cadence is on and we
@@ -2047,13 +2053,16 @@ impl Core {
                     };
                     record_backlog(&self.inner, gossip_id(&ct), rec.encode(), ts);
                 }
+                // The ciphertext gossip-id is this message's stable id: the receiver
+                // dedups + acks on it, and `Event::Delivered { gossip_id }` carries it
+                // back — so it's also what `send` returns for delivery tracking.
+                let gid = gossip_id(&ct);
                 // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
-                // outbox (keyed by ciphertext gossip-id, which the receiver dedups +
-                // acks on) so an offline member catches up on reconnect. Re-encrypting
-                // later would advance the ratchet, so we store these exact bytes.
+                // outbox (keyed by that gossip-id) so an offline member catches up on
+                // reconnect. Re-encrypting later would advance the ratchet, so we store
+                // these exact bytes.
                 let frame = Frame::GroupMsg(ct.clone());
                 if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
-                    let gid = gossip_id(&ct);
                     let dropped = self.inner.outbox.enqueue(
                         &self.inner.descriptor.channel,
                         gid,
@@ -2065,9 +2074,10 @@ impl Core {
                     }
                 }
                 route(&self.inner, frame, Route::Broadcast).await;
+                gid
             }
-        }
-        Ok(())
+        };
+        Ok(gid)
     }
 
     /// D1: re-send every un-acked outbox frame to currently-connected peers. Idempotent

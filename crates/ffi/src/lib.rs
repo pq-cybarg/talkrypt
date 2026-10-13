@@ -1194,10 +1194,13 @@ impl TalkryptClient {
         }))
     }
 
-    /// Send a message to the channel.
-    pub fn send(&self, text: String) -> Result<(), FfiError> {
+    /// Send a message to the channel. Returns the message's `gossip_id` as hex so
+    /// the app can correlate a later `Delivered` event to this exact message and
+    /// show per-message delivery state (empty string only if sending failed).
+    pub fn send(&self, text: String) -> Result<String, FfiError> {
         self.rt
             .block_on(self.core.send(&text))
+            .map(|gid| gid.iter().map(|b| format!("{b:02x}")).collect())
             .map_err(FfiError::from)
     }
 

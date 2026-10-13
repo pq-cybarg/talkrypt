@@ -533,6 +533,14 @@ enum UiEvt {
     Disconnected { id: u64, who: String },
     /// `mine = true` for our own echoed line; else an inbound peer message.
     Line { id: u64, mine: bool, who: String, text: String },
+    /// Our own message was handed to the transport — rendered as a bubble in the
+    /// `Sent` state, keyed by `gid` so a later `Delivered` can upgrade it.
+    Sent { id: u64, gid: [u8; 32], text: String },
+    /// A recipient acked the message with this `gid` (group/persistent path).
+    Delivered { id: u64, gid: [u8; 32] },
+    /// The outbox dropped `count` un-acked messages (cap/TTL) → mark that many of
+    /// our most-recent still-unacked bubbles as failed.
+    Dropped { id: u64, count: usize },
     /// A peer presented its account identity — carries the account fingerprint +
     /// display name so the chat can offer "Add contact / friend".
     PeerIdentity { id: u64, account_fp: [u8; 48], name: String },
@@ -794,7 +802,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
             Cmd::Send { id, text } => {
                 if let Some(c) = cores.get(&id) {
                     match c.send(&text).await {
-                        Ok(_) => { let _ = ui_tx.send(UiEvt::Line { id, mine: true, who: "me".into(), text }); }
+                        Ok(gid) => { let _ = ui_tx.send(UiEvt::Sent { id, gid, text }); }
                         Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("send failed: {e}") }); }
                     }
                 }
@@ -907,8 +915,8 @@ fn spawn_forwarder<F: Fn() + Send + 'static>(
                     let _ = ui_tx.send(UiEvt::Status { id, text: format!("\u{2733} {} is vouched", short(&subject)) });
                 }
                 Event::Vouch { .. } => {} // below threshold / withdrawn — no status line
-                Event::Delivered { .. } => {} // D1 delivery receipt (UI later)
-                Event::OutboxDropped { count } => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("! outbox dropped {count} un-acked message(s)") }); }
+                Event::Delivered { gossip_id } => { let _ = ui_tx.send(UiEvt::Delivered { id, gid: gossip_id }); }
+                Event::OutboxDropped { count } => { let _ = ui_tx.send(UiEvt::Dropped { id, count }); }
                 Event::PromoteProposed { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion proposed".into() }); }
                 Event::Promoted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promoted — chat is persistent".into() }); }
                 Event::PromoteAborted { .. } => { let _ = ui_tx.send(UiEvt::Status { id, text: "promotion aborted".into() }); }
@@ -954,12 +962,32 @@ enum Kind {
     Join,
 }
 
+/// Per-message delivery state for our OWN sent messages. `Sent` = handed to the
+/// transport (terminal for a pairwise chat — there's no ack); `Delivered` = a
+/// recipient ack (`Event::Delivered`, group/persistent path); `Failed` = the
+/// outbox dropped it (cap/TTL). Rendered as a trailing ·/✓✓/✗ on own bubbles.
+#[derive(PartialEq, Clone, Copy)]
+enum Delivery {
+    Sent,
+    Delivered,
+    Failed,
+}
+
+/// One rendered transcript line: who said it, the text, and (for our own lines)
+/// the delivery state. Peer/system lines carry `mine = false` and ignore it.
+struct Msg {
+    mine: bool,
+    who: String,
+    text: String,
+    delivery: Delivery,
+}
+
 /// One live chat the worker holds a `Core` for. The UI mirrors its state here.
 struct Session {
     id: u64,
     kind: Kind,
     title: String,
-    transcript: Vec<(bool, String, String)>, // (mine, who, text)
+    transcript: Vec<Msg>,
     peers: usize,
     connected: bool,
     invite: Option<String>,
@@ -968,6 +996,9 @@ struct Session {
     /// The peer's presented account (fingerprint + display name), if any — the
     /// target of the chat's "Add contact / friend" affordance.
     peer_account: Option<([u8; 48], String)>,
+    /// Our own sent messages by `gossip_id` → transcript index, so a later
+    /// `Delivered` ack can upgrade the right bubble's state.
+    sent_index: std::collections::HashMap<[u8; 32], usize>,
 }
 
 impl Session {
@@ -983,6 +1014,7 @@ impl Session {
             qr: None,
             status: "starting…".into(),
             peer_account: None,
+            sent_index: std::collections::HashMap::new(),
         }
     }
 }
@@ -1106,7 +1138,7 @@ impl App {
                     if let Some(s) = self.session_mut(id) {
                         s.peers += 1;
                         s.connected = true;
-                        s.transcript.push((false, "•".into(), format!("{who} connected")));
+                        s.transcript.push(Msg { mine: false, who: "•".into(), text: format!("{who} connected"), delivery: Delivery::Delivered });
                     }
                 }
                 UiEvt::Disconnected { id, who } => {
@@ -1115,12 +1147,44 @@ impl App {
                         if s.peers == 0 {
                             s.connected = false;
                         }
-                        s.transcript.push((false, "•".into(), format!("{who} left")));
+                        s.transcript.push(Msg { mine: false, who: "•".into(), text: format!("{who} left"), delivery: Delivery::Delivered });
                     }
                 }
                 UiEvt::Line { id, mine, who, text } => {
                     if let Some(s) = self.session_mut(id) {
-                        s.transcript.push((mine, who, text));
+                        s.transcript.push(Msg { mine, who, text, delivery: Delivery::Delivered });
+                    }
+                }
+                UiEvt::Sent { id, gid, text } => {
+                    if let Some(s) = self.session_mut(id) {
+                        let idx = s.transcript.len();
+                        s.transcript.push(Msg { mine: true, who: "me".into(), text, delivery: Delivery::Sent });
+                        s.sent_index.insert(gid, idx);
+                    }
+                }
+                UiEvt::Delivered { id, gid } => {
+                    if let Some(s) = self.session_mut(id) {
+                        if let Some(&idx) = s.sent_index.get(&gid) {
+                            if let Some(m) = s.transcript.get_mut(idx) {
+                                m.delivery = Delivery::Delivered;
+                            }
+                        }
+                    }
+                }
+                UiEvt::Dropped { id, count } => {
+                    if let Some(s) = self.session_mut(id) {
+                        // Mark the `count` most-recent still-unacked own messages failed
+                        // (OutboxDropped carries no per-message id).
+                        let mut n = count;
+                        for m in s.transcript.iter_mut().rev() {
+                            if n == 0 {
+                                break;
+                            }
+                            if m.mine && m.delivery == Delivery::Sent {
+                                m.delivery = Delivery::Failed;
+                                n -= 1;
+                            }
+                        }
                     }
                 }
                 UiEvt::PeerIdentity { id, account_fp, name } => {
@@ -1472,10 +1536,18 @@ impl App {
             .max_height((avail - 52.0).max(80.0))
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for (mine, who, text) in &self.sessions[idx].transcript {
+                for Msg { mine, who, text, delivery } in &self.sessions[idx].transcript {
                     ui.add_space(4.0);
                     if *mine {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            // Per-message delivery indicator (RTL: sits left of the bubble):
+                            // · sent · ✓✓ delivered (acked) · ✗ dropped/failed.
+                            let (glyph, col) = match delivery {
+                                Delivery::Sent => ("·", MUTED),
+                                Delivery::Delivered => ("✓✓", ACCENT),
+                                Delivery::Failed => ("✗", egui::Color32::from_rgb(220, 90, 90)),
+                            };
+                            ui.label(egui::RichText::new(glyph).small().color(col));
                             bubble(ui, ACCENT, None, text, egui::Color32::WHITE);
                         });
                     } else if who == "•" {
