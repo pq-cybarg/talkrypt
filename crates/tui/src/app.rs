@@ -40,6 +40,9 @@ pub struct App {
     /// How many wrapped rows the user has scrolled UP from the newest line.
     /// 0 == pinned to the bottom (newest), the default.
     pub scroll_offset: u16,
+    /// Our own sent messages: `gossip_id` → (log index, original text), so a later
+    /// delivery ack can upgrade that line's marker (· sent → ✓✓ delivered).
+    pub sent: std::collections::HashMap<[u8; 32], (usize, String)>,
     /// Current input buffer.
     pub input: String,
 }
@@ -53,6 +56,7 @@ impl App {
             safety_number: String::new(),
             log: Vec::new(),
             scroll_offset: 0,
+            sent: std::collections::HashMap::new(),
             input: String::new(),
         }
     }
@@ -63,7 +67,33 @@ impl App {
     pub fn push(&mut self, line: impl Into<String>) {
         self.log.push(line.into());
         if self.log.len() > 2000 {
-            self.log.drain(0..self.log.len() - 2000);
+            let drained = self.log.len() - 2000;
+            self.log.drain(0..drained);
+            // Keep the own-message index map valid across the drain: entries whose
+            // line scrolled off are forgotten, the rest shift down by `drained`.
+            self.sent = self
+                .sent
+                .drain()
+                .filter_map(|(gid, (i, t))| (i >= drained).then(|| (gid, (i - drained, t))))
+                .collect();
+        }
+    }
+
+    /// Record our own just-sent message with a "sent" marker, keyed by its
+    /// `gossip_id` so a delivery ack can later upgrade it.
+    pub fn push_sent(&mut self, gid: [u8; 32], text: &str) {
+        let idx = self.log.len();
+        self.push(format!("· me> {text}"));
+        self.sent.insert(gid, (idx, text.to_string()));
+    }
+
+    /// Upgrade a sent message to "delivered" (✓✓) when its ack arrives. No-op if
+    /// the message isn't ours / already scrolled out of the bounded log.
+    pub fn mark_delivered(&mut self, gid: [u8; 32]) {
+        if let Some((i, text)) = self.sent.get(&gid).cloned() {
+            if let Some(line) = self.log.get_mut(i) {
+                *line = format!("✓✓ me> {text}");
+            }
         }
     }
 
@@ -219,6 +249,34 @@ mod tests {
         // End returns to the newest.
         app.scroll_offset = 0;
         assert!(rendered_text(&app, 40, 8).contains("line-99"));
+    }
+
+    #[test]
+    fn own_message_marks_sent_then_delivered() {
+        let mut app = App::new("#c", "s");
+        let gid = [7u8; 32];
+        app.push_sent(gid, "hello");
+        assert!(app.log.last().unwrap().starts_with("· me> hello"), "sent marker");
+        app.mark_delivered(gid);
+        assert!(app.log.last().unwrap().starts_with("✓✓ me> hello"), "delivered marker");
+        // An ack for an unknown gid is a harmless no-op.
+        app.mark_delivered([9u8; 32]);
+        assert!(app.log.last().unwrap().starts_with("✓✓ me> hello"));
+    }
+
+    #[test]
+    fn sent_index_survives_scrollback_drain() {
+        let mut app = App::new("#c", "s");
+        let gid = [1u8; 32];
+        app.push_sent(gid, "early");
+        // Push enough to force a drain past the 2000-line cap.
+        for i in 0..2100 {
+            app.push(format!("filler {i}"));
+        }
+        // The "early" line scrolled off; its stale index must not mis-mark another.
+        app.mark_delivered(gid);
+        assert!(!app.log.iter().any(|l| l.contains("✓✓ me> early")));
+        assert!(!app.log.iter().any(|l| l.starts_with("✓✓ me> filler")));
     }
 
     #[test]

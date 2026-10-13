@@ -209,8 +209,9 @@ async fn run(
                     Some(CoreEvent::Name { .. }) => {}
                     Some(CoreEvent::Linkage { .. }) => {} // SUB-SPEC B (UI: Task 13)
                     Some(CoreEvent::Vouch { .. }) => {}   // SUB-SPEC C (UI: Task 11)
-                    Some(CoreEvent::Delivered { .. }) => {}    // D1 delivery receipt (UI later)
-                    Some(CoreEvent::OutboxDropped { .. }) => {} // D1 outbox cap/TTL drop
+                    Some(CoreEvent::Delivered { gossip_id }) => app.mark_delivered(gossip_id),
+                    Some(CoreEvent::OutboxDropped { count }) =>
+                        app.push(format!("✗ {count} message(s) not delivered (outbox cap/TTL)")),
                     Some(CoreEvent::PromoteProposed { .. }) => app.push("* promotion proposed".to_string()),
                     Some(CoreEvent::Promoted { .. }) => app.push("* promoted - chat is persistent".to_string()),
                     Some(CoreEvent::PromoteAborted { .. }) => app.push("* promotion aborted".to_string()),
@@ -265,10 +266,11 @@ async fn run(
                                         "peers" => app.push(format!("connected peers: {}", core.peer_count())),
                                         other => app.push(format!("unknown command: /{other}")),
                                     }
-                                } else if let Err(e) = core.send(&line).await {
-                                    app.push(format!("! send failed: {e}"));
                                 } else {
-                                    app.push(format!("me> {line}"));
+                                    match core.send(&line).await {
+                                        Ok(gid) => app.push_sent(gid, &line),
+                                        Err(e) => app.push(format!("! send failed: {e}")),
+                                    }
                                 }
                             }
                             _ => {}
