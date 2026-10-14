@@ -37,11 +37,14 @@ feedback) / **minor** / **polish**.
 
 ### Android (`android/app/src/main/kotlin/...`) — strongest client
 > Validation note: the APK (with regenerated uniffi bindings for this round's FFI
-> changes) **builds, installs, launches, and runs with no talkrypt crash** on the
-> `tk_phone` emulator. Deeper functional UI automation was blocked by the
-> swiftshader emulator destabilizing (`system_server` crashed, `DeadSystemException`
-> cascade) — an environment artifact, not the app. Fixes below are compiled +
-> code-reviewed; on-device functional retest pending a stable device/emulator.
+> changes) **builds, installs, launches, and the host flow works end-to-end** on
+> the `tk_phone` emulator (host GPU): New chat → Host a chat → the chat opens with
+> the invite **QR rendered**, a live **safety number**, and the `hosting ·
+> persistent` status, and the nearby-advertising permission prompt fires as
+> expected — no talkrypt crash. (The emulator's own `system_server`/SystemUI ANRs
+> under sustained automation are an environment artifact, not the app; they only
+> limit *extended* tap-through sequences.) Fixes below are compiled, code-reviewed,
+> and the core host path is emulator-verified.
 - ~~**MAJOR — host-over-Tor frozen form**~~ **FIXED** — `startHost` now shows the live `connectingScreen(...)` (same Tor-bootstrap % as join) for a Tor/Nym host instead of a toast on the unchanged form, and returns to the list on failure.
 - ~~**MAJOR — no double-submit guard**~~ **FIXED (host/join)** — an `inFlight` guard rejects a second Host/Join tap while the first is bootstrapping (reset in a `finally`), so no duplicate sessions/listeners. (Spawn-anchor/Link still to guard — follow-up.)
 - ~~**MAJOR — `REQ_BLE` has no handler** + grant races first use~~ **FIXED** — `ensureBlePermissions(onGranted)` defers the beacon/mesh start until the grant resolves (stashed in `pendingBle`), and a new `REQ_BLE` branch in `onRequestPermissionsResult` resumes it. First beacon/mesh tap no longer silently fails.
