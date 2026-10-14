@@ -101,6 +101,10 @@ class MainActivity : Activity() {
     private val foundInvites = LinkedHashMap<String, NearbyDiscovery.Peer>()
     private var nearbyList: LinearLayout? = null
     private var pendingNearby: (() -> Unit)? = null
+    private var pendingBle: (() -> Unit)? = null
+    /// Guard against double-submit of a host/join action: a second tap while the
+    /// first is still bootstrapping would spin up a duplicate session/listener.
+    private var inFlight = false
 
     // palette — tokens live in [Tk]; local aliases keep call sites short
     private val bg = Tk.bg
@@ -550,17 +554,20 @@ class MainActivity : Activity() {
     private fun startBeacon(id: String) {
         val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
         stopBeacon(id) // replace any prior beacon
-        ensureBlePermissions()
-        // Both radios at once (Rust MultiBeacon's Kotlin peer): BLE short-range +
-        // Wi-Fi/NSD for larger payloads/range. Each is best-effort; a dead radio is fine.
-        val backend = MultiLocalBeacon(listOf(BleBeaconBackend(this), WifiBeaconBackend(this)))
-        val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
-        // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
-        backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
-            { msg -> ui.post { sysLine(id, "beacon: $msg") } })
-        beaconBackend = backend
-        beacon = fb
-        sysLine(id, "📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning")
+        // Only advertise/scan once BLE permission is actually granted (deferred if
+        // the user is prompted) — otherwise the first tap would silently no-op.
+        ensureBlePermissions {
+            // Both radios at once (Rust MultiBeacon's Kotlin peer): BLE short-range +
+            // Wi-Fi/NSD for larger payloads/range. Each is best-effort; a dead radio is fine.
+            val backend = MultiLocalBeacon(listOf(BleBeaconBackend(this), WifiBeaconBackend(this)))
+            val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
+            // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
+            backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
+                { msg -> ui.post { sysLine(id, "beacon: $msg") } })
+            beaconBackend = backend
+            beacon = fb
+            sysLine(id, "📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning")
+        }
     }
 
     private fun stopBeacon(id: String) {
@@ -592,9 +599,11 @@ class MainActivity : Activity() {
     private fun startMesh(id: String, kind: MeshKind) {
         val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
         stopMesh(id)
-        ensureBlePermissions()
+        // Scan only after BLE permission is granted (deferred if prompted), so the
+        // first mesh tap can't silently fail.
+        ensureBlePermissions {
         val mgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
-        val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast("no BLE scanner"); return }
+        val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast("no BLE scanner"); return@ensureBlePermissions }
         val filter = android.bluetooth.le.ScanFilter.Builder()
             .setServiceUuid(android.os.ParcelUuid(kind.service)).build()
         val settings = android.bluetooth.le.ScanSettings.Builder()
@@ -622,6 +631,7 @@ class MainActivity : Activity() {
         } catch (e: SecurityException) {
             toast("BLE scan permission denied")
         }
+        } // ensureBlePermissions
     }
 
     private fun stopMesh(id: String) {
@@ -652,14 +662,26 @@ class MainActivity : Activity() {
     }
 
     /** Request the BLE runtime permissions (API 31+) the beacon/nearby features need. */
-    private fun ensureBlePermissions() {
-        if (Build.VERSION.SDK_INT >= 31) {
-            val perms = arrayOf(
-                android.Manifest.permission.BLUETOOTH_ADVERTISE,
-                android.Manifest.permission.BLUETOOTH_SCAN,
-                android.Manifest.permission.BLUETOOTH_CONNECT,
-            ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-            if (perms.isNotEmpty()) runCatching { requestPermissions(perms.toTypedArray(), REQ_BLE) }
+    /** Ensure BLE advertise/scan/connect permissions, THEN run `onGranted`. If a
+     *  grant is needed we stash the action and resume it from
+     *  `onRequestPermissionsResult` (REQ_BLE) — previously the caller raced the
+     *  dialog and the first beacon/mesh tap silently failed (there was no handler
+     *  for the grant at all). On <31 the runtime perms don't exist, so run now. */
+    private fun ensureBlePermissions(onGranted: () -> Unit) {
+        if (Build.VERSION.SDK_INT < 31) {
+            onGranted()
+            return
+        }
+        val perms = arrayOf(
+            android.Manifest.permission.BLUETOOTH_ADVERTISE,
+            android.Manifest.permission.BLUETOOTH_SCAN,
+            android.Manifest.permission.BLUETOOTH_CONNECT,
+        ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (perms.isEmpty()) {
+            onGranted()
+        } else {
+            pendingBle = onGranted
+            runCatching { requestPermissions(perms.toTypedArray(), REQ_BLE) }
         }
     }
 
@@ -1538,6 +1560,18 @@ class MainActivity : Activity() {
                 toast("nearby discovery needs Bluetooth / nearby-Wi-Fi permission")
             }
         }
+        if (requestCode == REQ_BLE) {
+            // Resume the deferred beacon/mesh start now that BLE perms resolved.
+            val act = pendingBle
+            pendingBle = null
+            val granted = grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                act?.invoke()
+            } else {
+                toast("nearby beacon / mesh needs Bluetooth permission")
+            }
+        }
     }
 
     // ---------- anchors (username registry directory) ----------
@@ -1994,7 +2028,13 @@ class MainActivity : Activity() {
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
     private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL, namePolicy: String = "") {
-        toast("creating chat…")
+        if (inFlight) { toast("already creating a chat…"); return }
+        inFlight = true
+        // Over Tor/Nym the bootstrap takes tens of seconds; show a connecting
+        // screen (not just a toast on the unchanged form) so the host isn't left
+        // staring at a form that looks like nothing happened.
+        if (useTor || useNym) setContentView(connectingScreen("Starting your chat over ${if (useNym) "Nym + Tor" else "Tor"}…", true))
+        else toast("creating chat…")
         thread {
             try {
                 // Bind to the LAN/hotspot address (not loopback) so the invite is
@@ -2037,7 +2077,12 @@ class MainActivity : Activity() {
                     addBubble(invite, mine = false, sender = "invite")
                     startNearbyAdvertising(invite)
                 }
-            } catch (e: Exception) { ui.post { toast("host failed: ${e.message}") } }
+            } catch (e: Exception) {
+                // Return to home so the user isn't stranded on the connecting screen.
+                ui.post { toast("host failed: ${e.message}"); if (useTor || useNym) setContentView(chatListScreen()) }
+            } finally {
+                inFlight = false
+            }
         }
     }
 
@@ -2090,6 +2135,8 @@ class MainActivity : Activity() {
     }
 
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
+        if (inFlight) { toast("already joining…"); return }
+        inFlight = true
         // Route over Tor if the invite is an onion (decoded from the descriptor —
         // the `.onion` is inside the base32, not the URI text), OR the user asked.
         // Otherwise a pasted onion invite would be plain-TCP dialed and fail.
@@ -2139,6 +2186,8 @@ class MainActivity : Activity() {
                     connectingLabel?.apply { text = "failed: ${ChatNet.friendlyError(e.message)}"; setTextColor(Tk.danger) }
                     toast("join failed")
                 }
+            } finally {
+                inFlight = false
             }
         }
     }
