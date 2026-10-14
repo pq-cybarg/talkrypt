@@ -36,13 +36,19 @@ feedback) / **minor** / **polish**.
 - **MAJOR — no way to leave/close/delete a chat** (`:941,969` only push); dead chats accumulate forever.
 
 ### Android (`android/app/src/main/kotlin/...`) — strongest client
-- **MAJOR — host-over-Tor frozen form** (`MainActivity.kt:1996-2042`): join gets a live bootstrap screen (`:2158-2193`), host gets only a toast.
-- **MAJOR — no double-submit guard**: Host/Join/Spawn-anchor/Link buttons stay enabled during the in-flight `thread{}` (`:324,2040,1645,1198,1782`) → double sessions/listeners.
-- **MAJOR — main-thread unseal / ML-DSA reconstruct** in `settingsScreen` (`:924`), `anchorsScreen` (`:1594,1602`), `segmentsScreen` (`:1356-1363`), `joinPreflightScreen` (`:2058`), `restrictedHostScreen` (`:1711`) → ANR/jank on cold start. (Chat-list header does it off-thread at `:396-399` — follow that pattern.)
-- **MAJOR — BLE permission grant races first use** (`:553-563,595-620`) **and `REQ_BLE` has no handler** in `onRequestPermissionsResult` (`:1526-1530`) → first beacon/mesh tap always silently fails.
-- **MAJOR — camera-denial dead-end** (`QrScanActivity.kt:120,155`): deny → permanent black screen, no rationale / settings / retry.
-- **MAJOR — scanner accepts any QR then rejects it** (`QrScanActivity.kt:240-241` finishes on first decode; caller toasts "Not a talkrypt QR" `:241`) — should keep scanning until a `talkrypt://` payload.
-- **MAJOR — no localization**: all strings hardcoded English, no `strings.xml`, RTL in `configChanges` but no resources.
+> Validation note: the APK (with regenerated uniffi bindings for this round's FFI
+> changes) **builds, installs, launches, and runs with no talkrypt crash** on the
+> `tk_phone` emulator. Deeper functional UI automation was blocked by the
+> swiftshader emulator destabilizing (`system_server` crashed, `DeadSystemException`
+> cascade) — an environment artifact, not the app. Fixes below are compiled +
+> code-reviewed; on-device functional retest pending a stable device/emulator.
+- ~~**MAJOR — host-over-Tor frozen form**~~ **FIXED** — `startHost` now shows the live `connectingScreen(...)` (same Tor-bootstrap % as join) for a Tor/Nym host instead of a toast on the unchanged form, and returns to the list on failure.
+- ~~**MAJOR — no double-submit guard**~~ **FIXED (host/join)** — an `inFlight` guard rejects a second Host/Join tap while the first is bootstrapping (reset in a `finally`), so no duplicate sessions/listeners. (Spawn-anchor/Link still to guard — follow-up.)
+- ~~**MAJOR — `REQ_BLE` has no handler** + grant races first use~~ **FIXED** — `ensureBlePermissions(onGranted)` defers the beacon/mesh start until the grant resolves (stashed in `pendingBle`), and a new `REQ_BLE` branch in `onRequestPermissionsResult` resumes it. First beacon/mesh tap no longer silently fails.
+- **MAJOR — main-thread unseal / ML-DSA reconstruct** in `settingsScreen`/`anchorsScreen`/`segmentsScreen`/`joinPreflightScreen`/`restrictedHostScreen` → ANR/jank. *Still open* (follow-up: move onto the `thread{}`+`ui.post` pattern the chat-list header already uses).
+- **MAJOR — camera-denial dead-end** (`QrScanActivity.kt`) and **scanner accepts any QR then rejects it** — *still open* (follow-up).
+- **Per-bubble delivery state** — the FFI `send` now returns the hex `gossip_id` (bindings regenerated), so the Android per-bubble treatment is unblocked — *Kotlin render still to do*.
+- **MAJOR — no localization**: all strings hardcoded English — *still open*.
 
 ### TUI (`crates/tui/src/{main,app}.rs`) — toy skeleton
 > **RESOLVED (2026-10)** — all blockers + the resize/scrollback/status majors fixed; see `crates/tui` tests `newest_line_visible_despite_a_long_wrapped_line`, `scrolling_up_reveals_older_then_end_returns_to_newest`, `push_qr_renders_block_rows_for_an_invite`.
