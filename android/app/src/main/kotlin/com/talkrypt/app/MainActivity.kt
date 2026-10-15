@@ -1379,19 +1379,35 @@ class MainActivity : Activity() {
         if (segs.isEmpty()) {
             col.addView(text("No segments yet — create one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         } else {
-            segs.forEach { (name, seed) ->
-                val seg = runCatching { SegmentKey.fromSeedHex(seed) }.getOrNull() ?: return@forEach
-                col.addView(text("● $name", 15f, fg, bold = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-                col.addView(text("safety ${seg.safetyNumber().take(23)}…", 12f, muted))
-                col.addView(pillButton("Join as “$name”", accent, onAccent) {
-                    val u = joinUri.text.toString().trim()
-                    if (u.startsWith("talkrypt://")) joinAsSegment(u, seg, name) else toast("paste a talkrypt:// invite above")
-                }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-                col.addView(pillButton("Delete “$name”", panel, Tk.danger) {
-                    confirm("Delete segment “$name”?", "Erases this segment's key — chats joined under it can't be rejoined as the same identity. This cannot be undone.", "Delete") {
-                        removeSegment(name); setContentView(segmentsScreen())
+            // Reconstruct each segment's ML-DSA key + safety number OFF the main
+            // thread (one keygen per segment is too much to do during layout —
+            // ANR/jank with several segments), then post the rows into this box so
+            // the screen renders immediately and fills in.
+            val segsBox = column(bg)
+            col.addView(segsBox, lp(MATCH_PARENT, WRAP_CONTENT))
+            val loading = text("loading segments…", 13f, muted)
+            segsBox.addView(loading, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+            thread {
+                val built = segs.mapNotNull { (name, seed) ->
+                    val seg = runCatching { SegmentKey.fromSeedHex(seed) }.getOrNull() ?: return@mapNotNull null
+                    Triple(name, seg, runCatching { seg.safetyNumber() }.getOrDefault(""))
+                }
+                ui.post {
+                    segsBox.removeView(loading)
+                    built.forEach { (name, seg, sn) ->
+                        segsBox.addView(text("● $name", 15f, fg, bold = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+                        segsBox.addView(text("safety ${sn.take(23)}…", 12f, muted))
+                        segsBox.addView(pillButton("Join as “$name”", accent, onAccent) {
+                            val u = joinUri.text.toString().trim()
+                            if (u.startsWith("talkrypt://")) joinAsSegment(u, seg, name) else toast("paste a talkrypt:// invite above")
+                        }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+                        segsBox.addView(pillButton("Delete “$name”", panel, Tk.danger) {
+                            confirm("Delete segment “$name”?", "Erases this segment's key — chats joined under it can't be rejoined as the same identity. This cannot be undone.", "Delete") {
+                                removeSegment(name); setContentView(segmentsScreen())
+                            }
+                        }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
                     }
-                }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
+                }
             }
         }
 
