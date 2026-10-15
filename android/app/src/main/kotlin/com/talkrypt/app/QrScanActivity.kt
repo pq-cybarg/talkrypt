@@ -47,6 +47,9 @@ class QrScanActivity : Activity() {
 
     private lateinit var textureView: TextureView
     private lateinit var hint: TextView
+    // Shown when camera permission is denied: a tappable recovery affordance
+    // instead of a permanent black screen with a dead hint.
+    private lateinit var settingsBtn: TextView
     private var cameraDevice: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
@@ -104,6 +107,35 @@ class QrScanActivity : Activity() {
                 Gravity.TOP or Gravity.END,
             ),
         )
+        settingsBtn = TextView(this).apply {
+            text = "Open app settings"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            minimumHeight = dp(48)
+            visibility = View.GONE
+            // Deep-link to this app's settings so the user can grant Camera, then
+            // return — onResume re-opens the camera automatically.
+            setOnClickListener {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.fromParts("package", packageName, null),
+                        ),
+                    )
+                }
+            }
+        }
+        root.addView(
+            settingsBtn,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER,
+            ),
+        )
         setContentView(root)
 
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -111,13 +143,25 @@ class QrScanActivity : Activity() {
         }
     }
 
+    /** Show the camera-denied recovery UI (actionable, not a dead black screen). */
+    private fun showCameraDenied() {
+        hint.text = "Camera access is off — enable it to scan, or cancel and paste the invite instead."
+        settingsBtn.visibility = View.VISIBLE
+    }
+
+    private fun hideCameraDenied() {
+        settingsBtn.visibility = View.GONE
+        hint.text = "Point at a talkrypt QR"
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                hideCameraDenied()
                 maybeOpenCamera()
             } else {
-                hint.text = "Camera permission needed to scan"
+                showCameraDenied()
             }
         }
     }
@@ -125,6 +169,13 @@ class QrScanActivity : Activity() {
     override fun onResume() {
         super.onResume()
         paused = false
+        // Returning from app-settings (or any resume): if the grant now exists,
+        // clear the recovery UI and proceed; if it's still denied, keep showing it.
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            hideCameraDenied()
+        } else if (settingsBtn.visibility == View.VISIBLE) {
+            showCameraDenied()
+        }
         bgThread = HandlerThread("qr-cam").also { it.start() }
         bgHandler = Handler(bgThread!!.looper)
         // Register the surface listener once; every open path funnels through the
@@ -238,7 +289,15 @@ class QrScanActivity : Activity() {
             }
             image.close()
             val text = QrDecode.decodeLuminance(data, w, h)
-            if (text != null) succeed(text)
+            // Keep scanning until we see an actual talkrypt invite, instead of
+            // finishing on the FIRST QR of any kind (which made the caller reopen
+            // the scanner after a "Not a talkrypt QR" toast). A non-talkrypt code
+            // just updates the hint and we read the next frame.
+            when {
+                text == null -> {}
+                text.startsWith("talkrypt://") -> succeed(text)
+                else -> runOnUiThread { hint.text = "Not a talkrypt QR — keep scanning" }
+            }
         } catch (_: Exception) {
             runCatching { image.close() }
         } finally {
