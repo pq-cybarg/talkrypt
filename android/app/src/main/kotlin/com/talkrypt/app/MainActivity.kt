@@ -1218,6 +1218,8 @@ class MainActivity : Activity() {
     }
 
     private fun startLinkOffer() {
+        if (inFlight) { toast("already starting…"); return }
+        inFlight = true
         toast("starting link offer…")
         thread {
             try {
@@ -1229,6 +1231,8 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 ui.post { toast("link offer failed: ${e.message}") }
+            } finally {
+                ui.post { inFlight = false }
             }
         }
     }
@@ -1272,6 +1276,8 @@ class MainActivity : Activity() {
     }
 
     private fun acceptLink(uri: String) {
+        if (inFlight) { toast("already linking…"); return }
+        inFlight = true
         toast("linking this device…")
         thread {
             try {
@@ -1283,6 +1289,8 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 ui.post { toast("link failed: ${e.message}") }
+            } finally {
+                ui.post { inFlight = false }
             }
         }
     }
@@ -1649,7 +1657,14 @@ class MainActivity : Activity() {
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(12)),
         )
         col.addView(text("YOUR ACCOUNT", 12f, muted, bold = true))
-        col.addView(text(acct.safetyNumber().take(35) + "…", 13f, accent), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
+        // Safety-number derivation hashes the ML-DSA account key — off the main
+        // thread so this screen lays out instantly and fills the number in.
+        val snView = text("deriving…", 13f, accent)
+        col.addView(snView, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
+        thread {
+            val sn = runCatching { acct.safetyNumber().take(35) + "…" }.getOrDefault("unavailable")
+            ui.post { snView.text = sn }
+        }
 
         // Spawn your own anchor.
         col.addView(pillButton("Spawn my own anchor", accent, onAccent) {
@@ -1693,6 +1708,8 @@ class MainActivity : Activity() {
     }
 
     private fun spawnAnchor() {
+        if (inFlight) { toast("already spawning…"); return }
+        inFlight = true
         toast("spawning anchor…")
         thread {
             try {
@@ -1704,6 +1721,8 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 ui.post { toast("anchor failed: ${e.message}") }
+            } finally {
+                ui.post { inFlight = false }
             }
         }
     }
@@ -1878,7 +1897,8 @@ class MainActivity : Activity() {
             val m = lc.history[renderedCount++]
             when (m.kind) {
                 MsgKind.MESSAGE -> addBubble(m.text, m.mine, sender = if (m.mine) null else m.display, marking = m.marking,
-                    tier = if (m.mine) "" else (m.sender?.let { lc.roster[it]?.nameTier } ?: ""))
+                    tier = if (m.mine) "" else (m.sender?.let { lc.roster[it]?.nameTier } ?: ""),
+                    delivery = if (m.mine) m.delivery else Delivery.NONE)
                 MsgKind.SYSTEM, MsgKind.ACTION -> system(m.text)
             }
         }
@@ -1979,7 +1999,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- bubbles ----------
-    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null, tier: String = "") {
+    private fun addBubble(body: String, mine: Boolean, sender: String? = null, marking: String? = null, tier: String = "", delivery: Delivery = Delivery.NONE) {
         val list = messages ?: return
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2008,6 +2028,24 @@ class MainActivity : Activity() {
             // cap long messages at ~76% of screen width so bubbles don't span edge-to-edge
             maxWidth = (resources.displayMetrics.widthPixels * 0.76f).toInt()
         })
+        // Per-bubble delivery glyph on OUR messages: · sent → ✓✓ delivered → ✗ failed.
+        // (Honest: ✓✓ appears only on a real ack — group/persistent path; pairwise
+        // 1:1 stays at · because there's no ack to upgrade it.)
+        if (mine && delivery != Delivery.NONE) {
+            val (glyph, color) = when (delivery) {
+                Delivery.DELIVERED -> "✓✓" to onAccent
+                Delivery.FAILED -> "✗" to Color.parseColor("#E57373")
+                else -> "·" to onAccent
+            }
+            val glyphView = text(glyph, 10f, color).apply {
+                contentDescription = when (delivery) {
+                    Delivery.DELIVERED -> "delivered"; Delivery.FAILED -> "not delivered"; else -> "sent"
+                }
+            }
+            bubble.addView(glyphView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                gravity = Gravity.END; topMargin = dp(2)
+            })
+        }
         wrap.addView(bubble, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         list.addView(wrap, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
         autoscroll()
@@ -2299,11 +2337,18 @@ class MainActivity : Activity() {
         // SUB-SPEC A: /name and /cq are handled locally (self-declared name + CQ beacon),
         // mirroring the CLI, rather than sent as chat text. Handled = accepted (true).
         if (t.startsWith("/name") || t.startsWith("/cq")) { handleNameCommand(chatId, c, t.trim()); return true }
-        val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null, ts = System.currentTimeMillis())
+        val msg = ChatMsg(MsgKind.MESSAGE, null, null, mine = true, text = t, marking = null,
+            ts = System.currentTimeMillis(), delivery = Delivery.SENT)
         lc.history.add(msg); sessions.touch(chatId, msg.ts)
         if (activeId == chatId) renderNew(lc)
         scheduleSave(chatId)
-        thread { runCatching { c.send(t) }.onFailure { ui.post { toast("send failed") } } }
+        // send() returns this message's hex gossip_id; stash it on the bubble so a
+        // later Delivered event flips its glyph · → ✓✓. On failure, mark it ✗.
+        thread {
+            runCatching { c.send(t) }
+                .onSuccess { gid -> ui.post { msg.gossipId = gid } }
+                .onFailure { ui.post { msg.delivery = Delivery.FAILED; if (activeId == chatId) rerenderTranscript(lc); toast("send failed") } }
+        }
         return true
     }
 
@@ -2402,7 +2447,7 @@ class MainActivity : Activity() {
      *  its chat is on screen. The recording is shared with the headless service;
      *  only the rendering is Activity-specific. */
     private fun handleEvent(id: String, lc: LiveChat, e: FfiEvent) {
-        val msg = applyEvent(sessions, id, lc, e)
+        applyEvent(sessions, id, lc, e)
         if (activeId == id) {
             // A trust/name change (Event::Name — e.g. a mode-3 stale-name drop or a
             // tier upgrade) can retroactively change how EARLIER messages should be
@@ -2410,7 +2455,9 @@ class MainActivity : Activity() {
             // unlike main, which only refreshed tiers incidentally on a connection
             // flap (full setContentView). We rebuild only the message list, never the
             // whole screen, so the user's half-typed input draft is preserved.
-            if (e is FfiEvent.Name) rerenderTranscript(lc) else renderNew(lc)
+            // Delivered/OutboxDropped mutate an EARLIER bubble's glyph in place
+            // (applyEvent returned null), so they rebuild the transcript too.
+            if (e is FfiEvent.Name || e is FfiEvent.Delivered || e is FfiEvent.OutboxDropped) rerenderTranscript(lc) else renderNew(lc)
             // Connection changes refresh the header chip in place — a rebuild here
             // used to wipe the draft on every peer flap.
             if (e is FfiEvent.Connected || e is FfiEvent.Disconnected) updateChatHeader(lc)
