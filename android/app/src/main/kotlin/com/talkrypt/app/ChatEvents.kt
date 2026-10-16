@@ -9,9 +9,12 @@ import uniffi.talkrypt_ffi.FfiEvent
  * [ChatMsg]) or the headless [ChatService] drains it in the background.
  *
  * Returns the [ChatMsg] it recorded so the caller can render exactly what was
- * stored (no second recording, no drift between model and view).
+ * stored (no second recording, no drift between model and view), or `null` when
+ * the event mutated existing history in place (a delivery-state change on one of
+ * our own bubbles) rather than appending a new line — the caller re-renders
+ * instead of appending.
  */
-fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatMsg {
+fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatMsg? {
     val now = System.currentTimeMillis()
     val msg = when (e) {
         is FfiEvent.Message -> {
@@ -85,12 +88,19 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
                     sysMsg("${e.subject.take(8)} vouch below threshold", now)
             }
         }
-        is FfiEvent.Delivered ->
-            // D1 delivery receipt — the peer acked our message; note it quietly.
-            sysMsg("✓ delivered", now)
-        is FfiEvent.OutboxDropped ->
-            // D1: a capped/expired outbox drop is never silent (data-loss honesty).
-            sysMsg("⚠ ${e.count} queued message(s) dropped (outbox full)", now)
+        is FfiEvent.Delivered -> {
+            // D1 delivery receipt — correlate to the exact sent bubble by gossip_id
+            // and flip it to DELIVERED in place (a per-bubble ✓✓), instead of a
+            // detached "✓ delivered" system line with no message to point at.
+            markDelivered(lc, e.gossipId)
+            return null
+        }
+        is FfiEvent.OutboxDropped -> {
+            // D1: a capped/expired outbox drop marks the most-recent still-unacked
+            // sent bubbles FAILED (✗) in place — never silent (data-loss honesty).
+            markDropped(lc, e.count.toInt())
+            return null
+        }
         is FfiEvent.BeaconSeen ->
             // SUB-SPEC A / #68: a nearby device is beaconing this chat over local radio.
             sysMsg("📡 a nearby device is beaconing this chat", now)
@@ -105,6 +115,34 @@ fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatM
     }
     sessions.recordIncoming(id, msg)
     return msg
+}
+
+/** Flip the newest matching unacked sent bubble to DELIVERED (per-bubble ✓✓).
+ *  Matches by the hex gossip_id `send` returned; newest-first so a repeated id
+ *  (shouldn't happen) still resolves deterministically. */
+private fun markDelivered(lc: LiveChat, gossipId: String) {
+    for (i in lc.history.indices.reversed()) {
+        val m = lc.history[i]
+        if (m.mine && m.kind == MsgKind.MESSAGE && m.gossipId == gossipId && m.delivery != Delivery.DELIVERED) {
+            m.delivery = Delivery.DELIVERED
+            return
+        }
+    }
+}
+
+/** Mark the `count` most-recent still-unacked (SENT) sent bubbles FAILED (✗).
+ *  Walks newest-first; stops at `count` so an older, already-settled bubble is
+ *  never retroactively failed. */
+private fun markDropped(lc: LiveChat, count: Int) {
+    var remaining = count
+    for (i in lc.history.indices.reversed()) {
+        if (remaining <= 0) break
+        val m = lc.history[i]
+        if (m.mine && m.kind == MsgKind.MESSAGE && m.delivery == Delivery.SENT) {
+            m.delivery = Delivery.FAILED
+            remaining--
+        }
+    }
 }
 
 /** The roster status line shown when a peer presents an account identity. */

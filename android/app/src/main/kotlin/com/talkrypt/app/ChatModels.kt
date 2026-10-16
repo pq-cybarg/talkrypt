@@ -8,6 +8,13 @@ enum class Role { HOST, JOIN }
 
 enum class MsgKind { MESSAGE, SYSTEM, ACTION }
 
+/** Delivery state of one of OUR sent messages, drawn as a per-bubble glyph.
+ *  NONE = not ours / no glyph; SENT = handed to the transport (·); DELIVERED =
+ *  the peer acked it (✓✓ — group/persistent outbox path only); FAILED = the
+ *  outbox dropped it (✗). Pairwise 1:1 has no ack, so SENT is terminal there —
+ *  we never fake a ✓✓ we didn't receive. */
+enum class Delivery { NONE, SENT, DELIVERED, FAILED }
+
 // Field/record separators for the dependency-free codec (so models unit-test on
 // the plain JVM with no JSON lib). Fields never contain a raw separator because
 // esc() escapes them; that lets split() on the raw separator stay unambiguous.
@@ -84,6 +91,13 @@ data class ChatMsg(
     val text: String,
     val marking: String?,
     val ts: Long,
+    /** Hex gossip_id of OUR sent message (set once `send` returns), so a later
+     *  Delivered event correlates to this exact bubble. Live-only — not persisted
+     *  (a restart has no live ack to match, and the format stays backward-compat). */
+    var gossipId: String? = null,
+    /** Per-bubble delivery glyph state. Live-only (see [gossipId]); a reloaded
+     *  message shows no glyph — the honest state, since there's no ack to replay. */
+    var delivery: Delivery = Delivery.NONE,
 ) {
     fun encode(): String = listOf(
         kind.name, sender ?: "", display ?: "", mine.toString(), text, marking ?: "", ts.toString(),
