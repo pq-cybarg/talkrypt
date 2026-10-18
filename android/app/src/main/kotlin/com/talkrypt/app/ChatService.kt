@@ -75,7 +75,7 @@ class ChatService : Service() {
     private fun attemptReconnect(lc: LiveChat, net: String, retriesLeft: Int) {
         if (lc.client != null) return
         val meta = lc.meta
-        sys(meta.id, lc, "reconnecting “${meta.title}” over $net…")
+        sys(meta.id, lc, Loc.s(R.string.svc_reconnecting, meta.title, net))
         thread {
             runCatching { ChatNet.connect(applicationContext, meta) }
                 .onSuccess { c ->
@@ -84,7 +84,7 @@ class ChatService : Service() {
                         if (meta.role == Role.HOST) {
                             runCatching { lc.meta = lc.meta.copy(inviteUri = c.inviteUri()) }
                         }
-                        sys(meta.id, lc, "reconnected “${meta.title}” over $net")
+                        sys(meta.id, lc, Loc.s(R.string.svc_reconnected, meta.title, net))
                         updateNotification()
                     }
                 }
@@ -93,10 +93,10 @@ class ChatService : Service() {
                         if (lc.client != null) return@post
                         val why = ChatNet.friendlyError(e.message)
                         if (retriesLeft > 0) {
-                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): $why — retrying…")
+                            sys(meta.id, lc, Loc.s(R.string.svc_reconnect_failed_retry, meta.title, net, why))
                             ui.postDelayed({ attemptReconnect(lc, net, retriesLeft - 1) }, RETRY_MS)
                         } else {
-                            sys(meta.id, lc, "reconnect failed for “${meta.title}” ($net): $why")
+                            sys(meta.id, lc, Loc.s(R.string.svc_reconnect_failed, meta.title, net, why))
                         }
                     }
                 }
@@ -157,7 +157,7 @@ class ChatService : Service() {
     private fun buildNotification(): Notification {
         val mgr = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
-            val chan = NotificationChannel(CHAN, "talkrypt connections", NotificationManager.IMPORTANCE_LOW)
+            val chan = NotificationChannel(CHAN, Loc.s(R.string.svc_channel_name), NotificationManager.IMPORTANCE_LOW)
             chan.setShowBadge(false)
             mgr.createNotificationChannel(chan)
         }
@@ -166,9 +166,9 @@ class ChatService : Service() {
         val connected = alwaysOn.count { it.client != null }
         // Surface health, not just a count: how many are connected vs offline.
         val status = when {
-            n == 0 -> "no always-on chats"
-            connected == n -> "$n always-on · all connected"
-            else -> "$n always-on · $connected connected, ${n - connected} offline"
+            n == 0 -> Loc.s(R.string.svc_status_none)
+            connected == n -> Loc.s(R.string.svc_status_all_connected, n)
+            else -> Loc.s(R.string.svc_status_partial, n, connected, n - connected)
         }
         val openApp = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
@@ -176,7 +176,7 @@ class ChatService : Service() {
         @Suppress("DEPRECATION")
         val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHAN) else Notification.Builder(this)
         return b
-            .setContentTitle("talkrypt")
+            .setContentTitle(Loc.s(R.string.svc_notif_title))
             .setContentText(status)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openApp)

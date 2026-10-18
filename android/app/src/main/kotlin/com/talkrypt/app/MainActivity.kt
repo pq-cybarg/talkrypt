@@ -196,7 +196,7 @@ class MainActivity : Activity() {
             if (isLink) {
                 setContentView(acceptLinkConfirmScreen(uri))
             } else {
-                toast("opening invite…")
+                toast(Loc.s(R.string.m1_opening_invite))
                 // Explicit default — a deep-linked join must not silently inherit
                 // whatever tier the last manual join happened to pick.
                 pendingTier = Persistence.PERSISTENT_LOCAL
@@ -242,9 +242,9 @@ class MainActivity : Activity() {
             REQ_SCAN -> {
                 // Route a scanned talkrypt:// invite like a deep link would.
                 val uri = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)?.trim().orEmpty()
-                if (!uri.startsWith("talkrypt://")) { toast("Not a talkrypt QR"); return }
+                if (!uri.startsWith("talkrypt://")) { toast(Loc.s(R.string.m1_not_a_talkrypt_qr)); return }
                 val isLink = runCatching { inviteChannel(uri) == "#link" }.getOrDefault(false)
-                if (isLink) setContentView(acceptLinkConfirmScreen(uri)) else { toast("opening invite…"); startJoin(uri) }
+                if (isLink) setContentView(acceptLinkConfirmScreen(uri)) else { toast(Loc.s(R.string.m1_opening_invite)); startJoin(uri) }
             }
             REQ_TICKETBOOK -> {
                 val uri = data?.data ?: return
@@ -257,8 +257,8 @@ class MainActivity : Activity() {
                     }
                     ui.post {
                         res.fold(
-                            { toast("Nym credential imported — paid mixnet ready (no mnemonic needed)") },
-                            { toast("import failed: ${ChatNet.friendlyError(it.message)}") },
+                            { toast(Loc.s(R.string.m1_nym_credential_imported)) },
+                            { toast(Loc.s(R.string.m1_import_failed, ChatNet.friendlyError(it.message))) },
                         )
                     }
                 }
@@ -271,29 +271,29 @@ class MainActivity : Activity() {
         backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
 
-        col.addView(text("New chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
+        col.addView(text(Loc.s(R.string.m1_new_chat), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
 
         val channel = inputField("#general")
-        col.addView(label("CHANNEL", channel))
+        col.addView(label(Loc.s(R.string.m1_channel), channel))
         col.addView(channel, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
         val posture = darkSpinner(listOf("pq-pure", "hybrid", "pq-pure-compact"))
-        col.addView(label("POSTURE", posture).also { it.setPadding(0, dp(20), 0, dp(8)) })
+        col.addView(label(Loc.s(R.string.m1_posture), posture).also { it.setPadding(0, dp(20), 0, dp(8)) })
         col.addView(posture, lp(MATCH_PARENT, WRAP_CONTENT))
 
         val access = darkSpinner(listOf("open", "contacts", "friends"))
-        col.addView(label("ACCESS", access).also { it.setPadding(0, dp(20), 0, dp(8)) })
+        col.addView(label(Loc.s(R.string.m1_access), access).also { it.setPadding(0, dp(20), 0, dp(8)) })
         col.addView(access, lp(MATCH_PARENT, WRAP_CONTENT))
 
         // SUB-SPEC A §5: the chat's baseline for how look-alike (homoglyph) names
         // are shown — travels in the invite so joiners inherit it (any viewer may
         // tighten it locally later, never loosen). Uses the a11y 2-arg label form.
-        val namePolicy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
-        col.addView(label("NAME DISPLAY", namePolicy).also { it.setPadding(0, dp(20), 0, dp(8)) })
+        val namePolicy = darkSpinner(listOf(Loc.s(R.string.m1_name_display_signal_style), Loc.s(R.string.m1_name_display_warn), Loc.s(R.string.m1_name_display_suppress)))
+        col.addView(label(Loc.s(R.string.m1_name_display), namePolicy).also { it.setPadding(0, dp(20), 0, dp(8)) })
         col.addView(namePolicy, lp(MATCH_PARENT, WRAP_CONTENT))
 
-        val persistence = darkSpinner(listOf("Ephemeral (memory only)", "Persistent (saved, reconnectable)", "Always-on (Phase 2)"))
-        col.addView(label("PERSISTENCE", persistence).also { it.setPadding(0, dp(20), 0, dp(8)) })
+        val persistence = darkSpinner(listOf(Loc.s(R.string.m1_persistence_ephemeral), Loc.s(R.string.m1_persistence_persistent), Loc.s(R.string.m1_persistence_always_on)))
+        col.addView(label(Loc.s(R.string.m1_persistence), persistence).also { it.setPadding(0, dp(20), 0, dp(8)) })
         // Default to Persistent (matches pendingTier's default): a real chat is
         // never silently ephemeral if a dropdown tap is missed, and Ephemeral
         // stays an explicit one-tap opt-in.
@@ -305,7 +305,7 @@ class MainActivity : Activity() {
         useTor = prefsBool("default_tor", useTor)
         useNym = prefsBool("default_nym", useNym)
         val torBox = CheckBox(this).apply {
-            text = "Route over Tor (.onion; slow to start)"
+            text = Loc.s(R.string.m1_route_over_tor)
             setTextColor(muted)
             isChecked = useTor
             setOnCheckedChangeListener { _, checked -> useTor = checked }
@@ -316,16 +316,16 @@ class MainActivity : Activity() {
         // traffic-analysis resistance. Only functional if the .so was built with
         // --features nym (else host/join over Nym returns a clear error).
         val nymBox = CheckBox(this).apply {
-            text = "Also route over Nym mixnet (opt-in; multi-homes the invite)"
+            text = Loc.s(R.string.m1_route_over_nym)
             setTextColor(muted)
             isChecked = useNym
             setOnCheckedChangeListener { _, checked -> useNym = checked }
         }
         col.addView(nymBox, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
-        col.addView(text("Paid Nym bandwidth (wallet mnemonic / credential) is set up in Settings.", 13f, muted)
+        col.addView(text(Loc.s(R.string.m1_paid_nym_bandwidth), 13f, muted)
             .also { it.setPadding(0, dp(4), 0, 0) })
 
-        col.addView(pillButton("Host a chat", accent, onAccent) {
+        col.addView(pillButton(Loc.s(R.string.m1_host_a_chat), accent, onAccent) {
             startHost(
                 channel.text.toString().ifBlank { "#general" },
                 posture.selectedItem.toString(),
@@ -334,32 +334,32 @@ class MainActivity : Activity() {
                 when (namePolicy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "" },
             )
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(32)))
-        col.addView(pillButton("Registry-restricted chat", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m1_registry_restricted_chat), panel, fg) {
             pendingTier = tierOf(persistence)
             setContentView(restrictedHostScreen(channel.text.toString().ifBlank { "#general" }, posture.selectedItem.toString()))
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
-        col.addView(text("— or join —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
-        val invite = inputField("talkrypt://…")
+        col.addView(text(Loc.s(R.string.m1_or_join), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
+        val invite = inputField(Loc.s(R.string.m1_join_invite_hint))
         col.addView(invite, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Join", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m1_join), panel, fg) {
             val uri = invite.text.toString().trim()
-            if (uri.startsWith("talkrypt://")) { pendingTier = tierOf(persistence); startJoin(uri) } else toast("Paste a talkrypt:// invite")
+            if (uri.startsWith("talkrypt://")) { pendingTier = tierOf(persistence); startJoin(uri) } else toast(Loc.s(R.string.m1_paste_invite))
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(12)))
-        col.addView(pillButton("Scan a QR code", accent, onAccent) {
+        col.addView(pillButton(Loc.s(R.string.m1_scan_qr), accent, onAccent) {
             pendingTier = tierOf(persistence)
             launchScanner()
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
         // In-person: find a nearby host, or send this very app P2P.
-        col.addView(text("— in person —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
-        col.addView(pillButton("Find nearby host (BLE / Wi-Fi Direct)", accent, onAccent) {
+        col.addView(text(Loc.s(R.string.m1_in_person), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(28), bottom = dp(12)))
+        col.addView(pillButton(Loc.s(R.string.m1_find_nearby_host), accent, onAccent) {
             findNearby()
         }, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Share app (P2P over Wi-Fi)", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m1_share_app), panel, fg) {
             shareApp()
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(12)))
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
+        col.addView(pillButton(Loc.s(R.string.m1_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
 
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
@@ -395,25 +395,25 @@ class MainActivity : Activity() {
         titleCol.addView(text("talkrypt", 26f, fg, bold = true))
         // The custody probe can hit StrongBox (slow) — fill in off the main
         // thread; usually instant thanks to the TkApp prewarm cache.
-        val tierLine = text("🔒 … · ML-DSA-87", 12f, accent)
+        val tierLine = text(Loc.s(R.string.m1_tier_line_placeholder), 12f, accent)
         titleCol.addView(tierLine)
         thread {
             val t = runCatching { CustodyBridge.detectTier().name }.getOrDefault("UNKNOWN")
-            ui.post { tierLine.text = "🔒 $t · ML-DSA-87" }
+            ui.post { tierLine.text = Loc.s(R.string.m1_tier_line, t) }
         }
         headRow.addView(titleCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         headRow.addView(text("⋯", 26f, muted).apply {
-            contentDescription = "More"
+            contentDescription = Loc.s(R.string.m1_more)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { setContentView(utilitiesScreen()) }
         })
         col.addView(headRow, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
-        col.addView(pillButton("＋  New chat", accent, onAccent) { setContentView(newChatScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(8)))
+        col.addView(pillButton(Loc.s(R.string.m1_new_chat_button), accent, onAccent) { setContentView(newChatScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(8)))
 
         val chats = sessions.ordered()
         if (chats.isEmpty()) {
-            col.addView(text("No chats yet — tap ＋ to host or join.", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(40)))
+            col.addView(text(Loc.s(R.string.m1_no_chats_yet), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(40)))
         } else {
             for (lc in chats) col.addView(chatRow(lc), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
         }
@@ -441,12 +441,12 @@ class MainActivity : Activity() {
         mid.addView(text(m.title, 16f, fg, bold = true))
         val last = lc.history.lastOrNull { it.kind == MsgKind.MESSAGE }
         val preview = when {
-            last != null && last.mine -> "you: ${last.text}"
-            last != null -> "${last.display ?: last.sender?.take(8) ?: "?"}: ${last.text}"
-            else -> if (m.role == Role.HOST) "hosting" else "joined"
+            last != null && last.mine -> Loc.s(R.string.m1_preview_you, last.text)
+            last != null -> Loc.s(R.string.m1_preview_sender, last.display ?: last.sender?.take(8) ?: "?", last.text)
+            else -> if (m.role == Role.HOST) Loc.s(R.string.m1_hosting) else Loc.s(R.string.m1_joined)
         }
         val members = lc.roster.size
-        val sub = if (m.group && members > 0) "$preview · $members members" else preview
+        val sub = if (m.group && members > 0) Loc.s(R.string.m1_preview_members, preview, members) else preview
         mid.addView(text(sub, 13f, muted).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
         row.addView(mid, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
@@ -458,7 +458,7 @@ class MainActivity : Activity() {
             }, lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
         }
         val (cs, cc) = connInfo(lc)
-        right.addView(text("● $cs", 10f, cc), lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
+        right.addView(text(Loc.s(R.string.m1_conn_dot, cs), 10f, cc), lp(WRAP_CONTENT, WRAP_CONTENT, top = dp(4)))
         row.addView(right, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         return row
     }
@@ -472,20 +472,20 @@ class MainActivity : Activity() {
     private fun connInfo(lc: LiveChat): Pair<String, Int> {
         val online = lc.roster.values.count { it.connected }
         return when {
-            lc.client == null -> "offline" to muted
-            online > 0 -> (if (online == 1) "online" else "$online online") to accent
-            lc.meta.role == Role.HOST -> "hosting" to amber
-            else -> "connecting" to amber
+            lc.client == null -> Loc.s(R.string.m1_offline) to muted
+            online > 0 -> (if (online == 1) Loc.s(R.string.m1_online) else Loc.s(R.string.m1_online_count, online)) to accent
+            lc.meta.role == Role.HOST -> Loc.s(R.string.m1_hosting) to amber
+            else -> Loc.s(R.string.m1_connecting) to amber
         }
     }
 
     private fun relTime(ts: Long): String {
         val d = System.currentTimeMillis() - ts
         return when {
-            d < 60_000 -> "now"
-            d < 3_600_000 -> "${d / 60_000}m"
-            d < 86_400_000 -> "${d / 3_600_000}h"
-            else -> "${d / 86_400_000}d"
+            d < 60_000 -> Loc.s(R.string.m1_time_now)
+            d < 3_600_000 -> Loc.s(R.string.m1_time_minutes, d / 60_000)
+            d < 86_400_000 -> Loc.s(R.string.m1_time_hours, d / 3_600_000)
+            else -> Loc.s(R.string.m1_time_days, d / 86_400_000)
         }
     }
 
@@ -522,23 +522,23 @@ class MainActivity : Activity() {
                     "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id, MeshKind.MESHTASTIC)
                     "Mesh over LoRa (Meshcore BLE)" -> startMesh(id, MeshKind.MESHCORE)
                     "Stop mesh (LoRa)" -> stopMesh(id)
-                    "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast("no invite")
+                    "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast(Loc.s(R.string.m1_no_invite))
                     "Show invite QR" -> lc.meta.inviteUri?.let { showInviteQr(it) }
                     "Safety number (verify)" -> {
                         android.app.AlertDialog.Builder(this)
-                            .setTitle("Safety number")
-                            .setMessage("${lc.meta.safety}\n\nCompare this with your peer out-of-band; a mismatch means the channel is not talking to who you think.")
-                            .setPositiveButton("Copy") { _, _ ->
+                            .setTitle(Loc.s(R.string.m1_safety_number_title))
+                            .setMessage(Loc.s(R.string.m1_safety_number_body, lc.meta.safety))
+                            .setPositiveButton(Loc.s(R.string.m1_copy)) { _, _ ->
                                 val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                 cm.setPrimaryClip(android.content.ClipData.newPlainText("talkrypt safety number", lc.meta.safety))
-                                toast("copied")
+                                toast(Loc.s(R.string.m1_copied))
                             }
-                            .setNegativeButton("Close", null)
+                            .setNegativeButton(Loc.s(R.string.m1_close), null)
                             .show()
                     }
                     "Reconnect" -> reconnect(id)
                     "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
-                    "Delete (erase)" -> confirm("Delete “${lc.meta.title}”?", "Erases this chat and its history from this device. This cannot be undone.", "Delete") {
+                    "Delete (erase)" -> confirm(Loc.s(R.string.m2_delete_chat_title, lc.meta.title), Loc.s(R.string.m2_delete_chat_body), Loc.s(R.string.m2_delete)) {
                         sessions.disconnect(id); sessions.remove(id); drafts.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen())
                     }
                 }
@@ -552,7 +552,7 @@ class MainActivity : Activity() {
      *  `BeaconSeen` event. One active beacon at a time (matches the single-active-chat
      *  UI); requires the BLE permissions the app already requests for nearby discovery. */
     private fun startBeacon(id: String) {
-        val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
+        val c = sessions.get(id)?.client ?: run { toast(Loc.s(R.string.m2_connect_first)); return }
         stopBeacon(id) // replace any prior beacon
         // Only advertise/scan once BLE permission is actually granted (deferred if
         // the user is prompted) — otherwise the first tap would silently no-op.
@@ -563,17 +563,17 @@ class MainActivity : Activity() {
             val fb = c.startLocalPresence(backend, AdvertisePolicy.FULL)
             // Push each scanned opaque blob into core; a match for our invite -> BeaconSeen.
             backend.startScanning({ blob, src -> runCatching { fb.deliverBeacon(blob, src) } },
-                { msg -> ui.post { sysLine(id, "beacon: $msg") } })
+                { msg -> ui.post { sysLine(id, Loc.s(R.string.m2_beacon_msg, msg)) } })
             beaconBackend = backend
             beacon = fb
-            sysLine(id, "📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning")
+            sysLine(id, Loc.s(R.string.m2_beaconing_nearby))
         }
     }
 
     private fun stopBeacon(id: String) {
         beacon?.let { runCatching { it.close() } }   // stops core's advertise/scan task
         beaconBackend?.let { runCatching { it.stop() } }
-        if (beacon != null) sysLine(id, "nearby beacon stopped")
+        if (beacon != null) sysLine(id, Loc.s(R.string.m2_nearby_beacon_stopped))
         beacon = null
         beaconBackend = null
     }
@@ -597,13 +597,13 @@ class MainActivity : Activity() {
      *  On-device only (the emulator has no real BLE). */
     @android.annotation.SuppressLint("MissingPermission")
     private fun startMesh(id: String, kind: MeshKind) {
-        val c = sessions.get(id)?.client ?: run { toast("connect first"); return }
+        val c = sessions.get(id)?.client ?: run { toast(Loc.s(R.string.m2_connect_first)); return }
         stopMesh(id)
         // Scan only after BLE permission is granted (deferred if prompted), so the
         // first mesh tap can't silently fail.
         ensureBlePermissions {
         val mgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
-        val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast("no BLE scanner"); return@ensureBlePermissions }
+        val scanner = mgr?.adapter?.bluetoothLeScanner ?: run { toast(Loc.s(R.string.m2_no_ble_scanner)); return@ensureBlePermissions }
         val filter = android.bluetooth.le.ScanFilter.Builder()
             .setServiceUuid(android.os.ParcelUuid(kind.service)).build()
         val settings = android.bluetooth.le.ScanSettings.Builder()
@@ -618,18 +618,18 @@ class MainActivity : Activity() {
                 backend.startReceiving { ch, p, from -> runCatching { fmn.deliverPacket(ch, p, from) } }
                 meshBackend = backend
                 meshNode = fmn
-                ui.post { sysLine(id, "📻 mesh: linked a ${kind.label} node — messages also ride LoRa") }
+                ui.post { sysLine(id, Loc.s(R.string.m2_mesh_linked, kind.label)) }
             }
             override fun onScanFailed(errorCode: Int) {
-                ui.post { sysLine(id, "mesh: BLE scan failed ($errorCode)") }
+                ui.post { sysLine(id, Loc.s(R.string.m2_mesh_scan_failed, errorCode)) }
             }
         }
         meshScan = cb
         try {
             scanner.startScan(listOf(filter), settings, cb)
-            sysLine(id, "🔎 looking for a ${kind.label} node over BLE…")
+            sysLine(id, Loc.s(R.string.m2_mesh_looking, kind.label))
         } catch (e: SecurityException) {
-            toast("BLE scan permission denied")
+            toast(Loc.s(R.string.m2_ble_scan_denied))
         }
         } // ensureBlePermissions
     }
@@ -643,7 +643,7 @@ class MainActivity : Activity() {
         }
         meshNode?.let { runCatching { it.close() } } // stops core's mesh advertise/scan task
         meshBackend?.let { runCatching { it.stop() } }
-        if (meshBackend != null) sysLine(id, "mesh stopped")
+        if (meshBackend != null) sysLine(id, Loc.s(R.string.m2_mesh_stopped))
         meshScan = null
         meshNode = null
         meshBackend = null
@@ -654,11 +654,11 @@ class MainActivity : Activity() {
      *  the full core round-trip (seal -> advertise -> open -> `Event::BeaconSeen`). On
      *  real hardware the BLE scan path delivers this over the air instead. */
     private fun beaconSpoofSelfTest(id: String) {
-        val fb = beacon ?: run { toast("start the beacon first"); return }
+        val fb = beacon ?: run { toast(Loc.s(R.string.m2_start_beacon_first)); return }
         val blob = beaconBackend?.lastAdvertised()
-            ?: run { toast("no advertised blob yet — try again in a moment"); return }
+            ?: run { toast(Loc.s(R.string.m2_no_blob_yet)); return }
         runCatching { fb.deliverBeacon(blob, "spoof-self") }
-        sysLine(id, "beacon self-test: fed our own sealed beacon back (expect a 📡 sighting)")
+        sysLine(id, Loc.s(R.string.m2_beacon_selftest))
     }
 
     /** Request the BLE runtime permissions (API 31+) the beacon/nearby features need. */
@@ -693,100 +693,100 @@ class MainActivity : Activity() {
         val lc = sessions.get(chatId) ?: return chatListScreen()
         val c = lc.client
         val col = column(bg).apply { setPadding(dp(20), dp(20), dp(20), dp(20)) }
-        col.addView(text("Callsigns", 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(4)) })
-        col.addView(text("Names you broadcast over your messages in this chat.", 13f, muted),
+        col.addView(text(Loc.s(R.string.m2_callsigns), 28f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(4)) })
+        col.addView(text(Loc.s(R.string.m2_callsigns_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)))
 
         if (c == null) {
-            col.addView(text("Connect to this chat to manage names.", 14f, muted), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
-            col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
+            col.addView(text(Loc.s(R.string.m2_connect_to_manage_names), 14f, muted), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+            col.addView(pillButton(Loc.s(R.string.m2_back), panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(20)))
             return ScrollView(this).apply { setBackgroundColor(bg); addView(col); applyInsets(this) }
         }
 
         // ----- your saved names -----
-        col.addView(label("YOUR NAMES").also { it.setPadding(0, dp(12), 0, dp(8)) })
+        col.addView(label(Loc.s(R.string.m2_your_names)).also { it.setPadding(0, dp(12), 0, dp(8)) })
         val names = runCatching { c.listNames() }.getOrDefault(emptyList())
         val active = runCatching { c.leadingNameId() }.getOrDefault("")
         if (names.isEmpty()) {
-            col.addView(text("None yet — add one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT))
+            col.addView(text(Loc.s(R.string.m2_none_yet_add), 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT))
         }
         for (n in names) {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val badge = if (n.linked) "🔗 " else ""
             val star = if (n.id == active) "★ " else ""
             row.addView(text("$star$badge${n.label}", 16f, if (n.id == active) accent else fg), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            if (n.id != active) row.addView(pillButton("Use", accent, Color.WHITE) {
+            if (n.id != active) row.addView(pillButton(Loc.s(R.string.m2_use), accent, Color.WHITE) {
                 thread { val ok = runCatching { c.useName(n.id) }.getOrDefault(false)
-                    ui.post { toast(if (ok) "calling as “${n.label}”" else "failed"); setContentView(nameBookScreen(chatId)) } }
+                    ui.post { toast(if (ok) Loc.s(R.string.m2_calling_as, n.label) else Loc.s(R.string.m2_failed)); setContentView(nameBookScreen(chatId)) } }
             }.apply { setPadding(dp(16), dp(8), dp(16), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
             row.addView(pillButton("✕", panel, muted) {
-                c.removeName(n.id); toast("removed"); setContentView(nameBookScreen(chatId))
+                c.removeName(n.id); toast(Loc.s(R.string.m2_removed)); setContentView(nameBookScreen(chatId))
             }.apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
             col.addView(row, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
         }
 
         // ----- add a name -----
-        val add = inputField("New callsign")
+        val add = inputField(Loc.s(R.string.m2_new_callsign))
         col.addView(add, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(14)))
-        col.addView(pillButton("Save to name book", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m2_save_to_name_book), panel, fg) {
             val v = add.text.toString().trim()
             if (v.isNotEmpty()) { c.addBareName(v, v); add.setText(""); setContentView(nameBookScreen(chatId)) }
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(pillButton("Set + announce now", accent, Color.WHITE) {
+        col.addView(pillButton(Loc.s(R.string.m2_set_announce_now), accent, Color.WHITE) {
             val v = add.text.toString().trim()
             if (v.isNotEmpty()) { c.setLeadingName(v); thread { runCatching { c.announcePresence() } }
-                add.setText(""); toast("calling as “$v”"); setContentView(nameBookScreen(chatId)) }
+                add.setText(""); toast(Loc.s(R.string.m2_calling_as, v)); setContentView(nameBookScreen(chatId)) }
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(pillButton("Set as VERIFIED (🔗 account-linked)", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m2_set_verified), panel, fg) {
             val v = add.text.toString().trim()
             if (v.isNotEmpty()) {
                 // Our account certifies this device → peers resolve it at the Linked
                 // tier (insider-unforgeable), unlike a bare callsign.
                 c.setLinkedLeadingName(account(), v); thread { runCatching { c.announcePresence() } }
-                add.setText(""); toast("verified name “$v”"); setContentView(nameBookScreen(chatId))
+                add.setText(""); toast(Loc.s(R.string.m2_verified_name, v)); setContentView(nameBookScreen(chatId))
             }
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(text("Verified uses your account key so a name can't be spoofed by another member.", 12f, muted),
+        col.addView(text(Loc.s(R.string.m2_verified_desc), 12f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
 
         // ----- CQ cadence -----
-        col.addView(label("CQ BEACON").also { it.setPadding(0, dp(24), 0, dp(8)) })
+        col.addView(label(Loc.s(R.string.m2_cq_beacon)).also { it.setPadding(0, dp(24), 0, dp(8)) })
         val periodicOn = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL) > 0uL
         val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
-        col.addView(pillButton(if (periodicOn) "Periodic re-beacon: ON (5 min)" else "Periodic re-beacon: off", if (periodicOn) accent else panel, if (periodicOn) Color.WHITE else fg) {
+        col.addView(pillButton(if (periodicOn) Loc.s(R.string.m2_periodic_on) else Loc.s(R.string.m2_periodic_off), if (periodicOn) accent else panel, if (periodicOn) Color.WHITE else fg) {
             c.setPresenceCadence(if (periodicOn) 0uL else 300uL, onMsg); setContentView(nameBookScreen(chatId))
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(pillButton(if (onMsg) "On-message name-id: ON" else "On-message name-id: off", if (onMsg) accent else panel, if (onMsg) Color.WHITE else fg) {
+        col.addView(pillButton(if (onMsg) Loc.s(R.string.m2_onmsg_on) else Loc.s(R.string.m2_onmsg_off), if (onMsg) accent else panel, if (onMsg) Color.WHITE else fg) {
             c.setPresenceCadence(if (periodicOn) 300uL else 0uL, !onMsg); setContentView(nameBookScreen(chatId))
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(text("On-message name-id lets peers notice if you rename and drop your stale callsign.", 12f, muted),
+        col.addView(text(Loc.s(R.string.m2_onmsg_desc), 12f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
 
         // ----- viewer name-trust policy (how strictly to show OTHERS' names) -----
-        col.addView(label("SHOW OTHERS' NAMES").also { it.setPadding(0, dp(24), 0, dp(8)) })
-        val policy = darkSpinner(listOf("Signal-style (badges only)", "Warn on look-alike collisions", "Suppress colliding names"))
+        col.addView(label(Loc.s(R.string.m2_show_others)).also { it.setPadding(0, dp(24), 0, dp(8)) })
+        val policy = darkSpinner(listOf(Loc.s(R.string.m2_nametrust_signal), Loc.s(R.string.m2_nametrust_warn), Loc.s(R.string.m2_nametrust_suppress)))
         col.addView(policy, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Apply name-trust setting", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m2_apply_nametrust), panel, fg) {
             val v = when (policy.selectedItemPosition) { 1 -> "warn"; 2 -> "suppress"; else -> "signal" }
-            c.setNameTrustPolicy(v); toast("name-trust: $v")
+            c.setNameTrustPolicy(v); toast(Loc.s(R.string.m2_nametrust_set, v))
         }, lp(MATCH_PARENT, dp(48), top = dp(8)))
-        col.addView(text("You can only tighten the chat's baseline, never loosen it.", 12f, muted),
+        col.addView(text(Loc.s(R.string.m2_tighten_only), 12f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
 
         // ----- who's here (resolved names + safety numbers) -----
         if (lc.roster.isNotEmpty()) {
-            col.addView(label("WHO'S HERE").also { it.setPadding(0, dp(24), 0, dp(8)) })
+            col.addView(label(Loc.s(R.string.m2_whos_here)).also { it.setPadding(0, dp(24), 0, dp(8)) })
             for (m in lc.roster.values) {
                 val badge = when (m.nameTier) { "Linked" -> "🔗 "; "RegistryConfirmed" -> "✓ "; else -> "" }
                 val shown = m.display ?: m.fp.take(8)
-                val sn = if (m.safetyNumber.isNotEmpty()) "  ·  safety ${m.safetyNumber}" else ""
+                val sn = if (m.safetyNumber.isNotEmpty()) Loc.s(R.string.m2_safety_suffix, m.safetyNumber) else ""
                 col.addView(text("$badge$shown$sn", 14f, fg).apply {
-                    setOnClickListener { toast("safety number: ${m.safetyNumber.ifEmpty { m.fp.take(16) }}") }
+                    setOnClickListener { toast(Loc.s(R.string.m2_safety_number, m.safetyNumber.ifEmpty { m.fp.take(16) })) }
                 }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
             }
         }
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
+        col.addView(pillButton(Loc.s(R.string.m2_back), panel, fg) { setContentView(chatScreen(chatId)) }, lp(MATCH_PARENT, dp(50), top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -823,7 +823,7 @@ class MainActivity : Activity() {
     }
 
     private fun shareText(s: String) {
-        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, s) }, "Share invite"))
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, s) }, Loc.s(R.string.m2_share_invite)))
     }
 
     /** The old utility buttons, moved off the chat-first home (⋯ on the list). */
@@ -831,13 +831,13 @@ class MainActivity : Activity() {
         backState = Back.LIST_CHILD
         setSecure(false) // leaving Settings
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("More", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
-        col.addView(pillButton("Anchors (username directory)", panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
-        col.addView(pillButton("Contacts", panel, fg) { setContentView(contactsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-        col.addView(pillButton("Linked devices", panel, fg) { setContentView(linkedDevicesScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-        col.addView(pillButton("Segments (contextual identities)", panel, fg) { setContentView(segmentsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-        col.addView(pillButton("Settings", panel, fg) { setContentView(settingsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
+        col.addView(text(Loc.s(R.string.m2_more), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
+        col.addView(pillButton(Loc.s(R.string.m2_anchors), panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
+        col.addView(pillButton(Loc.s(R.string.m2_contacts), panel, fg) { setContentView(contactsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m2_linked_devices), panel, fg) { setContentView(linkedDevicesScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m2_segments), panel, fg) { setContentView(segmentsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m2_settings), panel, fg) { setContentView(settingsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m2_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -881,7 +881,7 @@ class MainActivity : Activity() {
         val v = pendingMnemonic ?: return@Runnable
         thread {
             runCatching { SecretStore.put(this, "nym_mnemonic", v) }
-                .onFailure { ui.post { toast("couldn't seal mnemonic: ${it.message}") } }
+                .onFailure { ui.post { toast(Loc.s(R.string.m2_seal_mnemonic_err, it.message)) } }
         }
     }
 
@@ -892,54 +892,54 @@ class MainActivity : Activity() {
         backState = Back.LIST_CHILD
         setSecure(true) // the mnemonic lives here; cleared on the exits below
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Settings", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
+        col.addView(text(Loc.s(R.string.m2_settings), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, dp(16)) })
 
         // -- identity --
-        col.addView(label("IDENTITY"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(6)))
+        col.addView(label(Loc.s(R.string.m2_identity)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(6)))
         // Safety number derivation reconstructs the ML-DSA account — done off
         // the main thread (usually cached by the TkApp prewarm).
         var sn: String? = null
-        val snCard = infoCard("Account safety number", "deriving…", onClick = {
+        val snCard = infoCard(Loc.s(R.string.m2_account_safety_number), Loc.s(R.string.m2_deriving), onClick = {
             val v = sn
-            if (v == null) { toast("still deriving…") } else {
+            if (v == null) { toast(Loc.s(R.string.m2_still_deriving)) } else {
                 val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("talkrypt safety number", v))
-                toast("copied")
+                toast(Loc.s(R.string.m2_copied))
             }
         })
         col.addView(snCard, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         storedLink()?.let { (_, username, accountSn) ->
-            col.addView(infoCard("Linked as secondary device", "account ${accountSn.take(11)}" + if (username.isNotEmpty()) " · @$username" else ""),
+            col.addView(infoCard(Loc.s(R.string.m2_linked_secondary), Loc.s(R.string.m2_account_short, accountSn.take(11)) + if (username.isNotEmpty()) Loc.s(R.string.m2_username_handle, username) else ""),
                 lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         }
 
         // -- security --
-        col.addView(label("SECURITY"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
-        val custodyCard = infoCard("Key custody: …", "Where this device can keep keys (StrongBox > TEE > software). Reported to peers as your custody tier.")
+        col.addView(label(Loc.s(R.string.m2_security)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
+        val custodyCard = infoCard(Loc.s(R.string.m2_key_custody_loading), Loc.s(R.string.m2_key_custody_desc))
         col.addView(custodyCard, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         thread {
             val v = runCatching { account().safetyNumber() }.getOrDefault("unavailable")
             val t = runCatching { CustodyBridge.detectTier().name }.getOrDefault("UNKNOWN")
             ui.post {
                 sn = v
-                cardDetail(snCard).text = "$v — tap to copy. Compare out-of-band to verify you."
-                cardTitle(custodyCard).text = "Key custody: $t"
+                cardDetail(snCard).text = Loc.s(R.string.m2_safety_tap_copy, v)
+                cardTitle(custodyCard).text = Loc.s(R.string.m2_key_custody, t)
             }
         }
         val sealErr = SecretStore.lastError
         if (sealErr == null) {
-            col.addView(infoCard("Secrets sealed at rest", "Identity seeds and the Nym mnemonic are encrypted with a non-exportable Android Keystore key (StrongBox when available)."),
+            col.addView(infoCard(Loc.s(R.string.m2_secrets_sealed), Loc.s(R.string.m2_secrets_sealed_desc)),
                 lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         } else {
-            col.addView(infoCard("Sealing degraded", "The Keystore reported: $sealErr. Secrets that couldn't be sealed remain in app-private plaintext until it recovers.", titleColor = amber),
+            col.addView(infoCard(Loc.s(R.string.m2_sealing_degraded), Loc.s(R.string.m2_sealing_degraded_desc, sealErr), titleColor = amber),
                 lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         }
 
         // Paid Nym bandwidth (optional): mnemonic (sealed at rest) or ticketbook.
-        col.addView(label("NYM PAID BANDWIDTH (OPTIONAL)"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
+        col.addView(label(Loc.s(R.string.m2_nym_paid_bw)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
         // Masked by default (it controls funds), autofill excluded, sealed on a
         // debounce off the main thread rather than per keystroke.
-        val nymMnem = inputField("NYM wallet mnemonic — blank = free mixnet").apply {
+        val nymMnem = inputField(Loc.s(R.string.m2_nym_mnemonic_hint)).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
@@ -956,7 +956,7 @@ class MainActivity : Activity() {
         }
         col.addView(nymMnem, lp(MATCH_PARENT, WRAP_CONTENT))
         val reveal = CheckBox(this).apply {
-            text = "Show mnemonic"
+            text = Loc.s(R.string.m2_show_mnemonic)
             setTextColor(muted)
             setOnCheckedChangeListener { _, checked ->
                 nymMnem.transformationMethod =
@@ -965,42 +965,42 @@ class MainActivity : Activity() {
             }
         }
         col.addView(reveal, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(4)))
-        col.addView(text("Or import a ticketbook credential minted with your own Nym tooling (the wallet seed never enters this app):", 13f, muted)
+        col.addView(text(Loc.s(R.string.m2_ticketbook_desc), 13f, muted)
             .also { it.setPadding(0, dp(8), 0, 0) })
-        col.addView(pillButton("Import Nym credential", panel, fg) { launchTicketbookImport() },
+        col.addView(pillButton(Loc.s(R.string.m2_import_nym_cred), panel, fg) { launchTicketbookImport() },
             lp(MATCH_PARENT, dp(50), top = dp(4)))
 
         // -- network defaults --
-        col.addView(label("NETWORK DEFAULTS FOR NEW CHATS"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
+        col.addView(label(Loc.s(R.string.m2_network_defaults)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
         val torDef = CheckBox(this).apply {
-            text = "Route over Tor (.onion)"
+            text = Loc.s(R.string.m2_route_tor)
             setTextColor(muted); isChecked = prefsBool("default_tor", false)
             setOnCheckedChangeListener { _, c -> putPrefsBool("default_tor", c) }
         }
         col.addView(torDef, lp(MATCH_PARENT, WRAP_CONTENT))
         val nymDef = CheckBox(this).apply {
-            text = "Also route over Nym mixnet"
+            text = Loc.s(R.string.m2_route_nym)
             setTextColor(muted); isChecked = prefsBool("default_nym", false)
             setOnCheckedChangeListener { _, c -> putPrefsBool("default_nym", c) }
         }
         col.addView(nymDef, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(4)))
 
         // -- notifications --
-        col.addView(label("NOTIFICATIONS"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
-        col.addView(infoCard("Always-on chats", "Kept connected by a foreground service with a persistent notification. Tap to adjust it in system settings.", onClick = {
+        col.addView(label(Loc.s(R.string.m2_notifications)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
+        col.addView(infoCard(Loc.s(R.string.m2_always_on_chats), Loc.s(R.string.m2_always_on_desc), onClick = {
             runCatching {
                 startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-            }.onFailure { toast("couldn't open notification settings") }
+            }.onFailure { toast(Loc.s(R.string.m2_open_notif_err)) }
         }), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
 
         // -- about --
-        col.addView(label("ABOUT"), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
+        col.addView(label(Loc.s(R.string.m2_about)), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16), bottom = dp(6)))
         val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
-        col.addView(infoCard("talkrypt $ver", "Post-quantum E2E chat over Tor. NOT certified · NOT accredited · NOT audited — experimental software; classification markings are advisory labels only."),
+        col.addView(infoCard(Loc.s(R.string.m2_about_version, ver), Loc.s(R.string.m2_about_desc)),
             lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(utilitiesScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
+        col.addView(pillButton(Loc.s(R.string.m2_back), panel, fg) { setContentView(utilitiesScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -1009,26 +1009,26 @@ class MainActivity : Activity() {
     // ---------- contacts screen ----------
     private fun contactsScreen(): View {
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Contacts", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m2_contacts), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("Accounts you recognize. Recognition only — being a contact (or friend) doesn't grant channel access; that's set per chat.", 13f, muted),
+            text(Loc.s(R.string.m2_contacts_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
         )
         val contacts = storedContacts()
         if (contacts.isEmpty()) {
             col.addView(
-                text("No contacts yet. In a chat, when an account presents itself, tap “Add as a contact”.", 13f, muted),
+                text(Loc.s(R.string.m2_no_contacts), 13f, muted),
                 lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)),
             )
         } else {
             for ((pk, name, friend) in contacts) {
-                val label = (name.ifEmpty { pk.take(12) }) + (if (friend) "  [friend]" else "")
+                val label = (name.ifEmpty { pk.take(12) }) + (if (friend) Loc.s(R.string.m2_friend_suffix) else "")
                 col.addView(text(label, 15f, if (friend) accent else fg).apply {
                     background = roundRect(panel, 12); setPadding(dp(14), dp(12), dp(14), dp(12))
                 }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
             }
         }
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
+        col.addView(pillButton(Loc.s(R.string.m2_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -1036,14 +1036,14 @@ class MainActivity : Activity() {
 
     // ---------- P2P app sharing ----------
     private fun shareApp() {
-        toast("starting local share…")
+        toast(Loc.s(R.string.m2_starting_share))
         thread {
             val server = ApkShareServer(ApkShareServer.apkPath(this))
             val url = server.start()
             ui.post {
                 if (url == null) {
                     server.stop()
-                    toast("No Wi-Fi/LAN address — join a Wi-Fi network or hotspot first")
+                    toast(Loc.s(R.string.m2_no_wifi))
                     return@post
                 }
                 shareServer?.stop()
@@ -1056,11 +1056,10 @@ class MainActivity : Activity() {
     private fun shareScreen(url: String): View {
         backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Share talkrypt", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m2_share_talkrypt), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
-                "On the same Wi-Fi or hotspot, the other phone scans this code (or opens the URL), " +
-                    "downloads the app, and installs it (allow “install unknown apps” once).",
+                Loc.s(R.string.m2_share_instructions),
                 13f, muted,
             ),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(20)),
@@ -1069,7 +1068,7 @@ class MainActivity : Activity() {
         col.addView(text(url, 13f, accent, center = true).also { it.setPadding(0, dp(18), 0, dp(8)) })
         // The transfer is plain HTTP on the local network — give the receiver a
         // fingerprint to compare so a hostile LAN can't swap the APK silently.
-        val fpLine = text("APK SHA-256: computing…", 12f, muted, center = true)
+        val fpLine = text(Loc.s(R.string.m2_apk_computing), 12f, muted, center = true)
         col.addView(fpLine, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
         thread {
             val fp = runCatching {
@@ -1081,10 +1080,10 @@ class MainActivity : Activity() {
                 md.digest().joinToString("") { "%02x".format(it) }.take(16).chunked(4).joinToString(" ")
             }.getOrNull()
             ui.post {
-                fpLine.text = if (fp != null) "APK SHA-256 (first 16): $fp — verify on the receiving phone" else "couldn't compute APK fingerprint"
+                fpLine.text = if (fp != null) Loc.s(R.string.m3_apk_sha256_verify, fp) else Loc.s(R.string.m3_apk_fingerprint_failed)
             }
         }
-        col.addView(pillButton("Done", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m3_done), panel, fg) {
             shareServer?.stop(); shareServer = null
             setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT))
@@ -1096,7 +1095,7 @@ class MainActivity : Activity() {
     /** Add a centered QR image of `data` (sized as a fraction of screen width). */
     private fun addQrInto(parent: LinearLayout, data: String, widthFraction: Float) {
         val bmp = Qr.bitmap(data) ?: run {
-            parent.addView(text("(QR too large to render — use the text)", 12f, muted, center = true))
+            parent.addView(text(Loc.s(R.string.m3_qr_too_large), 12f, muted, center = true))
             return
         }
         val side = (resources.displayMetrics.widthPixels * widthFraction).toInt()
@@ -1161,10 +1160,10 @@ class MainActivity : Activity() {
 
     private fun linkedDevicesScreen(): View {
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Linked devices", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m3_linked_devices), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
-                "Link this device to your account on another device, so contacts recognize all your devices as one account. The account key never leaves the device that holds it — only a signed certificate crosses the wire.",
+                Loc.s(R.string.m3_linked_devices_desc),
                 13f, muted,
             ),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
@@ -1172,55 +1171,55 @@ class MainActivity : Activity() {
 
         val link = storedLink()
         if (link != null) {
-            col.addView(text("THIS DEVICE IS LINKED", 12f, muted, bold = true))
-            col.addView(text("account ${link.third.take(35)}…", 13f, accent))
-            if (link.second.isNotEmpty()) col.addView(text("username ${link.second}", 13f, fg))
+            col.addView(text(Loc.s(R.string.m3_this_device_is_linked), 12f, muted, bold = true))
+            col.addView(text(Loc.s(R.string.m3_account_prefix, link.third.take(35)), 13f, accent))
+            if (link.second.isNotEmpty()) col.addView(text(Loc.s(R.string.m3_username_prefix, link.second), 13f, fg))
             col.addView(
-                text("device ${deviceKey().fingerprintHex().take(24)}…", 12f, muted),
+                text(Loc.s(R.string.m3_device_prefix, deviceKey().fingerprintHex().take(24)), 12f, muted),
                 lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(14)),
             )
-            col.addView(label("JOIN A CHAT AS THIS ACCOUNT (talkrypt:// invite)"))
+            col.addView(label(Loc.s(R.string.m3_join_chat_as_account)))
             val joinUri = inputField("talkrypt://…")
             col.addView(joinUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-            col.addView(pillButton("Join as this account", accent, onAccent) {
+            col.addView(pillButton(Loc.s(R.string.m3_join_as_this_account), accent, onAccent) {
                 val u = joinUri.text.toString().trim()
-                if (u.startsWith("talkrypt://")) joinAsLinked(u) else toast("paste a talkrypt:// invite")
+                if (u.startsWith("talkrypt://")) joinAsLinked(u) else toast(Loc.s(R.string.m3_paste_talkrypt_invite))
             }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-            col.addView(pillButton("Unlink this device", panel, Tk.danger) {
-                confirm("Unlink this device?", "Removes the link certificate — contacts will no longer recognize this device as part of the account until you link again.", "Unlink") {
-                    clearLink(); toast("unlinked"); setContentView(linkedDevicesScreen())
+            col.addView(pillButton(Loc.s(R.string.m3_unlink_this_device), panel, Tk.danger) {
+                confirm(Loc.s(R.string.m3_unlink_this_device_q), Loc.s(R.string.m3_unlink_body), Loc.s(R.string.m3_unlink)) {
+                    clearLink(); toast(Loc.s(R.string.m3_unlinked)); setContentView(linkedDevicesScreen())
                 }
             }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-            col.addView(text("— or re-link —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(22), bottom = dp(6)))
+            col.addView(text(Loc.s(R.string.m3_or_relink), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(22), bottom = dp(6)))
         }
 
         // Primary role: certify ANOTHER device under this device's account.
-        col.addView(text("LINK ANOTHER DEVICE TO MY ACCOUNT", 12f, muted, bold = true).also { it.setPadding(0, dp(4), 0, dp(4)) })
-        col.addView(text("This device holds the account. Show a one-time QR the new device scans.", 12f, muted))
-        col.addView(pillButton("Start a link offer", accent, onAccent) {
+        col.addView(text(Loc.s(R.string.m3_link_another_device), 12f, muted, bold = true).also { it.setPadding(0, dp(4), 0, dp(4)) })
+        col.addView(text(Loc.s(R.string.m3_link_another_device_desc), 12f, muted))
+        col.addView(pillButton(Loc.s(R.string.m3_start_link_offer), accent, onAccent) {
             startLinkOffer()
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
         // Secondary role: link THIS device using an offer from the primary.
-        col.addView(text("LINK THIS DEVICE TO AN ACCOUNT", 12f, muted, bold = true).also { it.setPadding(0, dp(22), 0, dp(4)) })
-        col.addView(label("LINK OFFER (talkrypt:// from the primary)"))
+        col.addView(text(Loc.s(R.string.m3_link_this_device_to_account), 12f, muted, bold = true).also { it.setPadding(0, dp(22), 0, dp(4)) })
+        col.addView(label(Loc.s(R.string.m3_link_offer_label)))
         val offerUri = inputField("talkrypt://…")
         col.addView(offerUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-        col.addView(pillButton("Accept link on this device", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m3_accept_link_on_this_device), panel, fg) {
             val u = offerUri.text.toString().trim()
-            if (u.startsWith("talkrypt://")) setContentView(acceptLinkConfirmScreen(u)) else toast("paste the link offer URI")
+            if (u.startsWith("talkrypt://")) setContentView(acceptLinkConfirmScreen(u)) else toast(Loc.s(R.string.m3_paste_link_offer_uri))
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
+        col.addView(pillButton(Loc.s(R.string.m3_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
     }
 
     private fun startLinkOffer() {
-        if (inFlight) { toast("already starting…"); return }
+        if (inFlight) { toast(Loc.s(R.string.m3_already_starting)); return }
         inFlight = true
-        toast("starting link offer…")
+        toast(Loc.s(R.string.m3_starting_link_offer))
         thread {
             try {
                 val lan = ApkShareServer.lanIp() ?: "127.0.0.1"
@@ -1230,7 +1229,7 @@ class MainActivity : Activity() {
                     setContentView(linkOfferRunningScreen(offer.uri(), offer.accountSafetyNumber()))
                 }
             } catch (e: Exception) {
-                ui.post { toast("link offer failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m3_link_offer_failed, e.message)) }
             } finally {
                 ui.post { inFlight = false }
             }
@@ -1240,16 +1239,16 @@ class MainActivity : Activity() {
     private fun linkOfferRunningScreen(uri: String, accountSn: String): View {
         backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Link offer running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m3_link_offer_running), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("On the NEW device, scan this (or paste the URI into Linked devices → Accept link). The account key stays on this device.", 13f, muted),
+            text(Loc.s(R.string.m3_link_offer_running_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
         )
         addQrInto(col, uri, 0.66f)
         col.addView(text(uri, 12f, accent, center = true).also { it.setPadding(0, dp(14), 0, dp(16)) })
-        col.addView(text("VERIFY OUT OF BAND — account safety number:", 12f, muted, bold = true))
+        col.addView(text(Loc.s(R.string.m3_verify_oob_account_sn), 12f, muted, bold = true))
         col.addView(text(accountSn, 13f, fg), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
-        col.addView(pillButton("Done", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m3_done), panel, fg) {
             linkOffer = null; setContentView(linkedDevicesScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -1260,35 +1259,35 @@ class MainActivity : Activity() {
     private fun acceptLinkConfirmScreen(uri: String): View {
         backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Link this device?", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m3_link_this_device_q), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("This certifies THIS device under the account offering the link. Afterward, verify the account safety number shown matches the other device, out of band.", 13f, muted),
+            text(Loc.s(R.string.m3_link_this_device_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
         )
         col.addView(text(uri, 12f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
-        col.addView(pillButton("Accept link on this device", accent, onAccent) {
+        col.addView(pillButton(Loc.s(R.string.m3_accept_link_on_this_device), accent, onAccent) {
             acceptLink(uri)
         }, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Cancel", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m3_cancel), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
     }
 
     private fun acceptLink(uri: String) {
-        if (inFlight) { toast("already linking…"); return }
+        if (inFlight) { toast(Loc.s(R.string.m3_already_linking)); return }
         inFlight = true
-        toast("linking this device…")
+        toast(Loc.s(R.string.m3_linking_this_device))
         thread {
             try {
                 val res = linkAccept(deviceKey(), uri, "android")
                 saveLink(res.chainHex, res.username, res.accountSafetyNumber)
                 ui.post {
                     setContentView(linkedDevicesScreen())
-                    toast("linked to account ${res.accountSafetyNumber.take(11)}…")
+                    toast(Loc.s(R.string.m3_linked_to_account, res.accountSafetyNumber.take(11)))
                 }
             } catch (e: Exception) {
-                ui.post { toast("link failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m3_link_failed, e.message)) }
             } finally {
                 ui.post { inFlight = false }
             }
@@ -1296,8 +1295,8 @@ class MainActivity : Activity() {
     }
 
     private fun joinAsLinked(uri: String) {
-        val link = storedLink() ?: run { toast("this device isn't linked"); return }
-        toast("joining as linked account…")
+        val link = storedLink() ?: run { toast(Loc.s(R.string.m3_device_not_linked)); return }
+        toast(Loc.s(R.string.m3_joining_as_linked))
         thread {
             try {
                 val c = TalkryptClient.joinLinked(uri, deviceKey(), link.first, link.second.ifEmpty { null })
@@ -1306,10 +1305,10 @@ class MainActivity : Activity() {
                 ui.post {
                     val now = System.currentTimeMillis()
                     val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn, now, now)
-                    enterSession(meta, c, "joined as linked account" + (link.second.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""))
+                    enterSession(meta, c, Loc.s(R.string.m3_joined_as_linked_account) + (link.second.takeIf { it.isNotEmpty() }?.let { Loc.s(R.string.m3_name_paren_suffix, it) } ?: ""))
                 }
             } catch (e: Exception) {
-                ui.post { toast("join failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m3_join_failed, e.message)) }
             }
         }
     }
@@ -1332,7 +1331,7 @@ class MainActivity : Activity() {
 
     private fun saveSegmentSet(set: Set<String>) {
         runCatching { SecretStore.put(this, "segments", set.joinToString("\n")) }
-            .onFailure { toast("couldn't seal segments: ${it.message}") }
+            .onFailure { toast(Loc.s(R.string.m3_seal_segments_failed, it.message)) }
     }
 
     /** Persisted segments: (name, seed-hex). Each is an unlinkable contextual
@@ -1360,10 +1359,10 @@ class MainActivity : Activity() {
 
     private fun segmentsScreen(): View {
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Segments", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m3_segments), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
             text(
-                "Contextual sub-identities under your account. Each segment authenticates with its own key, so different segments are unlinkable to each other — yet a contact who recognizes your account recognizes every segment. Use one per context (work, activism, …).",
+                Loc.s(R.string.m3_segments_desc),
                 13f, muted,
             ),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(12)),
@@ -1372,20 +1371,20 @@ class MainActivity : Activity() {
         val linked = storedLink()
         col.addView(
             text(
-                if (linked != null) "rooted at your linked account ${linked.third.take(20)}…"
-                else "rooted at this device's account",
+                if (linked != null) Loc.s(R.string.m3_rooted_at_linked_account, linked.third.take(20))
+                else Loc.s(R.string.m3_rooted_at_device_account),
                 12f, muted,
             ),
             lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(12)),
         )
 
-        col.addView(label("JOIN A CHAT (talkrypt:// invite)"))
+        col.addView(label(Loc.s(R.string.m3_join_a_chat)))
         val joinUri = inputField("talkrypt://…")
         col.addView(joinUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6), bottom = dp(8)))
 
         val segs = storedSegments()
         if (segs.isEmpty()) {
-            col.addView(text("No segments yet — create one below.", 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
+            col.addView(text(Loc.s(R.string.m3_no_segments_yet), 13f, muted), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(8)))
         } else {
             // Reconstruct each segment's ML-DSA key + safety number OFF the main
             // thread (one keygen per segment is too much to do during layout —
@@ -1393,7 +1392,7 @@ class MainActivity : Activity() {
             // the screen renders immediately and fills in.
             val segsBox = column(bg)
             col.addView(segsBox, lp(MATCH_PARENT, WRAP_CONTENT))
-            val loading = text("loading segments…", 13f, muted)
+            val loading = text(Loc.s(R.string.m3_loading_segments), 13f, muted)
             segsBox.addView(loading, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
             thread {
                 val built = segs.mapNotNull { (name, seed) ->
@@ -1404,13 +1403,13 @@ class MainActivity : Activity() {
                     segsBox.removeView(loading)
                     built.forEach { (name, seg, sn) ->
                         segsBox.addView(text("● $name", 15f, fg, bold = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-                        segsBox.addView(text("safety ${sn.take(23)}…", 12f, muted))
-                        segsBox.addView(pillButton("Join as “$name”", accent, onAccent) {
+                        segsBox.addView(text(Loc.s(R.string.m3_safety_prefix, sn.take(23)), 12f, muted))
+                        segsBox.addView(pillButton(Loc.s(R.string.m3_join_as_name, name), accent, onAccent) {
                             val u = joinUri.text.toString().trim()
-                            if (u.startsWith("talkrypt://")) joinAsSegment(u, seg, name) else toast("paste a talkrypt:// invite above")
+                            if (u.startsWith("talkrypt://")) joinAsSegment(u, seg, name) else toast(Loc.s(R.string.m3_paste_talkrypt_invite_above))
                         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-                        segsBox.addView(pillButton("Delete “$name”", panel, Tk.danger) {
-                            confirm("Delete segment “$name”?", "Erases this segment's key — chats joined under it can't be rejoined as the same identity. This cannot be undone.", "Delete") {
+                        segsBox.addView(pillButton(Loc.s(R.string.m3_delete_name, name), panel, Tk.danger) {
+                            confirm(Loc.s(R.string.m3_delete_segment_q, name), Loc.s(R.string.m3_delete_segment_body), Loc.s(R.string.m3_delete)) {
                                 removeSegment(name); setContentView(segmentsScreen())
                             }
                         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
@@ -1419,24 +1418,24 @@ class MainActivity : Activity() {
             }
         }
 
-        col.addView(text("— new segment —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(8)))
-        col.addView(label("SEGMENT NAME (context label)"))
-        val name = inputField("work")
+        col.addView(text(Loc.s(R.string.m3_new_segment), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(8)))
+        col.addView(label(Loc.s(R.string.m3_segment_name_label)))
+        val name = inputField(Loc.s(R.string.m3_hint_work))
         col.addView(name, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
-        col.addView(pillButton("Create segment", accent, onAccent) {
+        col.addView(pillButton(Loc.s(R.string.m3_create_segment), accent, onAccent) {
             val n = name.text.toString().trim()
-            if (n.isEmpty()) { toast("name the segment"); return@pillButton }
-            addSegment(n); toast("created segment “$n”"); setContentView(segmentsScreen())
+            if (n.isEmpty()) { toast(Loc.s(R.string.m3_name_the_segment)); return@pillButton }
+            addSegment(n); toast(Loc.s(R.string.m3_created_segment, n)); setContentView(segmentsScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
+        col.addView(pillButton(Loc.s(R.string.m3_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
     }
 
     private fun joinAsSegment(uri: String, segment: SegmentKey, name: String) {
-        toast("joining as “$name”…")
+        toast(Loc.s(R.string.m3_joining_as_name, name))
         thread {
             try {
                 // Build account→device→segment: from the stored link chain if this
@@ -1454,10 +1453,10 @@ class MainActivity : Activity() {
                 ui.post {
                     val now = System.currentTimeMillis()
                     val meta = ChatMeta(chatId(uri), runCatching { inviteChannel(uri) }.getOrDefault("chat"), Role.JOIN, false, "", "open", uri, if (runCatching { inviteIsOnion(uri) }.getOrDefault(false)) uri else null, pendingTier, sn, now, now)
-                    enterSession(meta, c, "joined as segment “$name”")
+                    enterSession(meta, c, Loc.s(R.string.m3_joined_as_segment, name))
                 }
             } catch (e: Exception) {
-                ui.post { toast("join failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m3_join_failed, e.message)) }
             }
         }
     }
@@ -1484,7 +1483,7 @@ class MainActivity : Activity() {
     private fun promptWifiIfOff() {
         val wifi = getSystemService(WifiManager::class.java)
         if (wifi?.isWifiEnabled == false) {
-            toast("Wi-Fi is off — turn it on for Wi-Fi Direct (Bluetooth still works)")
+            toast(Loc.s(R.string.m3_wifi_off))
             // API 29+ slide-up Wi-Fi panel; apps can't toggle Wi-Fi directly.
             runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
         }
@@ -1493,16 +1492,16 @@ class MainActivity : Activity() {
     private fun findNearbyScreen(): View {
         backState = Back.LIST_CHILD
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Nearby hosts", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m3_nearby_hosts), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("Scanning over Bluetooth LE and Wi-Fi Direct. Tap a host to join.", 13f, muted),
+            text(Loc.s(R.string.m3_nearby_scanning), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
         )
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         nearbyList = list
         col.addView(list, lp(MATCH_PARENT, WRAP_CONTENT))
         col.addView(text("…", 13f, muted, center = true).also { it.setPadding(0, dp(16), 0, dp(16)) })
-        col.addView(pillButton("Back", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m3_back), panel, fg) {
             stopNearby(); setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(12)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -1513,7 +1512,7 @@ class MainActivity : Activity() {
     private fun addNearbyPeer(peer: NearbyDiscovery.Peer) {
         if (foundInvites.put(peer.inviteUri, peer) != null) return // de-dupe
         val list = nearbyList ?: return
-        list.addView(pillButton("Join ${peer.name}", accent, onAccent) {
+        list.addView(pillButton(Loc.s(R.string.m3_join_peer, peer.name), accent, onAccent) {
             stopNearby(); startJoin(peer.inviteUri)
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
     }
@@ -1523,7 +1522,7 @@ class MainActivity : Activity() {
             stopNearby()
             nearby = listOf(NearbyDiscovery.ble(this), NearbyDiscovery.wifiDirect(this))
             nearby.forEach { it.startAdvertising(invite) }
-            system("broadcasting nearby (BLE + Wi-Fi Direct)")
+            system(Loc.s(R.string.m3_broadcasting_nearby))
         }
     }
 
@@ -1571,7 +1570,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_NOTIF) {
             val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            if (!granted) toast("notifications blocked — always-on chats still run, but without a status notification")
+            if (!granted) toast(Loc.s(R.string.m3_notifications_blocked))
         }
         if (requestCode == REQ_NEARBY) {
             val granted = grantResults.isNotEmpty() &&
@@ -1581,7 +1580,7 @@ class MainActivity : Activity() {
             if (granted) {
                 act?.invoke()
             } else {
-                toast("nearby discovery needs Bluetooth / nearby-Wi-Fi permission")
+                toast(Loc.s(R.string.m3_nearby_perm_needed))
             }
         }
         if (requestCode == REQ_BLE) {
@@ -1593,7 +1592,7 @@ class MainActivity : Activity() {
             if (granted) {
                 act?.invoke()
             } else {
-                toast("nearby beacon / mesh needs Bluetooth permission")
+                toast(Loc.s(R.string.m3_beacon_perm_needed))
             }
         }
     }
@@ -1651,54 +1650,54 @@ class MainActivity : Activity() {
     private fun anchorsScreen(): View {
         val acct = account()
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Anchors", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m4_anchors_title), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("A username directory you spawn or point at by location. Names map to account keys; verify safety numbers out of band.", 13f, muted),
+            text(Loc.s(R.string.m4_anchors_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(12)),
         )
-        col.addView(text("YOUR ACCOUNT", 12f, muted, bold = true))
+        col.addView(text(Loc.s(R.string.m4_your_account), 12f, muted, bold = true))
         // Safety-number derivation hashes the ML-DSA account key — off the main
         // thread so this screen lays out instantly and fills the number in.
-        val snView = text("deriving…", 13f, accent)
+        val snView = text(Loc.s(R.string.m4_deriving), 13f, accent)
         col.addView(snView, lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(20)))
         thread {
-            val sn = runCatching { acct.safetyNumber().take(35) + "…" }.getOrDefault("unavailable")
+            val sn = runCatching { acct.safetyNumber().take(35) + "…" }.getOrDefault(Loc.s(R.string.m4_unavailable))
             ui.post { snView.text = sn }
         }
 
         // Spawn your own anchor.
-        col.addView(pillButton("Spawn my own anchor", accent, onAccent) {
+        col.addView(pillButton(Loc.s(R.string.m4_spawn_my_anchor), accent, onAccent) {
             spawnAnchor()
         }, lp(MATCH_PARENT, WRAP_CONTENT))
 
         // Use a known anchor by entering its location.
-        col.addView(text("— or use a known anchor —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24), bottom = dp(10)))
-        col.addView(label("ANCHOR LOCATION (talkrypt:// URI)"))
+        col.addView(text(Loc.s(R.string.m4_or_use_known_anchor), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24), bottom = dp(10)))
+        col.addView(label(Loc.s(R.string.m4_anchor_location_label)))
         val anchorUri = inputField("talkrypt://…")
         col.addView(anchorUri, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(6)))
 
-        col.addView(label("USERNAME").also { it.setPadding(0, dp(16), 0, dp(6)) })
-        val uname = inputField("alice")
+        col.addView(label(Loc.s(R.string.m4_username_label)).also { it.setPadding(0, dp(16), 0, dp(6)) })
+        val uname = inputField(Loc.s(R.string.m4_username_hint))
         col.addView(uname, lp(MATCH_PARENT, WRAP_CONTENT))
 
         val result = text("", 13f, fg).also { it.setPadding(0, dp(14), 0, 0) }
 
-        col.addView(pillButton("Register my username here", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m4_register_username_here), panel, fg) {
             val uri = anchorUri.text.toString().trim()
             val name = uname.text.toString().trim()
-            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast("enter an anchor URI + username"); return@pillButton }
+            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast(Loc.s(R.string.m4_enter_anchor_uri_username)); return@pillButton }
             registerAtAnchor(uri, acct, name, result)
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(16)))
 
-        col.addView(pillButton("Resolve this username", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m4_resolve_this_username), panel, fg) {
             val uri = anchorUri.text.toString().trim()
             val name = uname.text.toString().trim()
-            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast("enter an anchor URI + username"); return@pillButton }
+            if (!uri.startsWith("talkrypt://") || name.isEmpty()) { toast(Loc.s(R.string.m4_enter_anchor_uri_username)); return@pillButton }
             resolveAtAnchor(uri, name, result)
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
 
         col.addView(result, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Back", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m4_back), panel, fg) {
             setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
 
@@ -1708,9 +1707,9 @@ class MainActivity : Activity() {
     }
 
     private fun spawnAnchor() {
-        if (inFlight) { toast("already spawning…"); return }
+        if (inFlight) { toast(Loc.s(R.string.m4_already_spawning)); return }
         inFlight = true
-        toast("spawning anchor…")
+        toast(Loc.s(R.string.m4_spawning_anchor))
         thread {
             try {
                 val lan = ApkShareServer.lanIp() ?: "127.0.0.1"
@@ -1720,7 +1719,7 @@ class MainActivity : Activity() {
                     setContentView(anchorRunningScreen(node.uri()))
                 }
             } catch (e: Exception) {
-                ui.post { toast("anchor failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m4_anchor_failed, e.message)) }
             } finally {
                 ui.post { inFlight = false }
             }
@@ -1729,44 +1728,44 @@ class MainActivity : Activity() {
 
     private fun anchorRunningScreen(uri: String): View {
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Anchor running", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m4_anchor_running_title), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("Others register/resolve usernames here. Share this location (scan or copy). It runs while the app is open.", 13f, muted),
+            text(Loc.s(R.string.m4_anchor_running_desc), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(16)),
         )
         addQrInto(col, uri, 0.66f)
         col.addView(text(uri, 13f, accent, center = true).also { it.setPadding(0, dp(16), 0, dp(20)) })
-        col.addView(pillButton("Back", panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT))
+        col.addView(pillButton(Loc.s(R.string.m4_back), panel, fg) { setContentView(anchorsScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
     }
 
     private fun registerAtAnchor(uri: String, acct: Account, name: String, result: TextView) {
-        result.text = "registering…"
+        result.text = Loc.s(R.string.m4_registering)
         thread {
             val msg = try {
                 anchorRegister(uri, acct, name)
                 // Remember we're bound here so registry-restricted chats can
                 // offer it — the only registries it makes sense to gate by.
                 addBoundAnchor(uri, name)
-                "✓ registered “$name” → your account at this anchor"
+                Loc.s(R.string.m4_register_success, name)
             } catch (e: Exception) {
-                "! register failed: ${e.message}"
+                Loc.s(R.string.m4_register_failed, e.message)
             }
             ui.post { result.text = msg }
         }
     }
 
     private fun resolveAtAnchor(uri: String, name: String, result: TextView) {
-        result.text = "resolving…"
+        result.text = Loc.s(R.string.m4_resolving)
         thread {
             val msg = try {
                 val sn = anchorResolve(uri, name)
-                if (sn != null) "“$name” → account safety number:\n$sn\n(verify out of band before trusting)"
-                else "“$name” is not registered here (or registries disagreed)"
+                if (sn != null) Loc.s(R.string.m4_resolve_safety_number, name, sn)
+                else Loc.s(R.string.m4_resolve_not_registered, name)
             } catch (e: Exception) {
-                "! resolve failed: ${e.message}"
+                Loc.s(R.string.m4_resolve_failed, e.message)
             }
             ui.post { result.text = msg }
         }
@@ -1780,27 +1779,27 @@ class MainActivity : Activity() {
         val acct = account()
         val anchors = boundAnchors()
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Registry-restricted chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m4_registry_restricted_title), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("Only members of the chosen registry can join $channel. You can pick only registries you're bound at; unreachable ones (or ones missing your record) are greyed out.", 13f, muted),
+            text(Loc.s(R.string.m4_registry_restricted_desc, channel), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(18)),
         )
         if (anchors.isEmpty()) {
-            col.addView(text("You aren't registered at any anchor yet. Open Anchors and register a username first.", 13f, amber), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
+            col.addView(text(Loc.s(R.string.m4_not_registered_any_anchor), 13f, amber), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
         } else {
             for ((uri, username) in anchors) {
                 // One disabled row per bound anchor; a background ping enables it.
-                val row = pillButton("checking ${shortUri(uri)} …", panel, muted) { /* set on success */ }
+                val row = pillButton(Loc.s(R.string.m4_checking_anchor, shortUri(uri)), panel, muted) { /* set on success */ }
                 row.isEnabled = false
                 row.alpha = 0.5f
                 row.isClickable = false
                 col.addView(row, lp(MATCH_PARENT, dp(52), top = dp(8)))
-                pingAnchor(uri, username, acct, row, "Host gated by “$username@${shortUri(uri)}”") {
+                pingAnchor(uri, username, acct, row, Loc.s(R.string.m4_host_gated_by, username, shortUri(uri))) {
                     startRestrictedHost(channel, posture, uri, username)
                 }
             }
         }
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
+        col.addView(pillButton(Loc.s(R.string.m4_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(24)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
@@ -1841,7 +1840,7 @@ class MainActivity : Activity() {
                     row.isClickable = true
                     row.setOnClickListener { onLive() }
                 } else {
-                    row.text = "✗ ${shortUri(uri)} — unreachable or no record"
+                    row.text = Loc.s(R.string.m4_anchor_unreachable, shortUri(uri))
                     row.alpha = 0.5f
                 }
             }
@@ -1849,7 +1848,7 @@ class MainActivity : Activity() {
     }
 
     private fun startRestrictedHost(channel: String, posture: String, anchorUri: String, username: String) {
-        toast("creating restricted chat…")
+        toast(Loc.s(R.string.m4_creating_restricted_chat))
         thread {
             try {
                 val port = ChatNet.allocLanPort()
@@ -1861,28 +1860,28 @@ class MainActivity : Activity() {
                 ui.post {
                     val now = System.currentTimeMillis()
                     val meta = ChatMeta(chatId(invite), channel, Role.HOST, false, posture, "restricted", invite, if (useTor) invite else null, pendingTier, sn, now, now)
-                    enterSession(meta, c, "registry-restricted — only the $members anchor member(s) can join")
+                    enterSession(meta, c, Loc.s(R.string.m4_registry_restricted_members, members))
                     messages?.let { addQrInto(it, invite, 0.62f) }
-                    addBubble(invite, mine = false, sender = "invite")
+                    addBubble(invite, mine = false, sender = Loc.s(R.string.m4_sender_invite))
                     startNearbyAdvertising(invite)
                 }
             } catch (e: Exception) {
-                ui.post { toast("restricted host failed: ${e.message}") }
+                ui.post { toast(Loc.s(R.string.m4_restricted_host_failed, e.message)) }
             }
         }
     }
 
     // ---------- chat screen ----------
     private fun tierLabel(p: Persistence) =
-        when (p) { Persistence.EPHEMERAL -> "ephemeral"; Persistence.ALWAYS_ON -> "always-on"; else -> "persistent" }
+        when (p) { Persistence.EPHEMERAL -> Loc.s(R.string.m4_tier_ephemeral); Persistence.ALWAYS_ON -> Loc.s(R.string.m4_tier_always_on); else -> Loc.s(R.string.m4_tier_persistent) }
 
     /** Refresh the on-screen chat header (connection chip + details) in place —
      *  connection events must NOT rebuild the screen, that wipes the draft. */
     private fun updateChatHeader(lc: LiveChat) {
         val (cs, cc) = connInfo(lc)
         chatChip?.apply { text = "● $cs"; setTextColor(cc) }
-        val memberStr = if (lc.roster.isNotEmpty()) "${lc.roster.size} members · " else ""
-        chatDetail?.text = "  ·  ${memberStr}safety ${lc.meta.safety.take(11)} · ${tierLabel(lc.meta.persistence)}"
+        val memberStr = if (lc.roster.isNotEmpty()) Loc.s(R.string.m4_members_prefix, lc.roster.size) else ""
+        chatDetail?.text = Loc.s(R.string.m4_chat_detail, memberStr, lc.meta.safety.take(11), tierLabel(lc.meta.persistence))
     }
 
     /** Render history entries not yet on screen (the initial replay, live events,
@@ -1927,7 +1926,7 @@ class MainActivity : Activity() {
             setBackgroundColor(panel); setPadding(dp(8), dp(10), dp(12), dp(10))
         }
         header.addView(text("‹", 30f, fg).apply {
-            contentDescription = "Back"
+            contentDescription = Loc.s(R.string.m4_back)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(10), 0, dp(10), 0); setOnClickListener { setContentView(chatListScreen()) }
         })
@@ -1942,7 +1941,7 @@ class MainActivity : Activity() {
         updateChatHeader(lc)
         header.addView(titles, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         header.addView(text("⋯", 22f, muted).apply {
-            contentDescription = "Chat menu"
+            contentDescription = Loc.s(R.string.m4_chat_menu)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(10), dp(4), dp(8), dp(4)); setOnClickListener { chatRowMenu(lc) }
         })
@@ -1970,7 +1969,7 @@ class MainActivity : Activity() {
         }
         // Restore any unsent draft; mirror edits into [drafts] so the text
         // survives screen swaps (connection events, back, process pauses).
-        val input = inputField("Message").apply {
+        val input = inputField(Loc.s(R.string.m4_message_hint)).apply {
             background = roundRect(field, 24)
             setText(drafts[chatId] ?: "")
             addTextChangedListener(object : android.text.TextWatcher {
@@ -1981,7 +1980,7 @@ class MainActivity : Activity() {
         }
         bar.addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         val send = text("➤", 20f, onAccent, center = true).apply {
-            contentDescription = "Send"
+            contentDescription = Loc.s(R.string.m4_send)
             background = circle(accent)
             gravity = Gravity.CENTER
         }
@@ -2039,7 +2038,7 @@ class MainActivity : Activity() {
             }
             val glyphView = text(glyph, 10f, color).apply {
                 contentDescription = when (delivery) {
-                    Delivery.DELIVERED -> "delivered"; Delivery.FAILED -> "not delivered"; else -> "sent"
+                    Delivery.DELIVERED -> Loc.s(R.string.m4_delivery_delivered); Delivery.FAILED -> Loc.s(R.string.m4_delivery_not_delivered); else -> Loc.s(R.string.m4_delivery_sent)
                 }
             }
             bubble.addView(glyphView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
@@ -2082,13 +2081,13 @@ class MainActivity : Activity() {
 
     // ---------- engine actions (off the UI thread; the facade blocks) ----------
     private fun startHost(channel: String, posture: String, access: String = "open", tier: Persistence = Persistence.PERSISTENT_LOCAL, namePolicy: String = "") {
-        if (inFlight) { toast("already creating a chat…"); return }
+        if (inFlight) { toast(Loc.s(R.string.m4_already_creating_chat)); return }
         inFlight = true
         // Over Tor/Nym the bootstrap takes tens of seconds; show a connecting
         // screen (not just a toast on the unchanged form) so the host isn't left
         // staring at a form that looks like nothing happened.
-        if (useTor || useNym) setContentView(connectingScreen("Starting your chat over ${if (useNym) "Nym + Tor" else "Tor"}…", true))
-        else toast("creating chat…")
+        if (useTor || useNym) setContentView(connectingScreen(Loc.s(R.string.m4_starting_chat_over, if (useNym) "Nym + Tor" else "Tor"), true))
+        else toast(Loc.s(R.string.m4_creating_chat))
         thread {
             try {
                 // Bind to the LAN/hotspot address (not loopback) so the invite is
@@ -2126,14 +2125,14 @@ class MainActivity : Activity() {
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
                     openChat(meta.id)
-                    sysLine(meta.id, "hosting — share the invite to let a friend join:")
+                    sysLine(meta.id, Loc.s(R.string.m4_hosting_share_invite))
                     messages?.let { addQrInto(it, invite, 0.62f) }
-                    addBubble(invite, mine = false, sender = "invite")
+                    addBubble(invite, mine = false, sender = Loc.s(R.string.m4_sender_invite))
                     startNearbyAdvertising(invite)
                 }
             } catch (e: Exception) {
                 // Return to home so the user isn't stranded on the connecting screen.
-                ui.post { toast("host failed: ${e.message}"); if (useTor || useNym) setContentView(chatListScreen()) }
+                ui.post { toast(Loc.s(R.string.m5_host_failed, e.message)); if (useTor || useNym) setContentView(chatListScreen()) }
             } finally {
                 inFlight = false
             }
@@ -2157,39 +2156,39 @@ class MainActivity : Activity() {
         val acct = account()
         val anchors = boundAnchors()
         val col = column(bg).apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
-        col.addView(text("Join chat", 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
+        col.addView(text(Loc.s(R.string.m5_join_chat), 26f, fg, bold = true).also { it.setPadding(0, dp(8), 0, 0) })
         col.addView(
-            text("If this chat is registry-restricted, you're admitted only as a member. Present a live membership, or join as a pseudonym (open chats only).", 13f, muted),
+            text(Loc.s(R.string.m5_join_restricted_explainer), 13f, muted),
             lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8), bottom = dp(18)),
         )
         if (anchors.isEmpty()) {
-            col.addView(text("You have no registry memberships yet — register at an anchor to join restricted chats.", 13f, amber), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
+            col.addView(text(Loc.s(R.string.m5_no_memberships), 13f, amber), lp(MATCH_PARENT, WRAP_CONTENT, bottom = dp(16)))
         } else {
-            col.addView(text("PRESENT A MEMBERSHIP", 12f, muted, bold = true))
+            col.addView(text(Loc.s(R.string.m5_present_a_membership), 12f, muted, bold = true))
             for ((anchorUri, username) in anchors) {
-                val row = pillButton("checking ${shortUri(anchorUri)} …", panel, muted) { }
+                val row = pillButton(Loc.s(R.string.m5_checking_anchor, shortUri(anchorUri)), panel, muted) { }
                 row.isEnabled = false; row.alpha = 0.5f; row.isClickable = false
                 col.addView(row, lp(MATCH_PARENT, dp(52), top = dp(8)))
-                pingAnchor(anchorUri, username, acct, row, "Join as “$username@${shortUri(anchorUri)}”") {
+                pingAnchor(anchorUri, username, acct, row, Loc.s(R.string.m5_join_as_member, username, shortUri(anchorUri))) {
                     doJoin(uri, username, presentAccount = true)
                 }
             }
         }
-        col.addView(text("— or —", 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(10)))
-        col.addView(pillButton("Join with my account (no username)", panel, fg) {
+        col.addView(text(Loc.s(R.string.m5_or_separator), 13f, muted, center = true), lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20), bottom = dp(10)))
+        col.addView(pillButton(Loc.s(R.string.m5_join_with_account), panel, fg) {
             doJoin(uri, null, presentAccount = true)
         }, lp(MATCH_PARENT, WRAP_CONTENT))
-        col.addView(pillButton("Join as pseudonym (unlinkable)", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m5_join_as_pseudonym), panel, fg) {
             doJoin(uri, null, presentAccount = false)
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(10)))
-        col.addView(pillButton("Back", panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
+        col.addView(pillButton(Loc.s(R.string.m5_back), panel, fg) { setContentView(chatListScreen()) }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(20)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
         applyInsets(sv)
         return sv
     }
 
     private fun doJoin(uri: String, username: String?, presentAccount: Boolean) {
-        if (inFlight) { toast("already joining…"); return }
+        if (inFlight) { toast(Loc.s(R.string.m5_already_joining)); return }
         inFlight = true
         // Route over Tor if the invite is an onion (decoded from the descriptor —
         // the `.onion` is inside the base32, not the URI text), OR the user asked.
@@ -2231,14 +2230,14 @@ class MainActivity : Activity() {
                     val lc = sessions.open(meta, c)
                     if (tier != Persistence.EPHEMERAL) runCatching { store.save(meta, lc.history) }
                     openChat(meta.id)
-                    sysLine(meta.id, if (presentAccount) "joined" + (username?.let { " as $it" } ?: "") else "joined as pseudonym")
+                    sysLine(meta.id, if (presentAccount) Loc.s(R.string.m5_joined) + (username?.let { Loc.s(R.string.m5_as_suffix, it) } ?: "") else Loc.s(R.string.m5_joined_as_pseudonym))
                 }
             } catch (e: Exception) {
                 ui.post {
                     if (gen != joinGen) return@post // cancelled — nothing to report
                     connecting = false
-                    connectingLabel?.apply { text = "failed: ${ChatNet.friendlyError(e.message)}"; setTextColor(Tk.danger) }
-                    toast("join failed")
+                    connectingLabel?.apply { text = Loc.s(R.string.m5_failed, ChatNet.friendlyError(e.message)); setTextColor(Tk.danger) }
+                    toast(Loc.s(R.string.m5_join_failed))
                 }
             } finally {
                 inFlight = false
@@ -2262,16 +2261,16 @@ class MainActivity : Activity() {
         backState = Back.LIST_CHILD
         onConnecting = true
         val col = column(bg).apply { setPadding(dp(24), dp(64), dp(24), dp(24)) }
-        col.addView(text("Connecting", 26f, fg, bold = true, center = true))
+        col.addView(text(Loc.s(R.string.m5_connecting_title), 26f, fg, bold = true, center = true))
         col.addView(text(title, 16f, muted, center = true).also { it.setPadding(0, dp(8), 0, dp(28)) })
-        val lbl = text(if (tor) "Bootstrapping Tor…" else "Connecting…", 16f, accent, center = true)
+        val lbl = text(if (tor) Loc.s(R.string.m5_bootstrapping_tor) else Loc.s(R.string.m5_connecting), 16f, accent, center = true)
         connectingLabel = lbl
         col.addView(lbl)
         if (tor) col.addView(
-            text("First Tor connect is slow; later ones are instant.", 12f, muted, center = true)
+            text(Loc.s(R.string.m5_first_tor_slow), 12f, muted, center = true)
                 .also { it.setPadding(0, dp(16), 0, 0) },
         )
-        col.addView(pillButton("Cancel", panel, fg) {
+        col.addView(pillButton(Loc.s(R.string.m5_cancel), panel, fg) {
             cancelJoin(); setContentView(chatListScreen())
         }, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(36)))
         val sv = ScrollView(this).apply { setBackgroundColor(bg); addView(col) }
@@ -2289,7 +2288,7 @@ class MainActivity : Activity() {
                 if (!connecting) return
                 val pct = runCatching { torBootstrapPercent().toInt() }.getOrDefault(0)
                 connectingLabel?.text =
-                    if (pct < 100) "Bootstrapping Tor… $pct%" else "Building circuit + handshaking…"
+                    if (pct < 100) Loc.s(R.string.m5_bootstrapping_tor_pct, pct) else Loc.s(R.string.m5_building_circuit)
                 ui.postDelayed(this, 300)
             }
         }, 300)
@@ -2302,13 +2301,13 @@ class MainActivity : Activity() {
         if (lc.client != null) return
         val m = lc.meta
         val plan = reconnectPlan(m)
-        if (plan == ReconnectPlan.IMPOSSIBLE) { toast("can't reconnect — no saved invite"); return }
+        if (plan == ReconnectPlan.IMPOSSIBLE) { toast(Loc.s(R.string.m5_cant_reconnect)); return }
         val net = when (plan) {
             ReconnectPlan.HOST_NYM, ReconnectPlan.JOIN_NYM -> "Nym"
             ReconnectPlan.HOST_TOR, ReconnectPlan.JOIN_TOR -> "Tor"
             else -> "LAN"
         }
-        sysLine(id, "reconnecting over $net…"); toast("reconnecting over $net…")
+        sysLine(id, Loc.s(R.string.m5_reconnecting_over, net)); toast(Loc.s(R.string.m5_reconnecting_over, net))
         thread {
             try {
                 // Shared with ChatService — one place builds a client from a meta.
@@ -2318,14 +2317,14 @@ class MainActivity : Activity() {
                     lc.client = c
                     // A re-hosted LAN chat gets a fresh invite; keep the same chatId.
                     if (freshInvite != null) lc.meta = lc.meta.copy(inviteUri = freshInvite)
-                    sysLine(id, "reconnected over $net")
+                    sysLine(id, Loc.s(R.string.m5_reconnected_over, net))
                     when {
                         activeId == id -> setContentView(chatScreen(id))
                         activeId == null && backState == Back.HOME -> setContentView(chatListScreen())
                         else -> {} // user is on some other screen — don't yank it away
                     }
                 }
-            } catch (e: Exception) { ui.post { sysLine(id, "reconnect failed ($net): ${ChatNet.friendlyError(e.message)}"); toast("reconnect failed") } }
+            } catch (e: Exception) { ui.post { sysLine(id, Loc.s(R.string.m5_reconnect_failed_detail, net, ChatNet.friendlyError(e.message))); toast(Loc.s(R.string.m5_reconnect_failed)) } }
         }
     }
 
@@ -2333,7 +2332,7 @@ class MainActivity : Activity() {
      *  (no client yet), the caller keeps the composed text in the input. */
     private fun sendMessage(chatId: String, t: String): Boolean {
         val lc = sessions.get(chatId) ?: return false
-        val c = lc.client ?: run { reconnect(chatId); toast("reconnecting — your text is kept, try again in a moment"); return false }
+        val c = lc.client ?: run { reconnect(chatId); toast(Loc.s(R.string.m5_reconnecting_text_kept)); return false }
         // SUB-SPEC A: /name and /cq are handled locally (self-declared name + CQ beacon),
         // mirroring the CLI, rather than sent as chat text. Handled = accepted (true).
         if (t.startsWith("/name") || t.startsWith("/cq")) { handleNameCommand(chatId, c, t.trim()); return true }
@@ -2347,7 +2346,7 @@ class MainActivity : Activity() {
         thread {
             runCatching { c.send(t) }
                 .onSuccess { gid -> ui.post { msg.gossipId = gid } }
-                .onFailure { ui.post { msg.delivery = Delivery.FAILED; if (activeId == chatId) rerenderTranscript(lc); toast("send failed") } }
+                .onFailure { ui.post { msg.delivery = Delivery.FAILED; if (activeId == chatId) rerenderTranscript(lc); toast(Loc.s(R.string.m5_send_failed)) } }
         }
         return true
     }
@@ -2360,25 +2359,25 @@ class MainActivity : Activity() {
         when {
             t == "/name list" -> {
                 val names = runCatching { c.listNames() }.getOrDefault(emptyList())
-                if (names.isEmpty()) sysLine(chatId, "name book empty — /name <callsign> to add one")
+                if (names.isEmpty()) sysLine(chatId, Loc.s(R.string.m5_name_book_empty))
                 else {
                     val active = runCatching { c.leadingNameId() }.getOrDefault("")
                     names.forEach {
                         val mark = if (it.id == active) "* " else "  "
-                        val tier = if (it.linked) "account-linked" else "bare"
-                        sysLine(chatId, "$mark${it.id}  “${it.label}”  ($tier)")
+                        val tier = if (it.linked) Loc.s(R.string.m5_tier_account_linked) else Loc.s(R.string.m5_tier_bare)
+                        sysLine(chatId, Loc.s(R.string.m5_name_list_entry, mark, it.id, it.label, tier))
                     }
                 }
             }
             t.startsWith("/name new ") -> {
                 val label = t.removePrefix("/name new ").trim()
-                if (label.isNotEmpty()) { c.addBareName(label, label); sysLine(chatId, "saved “$label” to the name book") }
+                if (label.isNotEmpty()) { c.addBareName(label, label); sysLine(chatId, Loc.s(R.string.m5_saved_to_name_book, label)) }
             }
             t.startsWith("/name use ") -> {
                 val id = t.removePrefix("/name use ").trim()
                 thread {
                     val ok = runCatching { c.useName(id) }.getOrDefault(false)
-                    ui.post { sysLine(chatId, if (ok) "switched to “$id” and announced" else "no saved name “$id”") }
+                    ui.post { sysLine(chatId, if (ok) Loc.s(R.string.m5_switched_to, id) else Loc.s(R.string.m5_no_saved_name, id)) }
                 }
             }
             t.startsWith("/name link ") -> {
@@ -2388,34 +2387,34 @@ class MainActivity : Activity() {
                 if (label.isNotEmpty()) {
                     c.setLinkedLeadingName(account(), label)
                     thread { runCatching { c.announcePresence() } }
-                    sysLine(chatId, "🔗 calling as verified “$label”")
+                    sysLine(chatId, Loc.s(R.string.m5_calling_verified, label))
                 }
             }
             t.startsWith("/name ") -> {
                 val label = t.removePrefix("/name ").trim()
-                if (label == "off") { c.setLeadingName(""); sysLine(chatId, "name cleared") }
+                if (label == "off") { c.setLeadingName(""); sysLine(chatId, Loc.s(R.string.m5_name_cleared)) }
                 else {
                     c.setLeadingName(label)
                     thread { runCatching { c.announcePresence() } }
-                    sysLine(chatId, "calling as “$label”")
+                    sysLine(chatId, Loc.s(R.string.m5_calling_as, label))
                 }
             }
-            t == "/cq" -> { thread { runCatching { c.announcePresence() } }; sysLine(chatId, "CQ — announced your name") }
+            t == "/cq" -> { thread { runCatching { c.announcePresence() } }; sysLine(chatId, Loc.s(R.string.m5_cq_announced)) }
             t.startsWith("/cq periodic") -> {
                 val rest = t.removePrefix("/cq periodic").trim()
                 val secs = if (rest == "off" || rest.isEmpty()) 0L else (rest.toLongOrNull()?.times(60) ?: 0L)
                 // Preserve the on-message-id flag when changing the periodic interval.
                 val onMsg = runCatching { c.presenceCadenceOnMessageId() }.getOrDefault(false)
                 c.setPresenceCadence(secs.toULong(), onMsg)
-                sysLine(chatId, if (secs == 0L) "CQ cadence off" else "CQ cadence: every ${secs / 60} min")
+                sysLine(chatId, if (secs == 0L) Loc.s(R.string.m5_cq_cadence_off) else Loc.s(R.string.m5_cq_cadence_every, secs / 60))
             }
             t.startsWith("/cq onmsg") -> {
                 val on = t.removePrefix("/cq onmsg").trim().let { it == "on" || it.isEmpty() }
                 val secs = runCatching { c.presenceCadenceSecs() }.getOrDefault(0uL)
                 c.setPresenceCadence(secs, on)
-                sysLine(chatId, "CQ on-message name-id: ${if (on) "on" else "off"}")
+                sysLine(chatId, Loc.s(R.string.m5_cq_onmsg, if (on) Loc.s(R.string.m5_state_on) else Loc.s(R.string.m5_state_off)))
             }
-            else -> sysLine(chatId, "usage: /name <callsign>|link <cs>|new <cs>|list|use <id>|off  ·  /cq [periodic <mins>|off] [onmsg on|off]")
+            else -> sysLine(chatId, Loc.s(R.string.m5_name_usage))
         }
     }
 
@@ -2464,10 +2463,10 @@ class MainActivity : Activity() {
             if (e is FfiEvent.Identity && !e.contact) {
                 val who = lc.roster[e.accountFingerprint]?.display ?: e.accountFingerprint.take(8)
                 val fp = e.accountFingerprint; val name = e.username
-                addAction("Add “$who” as a contact") {
+                addAction(Loc.s(R.string.m5_add_as_contact, who)) {
                     val cl = lc.client
-                    if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) { saveContacts(cl); system("added contact $who") }
-                    else toast("could not add (account not seen)")
+                    if (cl != null && cl.addSeenContact(fp, name.ifEmpty { null }, false)) { saveContacts(cl); system(Loc.s(R.string.m5_added_contact, who)) }
+                    else toast(Loc.s(R.string.m5_could_not_add))
                 }
             }
         } else refreshListRowIfVisible()
@@ -2624,10 +2623,10 @@ class MainActivity : Activity() {
         }
         box.addView(text(invite, 12f, muted, center = true).also { it.setPadding(0, dp(14), 0, 0) })
         android.app.AlertDialog.Builder(this)
-            .setTitle("Invite QR")
+            .setTitle(Loc.s(R.string.m5_invite_qr))
             .setView(box)
-            .setPositiveButton("Share") { _, _ -> shareText(invite) }
-            .setNegativeButton("Close", null)
+            .setPositiveButton(Loc.s(R.string.m5_share)) { _, _ -> shareText(invite) }
+            .setNegativeButton(Loc.s(R.string.m5_close), null)
             .show()
     }
 
@@ -2636,7 +2635,7 @@ class MainActivity : Activity() {
         android.app.AlertDialog.Builder(this)
             .setTitle(title).setMessage(detail)
             .setPositiveButton(verb) { _, _ -> action() }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(Loc.s(R.string.m5_cancel), null)
             .show()
             .apply { getButton(android.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Tk.danger) }
     }

@@ -77,7 +77,7 @@ class QrScanActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
         hint = TextView(this).apply {
-            text = "Point at a talkrypt QR"
+            text = Loc.s(R.string.qr_point_at_talkrypt)
             setTextColor(Color.WHITE)
             textSize = 16f
             setPadding(0, 0, 0, dp(48))
@@ -92,7 +92,7 @@ class QrScanActivity : Activity() {
         )
         val cancel = TextView(this).apply {
             text = "✕"
-            contentDescription = "Cancel scan"
+            contentDescription = Loc.s(R.string.qr_cancel_scan)
             setTextColor(Color.WHITE)
             textSize = 22f
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
@@ -108,7 +108,7 @@ class QrScanActivity : Activity() {
             ),
         )
         settingsBtn = TextView(this).apply {
-            text = "Open app settings"
+            text = Loc.s(R.string.qr_open_app_settings)
             setTextColor(Color.WHITE)
             textSize = 15f
             gravity = Gravity.CENTER
@@ -145,13 +145,13 @@ class QrScanActivity : Activity() {
 
     /** Show the camera-denied recovery UI (actionable, not a dead black screen). */
     private fun showCameraDenied() {
-        hint.text = "Camera access is off — enable it to scan, or cancel and paste the invite instead."
+        hint.text = Loc.s(R.string.qr_camera_access_off)
         settingsBtn.visibility = View.VISIBLE
     }
 
     private fun hideCameraDenied() {
         settingsBtn.visibility = View.GONE
-        hint.text = "Point at a talkrypt QR"
+        hint.text = Loc.s(R.string.qr_point_at_talkrypt)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -206,7 +206,7 @@ class QrScanActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val mgr = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
-            val id = pickBackCamera(mgr) ?: run { hint.text = "No camera found"; return }
+            val id = pickBackCamera(mgr) ?: run { hint.text = Loc.s(R.string.qr_no_camera_found); return }
             cameraId = id
             val chars = mgr.getCameraCharacteristics(id)
             sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
@@ -225,11 +225,11 @@ class QrScanActivity : Activity() {
                     startPreview()
                 }
                 override fun onDisconnected(device: CameraDevice) { opening = false; device.close(); cameraDevice = null }
-                override fun onError(device: CameraDevice, error: Int) { opening = false; device.close(); cameraDevice = null; runOnUiThread { hint.text = "Camera error $error" } }
+                override fun onError(device: CameraDevice, error: Int) { opening = false; device.close(); cameraDevice = null; runOnUiThread { hint.text = Loc.s(R.string.qr_camera_error, error) } }
             }, bgHandler)
         } catch (e: Exception) {
             opening = false
-            runOnUiThread { hint.text = "Camera unavailable: ${e.message}" }
+            runOnUiThread { hint.text = Loc.s(R.string.qr_camera_unavailable, e.message ?: "") }
         }
     }
 
@@ -253,12 +253,12 @@ class QrScanActivity : Activity() {
                     session = s
                     runCatching { s.setRepeatingRequest(req.build(), null, bgHandler) }
                 }
-                override fun onConfigureFailed(s: CameraCaptureSession) { runOnUiThread { hint.text = "Camera config failed" } }
+                override fun onConfigureFailed(s: CameraCaptureSession) { runOnUiThread { hint.text = Loc.s(R.string.qr_camera_config_failed) } }
             }, bgHandler)
         } catch (e: Exception) {
             // Device disconnected/closed between open and preview — bail quietly
             // instead of crashing (the CAMERA_DISCONNECTED case).
-            runOnUiThread { hint.text = "Camera unavailable: ${e.message}" }
+            runOnUiThread { hint.text = Loc.s(R.string.qr_camera_unavailable, e.message ?: "") }
         }
     }
 
@@ -296,7 +296,7 @@ class QrScanActivity : Activity() {
             when {
                 text == null -> {}
                 text.startsWith("talkrypt://") -> succeed(text)
-                else -> runOnUiThread { hint.text = "Not a talkrypt QR — keep scanning" }
+                else -> runOnUiThread { hint.text = Loc.s(R.string.qr_not_talkrypt_keep_scanning) }
             }
         } catch (_: Exception) {
             runCatching { image.close() }

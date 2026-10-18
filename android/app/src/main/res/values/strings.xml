@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Base (English) string catalog for the talkrypt Android app.
+
+  Localization is backed by Android's resource system: every user-facing string
+  the Context-ful UI layer renders goes through Loc.s(R.string.*) (see Loc.kt),
+  which resolves against the device's current locale. To add a language, drop a
+  res/values-<lang>/strings.xml with the same names translated (see values-es).
+
+  NOT certified / NOT audited (project-wide). Security/disclaimer wording is
+  preserved verbatim here and must be translated faithfully (never strengthened
+  into a certification/compliance claim) in every locale.
+
+  The deliberately UI-free shared model (ChatEvents.kt) produces short status
+  lines in source-English by design (unit-tested headless on the plain JVM where
+  no resource table exists; AndroidX-free precludes Robolectric). Peer message
+  bodies are user-authored and never translated. See ChatEvents.kt for the note.
+
+  Note: the brand name "talkrypt" is intentionally not translated.
+-->
+<resources>
+    <string name="app_name">talkrypt</string>
+
+    <!-- ===== MainActivity: new-chat, chat list, chat row menu (range m1) ===== -->
+    <string name="m1_opening_invite">opening invite…</string>
+    <string name="m1_not_a_talkrypt_qr">Not a talkrypt QR</string>
+    <string name="m1_nym_credential_imported">Nym credential imported — paid mixnet ready (no mnemonic needed)</string>
+    <string name="m1_import_failed">import failed: %1$s</string>
+    <string name="m1_new_chat">New chat</string>
+    <string name="m1_channel">CHANNEL</string>
+    <string name="m1_posture">POSTURE</string>
+    <string name="m1_access">ACCESS</string>
+    <string name="m1_name_display_signal_style">Signal-style (badges only)</string>
+    <string name="m1_name_display_warn">Warn on look-alike collisions</string>
+    <string name="m1_name_display_suppress">Suppress colliding names</string>
+    <string name="m1_name_display">NAME DISPLAY</string>
+    <string name="m1_persistence_ephemeral">Ephemeral (memory only)</string>
+    <string name="m1_persistence_persistent">Persistent (saved, reconnectable)</string>
+    <string name="m1_persistence_always_on">Always-on (Phase 2)</string>
+    <string name="m1_persistence">PERSISTENCE</string>
+    <string name="m1_route_over_tor">Route over Tor (.onion; slow to start)</string>
+    <string name="m1_route_over_nym">Also route over Nym mixnet (opt-in; multi-homes the invite)</string>
+    <string name="m1_paid_nym_bandwidth">Paid Nym bandwidth (wallet mnemonic / credential) is set up in Settings.</string>
+    <string name="m1_host_a_chat">Host a chat</string>
+    <string name="m1_registry_restricted_chat">Registry-restricted chat</string>
+    <string name="m1_or_join">— or join —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Join</string>
+    <string name="m1_paste_invite">Paste a talkrypt:// invite</string>
+    <string name="m1_scan_qr">Scan a QR code</string>
+    <string name="m1_in_person">— in person —</string>
+    <string name="m1_find_nearby_host">Find nearby host (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Share app (P2P over Wi-Fi)</string>
+    <string name="m1_back">Back</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">More</string>
+    <string name="m1_new_chat_button">＋  New chat</string>
+    <string name="m1_no_chats_yet">No chats yet — tap ＋ to host or join.</string>
+    <string name="m1_preview_you">you: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">hosting</string>
+    <string name="m1_joined">joined</string>
+    <string name="m1_preview_members">%1$s · %2$d members</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">offline</string>
+    <string name="m1_online">online</string>
+    <string name="m1_online_count">%1$d online</string>
+    <string name="m1_connecting">connecting</string>
+    <string name="m1_time_now">now</string>
+    <string name="m1_time_minutes">%1$dm</string>
+    <string name="m1_time_hours">%1$dh</string>
+    <string name="m1_time_days">%1$dd</string>
+    <string name="m1_no_invite">no invite</string>
+    <string name="m1_safety_number_title">Safety number</string>
+    <string name="m1_safety_number_body">%1$s\n\nCompare this with your peer out-of-band; a mismatch means the channel is not talking to who you think.</string>
+    <string name="m1_copy">Copy</string>
+    <string name="m1_copied">copied</string>
+    <string name="m1_close">Close</string>
+
+    <!-- ===== MainActivity: settings, identity, nym, security (range m2) ===== -->
+    <string name="m2_delete_chat_title">Delete “%1$s”?</string>
+    <string name="m2_delete_chat_body">Erases this chat and its history from this device. This cannot be undone.</string>
+    <string name="m2_delete">Delete</string>
+    <string name="m2_connect_first">connect first</string>
+    <string name="m2_beacon_msg">beacon: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 beaconing this chat nearby (BLE + Wi-Fi) + scanning</string>
+    <string name="m2_nearby_beacon_stopped">nearby beacon stopped</string>
+    <string name="m2_no_ble_scanner">no BLE scanner</string>
+    <string name="m2_mesh_linked">📻 mesh: linked a %1$s node — messages also ride LoRa</string>
+    <string name="m2_mesh_scan_failed">mesh: BLE scan failed (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 looking for a %1$s node over BLE…</string>
+    <string name="m2_ble_scan_denied">BLE scan permission denied</string>
+    <string name="m2_mesh_stopped">mesh stopped</string>
+    <string name="m2_start_beacon_first">start the beacon first</string>
+    <string name="m2_no_blob_yet">no advertised blob yet — try again in a moment</string>
+    <string name="m2_beacon_selftest">beacon self-test: fed our own sealed beacon back (expect a 📡 sighting)</string>
+    <string name="m2_callsigns">Callsigns</string>
+    <string name="m2_callsigns_desc">Names you broadcast over your messages in this chat.</string>
+    <string name="m2_connect_to_manage_names">Connect to this chat to manage names.</string>
+    <string name="m2_back">Back</string>
+    <string name="m2_your_names">YOUR NAMES</string>
+    <string name="m2_none_yet_add">None yet — add one below.</string>
+    <string name="m2_use">Use</string>
+    <string name="m2_calling_as">calling as “%1$s”</string>
+    <string name="m2_failed">failed</string>
+    <string name="m2_removed">removed</string>
+    <string name="m2_new_callsign">New callsign</string>
+    <string name="m2_save_to_name_book">Save to name book</string>
+    <string name="m2_set_announce_now">Set + announce now</string>
+    <string name="m2_set_verified">Set as VERIFIED (🔗 account-linked)</string>
+    <string name="m2_verified_name">verified name “%1$s”</string>
+    <string name="m2_verified_desc">Verified uses your account key so a name can\'t be spoofed by another member.</string>
+    <string name="m2_cq_beacon">CQ BEACON</string>
+    <string name="m2_periodic_on">Periodic re-beacon: ON (5 min)</string>
+    <string name="m2_periodic_off">Periodic re-beacon: off</string>
+    <string name="m2_onmsg_on">On-message name-id: ON</string>
+    <string name="m2_onmsg_off">On-message name-id: off</string>
+    <string name="m2_onmsg_desc">On-message name-id lets peers notice if you rename and drop your stale callsign.</string>
+    <string name="m2_show_others">SHOW OTHERS\' NAMES</string>
+    <string name="m2_nametrust_signal">Signal-style (badges only)</string>
+    <string name="m2_nametrust_warn">Warn on look-alike collisions</string>
+    <string name="m2_nametrust_suppress">Suppress colliding names</string>
+    <string name="m2_apply_nametrust">Apply name-trust setting</string>
+    <string name="m2_nametrust_set">name-trust: %1$s</string>
+    <string name="m2_tighten_only">You can only tighten the chat\'s baseline, never loosen it.</string>
+    <string name="m2_whos_here">WHO\'S HERE</string>
+    <string name="m2_safety_suffix">  ·  safety %1$s</string>
+    <string name="m2_safety_number">safety number: %1$s</string>
+    <string name="m2_share_invite">Share invite</string>
+    <string name="m2_more">More</string>
+    <string name="m2_anchors">Anchors (username directory)</string>
+    <string name="m2_contacts">Contacts</string>
+    <string name="m2_linked_devices">Linked devices</string>
+    <string name="m2_segments">Segments (contextual identities)</string>
+    <string name="m2_settings">Settings</string>
+    <string name="m2_seal_mnemonic_err">couldn\'t seal mnemonic: %1$s</string>
+    <string name="m2_identity">IDENTITY</string>
+    <string name="m2_account_safety_number">Account safety number</string>
+    <string name="m2_deriving">deriving…</string>
+    <string name="m2_still_deriving">still deriving…</string>
+    <string name="m2_copied">copied</string>
+    <string name="m2_linked_secondary">Linked as secondary device</string>
+    <string name="m2_account_short">account %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">SECURITY</string>
+    <string name="m2_key_custody_loading">Key custody: …</string>
+    <string name="m2_key_custody_desc">Where this device can keep keys (StrongBox &gt; TEE &gt; software). Reported to peers as your custody tier.</string>
+    <string name="m2_safety_tap_copy">%1$s — tap to copy. Compare out-of-band to verify you.</string>
+    <string name="m2_key_custody">Key custody: %1$s</string>
+    <string name="m2_secrets_sealed">Secrets sealed at rest</string>
+    <string name="m2_secrets_sealed_desc">Identity seeds and the Nym mnemonic are encrypted with a non-exportable Android Keystore key (StrongBox when available).</string>
+    <string name="m2_sealing_degraded">Sealing degraded</string>
+    <string name="m2_sealing_degraded_desc">The Keystore reported: %1$s. Secrets that couldn\'t be sealed remain in app-private plaintext until it recovers.</string>
+    <string name="m2_nym_paid_bw">NYM PAID BANDWIDTH (OPTIONAL)</string>
+    <string name="m2_nym_mnemonic_hint">NYM wallet mnemonic — blank = free mixnet</string>
+    <string name="m2_show_mnemonic">Show mnemonic</string>
+    <string name="m2_ticketbook_desc">Or import a ticketbook credential minted with your own Nym tooling (the wallet seed never enters this app):</string>
+    <string name="m2_import_nym_cred">Import Nym credential</string>
+    <string name="m2_network_defaults">NETWORK DEFAULTS FOR NEW CHATS</string>
+    <string name="m2_route_tor">Route over Tor (.onion)</string>
+    <string name="m2_route_nym">Also route over Nym mixnet</string>
+    <string name="m2_notifications">NOTIFICATIONS</string>
+    <string name="m2_always_on_chats">Always-on chats</string>
+    <string name="m2_always_on_desc">Kept connected by a foreground service with a persistent notification. Tap to adjust it in system settings.</string>
+    <string name="m2_open_notif_err">couldn\'t open notification settings</string>
+    <string name="m2_about">ABOUT</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Post-quantum E2E chat over Tor. NOT certified · NOT accredited · NOT audited — experimental software; classification markings are advisory labels only.</string>
+    <string name="m2_contacts_desc">Accounts you recognize. Recognition only — being a contact (or friend) doesn\'t grant channel access; that\'s set per chat.</string>
+    <string name="m2_no_contacts">No contacts yet. In a chat, when an account presents itself, tap “Add as a contact”.</string>
+    <string name="m2_friend_suffix">  [friend]</string>
+    <string name="m2_starting_share">starting local share…</string>
+    <string name="m2_no_wifi">No Wi-Fi/LAN address — join a Wi-Fi network or hotspot first</string>
+    <string name="m2_share_talkrypt">Share talkrypt</string>
+    <string name="m2_share_instructions">On the same Wi-Fi or hotspot, the other phone scans this code (or opens the URL), downloads the app, and installs it (allow “install unknown apps” once).</string>
+    <string name="m2_apk_computing">APK SHA-256: computing…</string>
+
+    <!-- ===== MainActivity: custody, segments, nearby discovery (range m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Accept link on this device</string>
+    <string name="m3_account_prefix">account %1$s…</string>
+    <string name="m3_already_linking">already linking…</string>
+    <string name="m3_already_starting">already starting…</string>
+    <string name="m3_apk_fingerprint_failed">couldn\'t compute APK fingerprint</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (first 16): %1$s — verify on the receiving phone</string>
+    <string name="m3_back">Back</string>
+    <string name="m3_beacon_perm_needed">nearby beacon / mesh needs Bluetooth permission</string>
+    <string name="m3_broadcasting_nearby">broadcasting nearby (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Cancel</string>
+    <string name="m3_create_segment">Create segment</string>
+    <string name="m3_created_segment">created segment “%1$s”</string>
+    <string name="m3_delete">Delete</string>
+    <string name="m3_delete_name">Delete “%1$s”</string>
+    <string name="m3_delete_segment_body">Erases this segment\'s key — chats joined under it can\'t be rejoined as the same identity. This cannot be undone.</string>
+    <string name="m3_delete_segment_q">Delete segment “%1$s”?</string>
+    <string name="m3_device_not_linked">this device isn\'t linked</string>
+    <string name="m3_device_prefix">device %1$s…</string>
+    <string name="m3_done">Done</string>
+    <string name="m3_hint_work">work</string>
+    <string name="m3_join_a_chat">JOIN A CHAT (talkrypt:// invite)</string>
+    <string name="m3_join_as_name">Join as “%1$s”</string>
+    <string name="m3_join_as_this_account">Join as this account</string>
+    <string name="m3_join_chat_as_account">JOIN A CHAT AS THIS ACCOUNT (talkrypt:// invite)</string>
+    <string name="m3_join_failed">join failed: %1$s</string>
+    <string name="m3_join_peer">Join %1$s</string>
+    <string name="m3_joined_as_linked_account">joined as linked account</string>
+    <string name="m3_joined_as_segment">joined as segment “%1$s”</string>
+    <string name="m3_joining_as_linked">joining as linked account…</string>
+    <string name="m3_joining_as_name">joining as “%1$s”…</string>
+    <string name="m3_link_another_device">LINK ANOTHER DEVICE TO MY ACCOUNT</string>
+    <string name="m3_link_another_device_desc">This device holds the account. Show a one-time QR the new device scans.</string>
+    <string name="m3_link_failed">link failed: %1$s</string>
+    <string name="m3_link_offer_failed">link offer failed: %1$s</string>
+    <string name="m3_link_offer_label">LINK OFFER (talkrypt:// from the primary)</string>
+    <string name="m3_link_offer_running">Link offer running</string>
+    <string name="m3_link_offer_running_desc">On the NEW device, scan this (or paste the URI into Linked devices → Accept link). The account key stays on this device.</string>
+    <string name="m3_link_this_device_desc">This certifies THIS device under the account offering the link. Afterward, verify the account safety number shown matches the other device, out of band.</string>
+    <string name="m3_link_this_device_q">Link this device?</string>
+    <string name="m3_link_this_device_to_account">LINK THIS DEVICE TO AN ACCOUNT</string>
+    <string name="m3_linked_devices">Linked devices</string>
+    <string name="m3_linked_devices_desc">Link this device to your account on another device, so contacts recognize all your devices as one account. The account key never leaves the device that holds it — only a signed certificate crosses the wire.</string>
+    <string name="m3_linked_to_account">linked to account %1$s…</string>
+    <string name="m3_linking_this_device">linking this device…</string>
+    <string name="m3_loading_segments">loading segments…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">name the segment</string>
+    <string name="m3_nearby_hosts">Nearby hosts</string>
+    <string name="m3_nearby_perm_needed">nearby discovery needs Bluetooth / nearby-Wi-Fi permission</string>
+    <string name="m3_nearby_scanning">Scanning over Bluetooth LE and Wi-Fi Direct. Tap a host to join.</string>
+    <string name="m3_new_segment">— new segment —</string>
+    <string name="m3_no_segments_yet">No segments yet — create one below.</string>
+    <string name="m3_notifications_blocked">notifications blocked — always-on chats still run, but without a status notification</string>
+    <string name="m3_or_relink">— or re-link —</string>
+    <string name="m3_paste_link_offer_uri">paste the link offer URI</string>
+    <string name="m3_paste_talkrypt_invite">paste a talkrypt:// invite</string>
+    <string name="m3_paste_talkrypt_invite_above">paste a talkrypt:// invite above</string>
+    <string name="m3_qr_too_large">(QR too large to render — use the text)</string>
+    <string name="m3_rooted_at_device_account">rooted at this device\'s account</string>
+    <string name="m3_rooted_at_linked_account">rooted at your linked account %1$s…</string>
+    <string name="m3_safety_prefix">safety %1$s…</string>
+    <string name="m3_seal_segments_failed">couldn\'t seal segments: %1$s</string>
+    <string name="m3_segment_name_label">SEGMENT NAME (context label)</string>
+    <string name="m3_segments">Segments</string>
+    <string name="m3_segments_desc">Contextual sub-identities under your account. Each segment authenticates with its own key, so different segments are unlinkable to each other — yet a contact who recognizes your account recognizes every segment. Use one per context (work, activism, …).</string>
+    <string name="m3_start_link_offer">Start a link offer</string>
+    <string name="m3_starting_link_offer">starting link offer…</string>
+    <string name="m3_this_device_is_linked">THIS DEVICE IS LINKED</string>
+    <string name="m3_unlink">Unlink</string>
+    <string name="m3_unlink_body">Removes the link certificate — contacts will no longer recognize this device as part of the account until you link again.</string>
+    <string name="m3_unlink_this_device">Unlink this device</string>
+    <string name="m3_unlink_this_device_q">Unlink this device?</string>
+    <string name="m3_unlinked">unlinked</string>
+    <string name="m3_username_prefix">username %1$s</string>
+    <string name="m3_verify_oob_account_sn">VERIFY OUT OF BAND — account safety number:</string>
+    <string name="m3_wifi_off">Wi-Fi is off — turn it on for Wi-Fi Direct (Bluetooth still works)</string>
+
+    <!-- ===== MainActivity: anchors, restricted host, chat screen (range m4) ===== -->
+    <string name="m4_anchors_title">Anchors</string>
+    <string name="m4_anchors_desc">A username directory you spawn or point at by location. Names map to account keys; verify safety numbers out of band.</string>
+    <string name="m4_your_account">YOUR ACCOUNT</string>
+    <string name="m4_deriving">deriving…</string>
+    <string name="m4_unavailable">unavailable</string>
+    <string name="m4_spawn_my_anchor">Spawn my own anchor</string>
+    <string name="m4_or_use_known_anchor">— or use a known anchor —</string>
+    <string name="m4_anchor_location_label">ANCHOR LOCATION (talkrypt:// URI)</string>
+    <string name="m4_username_label">USERNAME</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Register my username here</string>
+    <string name="m4_enter_anchor_uri_username">enter an anchor URI + username</string>
+    <string name="m4_resolve_this_username">Resolve this username</string>
+    <string name="m4_back">Back</string>
+    <string name="m4_already_spawning">already spawning…</string>
+    <string name="m4_spawning_anchor">spawning anchor…</string>
+    <string name="m4_anchor_failed">anchor failed: %1$s</string>
+    <string name="m4_anchor_running_title">Anchor running</string>
+    <string name="m4_anchor_running_desc">Others register/resolve usernames here. Share this location (scan or copy). It runs while the app is open.</string>
+    <string name="m4_registering">registering…</string>
+    <string name="m4_register_success">✓ registered “%1$s” → your account at this anchor</string>
+    <string name="m4_register_failed">! register failed: %1$s</string>
+    <string name="m4_resolving">resolving…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → account safety number:\n%2$s\n(verify out of band before trusting)</string>
+    <string name="m4_resolve_not_registered">“%1$s” is not registered here (or registries disagreed)</string>
+    <string name="m4_resolve_failed">! resolve failed: %1$s</string>
+    <string name="m4_registry_restricted_title">Registry-restricted chat</string>
+    <string name="m4_registry_restricted_desc">Only members of the chosen registry can join %1$s. You can pick only registries you\'re bound at; unreachable ones (or ones missing your record) are greyed out.</string>
+    <string name="m4_not_registered_any_anchor">You aren\'t registered at any anchor yet. Open Anchors and register a username first.</string>
+    <string name="m4_checking_anchor">checking %1$s …</string>
+    <string name="m4_host_gated_by">Host gated by “%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — unreachable or no record</string>
+    <string name="m4_creating_restricted_chat">creating restricted chat…</string>
+    <string name="m4_registry_restricted_members">registry-restricted — only the %1$s anchor member(s) can join</string>
+    <string name="m4_sender_invite">invite</string>
+    <string name="m4_restricted_host_failed">restricted host failed: %1$s</string>
+    <string name="m4_tier_ephemeral">ephemeral</string>
+    <string name="m4_tier_always_on">always-on</string>
+    <string name="m4_tier_persistent">persistent</string>
+    <string name="m4_members_prefix">"%1$s members · "</string>
+    <string name="m4_chat_detail">"  ·  %1$ssafety %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Chat menu</string>
+    <string name="m4_message_hint">Message</string>
+    <string name="m4_send">Send</string>
+    <string name="m4_delivery_delivered">delivered</string>
+    <string name="m4_delivery_not_delivered">not delivered</string>
+    <string name="m4_delivery_sent">sent</string>
+    <string name="m4_already_creating_chat">already creating a chat…</string>
+    <string name="m4_starting_chat_over">Starting your chat over %1$s…</string>
+    <string name="m4_creating_chat">creating chat…</string>
+    <string name="m4_hosting_share_invite">hosting — share the invite to let a friend join:</string>
+
+    <!-- ===== MainActivity: join preflight, connecting, send, slash-commands (range m5) ===== -->
+    <string name="m5_host_failed">host failed: %1$s</string>
+    <string name="m5_join_chat">Join chat</string>
+    <string name="m5_join_restricted_explainer">If this chat is registry-restricted, you\'re admitted only as a member. Present a live membership, or join as a pseudonym (open chats only).</string>
+    <string name="m5_no_memberships">You have no registry memberships yet — register at an anchor to join restricted chats.</string>
+    <string name="m5_present_a_membership">PRESENT A MEMBERSHIP</string>
+    <string name="m5_checking_anchor">checking %1$s …</string>
+    <string name="m5_join_as_member">Join as “%1$s@%2$s”</string>
+    <string name="m5_or_separator">— or —</string>
+    <string name="m5_join_with_account">Join with my account (no username)</string>
+    <string name="m5_join_as_pseudonym">Join as pseudonym (unlinkable)</string>
+    <string name="m5_back">Back</string>
+    <string name="m5_already_joining">already joining…</string>
+    <string name="m5_joined">joined</string>
+    <string name="m5_as_suffix">" as %1$s"</string>
+    <string name="m5_joined_as_pseudonym">joined as pseudonym</string>
+    <string name="m5_failed">failed: %1$s</string>
+    <string name="m5_join_failed">join failed</string>
+    <string name="m5_connecting_title">Connecting</string>
+    <string name="m5_bootstrapping_tor">Bootstrapping Tor…</string>
+    <string name="m5_connecting">Connecting…</string>
+    <string name="m5_first_tor_slow">First Tor connect is slow; later ones are instant.</string>
+    <string name="m5_cancel">Cancel</string>
+    <string name="m5_bootstrapping_tor_pct">Bootstrapping Tor… %1$s%%</string>
+    <string name="m5_building_circuit">Building circuit + handshaking…</string>
+    <string name="m5_cant_reconnect">can\'t reconnect — no saved invite</string>
+    <string name="m5_reconnecting_over">reconnecting over %1$s…</string>
+    <string name="m5_reconnected_over">reconnected over %1$s</string>
+    <string name="m5_reconnect_failed_detail">reconnect failed (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">reconnect failed</string>
+    <string name="m5_reconnecting_text_kept">reconnecting — your text is kept, try again in a moment</string>
+    <string name="m5_send_failed">send failed</string>
+    <string name="m5_name_book_empty">name book empty — /name &lt;callsign&gt; to add one</string>
+    <string name="m5_tier_account_linked">account-linked</string>
+    <string name="m5_tier_bare">bare</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">saved “%1$s” to the name book</string>
+    <string name="m5_switched_to">switched to “%1$s” and announced</string>
+    <string name="m5_no_saved_name">no saved name “%1$s”</string>
+    <string name="m5_calling_verified">🔗 calling as verified “%1$s”</string>
+    <string name="m5_name_cleared">name cleared</string>
+    <string name="m5_calling_as">calling as “%1$s”</string>
+    <string name="m5_cq_announced">CQ — announced your name</string>
+    <string name="m5_cq_cadence_off">CQ cadence off</string>
+    <string name="m5_cq_cadence_every">CQ cadence: every %1$s min</string>
+    <string name="m5_state_on">on</string>
+    <string name="m5_state_off">off</string>
+    <string name="m5_cq_onmsg">CQ on-message name-id: %1$s</string>
+    <string name="m5_name_usage">usage: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Add “%1$s” as a contact</string>
+    <string name="m5_added_contact">added contact %1$s</string>
+    <string name="m5_could_not_add">could not add (account not seen)</string>
+    <string name="m5_invite_qr">Invite QR</string>
+    <string name="m5_share">Share</string>
+    <string name="m5_close">Close</string>
+
+    <!-- ===== ChatNet: friendly transport errors ===== -->
+    <string name="net_host_unreachable_tor">host unreachable over Tor — its onion didn\'t answer (offline, or not republished yet)</string>
+    <string name="net_timed_out_host">timed out reaching the host (unreachable from this network?)</string>
+    <string name="net_tor_not_ready">Tor isn\'t ready yet (still bootstrapping)</string>
+    <string name="net_cant_reconnect_no_invite">can\'t reconnect — no saved invite for this chat</string>
+    <string name="net_unknown_error">unknown error</string>
+
+    <!-- ===== QrScanActivity: scanner hints + camera-permission recovery ===== -->
+    <string name="qr_point_at_talkrypt">Point at a talkrypt QR</string>
+    <string name="qr_cancel_scan">Cancel scan</string>
+    <string name="qr_open_app_settings">Open app settings</string>
+    <string name="qr_camera_access_off">Camera access is off — enable it to scan, or cancel and paste the invite instead.</string>
+    <string name="qr_no_camera_found">No camera found</string>
+    <string name="qr_camera_error">Camera error %1$d</string>
+    <string name="qr_camera_unavailable">Camera unavailable: %1$s</string>
+    <string name="qr_camera_config_failed">Camera config failed</string>
+    <string name="qr_not_talkrypt_keep_scanning">Not a talkrypt QR — keep scanning</string>
+
+    <!-- ===== ChatService: foreground-service notification + reconnect ===== -->
+    <string name="svc_reconnecting">reconnecting “%1$s” over %2$s…</string>
+    <string name="svc_reconnected">reconnected “%1$s” over %2$s</string>
+    <string name="svc_reconnect_failed_retry">reconnect failed for “%1$s” (%2$s): %3$s — retrying…</string>
+    <string name="svc_reconnect_failed">reconnect failed for “%1$s” (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt connections</string>
+    <string name="svc_status_none">no always-on chats</string>
+    <string name="svc_status_all_connected">%1$d always-on · all connected</string>
+    <string name="svc_status_partial">%1$d always-on · %2$d connected, %3$d offline</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Nearby radios/beacons: user-surfaced errors ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct isn\'t supported on this device</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct is busy — try again in a moment</string>
+    <string name="radio_wifidirect_wifi_off">Turn on Wi-Fi to use Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct error</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct failed (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Nearby Wi-Fi permission denied</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct unavailable</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct connect failed (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct peer</string>
+    <string name="radio_ble_bt_off">Bluetooth is off</string>
+    <string name="radio_ble_no_scanner">No BLE scanner</string>
+    <string name="radio_ble_scan_failed">BLE scan failed (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth scan permission denied</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth is off</string>
+    <string name="radio_beacon_ble_no_scanner">No BLE scanner</string>
+    <string name="radio_beacon_ble_scan_failed">BLE scan failed (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth scan permission denied</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD unavailable</string>
+    <string name="radio_beacon_wifi_discovery_failed">discovery failed (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">discovery error</string>
+</resources>

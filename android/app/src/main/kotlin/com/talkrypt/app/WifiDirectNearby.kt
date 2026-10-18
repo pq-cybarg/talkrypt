@@ -66,11 +66,11 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
     private fun wifiOff(): Boolean = wifi?.isWifiEnabled != true
 
     private fun reasonText(reason: Int): String = when (reason) {
-        WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct isn't supported on this device"
-        WifiP2pManager.BUSY -> "Wi-Fi Direct is busy — try again in a moment"
+        WifiP2pManager.P2P_UNSUPPORTED -> Loc.s(R.string.radio_wifidirect_unsupported)
+        WifiP2pManager.BUSY -> Loc.s(R.string.radio_wifidirect_busy)
         WifiP2pManager.ERROR ->
-            if (wifiOff()) "Turn on Wi-Fi to use Wi-Fi Direct" else "Wi-Fi Direct error"
-        else -> "Wi-Fi Direct failed ($reason)"
+            if (wifiOff()) Loc.s(R.string.radio_wifidirect_wifi_off) else Loc.s(R.string.radio_wifidirect_error)
+        else -> Loc.s(R.string.radio_wifidirect_failed, reason)
     }
 
     /** Run discoverPeers, retrying once on the transient BUSY code. */
@@ -88,7 +88,7 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
                 }
             })
         } catch (e: SecurityException) {
-            main.post { onError("Nearby Wi-Fi permission denied") }
+            main.post { onError(Loc.s(R.string.radio_wifidirect_permission_denied)) }
         }
     }
 
@@ -107,11 +107,11 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
         onError: (String) -> Unit,
     ) {
         if (!ensureChannel()) {
-            onError("Wi-Fi Direct unavailable")
+            onError(Loc.s(R.string.radio_wifidirect_unavailable))
             return
         }
         if (wifiOff()) {
-            onError("Turn on Wi-Fi to use Wi-Fi Direct")
+            onError(Loc.s(R.string.radio_wifidirect_wifi_off))
             return
         }
         onFoundCb = onFound
@@ -194,15 +194,15 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
                     mgr.connect(ch, config, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() {}
                         override fun onFailure(reason: Int) {
-                            main.post { onErrorCb?.invoke("Wi-Fi Direct connect failed ($reason)") }
+                            main.post { onErrorCb?.invoke(Loc.s(R.string.radio_wifidirect_connect_failed, reason)) }
                         }
                     })
                 } catch (e: SecurityException) {
-                    main.post { onErrorCb?.invoke("Nearby Wi-Fi permission denied") }
+                    main.post { onErrorCb?.invoke(Loc.s(R.string.radio_wifidirect_permission_denied)) }
                 }
             }
         } catch (e: SecurityException) {
-            main.post { onErrorCb?.invoke("Nearby Wi-Fi permission denied") }
+            main.post { onErrorCb?.invoke(Loc.s(R.string.radio_wifidirect_permission_denied)) }
         }
     }
 
@@ -235,7 +235,7 @@ class WifiDirectNearby(private val context: Context) : NearbyDiscovery {
                             ?.trim()
                         if (line != null && line.startsWith("talkrypt://")) {
                             main.post {
-                                onFoundCb?.invoke(NearbyDiscovery.Peer("Wi-Fi Direct peer", line))
+                                onFoundCb?.invoke(NearbyDiscovery.Peer(Loc.s(R.string.radio_wifidirect_peer), line))
                             }
                             return@thread
                         }

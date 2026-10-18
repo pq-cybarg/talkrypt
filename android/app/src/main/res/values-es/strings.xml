@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Catálogo de cadenas en español para la app talkrypt de Android.
+
+  La localización se apoya en el sistema de recursos de Android: cada cadena
+  visible para el usuario que renderiza la capa de UI con Context pasa por
+  Loc.s(R.string.*) (ver Loc.kt), que se resuelve según la configuración
+  regional actual del dispositivo. Para añadir un idioma, coloca un
+  res/values-<lang>/strings.xml con los mismos nombres traducidos (ver values-es).
+
+  NO certificado / NO auditado (en todo el proyecto). El texto de
+  seguridad/descargo se conserva aquí de forma literal y debe traducirse con
+  fidelidad (nunca reforzándolo hasta convertirlo en una afirmación de
+  certificación/cumplimiento) en cada configuración regional.
+
+  El modelo compartido deliberadamente sin UI (ChatEvents.kt) produce líneas de
+  estado cortas en inglés de origen por diseño (probado en modo headless sobre
+  la JVM estándar donde no existe tabla de recursos; al ser sin AndroidX se
+  excluye Robolectric). Los cuerpos de mensaje de los pares los escribe el
+  usuario y nunca se traducen. Ver ChatEvents.kt para la nota.
+
+  Nota: el nombre de marca "talkrypt" intencionadamente no se traduce.
+-->
+<resources>
+
+    <!-- ===== MainActivity: nuevo chat, lista de chats, menú de fila de chat (rango m1) ===== -->
+    <string name="m1_opening_invite">abriendo invitación…</string>
+    <string name="m1_not_a_talkrypt_qr">No es un QR de talkrypt</string>
+    <string name="m1_nym_credential_imported">Credencial de Nym importada — mixnet de pago lista (no se necesita mnemónico)</string>
+    <string name="m1_import_failed">importación fallida: %1$s</string>
+    <string name="m1_new_chat">Nuevo chat</string>
+    <string name="m1_channel">CANAL</string>
+    <string name="m1_posture">POSTURA</string>
+    <string name="m1_access">ACCESO</string>
+    <string name="m1_name_display_signal_style">Estilo Signal (solo insignias)</string>
+    <string name="m1_name_display_warn">Avisar ante colisiones de nombres parecidos</string>
+    <string name="m1_name_display_suppress">Ocultar nombres en colisión</string>
+    <string name="m1_name_display">MOSTRAR NOMBRE</string>
+    <string name="m1_persistence_ephemeral">Efímero (solo en memoria)</string>
+    <string name="m1_persistence_persistent">Persistente (guardado, reconectable)</string>
+    <string name="m1_persistence_always_on">Siempre activo (Fase 2)</string>
+    <string name="m1_persistence">PERSISTENCIA</string>
+    <string name="m1_route_over_tor">Enrutar por Tor (.onion; lento al iniciar)</string>
+    <string name="m1_route_over_nym">Enrutar también por mixnet Nym (opcional; multiplica las rutas de la invitación)</string>
+    <string name="m1_paid_nym_bandwidth">El ancho de banda de pago de Nym (mnemónico de monedero / credencial) se configura en Ajustes.</string>
+    <string name="m1_host_a_chat">Alojar un chat</string>
+    <string name="m1_registry_restricted_chat">Chat restringido por registro</string>
+    <string name="m1_or_join">— o unirse —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Unirse</string>
+    <string name="m1_paste_invite">Pega una invitación talkrypt://</string>
+    <string name="m1_scan_qr">Escanear un código QR</string>
+    <string name="m1_in_person">— en persona —</string>
+    <string name="m1_find_nearby_host">Buscar anfitrión cercano (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Compartir app (P2P por Wi-Fi)</string>
+    <string name="m1_back">Atrás</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Más</string>
+    <string name="m1_new_chat_button">＋  Nuevo chat</string>
+    <string name="m1_no_chats_yet">Aún no hay chats — toca ＋ para alojar o unirte.</string>
+    <string name="m1_preview_you">tú: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">alojando</string>
+    <string name="m1_joined">unido</string>
+    <string name="m1_preview_members">%1$s · %2$d miembros</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">sin conexión</string>
+    <string name="m1_online">en línea</string>
+    <string name="m1_online_count">%1$d en línea</string>
+    <string name="m1_connecting">conectando</string>
+    <string name="m1_time_now">ahora</string>
+    <string name="m1_time_minutes">%1$dm</string>
+    <string name="m1_time_hours">%1$dh</string>
+    <string name="m1_time_days">%1$dd</string>
+    <string name="m1_no_invite">sin invitación</string>
+    <string name="m1_safety_number_title">Número de seguridad</string>
+    <string name="m1_safety_number_body">%1$s\n\nCompara esto con tu par por un canal aparte; una discrepancia significa que el canal no habla con quien crees.</string>
+    <string name="m1_copy">Copiar</string>
+    <string name="m1_copied">copiado</string>
+    <string name="m1_close">Cerrar</string>
+
+    <!-- ===== MainActivity: ajustes, identidad, nym, seguridad (rango m2) ===== -->
+    <string name="m2_delete_chat_title">¿Eliminar “%1$s”?</string>
+    <string name="m2_delete_chat_body">Borra este chat y su historial de este dispositivo. Esto no se puede deshacer.</string>
+    <string name="m2_delete">Eliminar</string>
+    <string name="m2_connect_first">conecta primero</string>
+    <string name="m2_beacon_msg">baliza: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 emitiendo baliza de este chat en las cercanías (BLE + Wi-Fi) + escaneando</string>
+    <string name="m2_nearby_beacon_stopped">baliza cercana detenida</string>
+    <string name="m2_no_ble_scanner">sin escáner BLE</string>
+    <string name="m2_mesh_linked">📻 malla: se enlazó un nodo %1$s — los mensajes también viajan por LoRa</string>
+    <string name="m2_mesh_scan_failed">malla: escaneo BLE fallido (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 buscando un nodo %1$s por BLE…</string>
+    <string name="m2_ble_scan_denied">permiso de escaneo BLE denegado</string>
+    <string name="m2_mesh_stopped">malla detenida</string>
+    <string name="m2_start_beacon_first">inicia la baliza primero</string>
+    <string name="m2_no_blob_yet">aún no hay blob anunciado — inténtalo de nuevo en un momento</string>
+    <string name="m2_beacon_selftest">autoprueba de baliza: se reintrodujo nuestra propia baliza sellada (espera un avistamiento 📡)</string>
+    <string name="m2_callsigns">Indicativos</string>
+    <string name="m2_callsigns_desc">Nombres que difundes sobre tus mensajes en este chat.</string>
+    <string name="m2_connect_to_manage_names">Conéctate a este chat para gestionar los nombres.</string>
+    <string name="m2_back">Atrás</string>
+    <string name="m2_your_names">TUS NOMBRES</string>
+    <string name="m2_none_yet_add">Aún ninguno — añade uno abajo.</string>
+    <string name="m2_use">Usar</string>
+    <string name="m2_calling_as">llamándote “%1$s”</string>
+    <string name="m2_failed">fallido</string>
+    <string name="m2_removed">eliminado</string>
+    <string name="m2_new_callsign">Nuevo indicativo</string>
+    <string name="m2_save_to_name_book">Guardar en la libreta de nombres</string>
+    <string name="m2_set_announce_now">Establecer + anunciar ahora</string>
+    <string name="m2_set_verified">Establecer como VERIFICADO (🔗 vinculado a la cuenta)</string>
+    <string name="m2_verified_name">nombre verificado “%1$s”</string>
+    <string name="m2_verified_desc">Verificado usa la clave de tu cuenta para que otro miembro no pueda suplantar un nombre.</string>
+    <string name="m2_cq_beacon">BALIZA CQ</string>
+    <string name="m2_periodic_on">Re-baliza periódica: ACTIVADA (5 min)</string>
+    <string name="m2_periodic_off">Re-baliza periódica: desactivada</string>
+    <string name="m2_onmsg_on">Identificación de nombre en el mensaje: ACTIVADA</string>
+    <string name="m2_onmsg_off">Identificación de nombre en el mensaje: desactivada</string>
+    <string name="m2_onmsg_desc">La identificación de nombre en el mensaje permite a los pares notar si te renombras y descartar tu indicativo obsoleto.</string>
+    <string name="m2_show_others">MOSTRAR NOMBRES DE OTROS</string>
+    <string name="m2_nametrust_signal">Estilo Signal (solo insignias)</string>
+    <string name="m2_nametrust_warn">Avisar ante colisiones de nombres parecidos</string>
+    <string name="m2_nametrust_suppress">Ocultar nombres en colisión</string>
+    <string name="m2_apply_nametrust">Aplicar ajuste de confianza de nombres</string>
+    <string name="m2_nametrust_set">confianza de nombres: %1$s</string>
+    <string name="m2_tighten_only">Solo puedes endurecer la línea base del chat, nunca relajarla.</string>
+    <string name="m2_whos_here">QUIÉN ESTÁ AQUÍ</string>
+    <string name="m2_safety_suffix">  ·  seguridad %1$s</string>
+    <string name="m2_safety_number">número de seguridad: %1$s</string>
+    <string name="m2_share_invite">Compartir invitación</string>
+    <string name="m2_more">Más</string>
+    <string name="m2_anchors">Anclas (directorio de nombres de usuario)</string>
+    <string name="m2_contacts">Contactos</string>
+    <string name="m2_linked_devices">Dispositivos vinculados</string>
+    <string name="m2_segments">Segmentos (identidades contextuales)</string>
+    <string name="m2_settings">Ajustes</string>
+    <string name="m2_seal_mnemonic_err">no se pudo sellar el mnemónico: %1$s</string>
+    <string name="m2_identity">IDENTIDAD</string>
+    <string name="m2_account_safety_number">Número de seguridad de la cuenta</string>
+    <string name="m2_deriving">derivando…</string>
+    <string name="m2_still_deriving">todavía derivando…</string>
+    <string name="m2_copied">copiado</string>
+    <string name="m2_linked_secondary">Vinculado como dispositivo secundario</string>
+    <string name="m2_account_short">cuenta %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">SEGURIDAD</string>
+    <string name="m2_key_custody_loading">Custodia de claves: …</string>
+    <string name="m2_key_custody_desc">Dónde este dispositivo puede guardar claves (StrongBox &gt; TEE &gt; software). Se comunica a los pares como tu nivel de custodia.</string>
+    <string name="m2_safety_tap_copy">%1$s — toca para copiar. Compara por un canal aparte para verificarte.</string>
+    <string name="m2_key_custody">Custodia de claves: %1$s</string>
+    <string name="m2_secrets_sealed">Secretos sellados en reposo</string>
+    <string name="m2_secrets_sealed_desc">Las semillas de identidad y el mnemónico de Nym se cifran con una clave no exportable de Android Keystore (StrongBox cuando está disponible).</string>
+    <string name="m2_sealing_degraded">Sellado degradado</string>
+    <string name="m2_sealing_degraded_desc">El Keystore informó: %1$s. Los secretos que no se pudieron sellar permanecen en texto plano privado de la app hasta que se recupere.</string>
+    <string name="m2_nym_paid_bw">ANCHO DE BANDA DE PAGO DE NYM (OPCIONAL)</string>
+    <string name="m2_nym_mnemonic_hint">Mnemónico del monedero NYM — en blanco = mixnet gratuito</string>
+    <string name="m2_show_mnemonic">Mostrar mnemónico</string>
+    <string name="m2_ticketbook_desc">O importa una credencial de ticketbook acuñada con tus propias herramientas de Nym (la semilla del monedero nunca entra en esta app):</string>
+    <string name="m2_import_nym_cred">Importar credencial de Nym</string>
+    <string name="m2_network_defaults">VALORES DE RED PREDETERMINADOS PARA NUEVOS CHATS</string>
+    <string name="m2_route_tor">Enrutar por Tor (.onion)</string>
+    <string name="m2_route_nym">Enrutar también por mixnet Nym</string>
+    <string name="m2_notifications">NOTIFICACIONES</string>
+    <string name="m2_always_on_chats">Chats siempre activos</string>
+    <string name="m2_always_on_desc">Se mantienen conectados por un servicio en primer plano con una notificación persistente. Toca para ajustarlo en los ajustes del sistema.</string>
+    <string name="m2_open_notif_err">no se pudieron abrir los ajustes de notificaciones</string>
+    <string name="m2_about">ACERCA DE</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Chat E2E poscuántico sobre Tor. NO certificado · NO acreditado · NO auditado — software experimental; las marcas de clasificación son solo etiquetas informativas.</string>
+    <string name="m2_contacts_desc">Cuentas que reconoces. Solo reconocimiento — ser un contacto (o amigo) no concede acceso al canal; eso se configura por chat.</string>
+    <string name="m2_no_contacts">Aún no hay contactos. En un chat, cuando una cuenta se presente, toca “Añadir como contacto”.</string>
+    <string name="m2_friend_suffix">  [amigo]</string>
+    <string name="m2_starting_share">iniciando uso compartido local…</string>
+    <string name="m2_no_wifi">Sin dirección Wi-Fi/LAN — únete primero a una red Wi-Fi o punto de acceso</string>
+    <string name="m2_share_talkrypt">Compartir talkrypt</string>
+    <string name="m2_share_instructions">En la misma Wi-Fi o punto de acceso, el otro teléfono escanea este código (o abre la URL), descarga la app y la instala (permite “instalar apps desconocidas” una vez).</string>
+    <string name="m2_apk_computing">SHA-256 del APK: calculando…</string>
+
+    <!-- ===== MainActivity: custodia, segmentos, descubrimiento cercano (rango m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Aceptar el enlace en este dispositivo</string>
+    <string name="m3_account_prefix">cuenta %1$s…</string>
+    <string name="m3_already_linking">ya se está vinculando…</string>
+    <string name="m3_already_starting">ya se está iniciando…</string>
+    <string name="m3_apk_fingerprint_failed">no se pudo calcular la huella del APK</string>
+    <string name="m3_apk_sha256_verify">SHA-256 del APK (primeros 16): %1$s — verifica en el teléfono receptor</string>
+    <string name="m3_back">Atrás</string>
+    <string name="m3_beacon_perm_needed">la baliza cercana / malla necesita permiso de Bluetooth</string>
+    <string name="m3_broadcasting_nearby">difundiendo en las cercanías (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Cancelar</string>
+    <string name="m3_create_segment">Crear segmento</string>
+    <string name="m3_created_segment">segmento “%1$s” creado</string>
+    <string name="m3_delete">Eliminar</string>
+    <string name="m3_delete_name">Eliminar “%1$s”</string>
+    <string name="m3_delete_segment_body">Borra la clave de este segmento — los chats a los que te uniste con él no se pueden reingresar como la misma identidad. Esto no se puede deshacer.</string>
+    <string name="m3_delete_segment_q">¿Eliminar el segmento “%1$s”?</string>
+    <string name="m3_device_not_linked">este dispositivo no está vinculado</string>
+    <string name="m3_device_prefix">dispositivo %1$s…</string>
+    <string name="m3_done">Listo</string>
+    <string name="m3_hint_work">trabajo</string>
+    <string name="m3_join_a_chat">UNIRSE A UN CHAT (invitación talkrypt://)</string>
+    <string name="m3_join_as_name">Unirse como “%1$s”</string>
+    <string name="m3_join_as_this_account">Unirse como esta cuenta</string>
+    <string name="m3_join_chat_as_account">UNIRSE A UN CHAT COMO ESTA CUENTA (invitación talkrypt://)</string>
+    <string name="m3_join_failed">unión fallida: %1$s</string>
+    <string name="m3_join_peer">Unirse a %1$s</string>
+    <string name="m3_joined_as_linked_account">unido como cuenta vinculada</string>
+    <string name="m3_joined_as_segment">unido como segmento “%1$s”</string>
+    <string name="m3_joining_as_linked">uniéndose como cuenta vinculada…</string>
+    <string name="m3_joining_as_name">uniéndose como “%1$s”…</string>
+    <string name="m3_link_another_device">VINCULAR OTRO DISPOSITIVO A MI CUENTA</string>
+    <string name="m3_link_another_device_desc">Este dispositivo guarda la cuenta. Muestra un QR de un solo uso que escanea el nuevo dispositivo.</string>
+    <string name="m3_link_failed">vinculación fallida: %1$s</string>
+    <string name="m3_link_offer_failed">oferta de vínculo fallida: %1$s</string>
+    <string name="m3_link_offer_label">OFERTA DE VÍNCULO (talkrypt:// desde el principal)</string>
+    <string name="m3_link_offer_running">Oferta de vínculo en curso</string>
+    <string name="m3_link_offer_running_desc">En el NUEVO dispositivo, escanea esto (o pega el URI en Dispositivos vinculados → Aceptar enlace). La clave de la cuenta permanece en este dispositivo.</string>
+    <string name="m3_link_this_device_desc">Esto certifica ESTE dispositivo bajo la cuenta que ofrece el vínculo. Después, verifica que el número de seguridad de la cuenta mostrado coincide con el del otro dispositivo, por un canal aparte.</string>
+    <string name="m3_link_this_device_q">¿Vincular este dispositivo?</string>
+    <string name="m3_link_this_device_to_account">VINCULAR ESTE DISPOSITIVO A UNA CUENTA</string>
+    <string name="m3_linked_devices">Dispositivos vinculados</string>
+    <string name="m3_linked_devices_desc">Vincula este dispositivo a tu cuenta en otro dispositivo, para que los contactos reconozcan todos tus dispositivos como una sola cuenta. La clave de la cuenta nunca sale del dispositivo que la guarda — solo un certificado firmado cruza la red.</string>
+    <string name="m3_linked_to_account">vinculado a la cuenta %1$s…</string>
+    <string name="m3_linking_this_device">vinculando este dispositivo…</string>
+    <string name="m3_loading_segments">cargando segmentos…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">nombra el segmento</string>
+    <string name="m3_nearby_hosts">Anfitriones cercanos</string>
+    <string name="m3_nearby_perm_needed">el descubrimiento cercano necesita permiso de Bluetooth / Wi-Fi cercano</string>
+    <string name="m3_nearby_scanning">Escaneando por Bluetooth LE y Wi-Fi Direct. Toca un anfitrión para unirte.</string>
+    <string name="m3_new_segment">— nuevo segmento —</string>
+    <string name="m3_no_segments_yet">Aún no hay segmentos — crea uno abajo.</string>
+    <string name="m3_notifications_blocked">notificaciones bloqueadas — los chats siempre activos siguen funcionando, pero sin una notificación de estado</string>
+    <string name="m3_or_relink">— o re-vincular —</string>
+    <string name="m3_paste_link_offer_uri">pega el URI de la oferta de vínculo</string>
+    <string name="m3_paste_talkrypt_invite">pega una invitación talkrypt://</string>
+    <string name="m3_paste_talkrypt_invite_above">pega una invitación talkrypt:// arriba</string>
+    <string name="m3_qr_too_large">(QR demasiado grande para renderizar — usa el texto)</string>
+    <string name="m3_rooted_at_device_account">anclado en la cuenta de este dispositivo</string>
+    <string name="m3_rooted_at_linked_account">anclado en tu cuenta vinculada %1$s…</string>
+    <string name="m3_safety_prefix">seguridad %1$s…</string>
+    <string name="m3_seal_segments_failed">no se pudieron sellar los segmentos: %1$s</string>
+    <string name="m3_segment_name_label">NOMBRE DEL SEGMENTO (etiqueta de contexto)</string>
+    <string name="m3_segments">Segmentos</string>
+    <string name="m3_segments_desc">Subidentidades contextuales bajo tu cuenta. Cada segmento se autentica con su propia clave, de modo que distintos segmentos no son vinculables entre sí — pero un contacto que reconoce tu cuenta reconoce cada segmento. Usa uno por contexto (trabajo, activismo, …).</string>
+    <string name="m3_start_link_offer">Iniciar una oferta de vínculo</string>
+    <string name="m3_starting_link_offer">iniciando oferta de vínculo…</string>
+    <string name="m3_this_device_is_linked">ESTE DISPOSITIVO ESTÁ VINCULADO</string>
+    <string name="m3_unlink">Desvincular</string>
+    <string name="m3_unlink_body">Elimina el certificado de vínculo — los contactos ya no reconocerán este dispositivo como parte de la cuenta hasta que lo vincules de nuevo.</string>
+    <string name="m3_unlink_this_device">Desvincular este dispositivo</string>
+    <string name="m3_unlink_this_device_q">¿Desvincular este dispositivo?</string>
+    <string name="m3_unlinked">desvinculado</string>
+    <string name="m3_username_prefix">nombre de usuario %1$s</string>
+    <string name="m3_verify_oob_account_sn">VERIFICA POR UN CANAL APARTE — número de seguridad de la cuenta:</string>
+    <string name="m3_wifi_off">Wi-Fi está desactivado — actívalo para Wi-Fi Direct (Bluetooth sigue funcionando)</string>
+
+    <!-- ===== MainActivity: anclas, anfitrión restringido, pantalla de chat (rango m4) ===== -->
+    <string name="m4_anchors_title">Anclas</string>
+    <string name="m4_anchors_desc">Un directorio de nombres de usuario que generas o al que apuntas por ubicación. Los nombres se asignan a claves de cuenta; verifica los números de seguridad por un canal aparte.</string>
+    <string name="m4_your_account">TU CUENTA</string>
+    <string name="m4_deriving">derivando…</string>
+    <string name="m4_unavailable">no disponible</string>
+    <string name="m4_spawn_my_anchor">Generar mi propia ancla</string>
+    <string name="m4_or_use_known_anchor">— o usar un ancla conocida —</string>
+    <string name="m4_anchor_location_label">UBICACIÓN DEL ANCLA (URI talkrypt://)</string>
+    <string name="m4_username_label">NOMBRE DE USUARIO</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Registrar mi nombre de usuario aquí</string>
+    <string name="m4_enter_anchor_uri_username">introduce un URI de ancla + nombre de usuario</string>
+    <string name="m4_resolve_this_username">Resolver este nombre de usuario</string>
+    <string name="m4_back">Atrás</string>
+    <string name="m4_already_spawning">ya se está generando…</string>
+    <string name="m4_spawning_anchor">generando ancla…</string>
+    <string name="m4_anchor_failed">ancla fallida: %1$s</string>
+    <string name="m4_anchor_running_title">Ancla en ejecución</string>
+    <string name="m4_anchor_running_desc">Otros registran/resuelven nombres de usuario aquí. Comparte esta ubicación (escanea o copia). Funciona mientras la app esté abierta.</string>
+    <string name="m4_registering">registrando…</string>
+    <string name="m4_register_success">✓ “%1$s” registrado → tu cuenta en esta ancla</string>
+    <string name="m4_register_failed">! registro fallido: %1$s</string>
+    <string name="m4_resolving">resolviendo…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → número de seguridad de la cuenta:\n%2$s\n(verifica por un canal aparte antes de confiar)</string>
+    <string name="m4_resolve_not_registered">“%1$s” no está registrado aquí (o los registros no coincidieron)</string>
+    <string name="m4_resolve_failed">! resolución fallida: %1$s</string>
+    <string name="m4_registry_restricted_title">Chat restringido por registro</string>
+    <string name="m4_registry_restricted_desc">Solo los miembros del registro elegido pueden unirse a %1$s. Solo puedes elegir registros a los que estás vinculado; los inalcanzables (o los que no tienen tu registro) aparecen atenuados.</string>
+    <string name="m4_not_registered_any_anchor">Aún no estás registrado en ninguna ancla. Abre Anclas y registra primero un nombre de usuario.</string>
+    <string name="m4_checking_anchor">comprobando %1$s …</string>
+    <string name="m4_host_gated_by">Anfitrión restringido por “%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — inalcanzable o sin registro</string>
+    <string name="m4_creating_restricted_chat">creando chat restringido…</string>
+    <string name="m4_registry_restricted_members">restringido por registro — solo el/los %1$s miembro(s) del ancla pueden unirse</string>
+    <string name="m4_sender_invite">invitación</string>
+    <string name="m4_restricted_host_failed">anfitrión restringido fallido: %1$s</string>
+    <string name="m4_tier_ephemeral">efímero</string>
+    <string name="m4_tier_always_on">siempre activo</string>
+    <string name="m4_tier_persistent">persistente</string>
+    <string name="m4_members_prefix">"%1$s miembros · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sseguridad %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Menú del chat</string>
+    <string name="m4_message_hint">Mensaje</string>
+    <string name="m4_send">Enviar</string>
+    <string name="m4_delivery_delivered">entregado</string>
+    <string name="m4_delivery_not_delivered">no entregado</string>
+    <string name="m4_delivery_sent">enviado</string>
+    <string name="m4_already_creating_chat">ya se está creando un chat…</string>
+    <string name="m4_starting_chat_over">Iniciando tu chat por %1$s…</string>
+    <string name="m4_creating_chat">creando chat…</string>
+    <string name="m4_hosting_share_invite">alojando — comparte la invitación para que un amigo se una:</string>
+
+    <!-- ===== MainActivity: verificación previa al unirse, conexión, envío, comandos de barra (rango m5) ===== -->
+    <string name="m5_host_failed">alojamiento fallido: %1$s</string>
+    <string name="m5_join_chat">Unirse al chat</string>
+    <string name="m5_join_restricted_explainer">Si este chat está restringido por registro, solo se te admite como miembro. Presenta una membresía activa, o únete como seudónimo (solo chats abiertos).</string>
+    <string name="m5_no_memberships">Aún no tienes membresías de registro — regístrate en un ancla para unirte a chats restringidos.</string>
+    <string name="m5_present_a_membership">PRESENTAR UNA MEMBRESÍA</string>
+    <string name="m5_checking_anchor">comprobando %1$s …</string>
+    <string name="m5_join_as_member">Unirse como “%1$s@%2$s”</string>
+    <string name="m5_or_separator">— o —</string>
+    <string name="m5_join_with_account">Unirse con mi cuenta (sin nombre de usuario)</string>
+    <string name="m5_join_as_pseudonym">Unirse como seudónimo (no vinculable)</string>
+    <string name="m5_back">Atrás</string>
+    <string name="m5_already_joining">ya se está uniendo…</string>
+    <string name="m5_joined">unido</string>
+    <string name="m5_as_suffix">" como %1$s"</string>
+    <string name="m5_joined_as_pseudonym">unido como seudónimo</string>
+    <string name="m5_failed">fallido: %1$s</string>
+    <string name="m5_join_failed">unión fallida</string>
+    <string name="m5_connecting_title">Conectando</string>
+    <string name="m5_bootstrapping_tor">Arrancando Tor…</string>
+    <string name="m5_connecting">Conectando…</string>
+    <string name="m5_first_tor_slow">La primera conexión de Tor es lenta; las siguientes son instantáneas.</string>
+    <string name="m5_cancel">Cancelar</string>
+    <string name="m5_bootstrapping_tor_pct">Arrancando Tor… %1$s%%</string>
+    <string name="m5_building_circuit">Construyendo circuito + negociando…</string>
+    <string name="m5_cant_reconnect">no se puede reconectar — no hay invitación guardada</string>
+    <string name="m5_reconnecting_over">reconectando por %1$s…</string>
+    <string name="m5_reconnected_over">reconectado por %1$s</string>
+    <string name="m5_reconnect_failed_detail">reconexión fallida (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">reconexión fallida</string>
+    <string name="m5_reconnecting_text_kept">reconectando — tu texto se conserva, inténtalo de nuevo en un momento</string>
+    <string name="m5_send_failed">envío fallido</string>
+    <string name="m5_name_book_empty">libreta de nombres vacía — /name &lt;indicativo&gt; para añadir uno</string>
+    <string name="m5_tier_account_linked">vinculado a la cuenta</string>
+    <string name="m5_tier_bare">simple</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">“%1$s” guardado en la libreta de nombres</string>
+    <string name="m5_switched_to">cambiado a “%1$s” y anunciado</string>
+    <string name="m5_no_saved_name">no hay un nombre guardado “%1$s”</string>
+    <string name="m5_calling_verified">🔗 llamándote como verificado “%1$s”</string>
+    <string name="m5_name_cleared">nombre borrado</string>
+    <string name="m5_calling_as">llamándote “%1$s”</string>
+    <string name="m5_cq_announced">CQ — anunció tu nombre</string>
+    <string name="m5_cq_cadence_off">cadencia CQ desactivada</string>
+    <string name="m5_cq_cadence_every">cadencia CQ: cada %1$s min</string>
+    <string name="m5_state_on">activado</string>
+    <string name="m5_state_off">desactivado</string>
+    <string name="m5_cq_onmsg">identificación de nombre CQ en el mensaje: %1$s</string>
+    <string name="m5_name_usage">uso: /name &lt;indicativo&gt;|link &lt;ind&gt;|new &lt;ind&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Añadir “%1$s” como contacto</string>
+    <string name="m5_added_contact">contacto %1$s añadido</string>
+    <string name="m5_could_not_add">no se pudo añadir (cuenta no vista)</string>
+    <string name="m5_invite_qr">QR de invitación</string>
+    <string name="m5_share">Compartir</string>
+    <string name="m5_close">Cerrar</string>
+
+    <!-- ===== ChatNet: errores de transporte amigables ===== -->
+    <string name="net_host_unreachable_tor">anfitrión inalcanzable por Tor — su onion no respondió (sin conexión, o aún no republicado)</string>
+    <string name="net_timed_out_host">se agotó el tiempo al contactar con el anfitrión (¿inalcanzable desde esta red?)</string>
+    <string name="net_tor_not_ready">Tor aún no está listo (todavía arrancando)</string>
+    <string name="net_cant_reconnect_no_invite">no se puede reconectar — no hay invitación guardada para este chat</string>
+    <string name="net_unknown_error">error desconocido</string>
+
+    <!-- ===== QrScanActivity: pistas del escáner + recuperación del permiso de cámara ===== -->
+    <string name="qr_point_at_talkrypt">Apunta a un QR de talkrypt</string>
+    <string name="qr_cancel_scan">Cancelar escaneo</string>
+    <string name="qr_open_app_settings">Abrir ajustes de la app</string>
+    <string name="qr_camera_access_off">El acceso a la cámara está desactivado — actívalo para escanear, o cancela y pega la invitación en su lugar.</string>
+    <string name="qr_no_camera_found">No se encontró cámara</string>
+    <string name="qr_camera_error">Error de cámara %1$d</string>
+    <string name="qr_camera_unavailable">Cámara no disponible: %1$s</string>
+    <string name="qr_camera_config_failed">Error de configuración de la cámara</string>
+    <string name="qr_not_talkrypt_keep_scanning">No es un QR de talkrypt — sigue escaneando</string>
+
+    <!-- ===== ChatService: notificación del servicio en primer plano + reconexión ===== -->
+    <string name="svc_reconnecting">reconectando “%1$s” por %2$s…</string>
+    <string name="svc_reconnected">reconectado “%1$s” por %2$s</string>
+    <string name="svc_reconnect_failed_retry">reconexión fallida para “%1$s” (%2$s): %3$s — reintentando…</string>
+    <string name="svc_reconnect_failed">reconexión fallida para “%1$s” (%2$s): %3$s</string>
+    <string name="svc_channel_name">conexiones de talkrypt</string>
+    <string name="svc_status_none">sin chats siempre activos</string>
+    <string name="svc_status_all_connected">%1$d siempre activos · todos conectados</string>
+    <string name="svc_status_partial">%1$d siempre activos · %2$d conectados, %3$d sin conexión</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Radios/balizas cercanas: errores mostrados al usuario ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct no es compatible con este dispositivo</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct está ocupado — inténtalo de nuevo en un momento</string>
+    <string name="radio_wifidirect_wifi_off">Activa Wi-Fi para usar Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">Error de Wi-Fi Direct</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct fallido (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Permiso de Wi-Fi cercano denegado</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct no disponible</string>
+    <string name="radio_wifidirect_connect_failed">Conexión de Wi-Fi Direct fallida (%1$d)</string>
+    <string name="radio_wifidirect_peer">Par de Wi-Fi Direct</string>
+    <string name="radio_ble_bt_off">Bluetooth está desactivado</string>
+    <string name="radio_ble_no_scanner">Sin escáner BLE</string>
+    <string name="radio_ble_scan_failed">Escaneo BLE fallido (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Permiso de escaneo Bluetooth denegado</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth está desactivado</string>
+    <string name="radio_beacon_ble_no_scanner">Sin escáner BLE</string>
+    <string name="radio_beacon_ble_scan_failed">Escaneo BLE fallido (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Permiso de escaneo Bluetooth denegado</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD no disponible</string>
+    <string name="radio_beacon_wifi_discovery_failed">descubrimiento fallido (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">error de descubrimiento</string>
+</resources>
