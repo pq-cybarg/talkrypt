@@ -145,14 +145,14 @@ object ChatNet {
         val m = (raw ?: "unknown error").lowercase()
         return when {
             m.contains("hidden service circuit") || m.contains("onion") ->
-                "host unreachable over Tor — its onion didn't answer (offline, or not republished yet)"
+                Loc.s(R.string.net_host_unreachable_tor)
             m.contains("timed out") || m.contains("timeout") ->
-                "timed out reaching the host (unreachable from this network?)"
+                Loc.s(R.string.net_timed_out_host)
             m.contains("bootstrap") ->
-                "Tor isn't ready yet (still bootstrapping)"
+                Loc.s(R.string.net_tor_not_ready)
             m.contains("no saved invite") ->
-                "can't reconnect — no saved invite for this chat"
-            else -> raw ?: "unknown error"
+                Loc.s(R.string.net_cant_reconnect_no_invite)
+            else -> raw ?: Loc.s(R.string.net_unknown_error)
         }
     }
 }

@@ -137,9 +137,9 @@ class BleBeaconBackend(private val context: Context) : RadioBeacon {
     override fun startScanning(onBlob: (ByteArray, String) -> Unit, onError: (String) -> Unit) {
         val adapter = mgr?.adapter
         if (adapter == null || !adapter.isEnabled) {
-            onError("Bluetooth is off"); return
+            onError(Loc.s(R.string.radio_beacon_ble_bt_off)); return
         }
-        val scanner = adapter.bluetoothLeScanner ?: run { onError("No BLE scanner"); return }
+        val scanner = adapter.bluetoothLeScanner ?: run { onError(Loc.s(R.string.radio_beacon_ble_no_scanner)); return }
         val filters = listOf(
             ScanFilter.Builder().setServiceUuid(ParcelUuid(NearbyDiscovery.BEACON_SERVICE_UUID)).build(),
         )
@@ -150,14 +150,14 @@ class BleBeaconBackend(private val context: Context) : RadioBeacon {
                 if (seen.add(device.address)) connectAndRead(device, onBlob)
             }
             override fun onScanFailed(errorCode: Int) {
-                main.post { onError("BLE scan failed ($errorCode)") }
+                main.post { onError(Loc.s(R.string.radio_beacon_ble_scan_failed, errorCode)) }
             }
         }
         scanCallback = cb
         try {
             scanner.startScan(filters, settings, cb)
         } catch (e: SecurityException) {
-            onError("Bluetooth scan permission denied")
+            onError(Loc.s(R.string.radio_beacon_ble_scan_permission_denied))
         }
     }
 

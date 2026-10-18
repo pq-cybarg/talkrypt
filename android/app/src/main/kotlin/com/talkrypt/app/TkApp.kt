@@ -11,6 +11,9 @@ import android.app.Application
 class TkApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Hold the Application context for the process-global localized-string
+        // accessor (see Loc) BEFORE anything can render a string.
+        Loc.ctx = applicationContext
         runCatching { NymNative.initTlsVerifier(this) }
         // Prewarm the expensive singletons (Keystore unseal + ML-DSA account
         // reconstruction, StrongBox custody probe) off the main thread, so the

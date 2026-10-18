@@ -13,6 +13,17 @@ import uniffi.talkrypt_ffi.FfiEvent
  * the event mutated existing history in place (a delivery-state change on one of
  * our own bubbles) rather than appending a new line — the caller re-renders
  * instead of appending.
+ *
+ * Localization boundary: the short status/system lines produced here stay
+ * source-English, unlike the Context-ful UI layer (which goes through [Loc]).
+ * This is deliberate — these lines are produced by UI-FREE code that is
+ * unit-tested headless on the plain JVM (see ChatEventsTest), where no Android
+ * resource table exists; and the project is AndroidX-free, so Robolectric (which
+ * would provide one) is off the table. They're also persisted verbatim into the
+ * transcript, so they are effectively log text. Peer message bodies are
+ * user-authored (never translated). If these lines must be localized later, the
+ * right design is a structured message code + args resolved at render time, not
+ * a resource lookup in this headless layer.
  */
 fun applyEvent(sessions: Sessions, id: String, lc: LiveChat, e: FfiEvent): ChatMsg? {
     val now = System.currentTimeMillis()

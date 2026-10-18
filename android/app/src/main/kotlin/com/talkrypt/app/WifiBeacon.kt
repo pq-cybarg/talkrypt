@@ -107,11 +107,11 @@ class WifiBeaconBackend(private val context: Context) : RadioBeacon {
      * Wire `onBlob` to `FfiBeacon.deliverBeacon(blob, source)`.
      */
     override fun startScanning(onBlob: (ByteArray, String) -> Unit, onError: (String) -> Unit) {
-        val n = nsd ?: run { onError("NSD unavailable"); return }
+        val n = nsd ?: run { onError(Loc.s(R.string.radio_beacon_wifi_nsd_unavailable)); return }
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String?) {}
             override fun onDiscoveryStopped(serviceType: String?) {}
-            override fun onStartDiscoveryFailed(serviceType: String?, err: Int) { onError("discovery failed ($err)") }
+            override fun onStartDiscoveryFailed(serviceType: String?, err: Int) { onError(Loc.s(R.string.radio_beacon_wifi_discovery_failed, err)) }
             override fun onStopDiscoveryFailed(serviceType: String?, err: Int) {}
             override fun onServiceLost(s: NsdServiceInfo?) {}
             override fun onServiceFound(s: NsdServiceInfo?) {
@@ -124,7 +124,7 @@ class WifiBeaconBackend(private val context: Context) : RadioBeacon {
         try {
             n.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Exception) {
-            onError("discovery error")
+            onError(Loc.s(R.string.radio_beacon_wifi_discovery_error))
         }
     }
 

@@ -124,11 +124,11 @@ class BleNearby(private val context: Context) : NearbyDiscovery {
     override fun startScanning(onFound: (NearbyDiscovery.Peer) -> Unit, onError: (String) -> Unit) {
         val adapter = mgr?.adapter
         if (adapter == null || !adapter.isEnabled) {
-            onError("Bluetooth is off")
+            onError(Loc.s(R.string.radio_ble_bt_off))
             return
         }
         val scanner = adapter.bluetoothLeScanner ?: run {
-            onError("No BLE scanner")
+            onError(Loc.s(R.string.radio_ble_no_scanner))
             return
         }
         val filters = listOf(
@@ -149,14 +149,14 @@ class BleNearby(private val context: Context) : NearbyDiscovery {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                main.post { onError("BLE scan failed ($errorCode)") }
+                main.post { onError(Loc.s(R.string.radio_ble_scan_failed, errorCode)) }
             }
         }
         scanCallback = cb
         try {
             scanner.startScan(filters, settings, cb)
         } catch (e: SecurityException) {
-            onError("Bluetooth scan permission denied")
+            onError(Loc.s(R.string.radio_ble_scan_permission_denied))
         }
     }
 
