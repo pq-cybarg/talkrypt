@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Український каталог рядків для застосунку talkrypt на Android.
+
+  Локалізація спирається на систему ресурсів Android: кожен видимий для
+  користувача рядок, який відмальовує шар інтерфейсу з Context, проходить через
+  Loc.s(R.string.*) (див. Loc.kt) і розв'язується відповідно до поточної локалі
+  пристрою. Щоб додати мову, покладіть res/values-<lang>/strings.xml з тими
+  самими іменами, перекладеними (див. values-es).
+
+  НЕ сертифіковано / НЕ проаудитовано (у межах усього проєкту). Текст про
+  безпеку та відмову від відповідальності тут збережено дослівно; його слід
+  перекладати точно (ніколи не посилюючи до твердження про
+  сертифікацію/відповідність) у кожній локалі.
+
+  Навмисно позбавлена інтерфейсу спільна модель (ChatEvents.kt) за задумом
+  видає короткі рядки стану вихідною англійською (тестується headless на
+  звичайній JVM, де немає таблиці ресурсів; відсутність AndroidX унеможливлює
+  Robolectric). Тіла повідомлень співрозмовників пише користувач, і вони ніколи
+  не перекладаються. Див. примітку в ChatEvents.kt.
+
+  Примітка: назву бренда "talkrypt" навмисно не перекладено.
+-->
+<resources>
+
+    <!-- ===== MainActivity: новий чат, список чатів, меню рядка чату (діапазон m1) ===== -->
+    <string name="m1_opening_invite">відкриваємо запрошення…</string>
+    <string name="m1_not_a_talkrypt_qr">Це не QR talkrypt</string>
+    <string name="m1_nym_credential_imported">Облікові дані Nym імпортовано — платний mixnet готовий (мнемоніка не потрібна)</string>
+    <string name="m1_import_failed">помилка імпорту: %1$s</string>
+    <string name="m1_new_chat">Новий чат</string>
+    <string name="m1_channel">КАНАЛ</string>
+    <string name="m1_posture">РЕЖИМ</string>
+    <string name="m1_access">ДОСТУП</string>
+    <string name="m1_name_display_signal_style">Стиль Signal (лише значки)</string>
+    <string name="m1_name_display_warn">Попереджати про схожі збіги</string>
+    <string name="m1_name_display_suppress">Приховувати імена, що збігаються</string>
+    <string name="m1_name_display">ВІДОБРАЖЕННЯ ІМЕН</string>
+    <string name="m1_persistence_ephemeral">Тимчасовий (лише в пам\'яті)</string>
+    <string name="m1_persistence_persistent">Постійний (збережений, можна перепідключатися)</string>
+    <string name="m1_persistence_always_on">Завжди активний (Фаза 2)</string>
+    <string name="m1_persistence">ЗБЕРЕЖЕННЯ</string>
+    <string name="m1_route_over_tor">Маршрутизувати через Tor (.onion; повільний старт)</string>
+    <string name="m1_route_over_nym">Також маршрутизувати через mixnet Nym (за згодою; додає запрошенню кілька маршрутів)</string>
+    <string name="m1_paid_nym_bandwidth">Платна пропускна здатність Nym (мнемоніка гаманця / облікові дані) налаштовується в Налаштуваннях.</string>
+    <string name="m1_host_a_chat">Розмістити чат</string>
+    <string name="m1_registry_restricted_chat">Чат, обмежений реєстром</string>
+    <string name="m1_or_join">— або приєднатися —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Приєднатися</string>
+    <string name="m1_paste_invite">Вставте запрошення talkrypt://</string>
+    <string name="m1_scan_qr">Сканувати QR-код</string>
+    <string name="m1_in_person">— особисто —</string>
+    <string name="m1_find_nearby_host">Знайти хост поблизу (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Поділитися застосунком (P2P через Wi-Fi)</string>
+    <string name="m1_back">Назад</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Більше</string>
+    <string name="m1_new_chat_button">＋  Новий чат</string>
+    <string name="m1_no_chats_yet">Поки що немає чатів — торкніться ＋, щоб розмістити чи приєднатися.</string>
+    <string name="m1_preview_you">ви: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">розміщую</string>
+    <string name="m1_joined">приєднано</string>
+    <string name="m1_preview_members">%1$s · %2$d учасників</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">офлайн</string>
+    <string name="m1_online">онлайн</string>
+    <string name="m1_online_count">%1$d онлайн</string>
+    <string name="m1_connecting">підключення</string>
+    <string name="m1_time_now">зараз</string>
+    <string name="m1_time_minutes">%1$dхв</string>
+    <string name="m1_time_hours">%1$dг</string>
+    <string name="m1_time_days">%1$dд</string>
+    <string name="m1_no_invite">немає запрошення</string>
+    <string name="m1_safety_number_title">Код безпеки</string>
+    <string name="m1_safety_number_body">%1$s\n\nПорівняйте це зі своїм співрозмовником позасмуговим каналом; розбіжність означає, що канал з\'єднано не з тим, на кого ви розраховуєте.</string>
+    <string name="m1_copy">Копіювати</string>
+    <string name="m1_copied">скопійовано</string>
+    <string name="m1_close">Закрити</string>
+
+    <!-- ===== MainActivity: налаштування, особистість, nym, безпека (діапазон m2) ===== -->
+    <string name="m2_delete_chat_title">Видалити “%1$s”?</string>
+    <string name="m2_delete_chat_body">Стирає цей чат та його історію з цього пристрою. Цю дію не можна скасувати.</string>
+    <string name="m2_delete">Видалити</string>
+    <string name="m2_connect_first">спершу підключіться</string>
+    <string name="m2_beacon_msg">маячок: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 транслюємо цей чат поблизу (BLE + Wi-Fi) + сканування</string>
+    <string name="m2_nearby_beacon_stopped">маячок поблизу зупинено</string>
+    <string name="m2_no_ble_scanner">немає сканера BLE</string>
+    <string name="m2_mesh_linked">📻 mesh: приєднано вузол %1$s — повідомлення також ідуть через LoRa</string>
+    <string name="m2_mesh_scan_failed">mesh: помилка сканування BLE (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 шукаємо вузол %1$s через BLE…</string>
+    <string name="m2_ble_scan_denied">Відмовлено в дозволі на сканування BLE</string>
+    <string name="m2_mesh_stopped">mesh зупинено</string>
+    <string name="m2_start_beacon_first">спершу запустіть маячок</string>
+    <string name="m2_no_blob_yet">ще немає оголошеного блоба — спробуйте за мить</string>
+    <string name="m2_beacon_selftest">самоперевірка маячка: повернули власний запечатаний маячок (очікуйте появу 📡)</string>
+    <string name="m2_callsigns">Позивні</string>
+    <string name="m2_callsigns_desc">Імена, які ви транслюєте у своїх повідомленнях у цьому чаті.</string>
+    <string name="m2_connect_to_manage_names">Підключіться до цього чату, щоб керувати іменами.</string>
+    <string name="m2_back">Назад</string>
+    <string name="m2_your_names">ВАШІ ІМЕНА</string>
+    <string name="m2_none_yet_add">Поки що немає — додайте нижче.</string>
+    <string name="m2_use">Використати</string>
+    <string name="m2_calling_as">представляєтесь як “%1$s”</string>
+    <string name="m2_failed">помилка</string>
+    <string name="m2_removed">видалено</string>
+    <string name="m2_new_callsign">Новий позивний</string>
+    <string name="m2_save_to_name_book">Зберегти в книгу імен</string>
+    <string name="m2_set_announce_now">Встановити + оголосити зараз</string>
+    <string name="m2_set_verified">Встановити як ПЕРЕВІРЕНЕ (🔗 прив\'язано до акаунта)</string>
+    <string name="m2_verified_name">перевірене ім\'я “%1$s”</string>
+    <string name="m2_verified_desc">Перевірене використовує ключ вашого акаунта, тож ім\'я не зможе підробити інший учасник.</string>
+    <string name="m2_cq_beacon">МАЯЧОК CQ</string>
+    <string name="m2_periodic_on">Періодичне повторне транслювання: УВІМК (5 хв)</string>
+    <string name="m2_periodic_off">Періодичне повторне транслювання: вимк</string>
+    <string name="m2_onmsg_on">Ідентифікація імені в повідомленні: УВІМК</string>
+    <string name="m2_onmsg_off">Ідентифікація імені в повідомленні: вимк</string>
+    <string name="m2_onmsg_desc">Ідентифікація імені в повідомленні дає змогу співрозмовникам помітити перейменування та відкинути застарілий позивний.</string>
+    <string name="m2_show_others">ПОКАЗУВАТИ ІМЕНА ІНШИХ</string>
+    <string name="m2_nametrust_signal">Стиль Signal (лише значки)</string>
+    <string name="m2_nametrust_warn">Попереджати про схожі збіги</string>
+    <string name="m2_nametrust_suppress">Приховувати імена, що збігаються</string>
+    <string name="m2_apply_nametrust">Застосувати налаштування довіри до імен</string>
+    <string name="m2_nametrust_set">довіра до імен: %1$s</string>
+    <string name="m2_tighten_only">Ви можете лише посилити базовий рівень чату, але не послабити його.</string>
+    <string name="m2_whos_here">ХТО ТУТ</string>
+    <string name="m2_safety_suffix">  ·  безпека %1$s</string>
+    <string name="m2_safety_number">код безпеки: %1$s</string>
+    <string name="m2_share_invite">Поділитися запрошенням</string>
+    <string name="m2_more">Більше</string>
+    <string name="m2_anchors">Якорі (каталог імен користувачів)</string>
+    <string name="m2_contacts">Контакти</string>
+    <string name="m2_linked_devices">Прив\'язані пристрої</string>
+    <string name="m2_segments">Сегменти (контекстні особистості)</string>
+    <string name="m2_settings">Налаштування</string>
+    <string name="m2_seal_mnemonic_err">не вдалося запечатати мнемоніку: %1$s</string>
+    <string name="m2_identity">ОСОБИСТІСТЬ</string>
+    <string name="m2_account_safety_number">Код безпеки акаунта</string>
+    <string name="m2_deriving">обчислення…</string>
+    <string name="m2_still_deriving">усе ще обчислюється…</string>
+    <string name="m2_copied">скопійовано</string>
+    <string name="m2_linked_secondary">Прив\'язано як вторинний пристрій</string>
+    <string name="m2_account_short">акаунт %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">БЕЗПЕКА</string>
+    <string name="m2_key_custody_loading">Зберігання ключів: …</string>
+    <string name="m2_key_custody_desc">Де цей пристрій може зберігати ключі (StrongBox &gt; TEE &gt; програмне забезпечення). Повідомляється співрозмовникам як ваш рівень зберігання.</string>
+    <string name="m2_safety_tap_copy">%1$s — торкніться, щоб скопіювати. Порівняйте позасмуговим каналом, щоб підтвердити вас.</string>
+    <string name="m2_key_custody">Зберігання ключів: %1$s</string>
+    <string name="m2_secrets_sealed">Секрети запечатано в стані спокою</string>
+    <string name="m2_secrets_sealed_desc">Насіння особистості та мнемоніка Nym шифруються неекспортованим ключем Android Keystore (StrongBox, якщо доступний).</string>
+    <string name="m2_sealing_degraded">Запечатування погіршено</string>
+    <string name="m2_sealing_degraded_desc">Keystore повідомив: %1$s. Секрети, які не вдалося запечатати, залишаються у відкритому вигляді в приватній області застосунку, доки він не відновиться.</string>
+    <string name="m2_nym_paid_bw">ПЛАТНА ПРОПУСКНА ЗДАТНІСТЬ NYM (НЕОБОВ\'ЯЗКОВО)</string>
+    <string name="m2_nym_mnemonic_hint">Мнемоніка гаманця NYM — порожнє = безкоштовний mixnet</string>
+    <string name="m2_show_mnemonic">Показати мнемоніку</string>
+    <string name="m2_ticketbook_desc">Або імпортуйте облікові дані ticketbook, створені вашими власними інструментами Nym (насіння гаманця ніколи не потрапляє в цей застосунок):</string>
+    <string name="m2_import_nym_cred">Імпортувати облікові дані Nym</string>
+    <string name="m2_network_defaults">МЕРЕЖЕВІ ТИПОВІ НАЛАШТУВАННЯ ДЛЯ НОВИХ ЧАТІВ</string>
+    <string name="m2_route_tor">Маршрутизувати через Tor (.onion)</string>
+    <string name="m2_route_nym">Також маршрутизувати через mixnet Nym</string>
+    <string name="m2_notifications">СПОВІЩЕННЯ</string>
+    <string name="m2_always_on_chats">Завжди активні чати</string>
+    <string name="m2_always_on_desc">Підтримуються підключеними службою переднього плану з постійним сповіщенням. Торкніться, щоб налаштувати це в системних налаштуваннях.</string>
+    <string name="m2_open_notif_err">не вдалося відкрити налаштування сповіщень</string>
+    <string name="m2_about">ПРО ЗАСТОСУНОК</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Постквантовий наскрізно зашифрований чат через Tor. НЕ сертифіковано · НЕ акредитовано · НЕ проаудитовано — експериментальне програмне забезпечення; позначки класифікації є лише рекомендаційними мітками.</string>
+    <string name="m2_contacts_desc">Акаунти, які ви розпізнаєте. Лише розпізнавання — бути контактом (чи другом) не надає доступу до каналу; це налаштовується для кожного чату.</string>
+    <string name="m2_no_contacts">Поки що немає контактів. У чаті, коли акаунт представляється, торкніться “Додати як контакт”.</string>
+    <string name="m2_friend_suffix">  [друг]</string>
+    <string name="m2_starting_share">запуск локального поширення…</string>
+    <string name="m2_no_wifi">Немає адреси Wi-Fi/LAN — спершу приєднайтеся до мережі Wi-Fi або точки доступу</string>
+    <string name="m2_share_talkrypt">Поділитися talkrypt</string>
+    <string name="m2_share_instructions">У тій самій мережі Wi-Fi або точці доступу інший телефон сканує цей код (або відкриває URL), завантажує застосунок і встановлює його (один раз дозвольте “встановлення невідомих застосунків”).</string>
+    <string name="m2_apk_computing">APK SHA-256: обчислення…</string>
+
+    <!-- ===== MainActivity: зберігання, сегменти, виявлення поблизу (діапазон m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Прийняти прив\'язку на цьому пристрої</string>
+    <string name="m3_account_prefix">акаунт %1$s…</string>
+    <string name="m3_already_linking">уже прив\'язується…</string>
+    <string name="m3_already_starting">уже запускається…</string>
+    <string name="m3_apk_fingerprint_failed">не вдалося обчислити відбиток APK</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (перші 16): %1$s — перевірте на телефоні-отримувачі</string>
+    <string name="m3_back">Назад</string>
+    <string name="m3_beacon_perm_needed">для маячка / mesh поблизу потрібен дозвіл Bluetooth</string>
+    <string name="m3_broadcasting_nearby">транслювання поблизу (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Скасувати</string>
+    <string name="m3_create_segment">Створити сегмент</string>
+    <string name="m3_created_segment">створено сегмент “%1$s”</string>
+    <string name="m3_delete">Видалити</string>
+    <string name="m3_delete_name">Видалити “%1$s”</string>
+    <string name="m3_delete_segment_body">Стирає ключ цього сегмента — до чатів, приєднаних під ним, не можна знову приєднатися під тією самою особистістю. Цю дію не можна скасувати.</string>
+    <string name="m3_delete_segment_q">Видалити сегмент “%1$s”?</string>
+    <string name="m3_device_not_linked">цей пристрій не прив\'язано</string>
+    <string name="m3_device_prefix">пристрій %1$s…</string>
+    <string name="m3_done">Готово</string>
+    <string name="m3_hint_work">робота</string>
+    <string name="m3_join_a_chat">ПРИЄДНАТИСЯ ДО ЧАТУ (запрошення talkrypt://)</string>
+    <string name="m3_join_as_name">Приєднатися як “%1$s”</string>
+    <string name="m3_join_as_this_account">Приєднатися під цим акаунтом</string>
+    <string name="m3_join_chat_as_account">ПРИЄДНАТИСЯ ДО ЧАТУ ПІД ЦИМ АКАУНТОМ (запрошення talkrypt://)</string>
+    <string name="m3_join_failed">помилка приєднання: %1$s</string>
+    <string name="m3_join_peer">Приєднатися до %1$s</string>
+    <string name="m3_joined_as_linked_account">приєднано під прив\'язаним акаунтом</string>
+    <string name="m3_joined_as_segment">приєднано як сегмент “%1$s”</string>
+    <string name="m3_joining_as_linked">приєднання під прив\'язаним акаунтом…</string>
+    <string name="m3_joining_as_name">приєднання як “%1$s”…</string>
+    <string name="m3_link_another_device">ПРИВ\'ЯЗАТИ ІНШИЙ ПРИСТРІЙ ДО МОГО АКАУНТА</string>
+    <string name="m3_link_another_device_desc">Цей пристрій утримує акаунт. Покажіть одноразовий QR, який сканує новий пристрій.</string>
+    <string name="m3_link_failed">помилка прив\'язки: %1$s</string>
+    <string name="m3_link_offer_failed">помилка пропозиції прив\'язки: %1$s</string>
+    <string name="m3_link_offer_label">ПРОПОЗИЦІЯ ПРИВ\'ЯЗКИ (talkrypt:// від основного)</string>
+    <string name="m3_link_offer_running">Пропозиція прив\'язки активна</string>
+    <string name="m3_link_offer_running_desc">На НОВОМУ пристрої відскануйте це (або вставте URI в Прив\'язані пристрої → Прийняти прив\'язку). Ключ акаунта залишається на цьому пристрої.</string>
+    <string name="m3_link_this_device_desc">Це сертифікує ЦЕЙ пристрій під акаунтом, що пропонує прив\'язку. Після цього переконайтеся, що показаний код безпеки акаунта збігається з іншим пристроєм, позасмуговим каналом.</string>
+    <string name="m3_link_this_device_q">Прив\'язати цей пристрій?</string>
+    <string name="m3_link_this_device_to_account">ПРИВ\'ЯЗАТИ ЦЕЙ ПРИСТРІЙ ДО АКАУНТА</string>
+    <string name="m3_linked_devices">Прив\'язані пристрої</string>
+    <string name="m3_linked_devices_desc">Прив\'яжіть цей пристрій до свого акаунта на іншому пристрої, щоб контакти розпізнавали всі ваші пристрої як один акаунт. Ключ акаунта ніколи не залишає пристрій, що його утримує — дротом проходить лише підписаний сертифікат.</string>
+    <string name="m3_linked_to_account">прив\'язано до акаунта %1$s…</string>
+    <string name="m3_linking_this_device">прив\'язування цього пристрою…</string>
+    <string name="m3_loading_segments">завантаження сегментів…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">назвіть сегмент</string>
+    <string name="m3_nearby_hosts">Хости поблизу</string>
+    <string name="m3_nearby_perm_needed">для виявлення поблизу потрібен дозвіл Bluetooth / Wi-Fi поблизу</string>
+    <string name="m3_nearby_scanning">Сканування через Bluetooth LE та Wi-Fi Direct. Торкніться хоста, щоб приєднатися.</string>
+    <string name="m3_new_segment">— новий сегмент —</string>
+    <string name="m3_no_segments_yet">Поки що немає сегментів — створіть нижче.</string>
+    <string name="m3_notifications_blocked">сповіщення заблоковано — завжди активні чати все одно працюють, але без сповіщення про стан</string>
+    <string name="m3_or_relink">— або повторно прив\'язати —</string>
+    <string name="m3_paste_link_offer_uri">вставте URI пропозиції прив\'язки</string>
+    <string name="m3_paste_talkrypt_invite">вставте запрошення talkrypt://</string>
+    <string name="m3_paste_talkrypt_invite_above">вставте запрошення talkrypt:// вище</string>
+    <string name="m3_qr_too_large">(QR завеликий для відображення — скористайтеся текстом)</string>
+    <string name="m3_rooted_at_device_account">закорінено в акаунті цього пристрою</string>
+    <string name="m3_rooted_at_linked_account">закорінено у вашому прив\'язаному акаунті %1$s…</string>
+    <string name="m3_safety_prefix">безпека %1$s…</string>
+    <string name="m3_seal_segments_failed">не вдалося запечатати сегменти: %1$s</string>
+    <string name="m3_segment_name_label">НАЗВА СЕГМЕНТА (контекстна мітка)</string>
+    <string name="m3_segments">Сегменти</string>
+    <string name="m3_segments_desc">Контекстні підособистості під вашим акаунтом. Кожен сегмент автентифікується власним ключем, тож різні сегменти неможливо пов\'язати один з одним — проте контакт, який розпізнає ваш акаунт, розпізнає кожен сегмент. Використовуйте по одному на контекст (робота, активізм, …).</string>
+    <string name="m3_start_link_offer">Почати пропозицію прив\'язки</string>
+    <string name="m3_starting_link_offer">запуск пропозиції прив\'язки…</string>
+    <string name="m3_this_device_is_linked">ЦЕЙ ПРИСТРІЙ ПРИВ\'ЯЗАНО</string>
+    <string name="m3_unlink">Відв\'язати</string>
+    <string name="m3_unlink_body">Видаляє сертифікат прив\'язки — контакти більше не розпізнаватимуть цей пристрій як частину акаунта, доки ви не прив\'яжете його знову.</string>
+    <string name="m3_unlink_this_device">Відв\'язати цей пристрій</string>
+    <string name="m3_unlink_this_device_q">Відв\'язати цей пристрій?</string>
+    <string name="m3_unlinked">відв\'язано</string>
+    <string name="m3_username_prefix">ім\'я користувача %1$s</string>
+    <string name="m3_verify_oob_account_sn">ПЕРЕВІРТЕ ПОЗАСМУГОВИМ КАНАЛОМ — код безпеки акаунта:</string>
+    <string name="m3_wifi_off">Wi-Fi вимкнено — увімкніть його для Wi-Fi Direct (Bluetooth усе одно працює)</string>
+
+    <!-- ===== MainActivity: якорі, обмежений хост, екран чату (діапазон m4) ===== -->
+    <string name="m4_anchors_title">Якорі</string>
+    <string name="m4_anchors_desc">Каталог імен користувачів, який ви створюєте або на який вказуєте за розташуванням. Імена зіставляються з ключами акаунтів; перевіряйте коди безпеки позасмуговим каналом.</string>
+    <string name="m4_your_account">ВАШ АКАУНТ</string>
+    <string name="m4_deriving">обчислення…</string>
+    <string name="m4_unavailable">недоступно</string>
+    <string name="m4_spawn_my_anchor">Створити власний якір</string>
+    <string name="m4_or_use_known_anchor">— або скористатися відомим якорем —</string>
+    <string name="m4_anchor_location_label">РОЗТАШУВАННЯ ЯКОРЯ (URI talkrypt://)</string>
+    <string name="m4_username_label">ІМ\'Я КОРИСТУВАЧА</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Зареєструвати тут моє ім\'я користувача</string>
+    <string name="m4_enter_anchor_uri_username">введіть URI якоря + ім\'я користувача</string>
+    <string name="m4_resolve_this_username">Розв\'язати це ім\'я користувача</string>
+    <string name="m4_back">Назад</string>
+    <string name="m4_already_spawning">уже створюється…</string>
+    <string name="m4_spawning_anchor">створення якоря…</string>
+    <string name="m4_anchor_failed">помилка якоря: %1$s</string>
+    <string name="m4_anchor_running_title">Якір активний</string>
+    <string name="m4_anchor_running_desc">Інші реєструють/розв\'язують тут імена користувачів. Поділіться цим розташуванням (скануйте чи скопіюйте). Воно працює, доки застосунок відкрито.</string>
+    <string name="m4_registering">реєстрація…</string>
+    <string name="m4_register_success">✓ зареєстровано “%1$s” → ваш акаунт на цьому якорі</string>
+    <string name="m4_register_failed">! помилка реєстрації: %1$s</string>
+    <string name="m4_resolving">розв\'язування…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → код безпеки акаунта:\n%2$s\n(перевірте позасмуговим каналом перед тим, як довіряти)</string>
+    <string name="m4_resolve_not_registered">“%1$s” тут не зареєстровано (або реєстри не збіглися)</string>
+    <string name="m4_resolve_failed">! помилка розв\'язування: %1$s</string>
+    <string name="m4_registry_restricted_title">Чат, обмежений реєстром</string>
+    <string name="m4_registry_restricted_desc">Приєднатися до %1$s можуть лише учасники обраного реєстру. Ви можете обрати лише реєстри, до яких вас прив\'язано; недосяжні (або ті, де немає вашого запису) показані сірим.</string>
+    <string name="m4_not_registered_any_anchor">Ви ще не зареєстровані на жодному якорі. Спершу відкрийте Якорі та зареєструйте ім\'я користувача.</string>
+    <string name="m4_checking_anchor">перевірка %1$s …</string>
+    <string name="m4_host_gated_by">Хост обмежено “%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — недосяжний або немає запису</string>
+    <string name="m4_creating_restricted_chat">створення обмеженого чату…</string>
+    <string name="m4_registry_restricted_members">обмежено реєстром — приєднатися можуть лише %1$s учасник(и) якоря</string>
+    <string name="m4_sender_invite">запрошення</string>
+    <string name="m4_restricted_host_failed">помилка обмеженого хоста: %1$s</string>
+    <string name="m4_tier_ephemeral">тимчасовий</string>
+    <string name="m4_tier_always_on">завжди активний</string>
+    <string name="m4_tier_persistent">постійний</string>
+    <string name="m4_members_prefix">"%1$s учасників · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sбезпека %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Меню чату</string>
+    <string name="m4_message_hint">Повідомлення</string>
+    <string name="m4_send">Надіслати</string>
+    <string name="m4_delivery_delivered">доставлено</string>
+    <string name="m4_delivery_not_delivered">не доставлено</string>
+    <string name="m4_delivery_sent">надіслано</string>
+    <string name="m4_already_creating_chat">уже створюється чат…</string>
+    <string name="m4_starting_chat_over">Запуск вашого чату через %1$s…</string>
+    <string name="m4_creating_chat">створення чату…</string>
+    <string name="m4_hosting_share_invite">розміщення — поділіться запрошенням, щоб друг міг приєднатися:</string>
+
+    <!-- ===== MainActivity: передперевірка приєднання, підключення, надсилання, слеш-команди (діапазон m5) ===== -->
+    <string name="m5_host_failed">помилка хоста: %1$s</string>
+    <string name="m5_join_chat">Приєднатися до чату</string>
+    <string name="m5_join_restricted_explainer">Якщо цей чат обмежено реєстром, вас впускають лише як учасника. Пред\'явіть активне членство або приєднайтеся під псевдонімом (лише відкриті чати).</string>
+    <string name="m5_no_memberships">У вас ще немає членства в реєстрах — зареєструйтеся на якорі, щоб приєднуватися до обмежених чатів.</string>
+    <string name="m5_present_a_membership">ПРЕД\'ЯВИТИ ЧЛЕНСТВО</string>
+    <string name="m5_checking_anchor">перевірка %1$s …</string>
+    <string name="m5_join_as_member">Приєднатися як “%1$s@%2$s”</string>
+    <string name="m5_or_separator">— або —</string>
+    <string name="m5_join_with_account">Приєднатися з моїм акаунтом (без імені користувача)</string>
+    <string name="m5_join_as_pseudonym">Приєднатися під псевдонімом (неможливо пов\'язати)</string>
+    <string name="m5_back">Назад</string>
+    <string name="m5_already_joining">уже приєднується…</string>
+    <string name="m5_joined">приєднано</string>
+    <string name="m5_as_suffix">" як %1$s"</string>
+    <string name="m5_joined_as_pseudonym">приєднано під псевдонімом</string>
+    <string name="m5_failed">помилка: %1$s</string>
+    <string name="m5_join_failed">помилка приєднання</string>
+    <string name="m5_connecting_title">Підключення</string>
+    <string name="m5_bootstrapping_tor">Запуск Tor…</string>
+    <string name="m5_connecting">Підключення…</string>
+    <string name="m5_first_tor_slow">Перше підключення до Tor повільне; наступні — миттєві.</string>
+    <string name="m5_cancel">Скасувати</string>
+    <string name="m5_bootstrapping_tor_pct">Запуск Tor… %1$s%%</string>
+    <string name="m5_building_circuit">Побудова ланцюга + рукостискання…</string>
+    <string name="m5_cant_reconnect">не вдається перепідключитися — немає збереженого запрошення</string>
+    <string name="m5_reconnecting_over">перепідключення через %1$s…</string>
+    <string name="m5_reconnected_over">перепідключено через %1$s</string>
+    <string name="m5_reconnect_failed_detail">помилка перепідключення (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">помилка перепідключення</string>
+    <string name="m5_reconnecting_text_kept">перепідключення — ваш текст збережено, спробуйте за мить</string>
+    <string name="m5_send_failed">помилка надсилання</string>
+    <string name="m5_name_book_empty">книга імен порожня — /name &lt;callsign&gt;, щоб додати</string>
+    <string name="m5_tier_account_linked">прив\'язано до акаунта</string>
+    <string name="m5_tier_bare">без прив\'язки</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">збережено “%1$s” у книгу імен</string>
+    <string name="m5_switched_to">переключено на “%1$s” та оголошено</string>
+    <string name="m5_no_saved_name">немає збереженого імені “%1$s”</string>
+    <string name="m5_calling_verified">🔗 представляєтесь як перевірене “%1$s”</string>
+    <string name="m5_name_cleared">ім\'я очищено</string>
+    <string name="m5_calling_as">представляєтесь як “%1$s”</string>
+    <string name="m5_cq_announced">CQ — ваше ім\'я оголошено</string>
+    <string name="m5_cq_cadence_off">Ритм CQ вимкнено</string>
+    <string name="m5_cq_cadence_every">Ритм CQ: кожні %1$s хв</string>
+    <string name="m5_state_on">увімк</string>
+    <string name="m5_state_off">вимк</string>
+    <string name="m5_cq_onmsg">Ідентифікація імені CQ у повідомленні: %1$s</string>
+    <string name="m5_name_usage">використання: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Додати “%1$s” як контакт</string>
+    <string name="m5_added_contact">додано контакт %1$s</string>
+    <string name="m5_could_not_add">не вдалося додати (акаунт не виявлено)</string>
+    <string name="m5_invite_qr">QR запрошення</string>
+    <string name="m5_share">Поділитися</string>
+    <string name="m5_close">Закрити</string>
+
+    <!-- ===== ChatNet: зрозумілі помилки транспорту ===== -->
+    <string name="net_host_unreachable_tor">хост недосяжний через Tor — його onion не відповів (офлайн або ще не переопубліковано)</string>
+    <string name="net_timed_out_host">час очікування хоста вичерпано (недосяжний із цієї мережі?)</string>
+    <string name="net_tor_not_ready">Tor ще не готовий (усе ще запускається)</string>
+    <string name="net_cant_reconnect_no_invite">не вдається перепідключитися — немає збереженого запрошення для цього чату</string>
+    <string name="net_unknown_error">невідома помилка</string>
+
+    <!-- ===== QrScanActivity: підказки сканера + відновлення дозволу камери ===== -->
+    <string name="qr_point_at_talkrypt">Наведіть на QR talkrypt</string>
+    <string name="qr_cancel_scan">Скасувати сканування</string>
+    <string name="qr_open_app_settings">Відкрити налаштування застосунку</string>
+    <string name="qr_camera_access_off">Доступ до камери вимкнено — увімкніть його для сканування або скасуйте та вставте запрошення.</string>
+    <string name="qr_no_camera_found">Камеру не знайдено</string>
+    <string name="qr_camera_error">Помилка камери %1$d</string>
+    <string name="qr_camera_unavailable">Камера недоступна: %1$s</string>
+    <string name="qr_camera_config_failed">Помилка налаштування камери</string>
+    <string name="qr_not_talkrypt_keep_scanning">Це не QR talkrypt — продовжуйте сканування</string>
+
+    <!-- ===== ChatService: сповіщення служби переднього плану + перепідключення ===== -->
+    <string name="svc_reconnecting">перепідключення “%1$s” через %2$s…</string>
+    <string name="svc_reconnected">перепідключено “%1$s” через %2$s</string>
+    <string name="svc_reconnect_failed_retry">помилка перепідключення “%1$s” (%2$s): %3$s — повторна спроба…</string>
+    <string name="svc_reconnect_failed">помилка перепідключення “%1$s” (%2$s): %3$s</string>
+    <string name="svc_channel_name">з\'єднання talkrypt</string>
+    <string name="svc_status_none">немає завжди активних чатів</string>
+    <string name="svc_status_all_connected">%1$d завжди активних · усі підключені</string>
+    <string name="svc_status_partial">%1$d завжди активних · %2$d підключено, %3$d офлайн</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Радіо/маячки поблизу: помилки, видимі користувачу ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct не підтримується на цьому пристрої</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct зайнятий — спробуйте за мить</string>
+    <string name="radio_wifidirect_wifi_off">Увімкніть Wi-Fi, щоб використовувати Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">Помилка Wi-Fi Direct</string>
+    <string name="radio_wifidirect_failed">Помилка Wi-Fi Direct (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Відмовлено в дозволі на Wi-Fi поблизу</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct недоступний</string>
+    <string name="radio_wifidirect_connect_failed">Помилка підключення Wi-Fi Direct (%1$d)</string>
+    <string name="radio_wifidirect_peer">Вузол Wi-Fi Direct</string>
+    <string name="radio_ble_bt_off">Bluetooth вимкнено</string>
+    <string name="radio_ble_no_scanner">Немає сканера BLE</string>
+    <string name="radio_ble_scan_failed">Помилка сканування BLE (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Відмовлено в дозволі на сканування Bluetooth</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth вимкнено</string>
+    <string name="radio_beacon_ble_no_scanner">Немає сканера BLE</string>
+    <string name="radio_beacon_ble_scan_failed">Помилка сканування BLE (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Відмовлено в дозволі на сканування Bluetooth</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD недоступний</string>
+    <string name="radio_beacon_wifi_discovery_failed">помилка виявлення (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">помилка виявлення</string>
+</resources>

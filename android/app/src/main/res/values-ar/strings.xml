@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  فهرس النصوص العربي لتطبيق talkrypt على أندرويد.
+
+  الترجمة مدعومة بنظام الموارد في أندرويد: كل نص يراه المستخدم في طبقة
+  الواجهة يمر عبر Loc.s(R.string.*) (راجع Loc.kt)، ويتحلل وفق اللغة الحالية
+  للجهاز. لإضافة لغة، ضع ملف res/values-<lang>/strings.xml بالأسماء نفسها
+  مترجمة (راجع values-es).
+
+  غير معتمد · غير مُدقَّق (على مستوى المشروع كله). صياغة الأمان وإخلاء
+  المسؤولية محفوظة حرفيًا هنا ويجب ترجمتها بأمانة (دون أي تقوية لها لتصبح
+  ادعاء اعتماد أو امتثال) في كل لغة.
+
+  النموذج المشترك الخالي عمدًا من الواجهة (ChatEvents.kt) ينتج أسطر حالة
+  قصيرة بالإنجليزية المصدرية عن قصد (تُختبَر وحدويًا دون واجهة على JVM
+  العادية حيث لا يوجد جدول موارد؛ الخلو من AndroidX يمنع استخدام Robolectric).
+  أجسام رسائل الأقران يكتبها المستخدمون ولا تُترجم أبدًا. راجع ChatEvents.kt
+  للملاحظة.
+
+  ملاحظة: اسم العلامة "talkrypt" لا يُترجم عن قصد.
+-->
+<resources>
+
+    <!-- ===== MainActivity: محادثة جديدة، قائمة المحادثات، قائمة صف المحادثة (النطاق m1) ===== -->
+    <string name="m1_opening_invite">يجري فتح الدعوة…</string>
+    <string name="m1_not_a_talkrypt_qr">ليس رمز QR خاصًا بـ talkrypt</string>
+    <string name="m1_nym_credential_imported">تم استيراد بيانات اعتماد Nym — شبكة المزج المدفوعة جاهزة (دون حاجة إلى عبارة استرجاع)</string>
+    <string name="m1_import_failed">فشل الاستيراد: %1$s</string>
+    <string name="m1_new_chat">محادثة جديدة</string>
+    <string name="m1_channel">القناة</string>
+    <string name="m1_posture">الوضعية</string>
+    <string name="m1_access">الوصول</string>
+    <string name="m1_name_display_signal_style">بأسلوب Signal (شارات فقط)</string>
+    <string name="m1_name_display_warn">التحذير من تضارب الأسماء المتشابهة</string>
+    <string name="m1_name_display_suppress">إخفاء الأسماء المتضاربة</string>
+    <string name="m1_name_display">عرض الاسم</string>
+    <string name="m1_persistence_ephemeral">عابر (في الذاكرة فقط)</string>
+    <string name="m1_persistence_persistent">دائم (محفوظ، قابل لإعادة الاتصال)</string>
+    <string name="m1_persistence_always_on">دائم التشغيل (المرحلة 2)</string>
+    <string name="m1_persistence">الاستمرارية</string>
+    <string name="m1_route_over_tor">التوجيه عبر Tor (‏.onion؛ بطيء في البدء)</string>
+    <string name="m1_route_over_nym">التوجيه أيضًا عبر شبكة مزج Nym (اختياري؛ يجعل الدعوة متعددة المضيفين)</string>
+    <string name="m1_paid_nym_bandwidth">يُعدّ عرض نطاق Nym المدفوع (عبارة استرجاع المحفظة / بيانات الاعتماد) من الإعدادات.</string>
+    <string name="m1_host_a_chat">استضافة محادثة</string>
+    <string name="m1_registry_restricted_chat">محادثة مقيّدة بالسجل</string>
+    <string name="m1_or_join">— أو انضم —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">انضمام</string>
+    <string name="m1_paste_invite">الصق دعوة talkrypt://</string>
+    <string name="m1_scan_qr">امسح رمز QR</string>
+    <string name="m1_in_person">— بشكل شخصي —</string>
+    <string name="m1_find_nearby_host">ابحث عن مضيف قريب (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">مشاركة التطبيق (نظير لنظير عبر Wi-Fi)</string>
+    <string name="m1_back">رجوع</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">المزيد</string>
+    <string name="m1_new_chat_button">＋  محادثة جديدة</string>
+    <string name="m1_no_chats_yet">لا توجد محادثات بعد — انقر ＋ للاستضافة أو الانضمام.</string>
+    <string name="m1_preview_you">أنت: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">استضافة</string>
+    <string name="m1_joined">منضمّ</string>
+    <string name="m1_preview_members">%1$s · %2$d عضو</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">غير متصل</string>
+    <string name="m1_online">متصل</string>
+    <string name="m1_online_count">%1$d متصل</string>
+    <string name="m1_connecting">يجري الاتصال</string>
+    <string name="m1_time_now">الآن</string>
+    <string name="m1_time_minutes">%1$d د</string>
+    <string name="m1_time_hours">%1$d س</string>
+    <string name="m1_time_days">%1$d ي</string>
+    <string name="m1_no_invite">لا توجد دعوة</string>
+    <string name="m1_safety_number_title">رقم الأمان</string>
+    <string name="m1_safety_number_body">%1$s\n\nقارن هذا مع نظيرك خارج القناة؛ عدم التطابق يعني أن القناة لا تتحدث مع من تظن.</string>
+    <string name="m1_copy">نسخ</string>
+    <string name="m1_copied">تم النسخ</string>
+    <string name="m1_close">إغلاق</string>
+
+    <!-- ===== MainActivity: الإعدادات، الهوية، nym، الأمان (النطاق m2) ===== -->
+    <string name="m2_delete_chat_title">حذف ”%1$s“؟</string>
+    <string name="m2_delete_chat_body">يمحو هذه المحادثة وسجلّها من هذا الجهاز. لا يمكن التراجع عن ذلك.</string>
+    <string name="m2_delete">حذف</string>
+    <string name="m2_connect_first">اتصل أولًا</string>
+    <string name="m2_beacon_msg">منارة: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 بثّ منارة هذه المحادثة في الجوار (BLE + Wi-Fi) + المسح</string>
+    <string name="m2_nearby_beacon_stopped">توقّف بثّ المنارة في الجوار</string>
+    <string name="m2_no_ble_scanner">لا يوجد ماسح BLE</string>
+    <string name="m2_mesh_linked">📻 الشبكة المتداخلة: تم ربط عقدة %1$s — الرسائل تنتقل أيضًا عبر LoRa</string>
+    <string name="m2_mesh_scan_failed">الشبكة المتداخلة: فشل مسح BLE (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 يجري البحث عن عقدة %1$s عبر BLE…</string>
+    <string name="m2_ble_scan_denied">رُفض إذن مسح BLE</string>
+    <string name="m2_mesh_stopped">توقفت الشبكة المتداخلة</string>
+    <string name="m2_start_beacon_first">ابدأ المنارة أولًا</string>
+    <string name="m2_no_blob_yet">لا توجد بيانات مُعلَنة بعد — أعد المحاولة بعد لحظة</string>
+    <string name="m2_beacon_selftest">الاختبار الذاتي للمنارة: أُعيدت منارتنا المختومة إلينا (توقّع ظهور 📡)</string>
+    <string name="m2_callsigns">علامات النداء</string>
+    <string name="m2_callsigns_desc">الأسماء التي تبثّها فوق رسائلك في هذه المحادثة.</string>
+    <string name="m2_connect_to_manage_names">اتصل بهذه المحادثة لإدارة الأسماء.</string>
+    <string name="m2_back">رجوع</string>
+    <string name="m2_your_names">أسماؤك</string>
+    <string name="m2_none_yet_add">لا شيء بعد — أضف واحدًا أدناه.</string>
+    <string name="m2_use">استخدام</string>
+    <string name="m2_calling_as">النداء باسم ”%1$s“</string>
+    <string name="m2_failed">فشل</string>
+    <string name="m2_removed">أُزيل</string>
+    <string name="m2_new_callsign">علامة نداء جديدة</string>
+    <string name="m2_save_to_name_book">حفظ في دفتر الأسماء</string>
+    <string name="m2_set_announce_now">تعيين + إعلان الآن</string>
+    <string name="m2_set_verified">تعيينه كموثَّق (🔗 مرتبط بالحساب)</string>
+    <string name="m2_verified_name">الاسم الموثَّق ”%1$s“</string>
+    <string name="m2_verified_desc">التوثيق يستخدم مفتاح حسابك حتى لا يتمكن عضو آخر من انتحال الاسم.</string>
+    <string name="m2_cq_beacon">منارة CQ</string>
+    <string name="m2_periodic_on">إعادة البثّ الدوري: مفعّل (5 دقائق)</string>
+    <string name="m2_periodic_off">إعادة البثّ الدوري: معطّل</string>
+    <string name="m2_onmsg_on">تعريف الاسم عند الرسالة: مفعّل</string>
+    <string name="m2_onmsg_off">تعريف الاسم عند الرسالة: معطّل</string>
+    <string name="m2_onmsg_desc">يتيح تعريف الاسم عند الرسالة للأقران ملاحظة تغيير اسمك وإسقاط علامة ندائك القديمة.</string>
+    <string name="m2_show_others">عرض أسماء الآخرين</string>
+    <string name="m2_nametrust_signal">بأسلوب Signal (شارات فقط)</string>
+    <string name="m2_nametrust_warn">التحذير من تضارب الأسماء المتشابهة</string>
+    <string name="m2_nametrust_suppress">إخفاء الأسماء المتضاربة</string>
+    <string name="m2_apply_nametrust">تطبيق إعداد الثقة بالأسماء</string>
+    <string name="m2_nametrust_set">الثقة بالأسماء: %1$s</string>
+    <string name="m2_tighten_only">يمكنك فقط تشديد الحد الأساسي للمحادثة، ولا يمكنك تخفيفه أبدًا.</string>
+    <string name="m2_whos_here">من هنا</string>
+    <string name="m2_safety_suffix">"  ·  الأمان %1$s"</string>
+    <string name="m2_safety_number">رقم الأمان: %1$s</string>
+    <string name="m2_share_invite">مشاركة الدعوة</string>
+    <string name="m2_more">المزيد</string>
+    <string name="m2_anchors">المراسي (دليل أسماء المستخدمين)</string>
+    <string name="m2_contacts">جهات الاتصال</string>
+    <string name="m2_linked_devices">الأجهزة المرتبطة</string>
+    <string name="m2_segments">المقاطع (هويات سياقية)</string>
+    <string name="m2_settings">الإعدادات</string>
+    <string name="m2_seal_mnemonic_err">تعذّر ختم عبارة الاسترجاع: %1$s</string>
+    <string name="m2_identity">الهوية</string>
+    <string name="m2_account_safety_number">رقم أمان الحساب</string>
+    <string name="m2_deriving">يجري الاشتقاق…</string>
+    <string name="m2_still_deriving">لا يزال الاشتقاق جاريًا…</string>
+    <string name="m2_copied">تم النسخ</string>
+    <string name="m2_linked_secondary">مرتبط كجهاز ثانوي</string>
+    <string name="m2_account_short">الحساب %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">الأمان</string>
+    <string name="m2_key_custody_loading">حفظ المفاتيح: …</string>
+    <string name="m2_key_custody_desc">المكان الذي يمكن لهذا الجهاز حفظ المفاتيح فيه (StrongBox &gt; TEE &gt; برمجيًا). يُبلَّغ به الأقران كمستوى حفظك.</string>
+    <string name="m2_safety_tap_copy">%1$s — انقر للنسخ. قارن خارج القناة للتحقق منك.</string>
+    <string name="m2_key_custody">حفظ المفاتيح: %1$s</string>
+    <string name="m2_secrets_sealed">الأسرار مختومة أثناء السكون</string>
+    <string name="m2_secrets_sealed_desc">تُشفَّر بذور الهوية وعبارة استرجاع Nym بمفتاح غير قابل للتصدير من Android Keystore (مع StrongBox عند توفره).</string>
+    <string name="m2_sealing_degraded">الختم متدهور</string>
+    <string name="m2_sealing_degraded_desc">أبلغ Keystore: %1$s. تبقى الأسرار التي تعذّر ختمها كنص صريح خاص بالتطبيق حتى يتعافى.</string>
+    <string name="m2_nym_paid_bw">عرض نطاق NYM المدفوع (اختياري)</string>
+    <string name="m2_nym_mnemonic_hint">عبارة استرجاع محفظة NYM — فارغ = شبكة مزج مجانية</string>
+    <string name="m2_show_mnemonic">إظهار عبارة الاسترجاع</string>
+    <string name="m2_ticketbook_desc">أو استورد بيانات اعتماد دفتر تذاكر مسكوكة بأدوات Nym الخاصة بك (بذرة المحفظة لا تدخل هذا التطبيق أبدًا):</string>
+    <string name="m2_import_nym_cred">استيراد بيانات اعتماد Nym</string>
+    <string name="m2_network_defaults">إعدادات الشبكة الافتراضية للمحادثات الجديدة</string>
+    <string name="m2_route_tor">التوجيه عبر Tor (‏.onion)</string>
+    <string name="m2_route_nym">التوجيه أيضًا عبر شبكة مزج Nym</string>
+    <string name="m2_notifications">الإشعارات</string>
+    <string name="m2_always_on_chats">المحادثات دائمة التشغيل</string>
+    <string name="m2_always_on_desc">تبقى متصلة عبر خدمة في المقدمة مع إشعار دائم. انقر لضبطها في إعدادات النظام.</string>
+    <string name="m2_open_notif_err">تعذّر فتح إعدادات الإشعارات</string>
+    <string name="m2_about">حول</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">محادثة مشفّرة طرفًا إلى طرف بعد الكم عبر Tor. غير معتمد · غير مُصادق عليه · غير مُدقَّق — برمجيات تجريبية؛ علامات التصنيف هي ملصقات إرشادية فقط.</string>
+    <string name="m2_contacts_desc">الحسابات التي تعرفها. تمييز فقط — كونك جهة اتصال (أو صديقًا) لا يمنح الوصول إلى القناة؛ ذلك يُضبط لكل محادثة.</string>
+    <string name="m2_no_contacts">لا توجد جهات اتصال بعد. في محادثة، عندما يقدّم حساب نفسه، انقر ”إضافة كجهة اتصال“.</string>
+    <string name="m2_friend_suffix">  [صديق]</string>
+    <string name="m2_starting_share">يبدأ المشاركة المحلية…</string>
+    <string name="m2_no_wifi">لا يوجد عنوان Wi-Fi/LAN — انضم إلى شبكة Wi-Fi أو نقطة اتصال أولًا</string>
+    <string name="m2_share_talkrypt">مشاركة talkrypt</string>
+    <string name="m2_share_instructions">على شبكة Wi-Fi أو نقطة الاتصال نفسها، يمسح الهاتف الآخر هذا الرمز (أو يفتح الرابط)، ويُنزِّل التطبيق، ويثبّته (اسمح بـ ”تثبيت التطبيقات غير المعروفة“ مرة واحدة).</string>
+    <string name="m2_apk_computing">APK SHA-256: يجري الحساب…</string>
+
+    <!-- ===== MainActivity: حفظ المفاتيح، المقاطع، الاكتشاف القريب (النطاق m3) ===== -->
+    <string name="m3_accept_link_on_this_device">قبول الربط على هذا الجهاز</string>
+    <string name="m3_account_prefix">الحساب %1$s…</string>
+    <string name="m3_already_linking">الربط جارٍ بالفعل…</string>
+    <string name="m3_already_starting">البدء جارٍ بالفعل…</string>
+    <string name="m3_apk_fingerprint_failed">تعذّر حساب بصمة APK</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (أول 16): %1$s — تحقّق منه على الهاتف المستقبِل</string>
+    <string name="m3_back">رجوع</string>
+    <string name="m3_beacon_perm_needed">منارة الجوار / الشبكة المتداخلة تحتاج إلى إذن البلوتوث</string>
+    <string name="m3_broadcasting_nearby">يجري البثّ في الجوار (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">إلغاء</string>
+    <string name="m3_create_segment">إنشاء مقطع</string>
+    <string name="m3_created_segment">تم إنشاء المقطع ”%1$s“</string>
+    <string name="m3_delete">حذف</string>
+    <string name="m3_delete_name">حذف ”%1$s“</string>
+    <string name="m3_delete_segment_body">يمحو مفتاح هذا المقطع — المحادثات التي انضممت إليها تحته لا يمكن إعادة الانضمام إليها بالهوية نفسها. لا يمكن التراجع عن ذلك.</string>
+    <string name="m3_delete_segment_q">حذف المقطع ”%1$s“؟</string>
+    <string name="m3_device_not_linked">هذا الجهاز غير مرتبط</string>
+    <string name="m3_device_prefix">الجهاز %1$s…</string>
+    <string name="m3_done">تم</string>
+    <string name="m3_hint_work">العمل</string>
+    <string name="m3_join_a_chat">الانضمام إلى محادثة (دعوة talkrypt://)</string>
+    <string name="m3_join_as_name">الانضمام باسم ”%1$s“</string>
+    <string name="m3_join_as_this_account">الانضمام بهذا الحساب</string>
+    <string name="m3_join_chat_as_account">الانضمام إلى محادثة بهذا الحساب (دعوة talkrypt://)</string>
+    <string name="m3_join_failed">فشل الانضمام: %1$s</string>
+    <string name="m3_join_peer">الانضمام إلى %1$s</string>
+    <string name="m3_joined_as_linked_account">انضممت كحساب مرتبط</string>
+    <string name="m3_joined_as_segment">انضممت كمقطع ”%1$s“</string>
+    <string name="m3_joining_as_linked">يجري الانضمام كحساب مرتبط…</string>
+    <string name="m3_joining_as_name">يجري الانضمام باسم ”%1$s“…</string>
+    <string name="m3_link_another_device">ربط جهاز آخر بحسابي</string>
+    <string name="m3_link_another_device_desc">هذا الجهاز يحمل الحساب. اعرض رمز QR لمرة واحدة يمسحه الجهاز الجديد.</string>
+    <string name="m3_link_failed">فشل الربط: %1$s</string>
+    <string name="m3_link_offer_failed">فشل عرض الربط: %1$s</string>
+    <string name="m3_link_offer_label">عرض الربط (talkrypt:// من الجهاز الأساسي)</string>
+    <string name="m3_link_offer_running">عرض الربط قيد التشغيل</string>
+    <string name="m3_link_offer_running_desc">على الجهاز الجديد، امسح هذا (أو الصق الرابط في الأجهزة المرتبطة ← قبول الربط). يبقى مفتاح الحساب على هذا الجهاز.</string>
+    <string name="m3_link_this_device_desc">هذا يوثّق هذا الجهاز تحت الحساب الذي يعرض الربط. بعد ذلك، تحقّق من مطابقة رقم أمان الحساب المعروض مع الجهاز الآخر خارج القناة.</string>
+    <string name="m3_link_this_device_q">ربط هذا الجهاز؟</string>
+    <string name="m3_link_this_device_to_account">ربط هذا الجهاز بحساب</string>
+    <string name="m3_linked_devices">الأجهزة المرتبطة</string>
+    <string name="m3_linked_devices_desc">اربط هذا الجهاز بحسابك على جهاز آخر، كي تتعرّف جهات الاتصال على جميع أجهزتك كحساب واحد. مفتاح الحساب لا يغادر الجهاز الذي يحمله أبدًا — تعبر الشبكة فقط شهادة موقّعة.</string>
+    <string name="m3_linked_to_account">مرتبط بالحساب %1$s…</string>
+    <string name="m3_linking_this_device">يجري ربط هذا الجهاز…</string>
+    <string name="m3_loading_segments">يجري تحميل المقاطع…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">سمِّ المقطع</string>
+    <string name="m3_nearby_hosts">المضيفون القريبون</string>
+    <string name="m3_nearby_perm_needed">الاكتشاف القريب يحتاج إلى إذن البلوتوث / Wi-Fi القريب</string>
+    <string name="m3_nearby_scanning">يجري المسح عبر Bluetooth LE و Wi-Fi Direct. انقر على مضيف للانضمام.</string>
+    <string name="m3_new_segment">— مقطع جديد —</string>
+    <string name="m3_no_segments_yet">لا توجد مقاطع بعد — أنشئ واحدًا أدناه.</string>
+    <string name="m3_notifications_blocked">الإشعارات محظورة — المحادثات دائمة التشغيل لا تزال تعمل، لكن دون إشعار حالة</string>
+    <string name="m3_or_relink">— أو أعد الربط —</string>
+    <string name="m3_paste_link_offer_uri">الصق رابط عرض الربط</string>
+    <string name="m3_paste_talkrypt_invite">الصق دعوة talkrypt://</string>
+    <string name="m3_paste_talkrypt_invite_above">الصق دعوة talkrypt:// أعلاه</string>
+    <string name="m3_qr_too_large">(رمز QR أكبر من أن يُعرض — استخدم النص)</string>
+    <string name="m3_rooted_at_device_account">متجذّر في حساب هذا الجهاز</string>
+    <string name="m3_rooted_at_linked_account">متجذّر في حسابك المرتبط %1$s…</string>
+    <string name="m3_safety_prefix">الأمان %1$s…</string>
+    <string name="m3_seal_segments_failed">تعذّر ختم المقاطع: %1$s</string>
+    <string name="m3_segment_name_label">اسم المقطع (ملصق السياق)</string>
+    <string name="m3_segments">المقاطع</string>
+    <string name="m3_segments_desc">هويات فرعية سياقية تحت حسابك. كل مقطع يصادق بمفتاحه الخاص، فلا يمكن ربط المقاطع المختلفة ببعضها — ومع ذلك فإن جهة الاتصال التي تعرف حسابك تعرف كل مقطع. استخدم واحدًا لكل سياق (عمل، نشاط، …).</string>
+    <string name="m3_start_link_offer">ابدأ عرض ربط</string>
+    <string name="m3_starting_link_offer">يبدأ عرض الربط…</string>
+    <string name="m3_this_device_is_linked">هذا الجهاز مرتبط</string>
+    <string name="m3_unlink">إلغاء الربط</string>
+    <string name="m3_unlink_body">يزيل شهادة الربط — لن تتعرّف جهات الاتصال على هذا الجهاز كجزء من الحساب حتى تربطه مرة أخرى.</string>
+    <string name="m3_unlink_this_device">إلغاء ربط هذا الجهاز</string>
+    <string name="m3_unlink_this_device_q">إلغاء ربط هذا الجهاز؟</string>
+    <string name="m3_unlinked">أُلغي الربط</string>
+    <string name="m3_username_prefix">اسم المستخدم %1$s</string>
+    <string name="m3_verify_oob_account_sn">تحقّق خارج القناة — رقم أمان الحساب:</string>
+    <string name="m3_wifi_off">Wi-Fi مُطفأ — شغّله لاستخدام Wi-Fi Direct (البلوتوث لا يزال يعمل)</string>
+
+    <!-- ===== MainActivity: المراسي، المضيف المقيّد، شاشة المحادثة (النطاق m4) ===== -->
+    <string name="m4_anchors_title">المراسي</string>
+    <string name="m4_anchors_desc">دليل أسماء مستخدمين تنشئه أو توجّهه بالموقع. الأسماء تُربط بمفاتيح الحسابات؛ تحقّق من أرقام الأمان خارج القناة.</string>
+    <string name="m4_your_account">حسابك</string>
+    <string name="m4_deriving">يجري الاشتقاق…</string>
+    <string name="m4_unavailable">غير متوفر</string>
+    <string name="m4_spawn_my_anchor">أنشئ مرساتي الخاصة</string>
+    <string name="m4_or_use_known_anchor">— أو استخدم مرساة معروفة —</string>
+    <string name="m4_anchor_location_label">موقع المرساة (رابط talkrypt://)</string>
+    <string name="m4_username_label">اسم المستخدم</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">سجّل اسم مستخدمي هنا</string>
+    <string name="m4_enter_anchor_uri_username">أدخل رابط مرساة + اسم مستخدم</string>
+    <string name="m4_resolve_this_username">حلّ اسم المستخدم هذا</string>
+    <string name="m4_back">رجوع</string>
+    <string name="m4_already_spawning">الإنشاء جارٍ بالفعل…</string>
+    <string name="m4_spawning_anchor">يجري إنشاء المرساة…</string>
+    <string name="m4_anchor_failed">فشلت المرساة: %1$s</string>
+    <string name="m4_anchor_running_title">المرساة قيد التشغيل</string>
+    <string name="m4_anchor_running_desc">يسجّل الآخرون أسماء المستخدمين ويحلّونها هنا. شارك هذا الموقع (امسح أو انسخ). يعمل ما دام التطبيق مفتوحًا.</string>
+    <string name="m4_registering">يجري التسجيل…</string>
+    <string name="m4_register_success">✓ تم تسجيل ”%1$s“ → حسابك عند هذه المرساة</string>
+    <string name="m4_register_failed">! فشل التسجيل: %1$s</string>
+    <string name="m4_resolving">يجري الحل…</string>
+    <string name="m4_resolve_safety_number">”%1$s“ → رقم أمان الحساب:\n%2$s\n(تحقّق خارج القناة قبل الوثوق)</string>
+    <string name="m4_resolve_not_registered">”%1$s“ غير مسجّل هنا (أو اختلفت السجلات)</string>
+    <string name="m4_resolve_failed">! فشل الحل: %1$s</string>
+    <string name="m4_registry_restricted_title">محادثة مقيّدة بالسجل</string>
+    <string name="m4_registry_restricted_desc">أعضاء السجل المختار فقط يمكنهم الانضمام إلى %1$s. يمكنك اختيار السجلات التي أنت مرتبط بها فقط؛ السجلات غير المتاحة (أو التي تفتقد سجلّك) تظهر باهتة.</string>
+    <string name="m4_not_registered_any_anchor">لست مسجّلًا عند أي مرساة بعد. افتح المراسي وسجّل اسم مستخدم أولًا.</string>
+    <string name="m4_checking_anchor">يجري التحقق من %1$s …</string>
+    <string name="m4_host_gated_by">مضيف مقيّد بـ ”%1$s@%2$s“</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — غير متاح أو لا يوجد سجل</string>
+    <string name="m4_creating_restricted_chat">يجري إنشاء محادثة مقيّدة…</string>
+    <string name="m4_registry_restricted_members">مقيّدة بالسجل — فقط أعضاء مرساة %1$s يمكنهم الانضمام</string>
+    <string name="m4_sender_invite">دعوة</string>
+    <string name="m4_restricted_host_failed">فشلت الاستضافة المقيّدة: %1$s</string>
+    <string name="m4_tier_ephemeral">عابر</string>
+    <string name="m4_tier_always_on">دائم التشغيل</string>
+    <string name="m4_tier_persistent">دائم</string>
+    <string name="m4_members_prefix">"%1$s عضو · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sالأمان %2$s · %3$s"</string>
+    <string name="m4_chat_menu">قائمة المحادثة</string>
+    <string name="m4_message_hint">رسالة</string>
+    <string name="m4_send">إرسال</string>
+    <string name="m4_delivery_delivered">تم التسليم</string>
+    <string name="m4_delivery_not_delivered">لم يُسلَّم</string>
+    <string name="m4_delivery_sent">أُرسل</string>
+    <string name="m4_already_creating_chat">يجري إنشاء محادثة بالفعل…</string>
+    <string name="m4_starting_chat_over">يبدأ محادثتك عبر %1$s…</string>
+    <string name="m4_creating_chat">يجري إنشاء المحادثة…</string>
+    <string name="m4_hosting_share_invite">استضافة — شارك الدعوة ليتمكن صديق من الانضمام:</string>
+
+    <!-- ===== MainActivity: ما قبل الانضمام، الاتصال، الإرسال، أوامر الشرطة المائلة (النطاق m5) ===== -->
+    <string name="m5_host_failed">فشلت الاستضافة: %1$s</string>
+    <string name="m5_join_chat">الانضمام إلى المحادثة</string>
+    <string name="m5_join_restricted_explainer">إذا كانت هذه المحادثة مقيّدة بالسجل، فلا تُقبَل إلا كعضو. قدّم عضوية حية، أو انضم باسم مستعار (المحادثات المفتوحة فقط).</string>
+    <string name="m5_no_memberships">ليس لديك عضويات سجل بعد — سجّل عند مرساة للانضمام إلى المحادثات المقيّدة.</string>
+    <string name="m5_present_a_membership">قدّم عضوية</string>
+    <string name="m5_checking_anchor">يجري التحقق من %1$s …</string>
+    <string name="m5_join_as_member">الانضمام باسم ”%1$s@%2$s“</string>
+    <string name="m5_or_separator">— أو —</string>
+    <string name="m5_join_with_account">الانضمام بحسابي (دون اسم مستخدم)</string>
+    <string name="m5_join_as_pseudonym">الانضمام باسم مستعار (غير قابل للربط)</string>
+    <string name="m5_back">رجوع</string>
+    <string name="m5_already_joining">الانضمام جارٍ بالفعل…</string>
+    <string name="m5_joined">منضمّ</string>
+    <string name="m5_as_suffix">" باسم %1$s"</string>
+    <string name="m5_joined_as_pseudonym">انضممت باسم مستعار</string>
+    <string name="m5_failed">فشل: %1$s</string>
+    <string name="m5_join_failed">فشل الانضمام</string>
+    <string name="m5_connecting_title">يجري الاتصال</string>
+    <string name="m5_bootstrapping_tor">يجري تمهيد Tor…</string>
+    <string name="m5_connecting">يجري الاتصال…</string>
+    <string name="m5_first_tor_slow">أول اتصال بـ Tor بطيء؛ اللاحقة فورية.</string>
+    <string name="m5_cancel">إلغاء</string>
+    <string name="m5_bootstrapping_tor_pct">يجري تمهيد Tor… %1$s%%</string>
+    <string name="m5_building_circuit">يجري بناء الدائرة + المصافحة…</string>
+    <string name="m5_cant_reconnect">تعذّرت إعادة الاتصال — لا توجد دعوة محفوظة</string>
+    <string name="m5_reconnecting_over">يجري إعادة الاتصال عبر %1$s…</string>
+    <string name="m5_reconnected_over">أُعيد الاتصال عبر %1$s</string>
+    <string name="m5_reconnect_failed_detail">فشلت إعادة الاتصال (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">فشلت إعادة الاتصال</string>
+    <string name="m5_reconnecting_text_kept">يجري إعادة الاتصال — نصّك محفوظ، أعد المحاولة بعد لحظة</string>
+    <string name="m5_send_failed">فشل الإرسال</string>
+    <string name="m5_name_book_empty">دفتر الأسماء فارغ — ‎/name &lt;callsign&gt; لإضافة واحد</string>
+    <string name="m5_tier_account_linked">مرتبط بالحساب</string>
+    <string name="m5_tier_bare">مجرّد</string>
+    <string name="m5_name_list_entry">%1$s%2$s  ”%3$s“  (%4$s)</string>
+    <string name="m5_saved_to_name_book">حُفظ ”%1$s“ في دفتر الأسماء</string>
+    <string name="m5_switched_to">تم التبديل إلى ”%1$s“ وأُعلن عنه</string>
+    <string name="m5_no_saved_name">لا يوجد اسم محفوظ ”%1$s“</string>
+    <string name="m5_calling_verified">🔗 النداء كموثَّق ”%1$s“</string>
+    <string name="m5_name_cleared">مُسح الاسم</string>
+    <string name="m5_calling_as">النداء باسم ”%1$s“</string>
+    <string name="m5_cq_announced">CQ — أُعلن عن اسمك</string>
+    <string name="m5_cq_cadence_off">إيقاع CQ معطّل</string>
+    <string name="m5_cq_cadence_every">إيقاع CQ: كل %1$s دقيقة</string>
+    <string name="m5_state_on">مفعّل</string>
+    <string name="m5_state_off">معطّل</string>
+    <string name="m5_cq_onmsg">تعريف اسم CQ عند الرسالة: %1$s</string>
+    <string name="m5_name_usage">الاستخدام: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">إضافة ”%1$s“ كجهة اتصال</string>
+    <string name="m5_added_contact">أُضيفت جهة الاتصال %1$s</string>
+    <string name="m5_could_not_add">تعذّرت الإضافة (لم يُرَ الحساب)</string>
+    <string name="m5_invite_qr">رمز QR للدعوة</string>
+    <string name="m5_share">مشاركة</string>
+    <string name="m5_close">إغلاق</string>
+
+    <!-- ===== ChatNet: أخطاء نقل ودّية ===== -->
+    <string name="net_host_unreachable_tor">المضيف غير متاح عبر Tor — لم يُجب عنوانه onion (غير متصل، أو لم يُعَد نشره بعد)</string>
+    <string name="net_timed_out_host">انتهت مهلة الوصول إلى المضيف (غير متاح من هذه الشبكة؟)</string>
+    <string name="net_tor_not_ready">Tor ليس جاهزًا بعد (لا يزال في التمهيد)</string>
+    <string name="net_cant_reconnect_no_invite">تعذّرت إعادة الاتصال — لا توجد دعوة محفوظة لهذه المحادثة</string>
+    <string name="net_unknown_error">خطأ غير معروف</string>
+
+    <!-- ===== QrScanActivity: تلميحات الماسح + استرداد إذن الكاميرا ===== -->
+    <string name="qr_point_at_talkrypt">وجّه نحو رمز QR خاص بـ talkrypt</string>
+    <string name="qr_cancel_scan">إلغاء المسح</string>
+    <string name="qr_open_app_settings">فتح إعدادات التطبيق</string>
+    <string name="qr_camera_access_off">الوصول إلى الكاميرا مُطفأ — فعّله للمسح، أو ألغِ والصق الدعوة بدلًا من ذلك.</string>
+    <string name="qr_no_camera_found">لم يُعثر على كاميرا</string>
+    <string name="qr_camera_error">خطأ في الكاميرا %1$d</string>
+    <string name="qr_camera_unavailable">الكاميرا غير متوفرة: %1$s</string>
+    <string name="qr_camera_config_failed">فشل تهيئة الكاميرا</string>
+    <string name="qr_not_talkrypt_keep_scanning">ليس رمز QR خاصًا بـ talkrypt — تابع المسح</string>
+
+    <!-- ===== ChatService: إشعار خدمة المقدمة + إعادة الاتصال ===== -->
+    <string name="svc_reconnecting">يجري إعادة الاتصال بـ ”%1$s“ عبر %2$s…</string>
+    <string name="svc_reconnected">أُعيد الاتصال بـ ”%1$s“ عبر %2$s</string>
+    <string name="svc_reconnect_failed_retry">فشلت إعادة الاتصال بـ ”%1$s“ (%2$s): %3$s — يجري إعادة المحاولة…</string>
+    <string name="svc_reconnect_failed">فشلت إعادة الاتصال بـ ”%1$s“ (%2$s): %3$s</string>
+    <string name="svc_channel_name">اتصالات talkrypt</string>
+    <string name="svc_status_none">لا توجد محادثات دائمة التشغيل</string>
+    <string name="svc_status_all_connected">%1$d دائم التشغيل · الكل متصل</string>
+    <string name="svc_status_partial">%1$d دائم التشغيل · %2$d متصل، %3$d غير متصل</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== أجهزة الراديو/المنارات القريبة: أخطاء تظهر للمستخدم ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct غير مدعوم على هذا الجهاز</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct مشغول — أعد المحاولة بعد لحظة</string>
+    <string name="radio_wifidirect_wifi_off">شغّل Wi-Fi لاستخدام Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">خطأ في Wi-Fi Direct</string>
+    <string name="radio_wifidirect_failed">فشل Wi-Fi Direct (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">رُفض إذن Wi-Fi القريب</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct غير متوفر</string>
+    <string name="radio_wifidirect_connect_failed">فشل اتصال Wi-Fi Direct (%1$d)</string>
+    <string name="radio_wifidirect_peer">نظير Wi-Fi Direct</string>
+    <string name="radio_ble_bt_off">البلوتوث مُطفأ</string>
+    <string name="radio_ble_no_scanner">لا يوجد ماسح BLE</string>
+    <string name="radio_ble_scan_failed">فشل مسح BLE (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">رُفض إذن مسح البلوتوث</string>
+    <string name="radio_beacon_ble_bt_off">البلوتوث مُطفأ</string>
+    <string name="radio_beacon_ble_no_scanner">لا يوجد ماسح BLE</string>
+    <string name="radio_beacon_ble_scan_failed">فشل مسح BLE (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">رُفض إذن مسح البلوتوث</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD غير متوفر</string>
+    <string name="radio_beacon_wifi_discovery_failed">فشل الاكتشاف (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">خطأ في الاكتشاف</string>
+</resources>

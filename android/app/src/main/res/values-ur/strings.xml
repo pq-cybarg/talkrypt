@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  talkrypt اینڈرائیڈ ایپ کے لیے اردو سٹرنگ کیٹلاگ۔
+
+  مقامی کاری اینڈرائیڈ کے ریسورس سسٹم پر مبنی ہے: Context والی UI پرت جو بھی
+  صارف کو نظر آنے والی سٹرنگ رینڈر کرتی ہے وہ Loc.s(R.string.*) سے گزرتی ہے
+  (دیکھیں Loc.kt)، جو ڈیوائس کے موجودہ لوکیل کے مطابق حل ہوتی ہے۔ زبان شامل
+  کرنے کے لیے، ویسے ہی ناموں کے ساتھ ترجمہ شدہ res/values-&lt;lang&gt;/strings.xml
+  رکھیں (دیکھیں values-es)۔
+
+  تصدیق شدہ نہیں / آڈٹ شدہ نہیں (پورے پراجیکٹ میں)۔ سیکیورٹی/ڈس کلیمر الفاظ
+  یہاں لفظ بہ لفظ محفوظ ہیں اور ہر لوکیل میں انہیں ایمانداری سے ترجمہ کرنا
+  لازم ہے (کبھی بھی کسی سرٹیفیکیشن/تعمیل کے دعوے میں تقویت نہ دیں)۔
+
+  جان بوجھ کر UI سے پاک مشترکہ ماڈل (ChatEvents.kt) ڈیزائن کے مطابق مختصر
+  اسٹیٹس لائنیں ماخذ انگریزی میں تیار کرتا ہے (سادہ JVM پر ہیڈ لیس یونٹ ٹیسٹ
+  ہوتا ہے جہاں کوئی ریسورس ٹیبل موجود نہیں؛ AndroidX سے پاک ہونا Robolectric کو
+  روکتا ہے)۔ پیر پیغاموں کے متن صارف کے لکھے ہوئے ہوتے ہیں اور کبھی ترجمہ نہیں
+  ہوتے۔ نوٹ کے لیے ChatEvents.kt دیکھیں۔
+
+  نوٹ: برانڈ نام "talkrypt" جان بوجھ کر ترجمہ نہیں کیا گیا۔
+-->
+<resources>
+
+    <!-- ===== MainActivity: نئی چیٹ، چیٹ فہرست، چیٹ قطار مینیو (range m1) ===== -->
+    <string name="m1_opening_invite">دعوت کھولی جا رہی ہے…</string>
+    <string name="m1_not_a_talkrypt_qr">یہ talkrypt QR نہیں ہے</string>
+    <string name="m1_nym_credential_imported">Nym سند درآمد ہو گئی — ادا شدہ mixnet تیار ہے (کسی mnemonic کی ضرورت نہیں)</string>
+    <string name="m1_import_failed">درآمد ناکام: %1$s</string>
+    <string name="m1_new_chat">نئی چیٹ</string>
+    <string name="m1_channel">چینل</string>
+    <string name="m1_posture">پوزیشن</string>
+    <string name="m1_access">رسائی</string>
+    <string name="m1_name_display_signal_style">Signal طرز (صرف بیجز)</string>
+    <string name="m1_name_display_warn">ملتے جلتے ناموں کے ٹکراؤ پر خبردار کریں</string>
+    <string name="m1_name_display_suppress">ٹکراتے ناموں کو دبا دیں</string>
+    <string name="m1_name_display">نام کی نمائش</string>
+    <string name="m1_persistence_ephemeral">عارضی (صرف میموری میں)</string>
+    <string name="m1_persistence_persistent">مستقل (محفوظ، دوبارہ جُڑنے کے قابل)</string>
+    <string name="m1_persistence_always_on">ہمیشہ آن (مرحلہ 2)</string>
+    <string name="m1_persistence">استقلال</string>
+    <string name="m1_route_over_tor">Tor کے ذریعے روٹ کریں (.onion؛ شروع ہونے میں سست)</string>
+    <string name="m1_route_over_nym">Nym mixnet کے ذریعے بھی روٹ کریں (رضاکارانہ؛ دعوت کو کثیر راستے دیتا ہے)</string>
+    <string name="m1_paid_nym_bandwidth">ادا شدہ Nym بینڈوڈتھ (والیٹ mnemonic / سند) ترتیبات میں سیٹ ہوتی ہے۔</string>
+    <string name="m1_host_a_chat">چیٹ میزبانی کریں</string>
+    <string name="m1_registry_restricted_chat">رجسٹری تک محدود چیٹ</string>
+    <string name="m1_or_join">— یا شامل ہوں —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">شامل ہوں</string>
+    <string name="m1_paste_invite">کوئی talkrypt:// دعوت چسپاں کریں</string>
+    <string name="m1_scan_qr">QR کوڈ اسکین کریں</string>
+    <string name="m1_in_person">— بالمشافہ —</string>
+    <string name="m1_find_nearby_host">قریبی میزبان تلاش کریں (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">ایپ شیئر کریں (Wi-Fi پر P2P)</string>
+    <string name="m1_back">واپس</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">مزید</string>
+    <string name="m1_new_chat_button">＋  نئی چیٹ</string>
+    <string name="m1_no_chats_yet">ابھی کوئی چیٹ نہیں — میزبانی یا شمولیت کے لیے ＋ پر ٹیپ کریں۔</string>
+    <string name="m1_preview_you">آپ: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">میزبانی</string>
+    <string name="m1_joined">شامل ہو گئے</string>
+    <string name="m1_preview_members">%1$s · %2$d ارکان</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">آف لائن</string>
+    <string name="m1_online">آن لائن</string>
+    <string name="m1_online_count">%1$d آن لائن</string>
+    <string name="m1_connecting">جُڑ رہا ہے</string>
+    <string name="m1_time_now">ابھی</string>
+    <string name="m1_time_minutes">%1$d منٹ</string>
+    <string name="m1_time_hours">%1$d گھنٹے</string>
+    <string name="m1_time_days">%1$d دن</string>
+    <string name="m1_no_invite">کوئی دعوت نہیں</string>
+    <string name="m1_safety_number_title">سیفٹی نمبر</string>
+    <string name="m1_safety_number_body">%1$s\n\nاسے اپنے پیر کے ساتھ بیرونِ چینل موازنہ کریں؛ عدم مطابقت کا مطلب ہے کہ چینل اُس سے بات نہیں کر رہا جس کا آپ گمان کرتے ہیں۔</string>
+    <string name="m1_copy">نقل کریں</string>
+    <string name="m1_copied">نقل ہو گیا</string>
+    <string name="m1_close">بند کریں</string>
+
+    <!-- ===== MainActivity: ترتیبات، شناخت، nym، سیکیورٹی (range m2) ===== -->
+    <string name="m2_delete_chat_title">“%1$s” کو حذف کریں؟</string>
+    <string name="m2_delete_chat_body">اس ڈیوائس سے یہ چیٹ اور اس کی تاریخ مٹا دیتا ہے۔ یہ واپس نہیں کیا جا سکتا۔</string>
+    <string name="m2_delete">حذف کریں</string>
+    <string name="m2_connect_first">پہلے جُڑیں</string>
+    <string name="m2_beacon_msg">بیکن: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 اس چیٹ کو قریب نشر کیا جا رہا ہے (BLE + Wi-Fi) + اسکیننگ</string>
+    <string name="m2_nearby_beacon_stopped">قریبی بیکن رک گیا</string>
+    <string name="m2_no_ble_scanner">کوئی BLE اسکینر نہیں</string>
+    <string name="m2_mesh_linked">📻 mesh: ایک %1$s نوڈ منسلک ہوا — پیغام LoRa پر بھی جاتے ہیں</string>
+    <string name="m2_mesh_scan_failed">mesh: BLE اسکین ناکام (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 BLE پر %1$s نوڈ تلاش کیا جا رہا ہے…</string>
+    <string name="m2_ble_scan_denied">BLE اسکین کی اجازت مسترد</string>
+    <string name="m2_mesh_stopped">mesh رک گیا</string>
+    <string name="m2_start_beacon_first">پہلے بیکن شروع کریں</string>
+    <string name="m2_no_blob_yet">ابھی کوئی نشر شدہ blob نہیں — لمحے بھر بعد دوبارہ کوشش کریں</string>
+    <string name="m2_beacon_selftest">بیکن خود جانچ: اپنا ہی سیل شدہ بیکن واپس فیڈ کیا (📡 نظر آنے کی توقع رکھیں)</string>
+    <string name="m2_callsigns">کال سائنز</string>
+    <string name="m2_callsigns_desc">وہ نام جو آپ اس چیٹ میں اپنے پیغاموں پر نشر کرتے ہیں۔</string>
+    <string name="m2_connect_to_manage_names">نام منظم کرنے کے لیے اس چیٹ سے جُڑیں۔</string>
+    <string name="m2_back">واپس</string>
+    <string name="m2_your_names">آپ کے نام</string>
+    <string name="m2_none_yet_add">ابھی کوئی نہیں — نیچے ایک شامل کریں۔</string>
+    <string name="m2_use">استعمال کریں</string>
+    <string name="m2_calling_as">“%1$s” کے طور پر پکارا جا رہا ہے</string>
+    <string name="m2_failed">ناکام</string>
+    <string name="m2_removed">ہٹا دیا گیا</string>
+    <string name="m2_new_callsign">نئی کال سائن</string>
+    <string name="m2_save_to_name_book">نام کتاب میں محفوظ کریں</string>
+    <string name="m2_set_announce_now">مقرر کریں + ابھی اعلان کریں</string>
+    <string name="m2_set_verified">تصدیق شدہ کے طور پر مقرر کریں (🔗 اکاؤنٹ سے منسلک)</string>
+    <string name="m2_verified_name">تصدیق شدہ نام “%1$s”</string>
+    <string name="m2_verified_desc">تصدیق شدہ آپ کی اکاؤنٹ کلید استعمال کرتا ہے تاکہ کوئی دوسرا رکن کسی نام کی نقالی نہ کر سکے۔</string>
+    <string name="m2_cq_beacon">CQ بیکن</string>
+    <string name="m2_periodic_on">دوریہ دوبارہ بیکن: آن (5 منٹ)</string>
+    <string name="m2_periodic_off">دوریہ دوبارہ بیکن: بند</string>
+    <string name="m2_onmsg_on">پیغام کے ساتھ نام شناخت: آن</string>
+    <string name="m2_onmsg_off">پیغام کے ساتھ نام شناخت: بند</string>
+    <string name="m2_onmsg_desc">پیغام کے ساتھ نام شناخت پیروں کو یہ جاننے دیتی ہے کہ اگر آپ نام بدلیں تو وہ آپ کی پرانی کال سائن چھوڑ دیں۔</string>
+    <string name="m2_show_others">دوسروں کے نام دکھائیں</string>
+    <string name="m2_nametrust_signal">Signal طرز (صرف بیجز)</string>
+    <string name="m2_nametrust_warn">ملتے جلتے ناموں کے ٹکراؤ پر خبردار کریں</string>
+    <string name="m2_nametrust_suppress">ٹکراتے ناموں کو دبا دیں</string>
+    <string name="m2_apply_nametrust">نام اعتماد ترتیب لاگو کریں</string>
+    <string name="m2_nametrust_set">نام اعتماد: %1$s</string>
+    <string name="m2_tighten_only">آپ صرف چیٹ کی بنیادی سطح کو سخت کر سکتے ہیں، کبھی ڈھیلا نہیں۔</string>
+    <string name="m2_whos_here">یہاں کون ہے</string>
+    <string name="m2_safety_suffix">  ·  سیفٹی %1$s</string>
+    <string name="m2_safety_number">سیفٹی نمبر: %1$s</string>
+    <string name="m2_share_invite">دعوت شیئر کریں</string>
+    <string name="m2_more">مزید</string>
+    <string name="m2_anchors">اینکرز (صارف نام ڈائریکٹری)</string>
+    <string name="m2_contacts">رابطے</string>
+    <string name="m2_linked_devices">منسلک ڈیوائسز</string>
+    <string name="m2_segments">سیگمنٹس (سیاق و سباق کی شناختیں)</string>
+    <string name="m2_settings">ترتیبات</string>
+    <string name="m2_seal_mnemonic_err">mnemonic سیل نہ ہو سکی: %1$s</string>
+    <string name="m2_identity">شناخت</string>
+    <string name="m2_account_safety_number">اکاؤنٹ سیفٹی نمبر</string>
+    <string name="m2_deriving">اخذ کیا جا رہا ہے…</string>
+    <string name="m2_still_deriving">ابھی بھی اخذ کیا جا رہا ہے…</string>
+    <string name="m2_copied">نقل ہو گیا</string>
+    <string name="m2_linked_secondary">ثانوی ڈیوائس کے طور پر منسلک</string>
+    <string name="m2_account_short">اکاؤنٹ %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">سیکیورٹی</string>
+    <string name="m2_key_custody_loading">کلید حراست: …</string>
+    <string name="m2_key_custody_desc">یہ ڈیوائس کہاں کلیدیں رکھ سکتی ہے (StrongBox &gt; TEE &gt; سافٹ ویئر)۔ آپ کی حراست سطح کے طور پر پیروں کو بتائی جاتی ہے۔</string>
+    <string name="m2_safety_tap_copy">%1$s — نقل کرنے کے لیے ٹیپ کریں۔ خود کی تصدیق کے لیے بیرونِ چینل موازنہ کریں۔</string>
+    <string name="m2_key_custody">کلید حراست: %1$s</string>
+    <string name="m2_secrets_sealed">راز بند حالت میں سیل شدہ</string>
+    <string name="m2_secrets_sealed_desc">شناختی بیج اور Nym mnemonic ایک غیر برآمد ہونے والی Android Keystore کلید سے خفیہ کیے جاتے ہیں (جہاں دستیاب ہو StrongBox)۔</string>
+    <string name="m2_sealing_degraded">سیلنگ کمزور ہوئی</string>
+    <string name="m2_sealing_degraded_desc">Keystore نے بتایا: %1$s۔ جو راز سیل نہ ہو سکے وہ بحالی تک ایپ کے نجی سادہ متن میں رہتے ہیں۔</string>
+    <string name="m2_nym_paid_bw">NYM ادا شدہ بینڈوڈتھ (اختیاری)</string>
+    <string name="m2_nym_mnemonic_hint">NYM والیٹ mnemonic — خالی = مفت mixnet</string>
+    <string name="m2_show_mnemonic">mnemonic دکھائیں</string>
+    <string name="m2_ticketbook_desc">یا اپنے Nym اوزاروں سے بنائی گئی ticketbook سند درآمد کریں (والیٹ بیج کبھی اس ایپ میں داخل نہیں ہوتا):</string>
+    <string name="m2_import_nym_cred">Nym سند درآمد کریں</string>
+    <string name="m2_network_defaults">نئی چیٹس کے لیے نیٹ ورک ڈیفالٹس</string>
+    <string name="m2_route_tor">Tor کے ذریعے روٹ کریں (.onion)</string>
+    <string name="m2_route_nym">Nym mixnet کے ذریعے بھی روٹ کریں</string>
+    <string name="m2_notifications">اطلاعات</string>
+    <string name="m2_always_on_chats">ہمیشہ آن چیٹس</string>
+    <string name="m2_always_on_desc">ایک فورگراؤنڈ سروس اور مستقل اطلاع کے ذریعے جُڑی رہتی ہیں۔ سسٹم ترتیبات میں ایڈجسٹ کرنے کے لیے ٹیپ کریں۔</string>
+    <string name="m2_open_notif_err">اطلاع کی ترتیبات نہ کھل سکیں</string>
+    <string name="m2_about">متعلق</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Tor پر پوسٹ کوانٹم E2E چیٹ۔ تصدیق شدہ نہیں · منظور شدہ نہیں · آڈٹ شدہ نہیں — تجرباتی سافٹ ویئر؛ درجہ بندی کے نشانات صرف مشاورتی لیبل ہیں۔</string>
+    <string name="m2_contacts_desc">وہ اکاؤنٹس جنہیں آپ پہچانتے ہیں۔ صرف پہچان — کسی کا رابطہ (یا دوست) ہونا چینل تک رسائی نہیں دیتا؛ وہ ہر چیٹ کے لیے الگ مقرر ہوتی ہے۔</string>
+    <string name="m2_no_contacts">ابھی کوئی رابطہ نہیں۔ کسی چیٹ میں جب کوئی اکاؤنٹ خود کو پیش کرے، تو “بطور رابطہ شامل کریں” پر ٹیپ کریں۔</string>
+    <string name="m2_friend_suffix">  [دوست]</string>
+    <string name="m2_starting_share">مقامی شیئر شروع ہو رہا ہے…</string>
+    <string name="m2_no_wifi">کوئی Wi-Fi/LAN پتہ نہیں — پہلے کسی Wi-Fi نیٹ ورک یا ہاٹ سپاٹ سے جُڑیں</string>
+    <string name="m2_share_talkrypt">talkrypt شیئر کریں</string>
+    <string name="m2_share_instructions">اسی Wi-Fi یا ہاٹ سپاٹ پر، دوسرا فون یہ کوڈ اسکین کرے (یا URL کھولے)، ایپ ڈاؤن لوڈ کرے اور انسٹال کرے (ایک بار “نامعلوم ایپس انسٹال کریں” کی اجازت دے)۔</string>
+    <string name="m2_apk_computing">APK SHA-256: حساب لگایا جا رہا ہے…</string>
+
+    <!-- ===== MainActivity: حراست، سیگمنٹس، قریبی دریافت (range m3) ===== -->
+    <string name="m3_accept_link_on_this_device">اس ڈیوائس پر لنک قبول کریں</string>
+    <string name="m3_account_prefix">اکاؤنٹ %1$s…</string>
+    <string name="m3_already_linking">پہلے سے منسلک ہو رہا ہے…</string>
+    <string name="m3_already_starting">پہلے سے شروع ہو رہا ہے…</string>
+    <string name="m3_apk_fingerprint_failed">APK فنگر پرنٹ حساب نہ ہو سکا</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (پہلے 16): %1$s — وصول کنندہ فون پر تصدیق کریں</string>
+    <string name="m3_back">واپس</string>
+    <string name="m3_beacon_perm_needed">قریبی بیکن / mesh کو Bluetooth کی اجازت درکار ہے</string>
+    <string name="m3_broadcasting_nearby">قریب نشر کیا جا رہا ہے (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">منسوخ کریں</string>
+    <string name="m3_create_segment">سیگمنٹ بنائیں</string>
+    <string name="m3_created_segment">سیگمنٹ “%1$s” بنایا گیا</string>
+    <string name="m3_delete">حذف کریں</string>
+    <string name="m3_delete_name">“%1$s” حذف کریں</string>
+    <string name="m3_delete_segment_body">اس سیگمنٹ کی کلید مٹا دیتا ہے — اس کے تحت شامل کی گئی چیٹس میں اسی شناخت کے طور پر دوبارہ شامل نہیں ہوا جا سکتا۔ یہ واپس نہیں کیا جا سکتا۔</string>
+    <string name="m3_delete_segment_q">سیگمنٹ “%1$s” حذف کریں؟</string>
+    <string name="m3_device_not_linked">یہ ڈیوائس منسلک نہیں ہے</string>
+    <string name="m3_device_prefix">ڈیوائس %1$s…</string>
+    <string name="m3_done">ہو گیا</string>
+    <string name="m3_hint_work">کام</string>
+    <string name="m3_join_a_chat">چیٹ میں شامل ہوں (talkrypt:// دعوت)</string>
+    <string name="m3_join_as_name">“%1$s” کے طور پر شامل ہوں</string>
+    <string name="m3_join_as_this_account">اس اکاؤنٹ کے طور پر شامل ہوں</string>
+    <string name="m3_join_chat_as_account">اس اکاؤنٹ کے طور پر چیٹ میں شامل ہوں (talkrypt:// دعوت)</string>
+    <string name="m3_join_failed">شمولیت ناکام: %1$s</string>
+    <string name="m3_join_peer">%1$s میں شامل ہوں</string>
+    <string name="m3_joined_as_linked_account">منسلک اکاؤنٹ کے طور پر شامل ہو گئے</string>
+    <string name="m3_joined_as_segment">سیگمنٹ “%1$s” کے طور پر شامل ہو گئے</string>
+    <string name="m3_joining_as_linked">منسلک اکاؤنٹ کے طور پر شامل ہو رہے ہیں…</string>
+    <string name="m3_joining_as_name">“%1$s” کے طور پر شامل ہو رہے ہیں…</string>
+    <string name="m3_link_another_device">میرے اکاؤنٹ سے کوئی اور ڈیوائس منسلک کریں</string>
+    <string name="m3_link_another_device_desc">یہ ڈیوائس اکاؤنٹ رکھتی ہے۔ ایک بار کا QR دکھائیں جسے نئی ڈیوائس اسکین کرے۔</string>
+    <string name="m3_link_failed">لنک ناکام: %1$s</string>
+    <string name="m3_link_offer_failed">لنک پیشکش ناکام: %1$s</string>
+    <string name="m3_link_offer_label">لنک پیشکش (پرائمری سے talkrypt://)</string>
+    <string name="m3_link_offer_running">لنک پیشکش چل رہی ہے</string>
+    <string name="m3_link_offer_running_desc">نئی ڈیوائس پر یہ اسکین کریں (یا URI کو منسلک ڈیوائسز → لنک قبول کریں میں چسپاں کریں)۔ اکاؤنٹ کلید اس ڈیوائس پر ہی رہتی ہے۔</string>
+    <string name="m3_link_this_device_desc">یہ اِس ڈیوائس کو لنک کی پیشکش کرنے والے اکاؤنٹ کے تحت تصدیق کرتا ہے۔ بعد میں، دکھائے گئے اکاؤنٹ سیفٹی نمبر کا دوسری ڈیوائس سے بیرونِ چینل موازنہ کریں۔</string>
+    <string name="m3_link_this_device_q">یہ ڈیوائس منسلک کریں؟</string>
+    <string name="m3_link_this_device_to_account">اس ڈیوائس کو کسی اکاؤنٹ سے منسلک کریں</string>
+    <string name="m3_linked_devices">منسلک ڈیوائسز</string>
+    <string name="m3_linked_devices_desc">اس ڈیوائس کو کسی اور ڈیوائس پر موجود اپنے اکاؤنٹ سے منسلک کریں، تاکہ رابطے آپ کی تمام ڈیوائسز کو ایک اکاؤنٹ کے طور پر پہچانیں۔ اکاؤنٹ کلید کبھی اُس ڈیوائس سے باہر نہیں جاتی جو اسے رکھتی ہے — صرف ایک دستخط شدہ سند تار پر جاتی ہے۔</string>
+    <string name="m3_linked_to_account">اکاؤنٹ %1$s سے منسلک…</string>
+    <string name="m3_linking_this_device">یہ ڈیوائس منسلک ہو رہی ہے…</string>
+    <string name="m3_loading_segments">سیگمنٹس لوڈ ہو رہے ہیں…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">سیگمنٹ کا نام رکھیں</string>
+    <string name="m3_nearby_hosts">قریبی میزبان</string>
+    <string name="m3_nearby_perm_needed">قریبی دریافت کو Bluetooth / قریبی Wi-Fi کی اجازت درکار ہے</string>
+    <string name="m3_nearby_scanning">Bluetooth LE اور Wi-Fi Direct پر اسکین ہو رہا ہے۔ شامل ہونے کے لیے کسی میزبان پر ٹیپ کریں۔</string>
+    <string name="m3_new_segment">— نیا سیگمنٹ —</string>
+    <string name="m3_no_segments_yet">ابھی کوئی سیگمنٹ نہیں — نیچے ایک بنائیں۔</string>
+    <string name="m3_notifications_blocked">اطلاعات مسدود — ہمیشہ آن چیٹس پھر بھی چلتی ہیں، مگر اسٹیٹس اطلاع کے بغیر</string>
+    <string name="m3_or_relink">— یا دوبارہ لنک کریں —</string>
+    <string name="m3_paste_link_offer_uri">لنک پیشکش کا URI چسپاں کریں</string>
+    <string name="m3_paste_talkrypt_invite">کوئی talkrypt:// دعوت چسپاں کریں</string>
+    <string name="m3_paste_talkrypt_invite_above">اوپر کوئی talkrypt:// دعوت چسپاں کریں</string>
+    <string name="m3_qr_too_large">(QR رینڈر کرنے کے لیے بہت بڑا — متن استعمال کریں)</string>
+    <string name="m3_rooted_at_device_account">اس ڈیوائس کے اکاؤنٹ پر جڑا ہوا</string>
+    <string name="m3_rooted_at_linked_account">آپ کے منسلک اکاؤنٹ %1$s… پر جڑا ہوا</string>
+    <string name="m3_safety_prefix">سیفٹی %1$s…</string>
+    <string name="m3_seal_segments_failed">سیگمنٹس سیل نہ ہو سکے: %1$s</string>
+    <string name="m3_segment_name_label">سیگمنٹ کا نام (سیاق لیبل)</string>
+    <string name="m3_segments">سیگمنٹس</string>
+    <string name="m3_segments_desc">آپ کے اکاؤنٹ کے تحت سیاقی ذیلی شناختیں۔ ہر سیگمنٹ اپنی ہی کلید سے تصدیق کرتا ہے، چنانچہ مختلف سیگمنٹس ایک دوسرے سے غیر قابل ربط ہیں — پھر بھی جو رابطہ آپ کے اکاؤنٹ کو پہچانتا ہے وہ ہر سیگمنٹ کو پہچانتا ہے۔ ہر سیاق کے لیے ایک استعمال کریں (کام، سرگرمی، …)۔</string>
+    <string name="m3_start_link_offer">لنک پیشکش شروع کریں</string>
+    <string name="m3_starting_link_offer">لنک پیشکش شروع ہو رہی ہے…</string>
+    <string name="m3_this_device_is_linked">یہ ڈیوائس منسلک ہے</string>
+    <string name="m3_unlink">غیر منسلک کریں</string>
+    <string name="m3_unlink_body">لنک سند ہٹا دیتا ہے — جب تک آپ دوبارہ لنک نہ کریں، رابطے اس ڈیوائس کو اکاؤنٹ کا حصہ نہیں پہچانیں گے۔</string>
+    <string name="m3_unlink_this_device">یہ ڈیوائس غیر منسلک کریں</string>
+    <string name="m3_unlink_this_device_q">یہ ڈیوائس غیر منسلک کریں؟</string>
+    <string name="m3_unlinked">غیر منسلک ہو گئی</string>
+    <string name="m3_username_prefix">صارف نام %1$s</string>
+    <string name="m3_verify_oob_account_sn">بیرونِ چینل تصدیق کریں — اکاؤنٹ سیفٹی نمبر:</string>
+    <string name="m3_wifi_off">Wi-Fi بند ہے — Wi-Fi Direct کے لیے اسے آن کریں (Bluetooth پھر بھی کام کرتا ہے)</string>
+
+    <!-- ===== MainActivity: اینکرز، محدود میزبان، چیٹ اسکرین (range m4) ===== -->
+    <string name="m4_anchors_title">اینکرز</string>
+    <string name="m4_anchors_desc">ایک صارف نام ڈائریکٹری جسے آپ مقام کے حساب سے پیدا کرتے یا اس کی طرف اشارہ کرتے ہیں۔ نام اکاؤنٹ کلیدوں سے نقشہ ہوتے ہیں؛ سیفٹی نمبروں کی بیرونِ چینل تصدیق کریں۔</string>
+    <string name="m4_your_account">آپ کا اکاؤنٹ</string>
+    <string name="m4_deriving">اخذ کیا جا رہا ہے…</string>
+    <string name="m4_unavailable">دستیاب نہیں</string>
+    <string name="m4_spawn_my_anchor">اپنا اینکر پیدا کریں</string>
+    <string name="m4_or_use_known_anchor">— یا کوئی معلوم اینکر استعمال کریں —</string>
+    <string name="m4_anchor_location_label">اینکر مقام (talkrypt:// URI)</string>
+    <string name="m4_username_label">صارف نام</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">یہاں میرا صارف نام رجسٹر کریں</string>
+    <string name="m4_enter_anchor_uri_username">ایک اینکر URI + صارف نام درج کریں</string>
+    <string name="m4_resolve_this_username">اس صارف نام کو حل کریں</string>
+    <string name="m4_back">واپس</string>
+    <string name="m4_already_spawning">پہلے سے پیدا ہو رہا ہے…</string>
+    <string name="m4_spawning_anchor">اینکر پیدا ہو رہا ہے…</string>
+    <string name="m4_anchor_failed">اینکر ناکام: %1$s</string>
+    <string name="m4_anchor_running_title">اینکر چل رہا ہے</string>
+    <string name="m4_anchor_running_desc">دوسرے یہاں صارف نام رجسٹر/حل کرتے ہیں۔ یہ مقام شیئر کریں (اسکین یا نقل کریں)۔ یہ ایپ کھلی رہنے تک چلتا ہے۔</string>
+    <string name="m4_registering">رجسٹر ہو رہا ہے…</string>
+    <string name="m4_register_success">✓ “%1$s” رجسٹر ہوا → اس اینکر پر آپ کا اکاؤنٹ</string>
+    <string name="m4_register_failed">! رجسٹریشن ناکام: %1$s</string>
+    <string name="m4_resolving">حل ہو رہا ہے…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → اکاؤنٹ سیفٹی نمبر:\n%2$s\n(بھروسہ کرنے سے پہلے بیرونِ چینل تصدیق کریں)</string>
+    <string name="m4_resolve_not_registered">“%1$s” یہاں رجسٹرڈ نہیں ہے (یا رجسٹریاں متفق نہ ہوئیں)</string>
+    <string name="m4_resolve_failed">! حل کرنا ناکام: %1$s</string>
+    <string name="m4_registry_restricted_title">رجسٹری تک محدود چیٹ</string>
+    <string name="m4_registry_restricted_desc">صرف منتخب رجسٹری کے ارکان %1$s میں شامل ہو سکتے ہیں۔ آپ صرف وہ رجسٹریاں چن سکتے ہیں جن سے آپ بندھے ہیں؛ ناقابل رسائی (یا جن میں آپ کا ریکارڈ موجود نہیں) دھندلی کر دی جاتی ہیں۔</string>
+    <string name="m4_not_registered_any_anchor">آپ ابھی کسی اینکر پر رجسٹرڈ نہیں ہیں۔ اینکرز کھولیں اور پہلے کوئی صارف نام رجسٹر کریں۔</string>
+    <string name="m4_checking_anchor">%1$s جانچا جا رہا ہے …</string>
+    <string name="m4_host_gated_by">میزبان “%1$s@%2$s” کے ذریعے محدود</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — ناقابل رسائی یا کوئی ریکارڈ نہیں</string>
+    <string name="m4_creating_restricted_chat">محدود چیٹ بنائی جا رہی ہے…</string>
+    <string name="m4_registry_restricted_members">رجسٹری تک محدود — صرف %1$s اینکر رکن شامل ہو سکتے ہیں</string>
+    <string name="m4_sender_invite">دعوت</string>
+    <string name="m4_restricted_host_failed">محدود میزبانی ناکام: %1$s</string>
+    <string name="m4_tier_ephemeral">عارضی</string>
+    <string name="m4_tier_always_on">ہمیشہ آن</string>
+    <string name="m4_tier_persistent">مستقل</string>
+    <string name="m4_members_prefix">"%1$s ارکان · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sسیفٹی %2$s · %3$s"</string>
+    <string name="m4_chat_menu">چیٹ مینیو</string>
+    <string name="m4_message_hint">پیغام</string>
+    <string name="m4_send">بھیجیں</string>
+    <string name="m4_delivery_delivered">پہنچ گیا</string>
+    <string name="m4_delivery_not_delivered">نہیں پہنچا</string>
+    <string name="m4_delivery_sent">بھیج دیا گیا</string>
+    <string name="m4_already_creating_chat">پہلے سے ایک چیٹ بن رہی ہے…</string>
+    <string name="m4_starting_chat_over">آپ کی چیٹ %1$s پر شروع ہو رہی ہے…</string>
+    <string name="m4_creating_chat">چیٹ بنائی جا رہی ہے…</string>
+    <string name="m4_hosting_share_invite">میزبانی — کسی دوست کو شامل ہونے دینے کے لیے دعوت شیئر کریں:</string>
+
+    <!-- ===== MainActivity: شمولیت پری فلائٹ، جُڑنا، بھیجنا، سلیش کمانڈز (range m5) ===== -->
+    <string name="m5_host_failed">میزبانی ناکام: %1$s</string>
+    <string name="m5_join_chat">چیٹ میں شامل ہوں</string>
+    <string name="m5_join_restricted_explainer">اگر یہ چیٹ رجسٹری تک محدود ہے، تو آپ صرف رکن کے طور پر داخل ہوتے ہیں۔ کوئی زندہ رکنیت پیش کریں، یا تخلص کے طور پر شامل ہوں (صرف کھلی چیٹس)۔</string>
+    <string name="m5_no_memberships">آپ کی ابھی کوئی رجسٹری رکنیت نہیں — محدود چیٹس میں شامل ہونے کے لیے کسی اینکر پر رجسٹر کریں۔</string>
+    <string name="m5_present_a_membership">ایک رکنیت پیش کریں</string>
+    <string name="m5_checking_anchor">%1$s جانچا جا رہا ہے …</string>
+    <string name="m5_join_as_member">“%1$s@%2$s” کے طور پر شامل ہوں</string>
+    <string name="m5_or_separator">— یا —</string>
+    <string name="m5_join_with_account">اپنے اکاؤنٹ سے شامل ہوں (کوئی صارف نام نہیں)</string>
+    <string name="m5_join_as_pseudonym">تخلص کے طور پر شامل ہوں (غیر قابل ربط)</string>
+    <string name="m5_back">واپس</string>
+    <string name="m5_already_joining">پہلے سے شامل ہو رہے ہیں…</string>
+    <string name="m5_joined">شامل ہو گئے</string>
+    <string name="m5_as_suffix">" بطور %1$s"</string>
+    <string name="m5_joined_as_pseudonym">تخلص کے طور پر شامل ہو گئے</string>
+    <string name="m5_failed">ناکام: %1$s</string>
+    <string name="m5_join_failed">شمولیت ناکام</string>
+    <string name="m5_connecting_title">جُڑ رہا ہے</string>
+    <string name="m5_bootstrapping_tor">Tor بوٹ سٹریپ ہو رہا ہے…</string>
+    <string name="m5_connecting">جُڑ رہا ہے…</string>
+    <string name="m5_first_tor_slow">پہلا Tor کنکشن سست ہے؛ بعد والے فوری ہوتے ہیں۔</string>
+    <string name="m5_cancel">منسوخ کریں</string>
+    <string name="m5_bootstrapping_tor_pct">Tor بوٹ سٹریپ ہو رہا ہے… %1$s%%</string>
+    <string name="m5_building_circuit">سرکٹ بنایا جا رہا ہے + ہینڈ شیک…</string>
+    <string name="m5_cant_reconnect">دوبارہ نہیں جُڑ سکتے — کوئی محفوظ دعوت نہیں</string>
+    <string name="m5_reconnecting_over">%1$s پر دوبارہ جُڑ رہا ہے…</string>
+    <string name="m5_reconnected_over">%1$s پر دوبارہ جُڑ گیا</string>
+    <string name="m5_reconnect_failed_detail">دوبارہ جُڑنا ناکام (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">دوبارہ جُڑنا ناکام</string>
+    <string name="m5_reconnecting_text_kept">دوبارہ جُڑ رہا ہے — آپ کا متن محفوظ ہے، لمحے بھر بعد دوبارہ کوشش کریں</string>
+    <string name="m5_send_failed">بھیجنا ناکام</string>
+    <string name="m5_name_book_empty">نام کتاب خالی — شامل کرنے کے لیے /name &lt;callsign&gt;</string>
+    <string name="m5_tier_account_linked">اکاؤنٹ سے منسلک</string>
+    <string name="m5_tier_bare">خالی</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">“%1$s” نام کتاب میں محفوظ کیا</string>
+    <string name="m5_switched_to">“%1$s” پر منتقل ہوئے اور اعلان کیا</string>
+    <string name="m5_no_saved_name">کوئی محفوظ نام “%1$s” نہیں</string>
+    <string name="m5_calling_verified">🔗 تصدیق شدہ “%1$s” کے طور پر پکارا جا رہا ہے</string>
+    <string name="m5_name_cleared">نام صاف کر دیا گیا</string>
+    <string name="m5_calling_as">“%1$s” کے طور پر پکارا جا رہا ہے</string>
+    <string name="m5_cq_announced">CQ — آپ کے نام کا اعلان کیا</string>
+    <string name="m5_cq_cadence_off">CQ تعدد بند</string>
+    <string name="m5_cq_cadence_every">CQ تعدد: ہر %1$s منٹ</string>
+    <string name="m5_state_on">آن</string>
+    <string name="m5_state_off">بند</string>
+    <string name="m5_cq_onmsg">CQ پیغام کے ساتھ نام شناخت: %1$s</string>
+    <string name="m5_name_usage">استعمال: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">“%1$s” کو بطور رابطہ شامل کریں</string>
+    <string name="m5_added_contact">رابطہ %1$s شامل کیا گیا</string>
+    <string name="m5_could_not_add">شامل نہ ہو سکا (اکاؤنٹ نظر نہیں آیا)</string>
+    <string name="m5_invite_qr">دعوت QR</string>
+    <string name="m5_share">شیئر کریں</string>
+    <string name="m5_close">بند کریں</string>
+
+    <!-- ===== ChatNet: دوستانہ ٹرانسپورٹ خرابیاں ===== -->
+    <string name="net_host_unreachable_tor">میزبان Tor پر ناقابل رسائی — اس کے onion نے جواب نہیں دیا (آف لائن، یا ابھی دوبارہ شائع نہیں ہوا)</string>
+    <string name="net_timed_out_host">میزبان تک پہنچنے میں وقت ختم (اس نیٹ ورک سے ناقابل رسائی؟)</string>
+    <string name="net_tor_not_ready">Tor ابھی تیار نہیں (ابھی بوٹ سٹریپ ہو رہا ہے)</string>
+    <string name="net_cant_reconnect_no_invite">دوبارہ نہیں جُڑ سکتے — اس چیٹ کے لیے کوئی محفوظ دعوت نہیں</string>
+    <string name="net_unknown_error">نامعلوم خرابی</string>
+
+    <!-- ===== QrScanActivity: اسکینر اشارے + کیمرا اجازت بحالی ===== -->
+    <string name="qr_point_at_talkrypt">کسی talkrypt QR کی طرف اشارہ کریں</string>
+    <string name="qr_cancel_scan">اسکین منسوخ کریں</string>
+    <string name="qr_open_app_settings">ایپ ترتیبات کھولیں</string>
+    <string name="qr_camera_access_off">کیمرا رسائی بند ہے — اسکین کرنے کے لیے اسے فعال کریں، یا منسوخ کر کے دعوت چسپاں کریں۔</string>
+    <string name="qr_no_camera_found">کوئی کیمرا نہیں ملا</string>
+    <string name="qr_camera_error">کیمرا خرابی %1$d</string>
+    <string name="qr_camera_unavailable">کیمرا دستیاب نہیں: %1$s</string>
+    <string name="qr_camera_config_failed">کیمرا کنفیگ ناکام</string>
+    <string name="qr_not_talkrypt_keep_scanning">یہ talkrypt QR نہیں ہے — اسکین جاری رکھیں</string>
+
+    <!-- ===== ChatService: فورگراؤنڈ سروس اطلاع + دوبارہ جُڑنا ===== -->
+    <string name="svc_reconnecting">“%1$s” کو %2$s پر دوبارہ جوڑا جا رہا ہے…</string>
+    <string name="svc_reconnected">“%1$s” %2$s پر دوبارہ جُڑ گیا</string>
+    <string name="svc_reconnect_failed_retry">“%1$s” کے لیے دوبارہ جُڑنا ناکام (%2$s): %3$s — دوبارہ کوشش کی جا رہی ہے…</string>
+    <string name="svc_reconnect_failed">“%1$s” کے لیے دوبارہ جُڑنا ناکام (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt کنکشنز</string>
+    <string name="svc_status_none">کوئی ہمیشہ آن چیٹ نہیں</string>
+    <string name="svc_status_all_connected">%1$d ہمیشہ آن · سب جُڑے ہوئے</string>
+    <string name="svc_status_partial">%1$d ہمیشہ آن · %2$d جُڑے ہوئے، %3$d آف لائن</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== قریبی ریڈیوز/بیکنز: صارف کو نظر آنے والی خرابیاں ===== -->
+    <string name="radio_wifidirect_unsupported">اس ڈیوائس پر Wi-Fi Direct معاون نہیں ہے</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct مصروف ہے — لمحے بھر بعد دوبارہ کوشش کریں</string>
+    <string name="radio_wifidirect_wifi_off">Wi-Fi Direct استعمال کرنے کے لیے Wi-Fi آن کریں</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct خرابی</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct ناکام (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">قریبی Wi-Fi کی اجازت مسترد</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct دستیاب نہیں</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct کنکشن ناکام (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct پیر</string>
+    <string name="radio_ble_bt_off">Bluetooth بند ہے</string>
+    <string name="radio_ble_no_scanner">کوئی BLE اسکینر نہیں</string>
+    <string name="radio_ble_scan_failed">BLE اسکین ناکام (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth اسکین کی اجازت مسترد</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth بند ہے</string>
+    <string name="radio_beacon_ble_no_scanner">کوئی BLE اسکینر نہیں</string>
+    <string name="radio_beacon_ble_scan_failed">BLE اسکین ناکام (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth اسکین کی اجازت مسترد</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD دستیاب نہیں</string>
+    <string name="radio_beacon_wifi_discovery_failed">دریافت ناکام (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">دریافت خرابی</string>
+</resources>

@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nederlandse stringcatalogus voor de talkrypt Android-app.
+
+  Lokalisatie steunt op het resourcesysteem van Android: elke voor de gebruiker
+  zichtbare string die de Context-houdende UI-laag rendert, gaat via
+  Loc.s(R.string.*) (zie Loc.kt), die wordt opgelost tegen de huidige landinstelling
+  van het apparaat. Om een taal toe te voegen, plaats je een
+  res/values-<lang>/strings.xml met dezelfde namen vertaald (zie values-es).
+
+  NIET gecertificeerd / NIET geaudit (projectbreed). Beveiligings-/disclaimertekst
+  wordt hier letterlijk bewaard en moet getrouw worden vertaald (nooit versterkt
+  tot een certificerings-/nalevingsclaim) in elke landinstelling.
+
+  Het bewust UI-vrije gedeelde model (ChatEvents.kt) produceert korte statusregels
+  in bron-Engels bij ontwerp (headless getest op de gewone JVM waar geen
+  resourcetabel bestaat; AndroidX-vrij sluit Robolectric uit). Berichtteksten van
+  peers zijn door de gebruiker geschreven en worden nooit vertaald. Zie
+  ChatEvents.kt voor de notitie.
+
+  Opmerking: de merknaam "talkrypt" wordt met opzet niet vertaald.
+-->
+<resources>
+
+    <!-- ===== MainActivity: nieuwe chat, chatlijst, chatrij-menu (bereik m1) ===== -->
+    <string name="m1_opening_invite">uitnodiging openen…</string>
+    <string name="m1_not_a_talkrypt_qr">Geen talkrypt-QR</string>
+    <string name="m1_nym_credential_imported">Nym-credential geïmporteerd — betaalde mixnet gereed (geen mnemonic nodig)</string>
+    <string name="m1_import_failed">importeren mislukt: %1$s</string>
+    <string name="m1_new_chat">Nieuwe chat</string>
+    <string name="m1_channel">KANAAL</string>
+    <string name="m1_posture">HOUDING</string>
+    <string name="m1_access">TOEGANG</string>
+    <string name="m1_name_display_signal_style">Signal-stijl (alleen badges)</string>
+    <string name="m1_name_display_warn">Waarschuwen bij gelijkende botsingen</string>
+    <string name="m1_name_display_suppress">Botsende namen onderdrukken</string>
+    <string name="m1_name_display">NAAMWEERGAVE</string>
+    <string name="m1_persistence_ephemeral">Vluchtig (alleen geheugen)</string>
+    <string name="m1_persistence_persistent">Blijvend (opgeslagen, herverbindbaar)</string>
+    <string name="m1_persistence_always_on">Altijd aan (fase 2)</string>
+    <string name="m1_persistence">PERSISTENTIE</string>
+    <string name="m1_route_over_tor">Routeren via Tor (.onion; traag opstarten)</string>
+    <string name="m1_route_over_nym">Ook routeren via Nym-mixnet (opt-in; geeft de uitnodiging meerdere routes)</string>
+    <string name="m1_paid_nym_bandwidth">Betaalde Nym-bandbreedte (wallet-mnemonic / credential) stel je in bij Instellingen.</string>
+    <string name="m1_host_a_chat">Een chat hosten</string>
+    <string name="m1_registry_restricted_chat">Chat beperkt tot register</string>
+    <string name="m1_or_join">— of deelnemen —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Deelnemen</string>
+    <string name="m1_paste_invite">Plak een talkrypt://-uitnodiging</string>
+    <string name="m1_scan_qr">Scan een QR-code</string>
+    <string name="m1_in_person">— in persoon —</string>
+    <string name="m1_find_nearby_host">Host in de buurt zoeken (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">App delen (P2P via Wi-Fi)</string>
+    <string name="m1_back">Terug</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Meer</string>
+    <string name="m1_new_chat_button">＋  Nieuwe chat</string>
+    <string name="m1_no_chats_yet">Nog geen chats — tik op ＋ om te hosten of deel te nemen.</string>
+    <string name="m1_preview_you">jij: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">hosten</string>
+    <string name="m1_joined">deelgenomen</string>
+    <string name="m1_preview_members">%1$s · %2$d leden</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">offline</string>
+    <string name="m1_online">online</string>
+    <string name="m1_online_count">%1$d online</string>
+    <string name="m1_connecting">verbinden</string>
+    <string name="m1_time_now">nu</string>
+    <string name="m1_time_minutes">%1$dm</string>
+    <string name="m1_time_hours">%1$du</string>
+    <string name="m1_time_days">%1$dd</string>
+    <string name="m1_no_invite">geen uitnodiging</string>
+    <string name="m1_safety_number_title">Veiligheidsnummer</string>
+    <string name="m1_safety_number_body">%1$s\n\nVergelijk dit buiten de band met je peer; een verschil betekent dat het kanaal niet praat met wie je denkt.</string>
+    <string name="m1_copy">Kopiëren</string>
+    <string name="m1_copied">gekopieerd</string>
+    <string name="m1_close">Sluiten</string>
+
+    <!-- ===== MainActivity: instellingen, identiteit, nym, beveiliging (bereik m2) ===== -->
+    <string name="m2_delete_chat_title">“%1$s” verwijderen?</string>
+    <string name="m2_delete_chat_body">Wist deze chat en de bijbehorende geschiedenis van dit apparaat. Dit kan niet ongedaan worden gemaakt.</string>
+    <string name="m2_delete">Verwijderen</string>
+    <string name="m2_connect_first">eerst verbinden</string>
+    <string name="m2_beacon_msg">baken: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 deze chat in de buurt uitzenden (BLE + Wi-Fi) + scannen</string>
+    <string name="m2_nearby_beacon_stopped">baken in de buurt gestopt</string>
+    <string name="m2_no_ble_scanner">geen BLE-scanner</string>
+    <string name="m2_mesh_linked">📻 mesh: een %1$s-node gekoppeld — berichten gaan ook via LoRa</string>
+    <string name="m2_mesh_scan_failed">mesh: BLE-scan mislukt (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 zoeken naar een %1$s-node via BLE…</string>
+    <string name="m2_ble_scan_denied">BLE-scanmachtiging geweigerd</string>
+    <string name="m2_mesh_stopped">mesh gestopt</string>
+    <string name="m2_start_beacon_first">start eerst het baken</string>
+    <string name="m2_no_blob_yet">nog geen uitgezonden blob — probeer het zo opnieuw</string>
+    <string name="m2_beacon_selftest">baken-zelftest: ons eigen verzegelde baken teruggevoerd (verwacht een 📡-waarneming)</string>
+    <string name="m2_callsigns">Roepnamen</string>
+    <string name="m2_callsigns_desc">Namen die je met je berichten in deze chat uitzendt.</string>
+    <string name="m2_connect_to_manage_names">Verbind met deze chat om namen te beheren.</string>
+    <string name="m2_back">Terug</string>
+    <string name="m2_your_names">JOUW NAMEN</string>
+    <string name="m2_none_yet_add">Nog geen — voeg er hieronder een toe.</string>
+    <string name="m2_use">Gebruiken</string>
+    <string name="m2_calling_as">aanmelden als “%1$s”</string>
+    <string name="m2_failed">mislukt</string>
+    <string name="m2_removed">verwijderd</string>
+    <string name="m2_new_callsign">Nieuwe roepnaam</string>
+    <string name="m2_save_to_name_book">Opslaan in naamboek</string>
+    <string name="m2_set_announce_now">Instellen + nu aankondigen</string>
+    <string name="m2_set_verified">Instellen als GEVERIFIEERD (🔗 account-gekoppeld)</string>
+    <string name="m2_verified_name">geverifieerde naam “%1$s”</string>
+    <string name="m2_verified_desc">Geverifieerd gebruikt je accountsleutel zodat een naam niet door een ander lid vervalst kan worden.</string>
+    <string name="m2_cq_beacon">CQ-BAKEN</string>
+    <string name="m2_periodic_on">Periodiek opnieuw uitzenden: AAN (5 min)</string>
+    <string name="m2_periodic_off">Periodiek opnieuw uitzenden: uit</string>
+    <string name="m2_onmsg_on">Naam-id bij bericht: AAN</string>
+    <string name="m2_onmsg_off">Naam-id bij bericht: uit</string>
+    <string name="m2_onmsg_desc">Naam-id bij bericht laat peers merken wanneer je van naam verandert en je oude roepnaam laat vervallen.</string>
+    <string name="m2_show_others">NAMEN VAN ANDEREN TONEN</string>
+    <string name="m2_nametrust_signal">Signal-stijl (alleen badges)</string>
+    <string name="m2_nametrust_warn">Waarschuwen bij gelijkende botsingen</string>
+    <string name="m2_nametrust_suppress">Botsende namen onderdrukken</string>
+    <string name="m2_apply_nametrust">Naamvertrouwen-instelling toepassen</string>
+    <string name="m2_nametrust_set">naamvertrouwen: %1$s</string>
+    <string name="m2_tighten_only">Je kunt de basislijn van de chat alleen aanscherpen, nooit versoepelen.</string>
+    <string name="m2_whos_here">WIE IS HIER</string>
+    <string name="m2_safety_suffix">  ·  veiligheid %1$s</string>
+    <string name="m2_safety_number">veiligheidsnummer: %1$s</string>
+    <string name="m2_share_invite">Uitnodiging delen</string>
+    <string name="m2_more">Meer</string>
+    <string name="m2_anchors">Ankers (gebruikersnaamgids)</string>
+    <string name="m2_contacts">Contacten</string>
+    <string name="m2_linked_devices">Gekoppelde apparaten</string>
+    <string name="m2_segments">Segmenten (contextuele identiteiten)</string>
+    <string name="m2_settings">Instellingen</string>
+    <string name="m2_seal_mnemonic_err">kon mnemonic niet verzegelen: %1$s</string>
+    <string name="m2_identity">IDENTITEIT</string>
+    <string name="m2_account_safety_number">Account-veiligheidsnummer</string>
+    <string name="m2_deriving">afleiden…</string>
+    <string name="m2_still_deriving">nog aan het afleiden…</string>
+    <string name="m2_copied">gekopieerd</string>
+    <string name="m2_linked_secondary">Gekoppeld als secundair apparaat</string>
+    <string name="m2_account_short">account %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">BEVEILIGING</string>
+    <string name="m2_key_custody_loading">Sleutelbeheer: …</string>
+    <string name="m2_key_custody_desc">Waar dit apparaat sleutels kan bewaren (StrongBox &gt; TEE &gt; software). Aan peers gemeld als jouw beheerniveau.</string>
+    <string name="m2_safety_tap_copy">%1$s — tik om te kopiëren. Vergelijk buiten de band om je te verifiëren.</string>
+    <string name="m2_key_custody">Sleutelbeheer: %1$s</string>
+    <string name="m2_secrets_sealed">Geheimen verzegeld in rust</string>
+    <string name="m2_secrets_sealed_desc">Identiteitszaden en de Nym-mnemonic worden versleuteld met een niet-exporteerbare Android Keystore-sleutel (StrongBox indien beschikbaar).</string>
+    <string name="m2_sealing_degraded">Verzegeling verslechterd</string>
+    <string name="m2_sealing_degraded_desc">De Keystore meldde: %1$s. Geheimen die niet verzegeld konden worden blijven in app-private platte tekst totdat hij herstelt.</string>
+    <string name="m2_nym_paid_bw">NYM BETAALDE BANDBREEDTE (OPTIONEEL)</string>
+    <string name="m2_nym_mnemonic_hint">NYM wallet-mnemonic — leeg = gratis mixnet</string>
+    <string name="m2_show_mnemonic">Mnemonic tonen</string>
+    <string name="m2_ticketbook_desc">Of importeer een ticketbook-credential gemunt met je eigen Nym-gereedschap (het wallet-zaad komt nooit in deze app):</string>
+    <string name="m2_import_nym_cred">Nym-credential importeren</string>
+    <string name="m2_network_defaults">NETWERKSTANDAARDEN VOOR NIEUWE CHATS</string>
+    <string name="m2_route_tor">Routeren via Tor (.onion)</string>
+    <string name="m2_route_nym">Ook routeren via Nym-mixnet</string>
+    <string name="m2_notifications">MELDINGEN</string>
+    <string name="m2_always_on_chats">Altijd-aan-chats</string>
+    <string name="m2_always_on_desc">Verbonden gehouden door een voorgrondservice met een blijvende melding. Tik om dit aan te passen in de systeeminstellingen.</string>
+    <string name="m2_open_notif_err">kon meldingsinstellingen niet openen</string>
+    <string name="m2_about">OVER</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Post-kwantum E2E-chat via Tor. NIET gecertificeerd · NIET geaccrediteerd · NIET geaudit — experimentele software; classificatiemarkeringen zijn slechts adviserende labels.</string>
+    <string name="m2_contacts_desc">Accounts die je herkent. Alleen herkenning — contact (of vriend) zijn geeft geen kanaaltoegang; dat wordt per chat ingesteld.</string>
+    <string name="m2_no_contacts">Nog geen contacten. Tik in een chat, wanneer een account zich voorstelt, op “Toevoegen als contact”.</string>
+    <string name="m2_friend_suffix">  [vriend]</string>
+    <string name="m2_starting_share">lokaal delen starten…</string>
+    <string name="m2_no_wifi">Geen Wi-Fi/LAN-adres — verbind eerst met een Wi-Fi-netwerk of hotspot</string>
+    <string name="m2_share_talkrypt">talkrypt delen</string>
+    <string name="m2_share_instructions">Op dezelfde Wi-Fi of hotspot scant de andere telefoon deze code (of opent de URL), downloadt de app en installeert deze (sta eenmalig “onbekende apps installeren” toe).</string>
+    <string name="m2_apk_computing">APK SHA-256: berekenen…</string>
+
+    <!-- ===== MainActivity: sleutelbeheer, segmenten, ontdekken in de buurt (bereik m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Koppeling op dit apparaat accepteren</string>
+    <string name="m3_account_prefix">account %1$s…</string>
+    <string name="m3_already_linking">al aan het koppelen…</string>
+    <string name="m3_already_starting">al aan het starten…</string>
+    <string name="m3_apk_fingerprint_failed">kon APK-vingerafdruk niet berekenen</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (eerste 16): %1$s — verifieer op de ontvangende telefoon</string>
+    <string name="m3_back">Terug</string>
+    <string name="m3_beacon_perm_needed">baken in de buurt / mesh vereist Bluetooth-machtiging</string>
+    <string name="m3_broadcasting_nearby">uitzenden in de buurt (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Annuleren</string>
+    <string name="m3_create_segment">Segment aanmaken</string>
+    <string name="m3_created_segment">segment “%1$s” aangemaakt</string>
+    <string name="m3_delete">Verwijderen</string>
+    <string name="m3_delete_name">“%1$s” verwijderen</string>
+    <string name="m3_delete_segment_body">Wist de sleutel van dit segment — chats waaraan je eronder deelnam kunnen niet opnieuw als dezelfde identiteit worden betreden. Dit kan niet ongedaan worden gemaakt.</string>
+    <string name="m3_delete_segment_q">Segment “%1$s” verwijderen?</string>
+    <string name="m3_device_not_linked">dit apparaat is niet gekoppeld</string>
+    <string name="m3_device_prefix">apparaat %1$s…</string>
+    <string name="m3_done">Klaar</string>
+    <string name="m3_hint_work">werk</string>
+    <string name="m3_join_a_chat">DEELNEMEN AAN EEN CHAT (talkrypt://-uitnodiging)</string>
+    <string name="m3_join_as_name">Deelnemen als “%1$s”</string>
+    <string name="m3_join_as_this_account">Deelnemen als dit account</string>
+    <string name="m3_join_chat_as_account">DEELNEMEN AAN EEN CHAT ALS DIT ACCOUNT (talkrypt://-uitnodiging)</string>
+    <string name="m3_join_failed">deelnemen mislukt: %1$s</string>
+    <string name="m3_join_peer">Deelnemen aan %1$s</string>
+    <string name="m3_joined_as_linked_account">deelgenomen als gekoppeld account</string>
+    <string name="m3_joined_as_segment">deelgenomen als segment “%1$s”</string>
+    <string name="m3_joining_as_linked">deelnemen als gekoppeld account…</string>
+    <string name="m3_joining_as_name">deelnemen als “%1$s”…</string>
+    <string name="m3_link_another_device">EEN ANDER APPARAAT AAN MIJN ACCOUNT KOPPELEN</string>
+    <string name="m3_link_another_device_desc">Dit apparaat bevat het account. Toon een eenmalige QR die het nieuwe apparaat scant.</string>
+    <string name="m3_link_failed">koppelen mislukt: %1$s</string>
+    <string name="m3_link_offer_failed">koppelingsaanbod mislukt: %1$s</string>
+    <string name="m3_link_offer_label">KOPPELINGSAANBOD (talkrypt:// van het primaire apparaat)</string>
+    <string name="m3_link_offer_running">Koppelingsaanbod actief</string>
+    <string name="m3_link_offer_running_desc">Scan dit op het NIEUWE apparaat (of plak de URI in Gekoppelde apparaten → Koppeling accepteren). De accountsleutel blijft op dit apparaat.</string>
+    <string name="m3_link_this_device_desc">Dit certificeert DIT apparaat onder het account dat de koppeling aanbiedt. Verifieer daarna buiten de band dat het getoonde account-veiligheidsnummer overeenkomt met het andere apparaat.</string>
+    <string name="m3_link_this_device_q">Dit apparaat koppelen?</string>
+    <string name="m3_link_this_device_to_account">DIT APPARAAT AAN EEN ACCOUNT KOPPELEN</string>
+    <string name="m3_linked_devices">Gekoppelde apparaten</string>
+    <string name="m3_linked_devices_desc">Koppel dit apparaat aan je account op een ander apparaat, zodat contacten al je apparaten als één account herkennen. De accountsleutel verlaat nooit het apparaat dat hem bevat — alleen een ondertekend certificaat gaat over de lijn.</string>
+    <string name="m3_linked_to_account">gekoppeld aan account %1$s…</string>
+    <string name="m3_linking_this_device">dit apparaat koppelen…</string>
+    <string name="m3_loading_segments">segmenten laden…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">geef het segment een naam</string>
+    <string name="m3_nearby_hosts">Hosts in de buurt</string>
+    <string name="m3_nearby_perm_needed">ontdekken in de buurt vereist Bluetooth- / nabije-Wi-Fi-machtiging</string>
+    <string name="m3_nearby_scanning">Scannen via Bluetooth LE en Wi-Fi Direct. Tik op een host om deel te nemen.</string>
+    <string name="m3_new_segment">— nieuw segment —</string>
+    <string name="m3_no_segments_yet">Nog geen segmenten — maak er hieronder een aan.</string>
+    <string name="m3_notifications_blocked">meldingen geblokkeerd — altijd-aan-chats blijven draaien, maar zonder statusmelding</string>
+    <string name="m3_or_relink">— of opnieuw koppelen —</string>
+    <string name="m3_paste_link_offer_uri">plak de URI van het koppelingsaanbod</string>
+    <string name="m3_paste_talkrypt_invite">plak een talkrypt://-uitnodiging</string>
+    <string name="m3_paste_talkrypt_invite_above">plak hierboven een talkrypt://-uitnodiging</string>
+    <string name="m3_qr_too_large">(QR te groot om weer te geven — gebruik de tekst)</string>
+    <string name="m3_rooted_at_device_account">geworteld in het account van dit apparaat</string>
+    <string name="m3_rooted_at_linked_account">geworteld in je gekoppelde account %1$s…</string>
+    <string name="m3_safety_prefix">veiligheid %1$s…</string>
+    <string name="m3_seal_segments_failed">kon segmenten niet verzegelen: %1$s</string>
+    <string name="m3_segment_name_label">SEGMENTNAAM (contextlabel)</string>
+    <string name="m3_segments">Segmenten</string>
+    <string name="m3_segments_desc">Contextuele subidentiteiten onder je account. Elk segment authenticeert met zijn eigen sleutel, zodat verschillende segmenten onderling niet te koppelen zijn — toch herkent een contact die je account herkent elk segment. Gebruik er één per context (werk, activisme, …).</string>
+    <string name="m3_start_link_offer">Een koppelingsaanbod starten</string>
+    <string name="m3_starting_link_offer">koppelingsaanbod starten…</string>
+    <string name="m3_this_device_is_linked">DIT APPARAAT IS GEKOPPELD</string>
+    <string name="m3_unlink">Ontkoppelen</string>
+    <string name="m3_unlink_body">Verwijdert het koppelingscertificaat — contacten herkennen dit apparaat niet langer als deel van het account totdat je opnieuw koppelt.</string>
+    <string name="m3_unlink_this_device">Dit apparaat ontkoppelen</string>
+    <string name="m3_unlink_this_device_q">Dit apparaat ontkoppelen?</string>
+    <string name="m3_unlinked">ontkoppeld</string>
+    <string name="m3_username_prefix">gebruikersnaam %1$s</string>
+    <string name="m3_verify_oob_account_sn">VERIFIEER BUITEN DE BAND — account-veiligheidsnummer:</string>
+    <string name="m3_wifi_off">Wi-Fi is uit — zet het aan voor Wi-Fi Direct (Bluetooth werkt nog)</string>
+
+    <!-- ===== MainActivity: ankers, beperkte host, chatscherm (bereik m4) ===== -->
+    <string name="m4_anchors_title">Ankers</string>
+    <string name="m4_anchors_desc">Een gebruikersnaamgids die je opzet of waar je per locatie naar verwijst. Namen verwijzen naar accountsleutels; verifieer veiligheidsnummers buiten de band.</string>
+    <string name="m4_your_account">JOUW ACCOUNT</string>
+    <string name="m4_deriving">afleiden…</string>
+    <string name="m4_unavailable">niet beschikbaar</string>
+    <string name="m4_spawn_my_anchor">Mijn eigen anker opzetten</string>
+    <string name="m4_or_use_known_anchor">— of gebruik een bekend anker —</string>
+    <string name="m4_anchor_location_label">ANKERLOCATIE (talkrypt://-URI)</string>
+    <string name="m4_username_label">GEBRUIKERSNAAM</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Mijn gebruikersnaam hier registreren</string>
+    <string name="m4_enter_anchor_uri_username">voer een anker-URI + gebruikersnaam in</string>
+    <string name="m4_resolve_this_username">Deze gebruikersnaam opzoeken</string>
+    <string name="m4_back">Terug</string>
+    <string name="m4_already_spawning">al aan het opzetten…</string>
+    <string name="m4_spawning_anchor">anker opzetten…</string>
+    <string name="m4_anchor_failed">anker mislukt: %1$s</string>
+    <string name="m4_anchor_running_title">Anker actief</string>
+    <string name="m4_anchor_running_desc">Anderen registreren/zoeken hier gebruikersnamen op. Deel deze locatie (scannen of kopiëren). Het draait zolang de app open is.</string>
+    <string name="m4_registering">registreren…</string>
+    <string name="m4_register_success">✓ “%1$s” geregistreerd → je account bij dit anker</string>
+    <string name="m4_register_failed">! registreren mislukt: %1$s</string>
+    <string name="m4_resolving">opzoeken…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → account-veiligheidsnummer:\n%2$s\n(verifieer buiten de band voordat je vertrouwt)</string>
+    <string name="m4_resolve_not_registered">“%1$s” is hier niet geregistreerd (of registers waren het oneens)</string>
+    <string name="m4_resolve_failed">! opzoeken mislukt: %1$s</string>
+    <string name="m4_registry_restricted_title">Chat beperkt tot register</string>
+    <string name="m4_registry_restricted_desc">Alleen leden van het gekozen register kunnen deelnemen aan %1$s. Je kunt alleen registers kiezen waaraan je bent gebonden; onbereikbare (of waar je record ontbreekt) zijn grijs gemaakt.</string>
+    <string name="m4_not_registered_any_anchor">Je bent nog bij geen enkel anker geregistreerd. Open Ankers en registreer eerst een gebruikersnaam.</string>
+    <string name="m4_checking_anchor">%1$s controleren …</string>
+    <string name="m4_host_gated_by">Host afgeschermd door “%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — onbereikbaar of geen record</string>
+    <string name="m4_creating_restricted_chat">beperkte chat aanmaken…</string>
+    <string name="m4_registry_restricted_members">beperkt tot register — alleen de %1$s ankerleden kunnen deelnemen</string>
+    <string name="m4_sender_invite">uitnodiging</string>
+    <string name="m4_restricted_host_failed">beperkte host mislukt: %1$s</string>
+    <string name="m4_tier_ephemeral">vluchtig</string>
+    <string name="m4_tier_always_on">altijd aan</string>
+    <string name="m4_tier_persistent">blijvend</string>
+    <string name="m4_members_prefix">"%1$s leden · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sveiligheid %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Chatmenu</string>
+    <string name="m4_message_hint">Bericht</string>
+    <string name="m4_send">Verzenden</string>
+    <string name="m4_delivery_delivered">afgeleverd</string>
+    <string name="m4_delivery_not_delivered">niet afgeleverd</string>
+    <string name="m4_delivery_sent">verzonden</string>
+    <string name="m4_already_creating_chat">al een chat aan het aanmaken…</string>
+    <string name="m4_starting_chat_over">Je chat starten via %1$s…</string>
+    <string name="m4_creating_chat">chat aanmaken…</string>
+    <string name="m4_hosting_share_invite">hosten — deel de uitnodiging zodat een vriend kan deelnemen:</string>
+
+    <!-- ===== MainActivity: deelname-preflight, verbinden, verzenden, slash-commando's (bereik m5) ===== -->
+    <string name="m5_host_failed">host mislukt: %1$s</string>
+    <string name="m5_join_chat">Deelnemen aan chat</string>
+    <string name="m5_join_restricted_explainer">Als deze chat beperkt is tot een register, word je alleen als lid toegelaten. Toon een live lidmaatschap, of neem deel als pseudoniem (alleen open chats).</string>
+    <string name="m5_no_memberships">Je hebt nog geen registerlidmaatschappen — registreer je bij een anker om deel te nemen aan beperkte chats.</string>
+    <string name="m5_present_a_membership">TOON EEN LIDMAATSCHAP</string>
+    <string name="m5_checking_anchor">%1$s controleren …</string>
+    <string name="m5_join_as_member">Deelnemen als “%1$s@%2$s”</string>
+    <string name="m5_or_separator">— of —</string>
+    <string name="m5_join_with_account">Deelnemen met mijn account (geen gebruikersnaam)</string>
+    <string name="m5_join_as_pseudonym">Deelnemen als pseudoniem (niet te koppelen)</string>
+    <string name="m5_back">Terug</string>
+    <string name="m5_already_joining">al aan het deelnemen…</string>
+    <string name="m5_joined">deelgenomen</string>
+    <string name="m5_as_suffix">" als %1$s"</string>
+    <string name="m5_joined_as_pseudonym">deelgenomen als pseudoniem</string>
+    <string name="m5_failed">mislukt: %1$s</string>
+    <string name="m5_join_failed">deelnemen mislukt</string>
+    <string name="m5_connecting_title">Verbinden</string>
+    <string name="m5_bootstrapping_tor">Tor opstarten…</string>
+    <string name="m5_connecting">Verbinden…</string>
+    <string name="m5_first_tor_slow">De eerste Tor-verbinding is traag; latere zijn direct.</string>
+    <string name="m5_cancel">Annuleren</string>
+    <string name="m5_bootstrapping_tor_pct">Tor opstarten… %1$s%%</string>
+    <string name="m5_building_circuit">Circuit bouwen + handshaken…</string>
+    <string name="m5_cant_reconnect">kan niet opnieuw verbinden — geen opgeslagen uitnodiging</string>
+    <string name="m5_reconnecting_over">opnieuw verbinden via %1$s…</string>
+    <string name="m5_reconnected_over">opnieuw verbonden via %1$s</string>
+    <string name="m5_reconnect_failed_detail">opnieuw verbinden mislukt (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">opnieuw verbinden mislukt</string>
+    <string name="m5_reconnecting_text_kept">opnieuw verbinden — je tekst blijft behouden, probeer het zo opnieuw</string>
+    <string name="m5_send_failed">verzenden mislukt</string>
+    <string name="m5_name_book_empty">naamboek leeg — /name &lt;roepnaam&gt; om er een toe te voegen</string>
+    <string name="m5_tier_account_linked">account-gekoppeld</string>
+    <string name="m5_tier_bare">kaal</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">“%1$s” opgeslagen in het naamboek</string>
+    <string name="m5_switched_to">overgeschakeld naar “%1$s” en aangekondigd</string>
+    <string name="m5_no_saved_name">geen opgeslagen naam “%1$s”</string>
+    <string name="m5_calling_verified">🔗 aanmelden als geverifieerd “%1$s”</string>
+    <string name="m5_name_cleared">naam gewist</string>
+    <string name="m5_calling_as">aanmelden als “%1$s”</string>
+    <string name="m5_cq_announced">CQ — je naam aangekondigd</string>
+    <string name="m5_cq_cadence_off">CQ-cadans uit</string>
+    <string name="m5_cq_cadence_every">CQ-cadans: elke %1$s min</string>
+    <string name="m5_state_on">aan</string>
+    <string name="m5_state_off">uit</string>
+    <string name="m5_cq_onmsg">CQ naam-id bij bericht: %1$s</string>
+    <string name="m5_name_usage">gebruik: /name &lt;roepnaam&gt;|link &lt;rn&gt;|new &lt;rn&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;min&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">“%1$s” toevoegen als contact</string>
+    <string name="m5_added_contact">contact %1$s toegevoegd</string>
+    <string name="m5_could_not_add">kon niet toevoegen (account niet gezien)</string>
+    <string name="m5_invite_qr">Uitnodigings-QR</string>
+    <string name="m5_share">Delen</string>
+    <string name="m5_close">Sluiten</string>
+
+    <!-- ===== ChatNet: vriendelijke transportfouten ===== -->
+    <string name="net_host_unreachable_tor">host onbereikbaar via Tor — de onion antwoordde niet (offline, of nog niet opnieuw gepubliceerd)</string>
+    <string name="net_timed_out_host">time-out bij bereiken van de host (onbereikbaar vanaf dit netwerk?)</string>
+    <string name="net_tor_not_ready">Tor is nog niet gereed (nog aan het opstarten)</string>
+    <string name="net_cant_reconnect_no_invite">kan niet opnieuw verbinden — geen opgeslagen uitnodiging voor deze chat</string>
+    <string name="net_unknown_error">onbekende fout</string>
+
+    <!-- ===== QrScanActivity: scanneraanwijzingen + herstel cameramachtiging ===== -->
+    <string name="qr_point_at_talkrypt">Richt op een talkrypt-QR</string>
+    <string name="qr_cancel_scan">Scan annuleren</string>
+    <string name="qr_open_app_settings">App-instellingen openen</string>
+    <string name="qr_camera_access_off">Cameratoegang is uit — schakel het in om te scannen, of annuleer en plak in plaats daarvan de uitnodiging.</string>
+    <string name="qr_no_camera_found">Geen camera gevonden</string>
+    <string name="qr_camera_error">Camerafout %1$d</string>
+    <string name="qr_camera_unavailable">Camera niet beschikbaar: %1$s</string>
+    <string name="qr_camera_config_failed">Cameraconfiguratie mislukt</string>
+    <string name="qr_not_talkrypt_keep_scanning">Geen talkrypt-QR — blijf scannen</string>
+
+    <!-- ===== ChatService: melding voorgrondservice + opnieuw verbinden ===== -->
+    <string name="svc_reconnecting">“%1$s” opnieuw verbinden via %2$s…</string>
+    <string name="svc_reconnected">“%1$s” opnieuw verbonden via %2$s</string>
+    <string name="svc_reconnect_failed_retry">opnieuw verbinden mislukt voor “%1$s” (%2$s): %3$s — opnieuw proberen…</string>
+    <string name="svc_reconnect_failed">opnieuw verbinden mislukt voor “%1$s” (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt-verbindingen</string>
+    <string name="svc_status_none">geen altijd-aan-chats</string>
+    <string name="svc_status_all_connected">%1$d altijd aan · allemaal verbonden</string>
+    <string name="svc_status_partial">%1$d altijd aan · %2$d verbonden, %3$d offline</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Radio's/bakens in de buurt: aan de gebruiker getoonde fouten ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct wordt niet ondersteund op dit apparaat</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct is bezig — probeer het zo opnieuw</string>
+    <string name="radio_wifidirect_wifi_off">Zet Wi-Fi aan om Wi-Fi Direct te gebruiken</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct-fout</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct mislukt (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Nabije-Wi-Fi-machtiging geweigerd</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct niet beschikbaar</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct-verbinding mislukt (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct-peer</string>
+    <string name="radio_ble_bt_off">Bluetooth is uit</string>
+    <string name="radio_ble_no_scanner">Geen BLE-scanner</string>
+    <string name="radio_ble_scan_failed">BLE-scan mislukt (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth-scanmachtiging geweigerd</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth is uit</string>
+    <string name="radio_beacon_ble_no_scanner">Geen BLE-scanner</string>
+    <string name="radio_beacon_ble_scan_failed">BLE-scan mislukt (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth-scanmachtiging geweigerd</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD niet beschikbaar</string>
+    <string name="radio_beacon_wifi_discovery_failed">ontdekken mislukt (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">ontdekkingsfout</string>
+</resources>

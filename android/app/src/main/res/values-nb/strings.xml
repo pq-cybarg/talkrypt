@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Norsk bokmål (nb) strengkatalog for talkrypt Android-appen.
+
+  Lokalisering støttes av Androids ressurssystem: hver brukervendte streng som
+  Context-laget tegner, går gjennom Loc.s(R.string.*) (se Loc.kt), som slår opp
+  mot enhetens gjeldende lokalitet. For å legge til et språk, slipp inn en
+  res/values-<lang>/strings.xml med de samme navnene oversatt (se values-es).
+
+  IKKE sertifisert / IKKE revidert (prosjektomfattende). Sikkerhets- og
+  ansvarsfraskrivelsestekst bevares ordrett her og må oversettes trofast (aldri
+  styrket til en sertifiserings eller samsvarspåstand) i hver lokalitet.
+
+  Den bevisst UI-frie delte modellen (ChatEvents.kt) produserer korte
+  statuslinjer på kilde-engelsk med hensikt (enhetstestet uten hode på ren JVM
+  der ingen ressurstabell finnes; AndroidX-fri utelukker Robolectric).
+  Meldingstekster fra motparter er brukerskrevne og oversettes aldri. Se
+  ChatEvents.kt for notatet.
+
+  Merk: merkenavnet "talkrypt" er med hensikt ikke oversatt.
+-->
+<resources>
+
+    <!-- ===== MainActivity: ny chat, chatliste, chatradmeny (område m1) ===== -->
+    <string name="m1_opening_invite">åpner invitasjon…</string>
+    <string name="m1_not_a_talkrypt_qr">Ikke en talkrypt-QR</string>
+    <string name="m1_nym_credential_imported">Nym-legitimasjon importert — betalt mixnet klart (ingen mnemonikk nødvendig)</string>
+    <string name="m1_import_failed">import mislyktes: %1$s</string>
+    <string name="m1_new_chat">Ny chat</string>
+    <string name="m1_channel">KANAL</string>
+    <string name="m1_posture">SIKKERHETSPROFIL</string>
+    <string name="m1_access">TILGANG</string>
+    <string name="m1_name_display_signal_style">Signal-stil (kun merker)</string>
+    <string name="m1_name_display_warn">Varsle ved forvekslbare kollisjoner</string>
+    <string name="m1_name_display_suppress">Skjul kolliderende navn</string>
+    <string name="m1_name_display">NAVNEVISNING</string>
+    <string name="m1_persistence_ephemeral">Flyktig (kun minne)</string>
+    <string name="m1_persistence_persistent">Vedvarende (lagret, kan kobles til igjen)</string>
+    <string name="m1_persistence_always_on">Alltid på (fase 2)</string>
+    <string name="m1_persistence">VEDVARENHET</string>
+    <string name="m1_route_over_tor">Rut via Tor (.onion; treg oppstart)</string>
+    <string name="m1_route_over_nym">Rut også via Nym-mixnet (valgfritt; gir invitasjonen flere hjem)</string>
+    <string name="m1_paid_nym_bandwidth">Betalt Nym-båndbredde (lommebok-mnemonikk / legitimasjon) settes opp i Innstillinger.</string>
+    <string name="m1_host_a_chat">Vær vert for en chat</string>
+    <string name="m1_registry_restricted_chat">Registerbegrenset chat</string>
+    <string name="m1_or_join">— eller bli med —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Bli med</string>
+    <string name="m1_paste_invite">Lim inn en talkrypt://-invitasjon</string>
+    <string name="m1_scan_qr">Skann en QR-kode</string>
+    <string name="m1_in_person">— personlig —</string>
+    <string name="m1_find_nearby_host">Finn vert i nærheten (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Del app (P2P over Wi-Fi)</string>
+    <string name="m1_back">Tilbake</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Mer</string>
+    <string name="m1_new_chat_button">＋  Ny chat</string>
+    <string name="m1_no_chats_yet">Ingen chatter ennå — trykk ＋ for å være vert eller bli med.</string>
+    <string name="m1_preview_you">deg: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">er vert</string>
+    <string name="m1_joined">ble med</string>
+    <string name="m1_preview_members">%1$s · %2$d medlemmer</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">frakoblet</string>
+    <string name="m1_online">tilkoblet</string>
+    <string name="m1_online_count">%1$d tilkoblet</string>
+    <string name="m1_connecting">kobler til</string>
+    <string name="m1_time_now">nå</string>
+    <string name="m1_time_minutes">%1$dmin</string>
+    <string name="m1_time_hours">%1$dt</string>
+    <string name="m1_time_days">%1$dd</string>
+    <string name="m1_no_invite">ingen invitasjon</string>
+    <string name="m1_safety_number_title">Sikkerhetsnummer</string>
+    <string name="m1_safety_number_body">%1$s\n\nSammenlign dette med motparten din via en annen kanal; et avvik betyr at kanalen ikke snakker med den du tror.</string>
+    <string name="m1_copy">Kopier</string>
+    <string name="m1_copied">kopiert</string>
+    <string name="m1_close">Lukk</string>
+
+    <!-- ===== MainActivity: innstillinger, identitet, nym, sikkerhet (område m2) ===== -->
+    <string name="m2_delete_chat_title">Slette «%1$s»?</string>
+    <string name="m2_delete_chat_body">Sletter denne chatten og historikken fra denne enheten. Dette kan ikke angres.</string>
+    <string name="m2_delete">Slett</string>
+    <string name="m2_connect_first">koble til først</string>
+    <string name="m2_beacon_msg">peilesignal: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 sender peilesignal for denne chatten i nærheten (BLE + Wi-Fi) + skanner</string>
+    <string name="m2_nearby_beacon_stopped">peilesignal i nærheten stoppet</string>
+    <string name="m2_no_ble_scanner">ingen BLE-skanner</string>
+    <string name="m2_mesh_linked">📻 mesh: koblet til en %1$s-node — meldinger går også over LoRa</string>
+    <string name="m2_mesh_scan_failed">mesh: BLE-skanning mislyktes (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 leter etter en %1$s-node over BLE…</string>
+    <string name="m2_ble_scan_denied">BLE-skannetillatelse nektet</string>
+    <string name="m2_mesh_stopped">mesh stoppet</string>
+    <string name="m2_start_beacon_first">start peilesignalet først</string>
+    <string name="m2_no_blob_yet">ingen annonsert blob ennå — prøv igjen om et øyeblikk</string>
+    <string name="m2_beacon_selftest">peilesignal-selvtest: matet vårt eget forseglede peilesignal tilbake (forvent en 📡-observasjon)</string>
+    <string name="m2_callsigns">Kallesignaler</string>
+    <string name="m2_callsigns_desc">Navn du kringkaster over meldingene dine i denne chatten.</string>
+    <string name="m2_connect_to_manage_names">Koble til denne chatten for å administrere navn.</string>
+    <string name="m2_back">Tilbake</string>
+    <string name="m2_your_names">DINE NAVN</string>
+    <string name="m2_none_yet_add">Ingen ennå — legg til ett nedenfor.</string>
+    <string name="m2_use">Bruk</string>
+    <string name="m2_calling_as">kaller deg «%1$s»</string>
+    <string name="m2_failed">mislyktes</string>
+    <string name="m2_removed">fjernet</string>
+    <string name="m2_new_callsign">Nytt kallesignal</string>
+    <string name="m2_save_to_name_book">Lagre i navnebok</string>
+    <string name="m2_set_announce_now">Angi + annonser nå</string>
+    <string name="m2_set_verified">Angi som VERIFISERT (🔗 kontokoblet)</string>
+    <string name="m2_verified_name">verifisert navn «%1$s»</string>
+    <string name="m2_verified_desc">Verifisert bruker kontonøkkelen din slik at et navn ikke kan forfalskes av et annet medlem.</string>
+    <string name="m2_cq_beacon">CQ-PEILESIGNAL</string>
+    <string name="m2_periodic_on">Periodisk gjentatt peilesignal: PÅ (5 min)</string>
+    <string name="m2_periodic_off">Periodisk gjentatt peilesignal: av</string>
+    <string name="m2_onmsg_on">Navne-ID per melding: PÅ</string>
+    <string name="m2_onmsg_off">Navne-ID per melding: av</string>
+    <string name="m2_onmsg_desc">Navne-ID per melding lar motparter merke om du bytter navn og forkaster det utdaterte kallesignalet ditt.</string>
+    <string name="m2_show_others">VIS ANDRES NAVN</string>
+    <string name="m2_nametrust_signal">Signal-stil (kun merker)</string>
+    <string name="m2_nametrust_warn">Varsle ved forvekslbare kollisjoner</string>
+    <string name="m2_nametrust_suppress">Skjul kolliderende navn</string>
+    <string name="m2_apply_nametrust">Bruk navnetillit-innstilling</string>
+    <string name="m2_nametrust_set">navnetillit: %1$s</string>
+    <string name="m2_tighten_only">Du kan bare stramme inn chattens grunnlinje, aldri løsne den.</string>
+    <string name="m2_whos_here">HVEM ER HER</string>
+    <string name="m2_safety_suffix">  ·  sikkerhet %1$s</string>
+    <string name="m2_safety_number">sikkerhetsnummer: %1$s</string>
+    <string name="m2_share_invite">Del invitasjon</string>
+    <string name="m2_more">Mer</string>
+    <string name="m2_anchors">Ankre (brukernavnkatalog)</string>
+    <string name="m2_contacts">Kontakter</string>
+    <string name="m2_linked_devices">Koblede enheter</string>
+    <string name="m2_segments">Segmenter (kontekstuelle identiteter)</string>
+    <string name="m2_settings">Innstillinger</string>
+    <string name="m2_seal_mnemonic_err">kunne ikke forsegle mnemonikk: %1$s</string>
+    <string name="m2_identity">IDENTITET</string>
+    <string name="m2_account_safety_number">Kontoens sikkerhetsnummer</string>
+    <string name="m2_deriving">utleder…</string>
+    <string name="m2_still_deriving">utleder fortsatt…</string>
+    <string name="m2_copied">kopiert</string>
+    <string name="m2_linked_secondary">Koblet som sekundærenhet</string>
+    <string name="m2_account_short">konto %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">SIKKERHET</string>
+    <string name="m2_key_custody_loading">Nøkkeloppbevaring: …</string>
+    <string name="m2_key_custody_desc">Hvor denne enheten kan oppbevare nøkler (StrongBox &gt; TEE &gt; programvare). Rapporteres til motparter som ditt oppbevaringsnivå.</string>
+    <string name="m2_safety_tap_copy">%1$s — trykk for å kopiere. Sammenlign via en annen kanal for å bekrefte deg.</string>
+    <string name="m2_key_custody">Nøkkeloppbevaring: %1$s</string>
+    <string name="m2_secrets_sealed">Hemmeligheter forseglet i hvile</string>
+    <string name="m2_secrets_sealed_desc">Identitetsfrø og Nym-mnemonikken krypteres med en ikke-eksporterbar Android Keystore-nøkkel (StrongBox når tilgjengelig).</string>
+    <string name="m2_sealing_degraded">Forsegling svekket</string>
+    <string name="m2_sealing_degraded_desc">Keystore rapporterte: %1$s. Hemmeligheter som ikke kunne forsegles, forblir i app-privat klartekst til den gjenopprettes.</string>
+    <string name="m2_nym_paid_bw">NYM BETALT BÅNDBREDDE (VALGFRITT)</string>
+    <string name="m2_nym_mnemonic_hint">NYM lommebok-mnemonikk — tom = gratis mixnet</string>
+    <string name="m2_show_mnemonic">Vis mnemonikk</string>
+    <string name="m2_ticketbook_desc">Eller importer en ticketbook-legitimasjon laget med ditt eget Nym-verktøy (lommebokfrøet kommer aldri inn i denne appen):</string>
+    <string name="m2_import_nym_cred">Importer Nym-legitimasjon</string>
+    <string name="m2_network_defaults">NETTVERKSSTANDARDER FOR NYE CHATTER</string>
+    <string name="m2_route_tor">Rut via Tor (.onion)</string>
+    <string name="m2_route_nym">Rut også via Nym-mixnet</string>
+    <string name="m2_notifications">VARSLER</string>
+    <string name="m2_always_on_chats">Alltid på-chatter</string>
+    <string name="m2_always_on_desc">Holdes tilkoblet av en forgrunnstjeneste med et vedvarende varsel. Trykk for å justere det i systeminnstillingene.</string>
+    <string name="m2_open_notif_err">kunne ikke åpne varslingsinnstillingene</string>
+    <string name="m2_about">OM</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Postkvante E2E-chat over Tor. IKKE sertifisert · IKKE akkreditert · IKKE revidert — eksperimentell programvare; klassifiseringsmerker er kun veiledende etiketter.</string>
+    <string name="m2_contacts_desc">Kontoer du gjenkjenner. Kun gjenkjenning — å være en kontakt (eller venn) gir ikke kanaltilgang; det settes per chat.</string>
+    <string name="m2_no_contacts">Ingen kontakter ennå. I en chat, når en konto presenterer seg, trykk «Legg til som kontakt».</string>
+    <string name="m2_friend_suffix">  [venn]</string>
+    <string name="m2_starting_share">starter lokal deling…</string>
+    <string name="m2_no_wifi">Ingen Wi-Fi/LAN-adresse — koble til et Wi-Fi-nettverk eller hotspot først</string>
+    <string name="m2_share_talkrypt">Del talkrypt</string>
+    <string name="m2_share_instructions">På samme Wi-Fi eller hotspot skanner den andre telefonen denne koden (eller åpner URL-en), laster ned appen og installerer den (tillat «installer ukjente apper» én gang).</string>
+    <string name="m2_apk_computing">APK SHA-256: beregner…</string>
+
+    <!-- ===== MainActivity: oppbevaring, segmenter, oppdagelse i nærheten (område m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Godta kobling på denne enheten</string>
+    <string name="m3_account_prefix">konto %1$s…</string>
+    <string name="m3_already_linking">kobler allerede…</string>
+    <string name="m3_already_starting">starter allerede…</string>
+    <string name="m3_apk_fingerprint_failed">kunne ikke beregne APK-fingeravtrykk</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (første 16): %1$s — bekreft på mottakertelefonen</string>
+    <string name="m3_back">Tilbake</string>
+    <string name="m3_beacon_perm_needed">peilesignal / mesh i nærheten trenger Bluetooth-tillatelse</string>
+    <string name="m3_broadcasting_nearby">kringkaster i nærheten (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Avbryt</string>
+    <string name="m3_create_segment">Opprett segment</string>
+    <string name="m3_created_segment">opprettet segment «%1$s»</string>
+    <string name="m3_delete">Slett</string>
+    <string name="m3_delete_name">Slett «%1$s»</string>
+    <string name="m3_delete_segment_body">Sletter dette segmentets nøkkel — chatter du ble med i under det kan ikke bli med på nytt som samme identitet. Dette kan ikke angres.</string>
+    <string name="m3_delete_segment_q">Slette segment «%1$s»?</string>
+    <string name="m3_device_not_linked">denne enheten er ikke koblet</string>
+    <string name="m3_device_prefix">enhet %1$s…</string>
+    <string name="m3_done">Ferdig</string>
+    <string name="m3_hint_work">jobb</string>
+    <string name="m3_join_a_chat">BLI MED I EN CHAT (talkrypt://-invitasjon)</string>
+    <string name="m3_join_as_name">Bli med som «%1$s»</string>
+    <string name="m3_join_as_this_account">Bli med som denne kontoen</string>
+    <string name="m3_join_chat_as_account">BLI MED I EN CHAT SOM DENNE KONTOEN (talkrypt://-invitasjon)</string>
+    <string name="m3_join_failed">kunne ikke bli med: %1$s</string>
+    <string name="m3_join_peer">Bli med %1$s</string>
+    <string name="m3_joined_as_linked_account">ble med som koblet konto</string>
+    <string name="m3_joined_as_segment">ble med som segment «%1$s»</string>
+    <string name="m3_joining_as_linked">blir med som koblet konto…</string>
+    <string name="m3_joining_as_name">blir med som «%1$s»…</string>
+    <string name="m3_link_another_device">KOBLE EN ANNEN ENHET TIL KONTOEN MIN</string>
+    <string name="m3_link_another_device_desc">Denne enheten innehar kontoen. Vis en engangs-QR som den nye enheten skanner.</string>
+    <string name="m3_link_failed">kobling mislyktes: %1$s</string>
+    <string name="m3_link_offer_failed">koblingstilbud mislyktes: %1$s</string>
+    <string name="m3_link_offer_label">KOBLINGSTILBUD (talkrypt:// fra primærenheten)</string>
+    <string name="m3_link_offer_running">Koblingstilbud kjører</string>
+    <string name="m3_link_offer_running_desc">På den NYE enheten, skann dette (eller lim inn URI-en i Koblede enheter → Godta kobling). Kontonøkkelen blir værende på denne enheten.</string>
+    <string name="m3_link_this_device_desc">Dette sertifiserer DENNE enheten under kontoen som tilbyr koblingen. Bekreft deretter at kontoens sikkerhetsnummer som vises samsvarer med den andre enheten, via en annen kanal.</string>
+    <string name="m3_link_this_device_q">Koble denne enheten?</string>
+    <string name="m3_link_this_device_to_account">KOBLE DENNE ENHETEN TIL EN KONTO</string>
+    <string name="m3_linked_devices">Koblede enheter</string>
+    <string name="m3_linked_devices_desc">Koble denne enheten til kontoen din på en annen enhet, slik at kontakter gjenkjenner alle enhetene dine som én konto. Kontonøkkelen forlater aldri enheten som innehar den — bare et signert sertifikat går over nettet.</string>
+    <string name="m3_linked_to_account">koblet til konto %1$s…</string>
+    <string name="m3_linking_this_device">kobler denne enheten…</string>
+    <string name="m3_loading_segments">laster segmenter…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">gi segmentet et navn</string>
+    <string name="m3_nearby_hosts">Verter i nærheten</string>
+    <string name="m3_nearby_perm_needed">oppdagelse i nærheten trenger Bluetooth- eller nærliggende-Wi-Fi-tillatelse</string>
+    <string name="m3_nearby_scanning">Skanner over Bluetooth LE og Wi-Fi Direct. Trykk på en vert for å bli med.</string>
+    <string name="m3_new_segment">— nytt segment —</string>
+    <string name="m3_no_segments_yet">Ingen segmenter ennå — opprett ett nedenfor.</string>
+    <string name="m3_notifications_blocked">varsler blokkert — alltid på-chatter kjører fortsatt, men uten et statusvarsel</string>
+    <string name="m3_or_relink">— eller koble på nytt —</string>
+    <string name="m3_paste_link_offer_uri">lim inn koblingstilbudets URI</string>
+    <string name="m3_paste_talkrypt_invite">lim inn en talkrypt://-invitasjon</string>
+    <string name="m3_paste_talkrypt_invite_above">lim inn en talkrypt://-invitasjon ovenfor</string>
+    <string name="m3_qr_too_large">(QR for stor til å vises — bruk teksten)</string>
+    <string name="m3_rooted_at_device_account">forankret i denne enhetens konto</string>
+    <string name="m3_rooted_at_linked_account">forankret i din koblede konto %1$s…</string>
+    <string name="m3_safety_prefix">sikkerhet %1$s…</string>
+    <string name="m3_seal_segments_failed">kunne ikke forsegle segmenter: %1$s</string>
+    <string name="m3_segment_name_label">SEGMENTNAVN (kontekstetikett)</string>
+    <string name="m3_segments">Segmenter</string>
+    <string name="m3_segments_desc">Kontekstuelle underidentiteter under kontoen din. Hvert segment autentiserer med sin egen nøkkel, slik at ulike segmenter ikke kan kobles til hverandre — men en kontakt som gjenkjenner kontoen din, gjenkjenner hvert segment. Bruk ett per kontekst (jobb, aktivisme, …).</string>
+    <string name="m3_start_link_offer">Start et koblingstilbud</string>
+    <string name="m3_starting_link_offer">starter koblingstilbud…</string>
+    <string name="m3_this_device_is_linked">DENNE ENHETEN ER KOBLET</string>
+    <string name="m3_unlink">Koble fra</string>
+    <string name="m3_unlink_body">Fjerner koblingssertifikatet — kontakter vil ikke lenger gjenkjenne denne enheten som del av kontoen før du kobler på nytt.</string>
+    <string name="m3_unlink_this_device">Koble fra denne enheten</string>
+    <string name="m3_unlink_this_device_q">Koble fra denne enheten?</string>
+    <string name="m3_unlinked">koblet fra</string>
+    <string name="m3_username_prefix">brukernavn %1$s</string>
+    <string name="m3_verify_oob_account_sn">BEKREFT VIA EN ANNEN KANAL — kontoens sikkerhetsnummer:</string>
+    <string name="m3_wifi_off">Wi-Fi er av — slå det på for Wi-Fi Direct (Bluetooth virker fortsatt)</string>
+
+    <!-- ===== MainActivity: ankre, begrenset vert, chatskjerm (område m4) ===== -->
+    <string name="m4_anchors_title">Ankre</string>
+    <string name="m4_anchors_desc">En brukernavnkatalog du oppretter eller peker på via plassering. Navn knyttes til kontonøkler; bekreft sikkerhetsnumre via en annen kanal.</string>
+    <string name="m4_your_account">KONTOEN DIN</string>
+    <string name="m4_deriving">utleder…</string>
+    <string name="m4_unavailable">utilgjengelig</string>
+    <string name="m4_spawn_my_anchor">Opprett mitt eget anker</string>
+    <string name="m4_or_use_known_anchor">— eller bruk et kjent anker —</string>
+    <string name="m4_anchor_location_label">ANKERPLASSERING (talkrypt://-URI)</string>
+    <string name="m4_username_label">BRUKERNAVN</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Registrer brukernavnet mitt her</string>
+    <string name="m4_enter_anchor_uri_username">skriv inn en anker-URI + brukernavn</string>
+    <string name="m4_resolve_this_username">Slå opp dette brukernavnet</string>
+    <string name="m4_back">Tilbake</string>
+    <string name="m4_already_spawning">oppretter allerede…</string>
+    <string name="m4_spawning_anchor">oppretter anker…</string>
+    <string name="m4_anchor_failed">anker mislyktes: %1$s</string>
+    <string name="m4_anchor_running_title">Anker kjører</string>
+    <string name="m4_anchor_running_desc">Andre registrerer/slår opp brukernavn her. Del denne plasseringen (skann eller kopier). Det kjører mens appen er åpen.</string>
+    <string name="m4_registering">registrerer…</string>
+    <string name="m4_register_success">✓ registrerte «%1$s» → kontoen din på dette ankeret</string>
+    <string name="m4_register_failed">! registrering mislyktes: %1$s</string>
+    <string name="m4_resolving">slår opp…</string>
+    <string name="m4_resolve_safety_number">«%1$s» → kontoens sikkerhetsnummer:\n%2$s\n(bekreft via en annen kanal før du stoler på det)</string>
+    <string name="m4_resolve_not_registered">«%1$s» er ikke registrert her (eller registrene var uenige)</string>
+    <string name="m4_resolve_failed">! oppslag mislyktes: %1$s</string>
+    <string name="m4_registry_restricted_title">Registerbegrenset chat</string>
+    <string name="m4_registry_restricted_desc">Bare medlemmer av det valgte registeret kan bli med i %1$s. Du kan bare velge registre du er bundet til; uoppnåelige (eller de som mangler oppføringen din) er nedtonet.</string>
+    <string name="m4_not_registered_any_anchor">Du er ikke registrert ved noe anker ennå. Åpne Ankre og registrer et brukernavn først.</string>
+    <string name="m4_checking_anchor">sjekker %1$s …</string>
+    <string name="m4_host_gated_by">Vert begrenset av «%1$s@%2$s»</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — uoppnåelig eller ingen oppføring</string>
+    <string name="m4_creating_restricted_chat">oppretter begrenset chat…</string>
+    <string name="m4_registry_restricted_members">registerbegrenset — bare de %1$s ankermedlemmene kan bli med</string>
+    <string name="m4_sender_invite">invitasjon</string>
+    <string name="m4_restricted_host_failed">begrenset vert mislyktes: %1$s</string>
+    <string name="m4_tier_ephemeral">flyktig</string>
+    <string name="m4_tier_always_on">alltid på</string>
+    <string name="m4_tier_persistent">vedvarende</string>
+    <string name="m4_members_prefix">"%1$s medlemmer · "</string>
+    <string name="m4_chat_detail">"  ·  %1$ssikkerhet %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Chat-meny</string>
+    <string name="m4_message_hint">Melding</string>
+    <string name="m4_send">Send</string>
+    <string name="m4_delivery_delivered">levert</string>
+    <string name="m4_delivery_not_delivered">ikke levert</string>
+    <string name="m4_delivery_sent">sendt</string>
+    <string name="m4_already_creating_chat">oppretter allerede en chat…</string>
+    <string name="m4_starting_chat_over">Starter chatten din over %1$s…</string>
+    <string name="m4_creating_chat">oppretter chat…</string>
+    <string name="m4_hosting_share_invite">er vert — del invitasjonen for å la en venn bli med:</string>
+
+    <!-- ===== MainActivity: preflight for å bli med, tilkobling, sending, skråstrekkommandoer (område m5) ===== -->
+    <string name="m5_host_failed">vert mislyktes: %1$s</string>
+    <string name="m5_join_chat">Bli med i chat</string>
+    <string name="m5_join_restricted_explainer">Hvis denne chatten er registerbegrenset, slippes du bare inn som medlem. Legg frem et aktivt medlemskap, eller bli med som et pseudonym (bare åpne chatter).</string>
+    <string name="m5_no_memberships">Du har ingen registermedlemskap ennå — registrer deg ved et anker for å bli med i begrensede chatter.</string>
+    <string name="m5_present_a_membership">LEGG FREM ET MEDLEMSKAP</string>
+    <string name="m5_checking_anchor">sjekker %1$s …</string>
+    <string name="m5_join_as_member">Bli med som «%1$s@%2$s»</string>
+    <string name="m5_or_separator">— eller —</string>
+    <string name="m5_join_with_account">Bli med med kontoen min (uten brukernavn)</string>
+    <string name="m5_join_as_pseudonym">Bli med som pseudonym (ikke sporbar)</string>
+    <string name="m5_back">Tilbake</string>
+    <string name="m5_already_joining">blir allerede med…</string>
+    <string name="m5_joined">ble med</string>
+    <string name="m5_as_suffix">" som %1$s"</string>
+    <string name="m5_joined_as_pseudonym">ble med som pseudonym</string>
+    <string name="m5_failed">mislyktes: %1$s</string>
+    <string name="m5_join_failed">kunne ikke bli med</string>
+    <string name="m5_connecting_title">Kobler til</string>
+    <string name="m5_bootstrapping_tor">Starter opp Tor…</string>
+    <string name="m5_connecting">Kobler til…</string>
+    <string name="m5_first_tor_slow">Første Tor-tilkobling er treg; senere er umiddelbare.</string>
+    <string name="m5_cancel">Avbryt</string>
+    <string name="m5_bootstrapping_tor_pct">Starter opp Tor… %1$s%%</string>
+    <string name="m5_building_circuit">Bygger krets + håndtrykk…</string>
+    <string name="m5_cant_reconnect">kan ikke koble til igjen — ingen lagret invitasjon</string>
+    <string name="m5_reconnecting_over">kobler til igjen over %1$s…</string>
+    <string name="m5_reconnected_over">koblet til igjen over %1$s</string>
+    <string name="m5_reconnect_failed_detail">tilkobling igjen mislyktes (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">tilkobling igjen mislyktes</string>
+    <string name="m5_reconnecting_text_kept">kobler til igjen — teksten din beholdes, prøv igjen om et øyeblikk</string>
+    <string name="m5_send_failed">sending mislyktes</string>
+    <string name="m5_name_book_empty">navnebok tom — /name &lt;kallesignal&gt; for å legge til ett</string>
+    <string name="m5_tier_account_linked">kontokoblet</string>
+    <string name="m5_tier_bare">bar</string>
+    <string name="m5_name_list_entry">%1$s%2$s  «%3$s»  (%4$s)</string>
+    <string name="m5_saved_to_name_book">lagret «%1$s» i navneboken</string>
+    <string name="m5_switched_to">byttet til «%1$s» og annonserte</string>
+    <string name="m5_no_saved_name">ingen lagret navn «%1$s»</string>
+    <string name="m5_calling_verified">🔗 kaller deg som verifisert «%1$s»</string>
+    <string name="m5_name_cleared">navn fjernet</string>
+    <string name="m5_calling_as">kaller deg «%1$s»</string>
+    <string name="m5_cq_announced">CQ — annonserte navnet ditt</string>
+    <string name="m5_cq_cadence_off">CQ-kadens av</string>
+    <string name="m5_cq_cadence_every">CQ-kadens: hvert %1$s min</string>
+    <string name="m5_state_on">på</string>
+    <string name="m5_state_off">av</string>
+    <string name="m5_cq_onmsg">CQ navne-ID per melding: %1$s</string>
+    <string name="m5_name_usage">bruk: /name &lt;kallesignal&gt;|link &lt;ks&gt;|new &lt;ks&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;min&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Legg til «%1$s» som kontakt</string>
+    <string name="m5_added_contact">la til kontakt %1$s</string>
+    <string name="m5_could_not_add">kunne ikke legge til (konto ikke sett)</string>
+    <string name="m5_invite_qr">Invitasjons-QR</string>
+    <string name="m5_share">Del</string>
+    <string name="m5_close">Lukk</string>
+
+    <!-- ===== ChatNet: vennlige transportfeil ===== -->
+    <string name="net_host_unreachable_tor">vert uoppnåelig over Tor — onion-en svarte ikke (frakoblet, eller ikke republisert ennå)</string>
+    <string name="net_timed_out_host">tidsavbrudd ved tilkobling til verten (uoppnåelig fra dette nettverket?)</string>
+    <string name="net_tor_not_ready">Tor er ikke klar ennå (starter fortsatt opp)</string>
+    <string name="net_cant_reconnect_no_invite">kan ikke koble til igjen — ingen lagret invitasjon for denne chatten</string>
+    <string name="net_unknown_error">ukjent feil</string>
+
+    <!-- ===== QrScanActivity: skannerhint + gjenoppretting av kameratillatelse ===== -->
+    <string name="qr_point_at_talkrypt">Pek mot en talkrypt-QR</string>
+    <string name="qr_cancel_scan">Avbryt skanning</string>
+    <string name="qr_open_app_settings">Åpne appinnstillinger</string>
+    <string name="qr_camera_access_off">Kameratilgang er av — aktiver den for å skanne, eller avbryt og lim inn invitasjonen i stedet.</string>
+    <string name="qr_no_camera_found">Fant ikke noe kamera</string>
+    <string name="qr_camera_error">Kamerafeil %1$d</string>
+    <string name="qr_camera_unavailable">Kamera utilgjengelig: %1$s</string>
+    <string name="qr_camera_config_failed">Kamerakonfigurasjon mislyktes</string>
+    <string name="qr_not_talkrypt_keep_scanning">Ikke en talkrypt-QR — fortsett å skanne</string>
+
+    <!-- ===== ChatService: forgrunnstjenestevarsel + gjenoppkobling ===== -->
+    <string name="svc_reconnecting">kobler til «%1$s» igjen over %2$s…</string>
+    <string name="svc_reconnected">koblet til «%1$s» igjen over %2$s</string>
+    <string name="svc_reconnect_failed_retry">tilkobling igjen mislyktes for «%1$s» (%2$s): %3$s — prøver igjen…</string>
+    <string name="svc_reconnect_failed">tilkobling igjen mislyktes for «%1$s» (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt-tilkoblinger</string>
+    <string name="svc_status_none">ingen alltid på-chatter</string>
+    <string name="svc_status_all_connected">%1$d alltid på · alle tilkoblet</string>
+    <string name="svc_status_partial">%1$d alltid på · %2$d tilkoblet, %3$d frakoblet</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Radioer/peilesignaler i nærheten: brukervendte feil ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct støttes ikke på denne enheten</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct er opptatt — prøv igjen om et øyeblikk</string>
+    <string name="radio_wifidirect_wifi_off">Slå på Wi-Fi for å bruke Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct-feil</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct mislyktes (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Tillatelse til nærliggende Wi-Fi nektet</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct utilgjengelig</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct-tilkobling mislyktes (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct-motpart</string>
+    <string name="radio_ble_bt_off">Bluetooth er av</string>
+    <string name="radio_ble_no_scanner">Ingen BLE-skanner</string>
+    <string name="radio_ble_scan_failed">BLE-skanning mislyktes (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth-skannetillatelse nektet</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth er av</string>
+    <string name="radio_beacon_ble_no_scanner">Ingen BLE-skanner</string>
+    <string name="radio_beacon_ble_scan_failed">BLE-skanning mislyktes (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth-skannetillatelse nektet</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD utilgjengelig</string>
+    <string name="radio_beacon_wifi_discovery_failed">oppdagelse mislyktes (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">oppdagelsesfeil</string>
+</resources>
