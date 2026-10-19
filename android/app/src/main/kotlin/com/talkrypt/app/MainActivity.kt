@@ -405,7 +405,7 @@ class MainActivity : Activity() {
         headRow.addView(text("⋯", 26f, muted).apply {
             contentDescription = Loc.s(R.string.m1_more)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
-            setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { setContentView(utilitiesScreen()) }
+            setPaddingRelative(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { setContentView(utilitiesScreen()) }
         })
         col.addView(headRow, lp(MATCH_PARENT, WRAP_CONTENT, top = dp(8)))
 
@@ -435,7 +435,7 @@ class MainActivity : Activity() {
             background = circle(if (m.group) accent else peerBubble); gravity = Gravity.CENTER
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO // decorative
         }
-        row.addView(glyph, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(12) })
+        row.addView(glyph, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(12) })
 
         val mid = column(Color.TRANSPARENT)
         mid.addView(text(m.title, 16f, fg, bold = true))
@@ -718,7 +718,7 @@ class MainActivity : Activity() {
             if (n.id != active) row.addView(pillButton(Loc.s(R.string.m2_use), accent, Color.WHITE) {
                 thread { val ok = runCatching { c.useName(n.id) }.getOrDefault(false)
                     ui.post { toast(if (ok) Loc.s(R.string.m2_calling_as, n.label) else Loc.s(R.string.m2_failed)); setContentView(nameBookScreen(chatId)) } }
-            }.apply { setPadding(dp(16), dp(8), dp(16), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
+            }.apply { setPadding(dp(16), dp(8), dp(16), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(8) })
             row.addView(pillButton("✕", panel, muted) {
                 c.removeName(n.id); toast(Loc.s(R.string.m2_removed)); setContentView(nameBookScreen(chatId))
             }.apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
@@ -1923,9 +1923,9 @@ class MainActivity : Activity() {
         // only the messages ScrollView (weight 1) takes the remaining space.
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(panel); setPadding(dp(8), dp(10), dp(12), dp(10))
+            setBackgroundColor(panel); setPaddingRelative(dp(8), dp(10), dp(12), dp(10))
         }
-        header.addView(text("‹", 30f, fg).apply {
+        header.addView(text(if (isRtl) "›" else "‹", 30f, fg).apply {
             contentDescription = Loc.s(R.string.m4_back)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
             setPadding(dp(10), 0, dp(10), 0); setOnClickListener { setContentView(chatListScreen()) }
@@ -1943,7 +1943,7 @@ class MainActivity : Activity() {
         header.addView(text("⋯", 22f, muted).apply {
             contentDescription = Loc.s(R.string.m4_chat_menu)
             minimumWidth = dp(48); minimumHeight = dp(48); gravity = Gravity.CENTER
-            setPadding(dp(10), dp(4), dp(8), dp(4)); setOnClickListener { chatRowMenu(lc) }
+            setPaddingRelative(dp(10), dp(4), dp(8), dp(4)); setOnClickListener { chatRowMenu(lc) }
         })
         root.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
@@ -1983,6 +1983,9 @@ class MainActivity : Activity() {
             contentDescription = Loc.s(R.string.m4_send)
             background = circle(accent)
             gravity = Gravity.CENTER
+            // The send arrow points in the writing direction: ➤ (LTR) / ◀ flipped
+            // for RTL so it reads "forward" toward the message column.
+            scaleX = if (isRtl) -1f else 1f
         }
         send.setOnClickListener {
             val t = input.text.toString()
@@ -1990,7 +1993,7 @@ class MainActivity : Activity() {
             // must never eat the composed text.
             if (t.isNotEmpty() && sendMessage(chatId, t)) input.setText("")
         }
-        bar.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(10) })
+        bar.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(10) })
         root.addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         applyInsets(root)
@@ -2575,6 +2578,14 @@ class MainActivity : Activity() {
 
     private fun lp(w: Int, h: Int, top: Int = 0, bottom: Int = 0) =
         LinearLayout.LayoutParams(w, h).apply { topMargin = top; bottomMargin = bottom }
+
+    /** True when the resolved layout direction is right-to-left (Arabic, Hebrew,
+     *  Persian, Urdu). Used to flip directional glyphs (back chevron, send arrow)
+     *  that the framework can't auto-mirror because they're text, not drawables.
+     *  Horizontal LinearLayouts + relative padding/margins already mirror under
+     *  supportsRtl, so only these glyphs need an explicit flip. */
+    private val isRtl: Boolean
+        get() = resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
 
     private fun text(s: String, size: Float, color: Int, bold: Boolean = false, center: Boolean = false) =
         TextView(this).apply {
