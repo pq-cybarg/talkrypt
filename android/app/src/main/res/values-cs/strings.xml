@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Český katalog řetězců pro aplikaci talkrypt pro Android.
+
+  Lokalizace se opírá o systém prostředků Androidu: každý řetězec viditelný pro
+  uživatele, který vykresluje vrstva UI s Contextem, prochází přes
+  Loc.s(R.string.*) (viz Loc.kt), jenž se vyhodnocuje podle aktuálního národního
+  prostředí zařízení. Chcete-li přidat jazyk, umístěte soubor
+  res/values-<lang>/strings.xml se stejnými názvy a přeloženými hodnotami (viz values-es).
+
+  NENÍ certifikováno / NENÍ auditováno (v celém projektu). Text o
+  zabezpečení a vyloučení odpovědnosti je zde zachován doslovně a musí být
+  přeložen věrně (nikdy ne zesílen na tvrzení o certifikaci či shodě) v každém
+  národním prostředí.
+
+  Záměrně bezrozhraňový sdílený model (ChatEvents.kt) produkuje krátké stavové
+  řádky ve zdrojové angličtině podle návrhu (testováno bezhlavě na běžné JVM, kde
+  neexistuje tabulka prostředků; absence AndroidX vylučuje Robolectric). Těla
+  zpráv protějšků píše uživatel a nikdy se nepřekládají. Viz poznámka v ChatEvents.kt.
+
+  Poznámka: značka "talkrypt" se záměrně nepřekládá.
+-->
+<resources>
+
+    <!-- ===== MainActivity: nový chat, seznam chatů, nabídka řádku chatu (rozsah m1) ===== -->
+    <string name="m1_opening_invite">otevírání pozvánky…</string>
+    <string name="m1_not_a_talkrypt_qr">Není to QR kód talkrypt</string>
+    <string name="m1_nym_credential_imported">Přihlašovací údaje Nym importovány — placený mixnet připraven (není potřeba mnemonika)</string>
+    <string name="m1_import_failed">import se nezdařil: %1$s</string>
+    <string name="m1_new_chat">Nový chat</string>
+    <string name="m1_channel">KANÁL</string>
+    <string name="m1_posture">POSTOJ</string>
+    <string name="m1_access">PŘÍSTUP</string>
+    <string name="m1_name_display_signal_style">Styl Signal (pouze odznaky)</string>
+    <string name="m1_name_display_warn">Upozornit na podobné kolize</string>
+    <string name="m1_name_display_suppress">Potlačit kolidující jména</string>
+    <string name="m1_name_display">ZOBRAZENÍ JMEN</string>
+    <string name="m1_persistence_ephemeral">Dočasné (pouze v paměti)</string>
+    <string name="m1_persistence_persistent">Trvalé (uložené, lze se znovu připojit)</string>
+    <string name="m1_persistence_always_on">Stále zapnuté (fáze 2)</string>
+    <string name="m1_persistence">TRVALOST</string>
+    <string name="m1_route_over_tor">Směrovat přes Tor (.onion; pomalý start)</string>
+    <string name="m1_route_over_nym">Směrovat také přes mixnet Nym (volitelné; pozvánka přes více sítí)</string>
+    <string name="m1_paid_nym_bandwidth">Placené pásmo Nym (mnemonika peněženky / přihlašovací údaje) se nastavuje v Nastavení.</string>
+    <string name="m1_host_a_chat">Hostovat chat</string>
+    <string name="m1_registry_restricted_chat">Chat omezený registrem</string>
+    <string name="m1_or_join">— nebo se připojit —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Připojit se</string>
+    <string name="m1_paste_invite">Vložte pozvánku talkrypt://</string>
+    <string name="m1_scan_qr">Naskenovat QR kód</string>
+    <string name="m1_in_person">— osobně —</string>
+    <string name="m1_find_nearby_host">Najít hostitele v okolí (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Sdílet aplikaci (P2P přes Wi-Fi)</string>
+    <string name="m1_back">Zpět</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Více</string>
+    <string name="m1_new_chat_button">＋  Nový chat</string>
+    <string name="m1_no_chats_yet">Zatím žádné chaty — klepnutím na ＋ hostujte nebo se připojte.</string>
+    <string name="m1_preview_you">vy: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">hostování</string>
+    <string name="m1_joined">připojeno</string>
+    <string name="m1_preview_members">%1$s · %2$d členů</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">offline</string>
+    <string name="m1_online">online</string>
+    <string name="m1_online_count">%1$d online</string>
+    <string name="m1_connecting">připojování</string>
+    <string name="m1_time_now">nyní</string>
+    <string name="m1_time_minutes">%1$dm</string>
+    <string name="m1_time_hours">%1$dh</string>
+    <string name="m1_time_days">%1$dd</string>
+    <string name="m1_no_invite">bez pozvánky</string>
+    <string name="m1_safety_number_title">Bezpečnostní číslo</string>
+    <string name="m1_safety_number_body">%1$s\n\nPorovnejte to s protějškem mimo tento kanál; neshoda znamená, že kanál nekomunikuje s tím, koho si myslíte.</string>
+    <string name="m1_copy">Kopírovat</string>
+    <string name="m1_copied">zkopírováno</string>
+    <string name="m1_close">Zavřít</string>
+
+    <!-- ===== MainActivity: nastavení, identita, nym, zabezpečení (rozsah m2) ===== -->
+    <string name="m2_delete_chat_title">Odstranit “%1$s”?</string>
+    <string name="m2_delete_chat_body">Vymaže tento chat a jeho historii z tohoto zařízení. Tuto akci nelze vrátit zpět.</string>
+    <string name="m2_delete">Odstranit</string>
+    <string name="m2_connect_first">nejprve se připojte</string>
+    <string name="m2_beacon_msg">maják: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 vysílání majáku tohoto chatu v okolí (BLE + Wi-Fi) + skenování</string>
+    <string name="m2_nearby_beacon_stopped">maják v okolí zastaven</string>
+    <string name="m2_no_ble_scanner">žádný BLE skener</string>
+    <string name="m2_mesh_linked">📻 mesh: propojen uzel %1$s — zprávy jdou také přes LoRa</string>
+    <string name="m2_mesh_scan_failed">mesh: skenování BLE se nezdařilo (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 hledání uzlu %1$s přes BLE…</string>
+    <string name="m2_ble_scan_denied">Oprávnění ke skenování BLE odepřeno</string>
+    <string name="m2_mesh_stopped">mesh zastaven</string>
+    <string name="m2_start_beacon_first">nejprve spusťte maják</string>
+    <string name="m2_no_blob_yet">zatím žádná vysílaná data — zkuste to za okamžik znovu</string>
+    <string name="m2_beacon_selftest">autotest majáku: vlastní zapečetěný maják vrácen zpět (očekávejte zachycení 📡)</string>
+    <string name="m2_callsigns">Volací znaky</string>
+    <string name="m2_callsigns_desc">Jména, která vysíláte u svých zpráv v tomto chatu.</string>
+    <string name="m2_connect_to_manage_names">Pro správu jmen se připojte k tomuto chatu.</string>
+    <string name="m2_back">Zpět</string>
+    <string name="m2_your_names">VAŠE JMÉNA</string>
+    <string name="m2_none_yet_add">Zatím žádná — přidejte níže.</string>
+    <string name="m2_use">Použít</string>
+    <string name="m2_calling_as">vystupujete jako “%1$s”</string>
+    <string name="m2_failed">nezdařilo se</string>
+    <string name="m2_removed">odebráno</string>
+    <string name="m2_new_callsign">Nový volací znak</string>
+    <string name="m2_save_to_name_book">Uložit do knihy jmen</string>
+    <string name="m2_set_announce_now">Nastavit + oznámit nyní</string>
+    <string name="m2_set_verified">Nastavit jako OVĚŘENÉ (🔗 propojeno s účtem)</string>
+    <string name="m2_verified_name">ověřené jméno “%1$s”</string>
+    <string name="m2_verified_desc">Ověření používá klíč vašeho účtu, takže jméno nemůže napodobit jiný člen.</string>
+    <string name="m2_cq_beacon">MAJÁK CQ</string>
+    <string name="m2_periodic_on">Pravidelné opakování majáku: ZAPNUTO (5 min)</string>
+    <string name="m2_periodic_off">Pravidelné opakování majáku: vypnuto</string>
+    <string name="m2_onmsg_on">Jmenné ID u zprávy: ZAPNUTO</string>
+    <string name="m2_onmsg_off">Jmenné ID u zprávy: vypnuto</string>
+    <string name="m2_onmsg_desc">Jmenné ID u zprávy umožňuje protějškům zaznamenat, když se přejmenujete, a zahodit váš zastaralý volací znak.</string>
+    <string name="m2_show_others">ZOBRAZIT JMÉNA OSTATNÍCH</string>
+    <string name="m2_nametrust_signal">Styl Signal (pouze odznaky)</string>
+    <string name="m2_nametrust_warn">Upozornit na podobné kolize</string>
+    <string name="m2_nametrust_suppress">Potlačit kolidující jména</string>
+    <string name="m2_apply_nametrust">Použít nastavení důvěry ve jména</string>
+    <string name="m2_nametrust_set">důvěra ve jména: %1$s</string>
+    <string name="m2_tighten_only">Výchozí nastavení chatu můžete pouze zpřísnit, nikdy uvolnit.</string>
+    <string name="m2_whos_here">KDO JE ZDE</string>
+    <string name="m2_safety_suffix">  ·  bezpečnost %1$s</string>
+    <string name="m2_safety_number">bezpečnostní číslo: %1$s</string>
+    <string name="m2_share_invite">Sdílet pozvánku</string>
+    <string name="m2_more">Více</string>
+    <string name="m2_anchors">Kotvy (adresář uživatelských jmen)</string>
+    <string name="m2_contacts">Kontakty</string>
+    <string name="m2_linked_devices">Propojená zařízení</string>
+    <string name="m2_segments">Segmenty (kontextové identity)</string>
+    <string name="m2_settings">Nastavení</string>
+    <string name="m2_seal_mnemonic_err">nepodařilo se zapečetit mnemoniku: %1$s</string>
+    <string name="m2_identity">IDENTITA</string>
+    <string name="m2_account_safety_number">Bezpečnostní číslo účtu</string>
+    <string name="m2_deriving">odvozování…</string>
+    <string name="m2_still_deriving">stále se odvozuje…</string>
+    <string name="m2_copied">zkopírováno</string>
+    <string name="m2_linked_secondary">Propojeno jako sekundární zařízení</string>
+    <string name="m2_account_short">účet %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">ZABEZPEČENÍ</string>
+    <string name="m2_key_custody_loading">Úschova klíčů: …</string>
+    <string name="m2_key_custody_desc">Kde toto zařízení může uchovávat klíče (StrongBox &gt; TEE &gt; software). Protějškům se hlásí jako vaše úroveň úschovy.</string>
+    <string name="m2_safety_tap_copy">%1$s — klepnutím zkopírujete. Porovnejte mimo kanál pro vaše ověření.</string>
+    <string name="m2_key_custody">Úschova klíčů: %1$s</string>
+    <string name="m2_secrets_sealed">Tajemství zapečetěna v klidu</string>
+    <string name="m2_secrets_sealed_desc">Zárodky identity a mnemonika Nym jsou šifrovány neexportovatelným klíčem Android Keystore (StrongBox, je-li k dispozici).</string>
+    <string name="m2_sealing_degraded">Pečetění omezeno</string>
+    <string name="m2_sealing_degraded_desc">Keystore nahlásil: %1$s. Tajemství, která nebylo možné zapečetit, zůstávají v otevřeném textu v soukromí aplikace, dokud se neobnoví.</string>
+    <string name="m2_nym_paid_bw">PLACENÉ PÁSMO NYM (VOLITELNÉ)</string>
+    <string name="m2_nym_mnemonic_hint">Mnemonika peněženky NYM — prázdné = bezplatný mixnet</string>
+    <string name="m2_show_mnemonic">Zobrazit mnemoniku</string>
+    <string name="m2_ticketbook_desc">Nebo importujte přihlašovací údaje ticketbook vytvořené vlastními nástroji Nym (zárodek peněženky se do této aplikace nikdy nedostane):</string>
+    <string name="m2_import_nym_cred">Importovat přihlašovací údaje Nym</string>
+    <string name="m2_network_defaults">VÝCHOZÍ SÍŤ PRO NOVÉ CHATY</string>
+    <string name="m2_route_tor">Směrovat přes Tor (.onion)</string>
+    <string name="m2_route_nym">Směrovat také přes mixnet Nym</string>
+    <string name="m2_notifications">OZNÁMENÍ</string>
+    <string name="m2_always_on_chats">Stále zapnuté chaty</string>
+    <string name="m2_always_on_desc">Udržovány připojené službou na popředí s trvalým oznámením. Klepnutím je upravíte v nastavení systému.</string>
+    <string name="m2_open_notif_err">nepodařilo se otevřít nastavení oznámení</string>
+    <string name="m2_about">O APLIKACI</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Postkvantový E2E chat přes Tor. NENÍ certifikováno · NENÍ akreditováno · NENÍ auditováno — experimentální software; klasifikační označení jsou pouze informativní štítky.</string>
+    <string name="m2_contacts_desc">Účty, které poznáváte. Pouze rozpoznání — být kontaktem (nebo přítelem) neuděluje přístup ke kanálu; ten se nastavuje u každého chatu.</string>
+    <string name="m2_no_contacts">Zatím žádné kontakty. V chatu, když se účet představí, klepněte na “Přidat jako kontakt”.</string>
+    <string name="m2_friend_suffix">  [přítel]</string>
+    <string name="m2_starting_share">spouštění místního sdílení…</string>
+    <string name="m2_no_wifi">Žádná adresa Wi-Fi/LAN — nejprve se připojte k síti Wi-Fi nebo hotspotu</string>
+    <string name="m2_share_talkrypt">Sdílet talkrypt</string>
+    <string name="m2_share_instructions">Ve stejné síti Wi-Fi nebo hotspotu druhý telefon naskenuje tento kód (nebo otevře URL), stáhne aplikaci a nainstaluje ji (jednou povolte “instalaci neznámých aplikací”).</string>
+    <string name="m2_apk_computing">APK SHA-256: výpočet…</string>
+
+    <!-- ===== MainActivity: úschova, segmenty, zjišťování v okolí (rozsah m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Přijmout propojení na tomto zařízení</string>
+    <string name="m3_account_prefix">účet %1$s…</string>
+    <string name="m3_already_linking">již probíhá propojování…</string>
+    <string name="m3_already_starting">již se spouští…</string>
+    <string name="m3_apk_fingerprint_failed">nepodařilo se vypočítat otisk APK</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (prvních 16): %1$s — ověřte na přijímajícím telefonu</string>
+    <string name="m3_back">Zpět</string>
+    <string name="m3_beacon_perm_needed">maják / mesh v okolí vyžaduje oprávnění Bluetooth</string>
+    <string name="m3_broadcasting_nearby">vysílání v okolí (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Zrušit</string>
+    <string name="m3_create_segment">Vytvořit segment</string>
+    <string name="m3_created_segment">vytvořen segment “%1$s”</string>
+    <string name="m3_delete">Odstranit</string>
+    <string name="m3_delete_name">Odstranit “%1$s”</string>
+    <string name="m3_delete_segment_body">Vymaže klíč tohoto segmentu — chaty, ke kterým jste se pod ním připojili, nelze znovu připojit jako stejná identita. Tuto akci nelze vrátit zpět.</string>
+    <string name="m3_delete_segment_q">Odstranit segment “%1$s”?</string>
+    <string name="m3_device_not_linked">toto zařízení není propojeno</string>
+    <string name="m3_device_prefix">zařízení %1$s…</string>
+    <string name="m3_done">Hotovo</string>
+    <string name="m3_hint_work">práce</string>
+    <string name="m3_join_a_chat">PŘIPOJIT SE K CHATU (pozvánka talkrypt://)</string>
+    <string name="m3_join_as_name">Připojit se jako “%1$s”</string>
+    <string name="m3_join_as_this_account">Připojit se jako tento účet</string>
+    <string name="m3_join_chat_as_account">PŘIPOJIT SE K CHATU JAKO TENTO ÚČET (pozvánka talkrypt://)</string>
+    <string name="m3_join_failed">připojení se nezdařilo: %1$s</string>
+    <string name="m3_join_peer">Připojit se k %1$s</string>
+    <string name="m3_joined_as_linked_account">připojeno jako propojený účet</string>
+    <string name="m3_joined_as_segment">připojeno jako segment “%1$s”</string>
+    <string name="m3_joining_as_linked">připojování jako propojený účet…</string>
+    <string name="m3_joining_as_name">připojování jako “%1$s”…</string>
+    <string name="m3_link_another_device">PROPOJIT DALŠÍ ZAŘÍZENÍ S MÝM ÚČTEM</string>
+    <string name="m3_link_another_device_desc">Toto zařízení drží účet. Zobrazte jednorázový QR kód, který nové zařízení naskenuje.</string>
+    <string name="m3_link_failed">propojení se nezdařilo: %1$s</string>
+    <string name="m3_link_offer_failed">nabídka propojení se nezdařila: %1$s</string>
+    <string name="m3_link_offer_label">NABÍDKA PROPOJENÍ (talkrypt:// z primárního)</string>
+    <string name="m3_link_offer_running">Nabídka propojení běží</string>
+    <string name="m3_link_offer_running_desc">Na NOVÉM zařízení toto naskenujte (nebo vložte URI do Propojená zařízení → Přijmout propojení). Klíč účtu zůstává na tomto zařízení.</string>
+    <string name="m3_link_this_device_desc">Tím se TOTO zařízení certifikuje pod účtem nabízejícím propojení. Poté ověřte, že zobrazené bezpečnostní číslo účtu odpovídá druhému zařízení, mimo kanál.</string>
+    <string name="m3_link_this_device_q">Propojit toto zařízení?</string>
+    <string name="m3_link_this_device_to_account">PROPOJIT TOTO ZAŘÍZENÍ S ÚČTEM</string>
+    <string name="m3_linked_devices">Propojená zařízení</string>
+    <string name="m3_linked_devices_desc">Propojte toto zařízení se svým účtem na jiném zařízení, aby kontakty rozpoznaly všechna vaše zařízení jako jeden účet. Klíč účtu nikdy neopustí zařízení, které jej drží — po síti putuje pouze podepsaný certifikát.</string>
+    <string name="m3_linked_to_account">propojeno s účtem %1$s…</string>
+    <string name="m3_linking_this_device">propojování tohoto zařízení…</string>
+    <string name="m3_loading_segments">načítání segmentů…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">pojmenujte segment</string>
+    <string name="m3_nearby_hosts">Hostitelé v okolí</string>
+    <string name="m3_nearby_perm_needed">zjišťování v okolí vyžaduje oprávnění Bluetooth / Wi-Fi v okolí</string>
+    <string name="m3_nearby_scanning">Skenování přes Bluetooth LE a Wi-Fi Direct. Klepnutím na hostitele se připojíte.</string>
+    <string name="m3_new_segment">— nový segment —</string>
+    <string name="m3_no_segments_yet">Zatím žádné segmenty — vytvořte jeden níže.</string>
+    <string name="m3_notifications_blocked">oznámení blokována — stále zapnuté chaty běží dál, ale bez stavového oznámení</string>
+    <string name="m3_or_relink">— nebo znovu propojit —</string>
+    <string name="m3_paste_link_offer_uri">vložte URI nabídky propojení</string>
+    <string name="m3_paste_talkrypt_invite">vložte pozvánku talkrypt://</string>
+    <string name="m3_paste_talkrypt_invite_above">vložte pozvánku talkrypt:// výše</string>
+    <string name="m3_qr_too_large">(QR kód je příliš velký k vykreslení — použijte text)</string>
+    <string name="m3_rooted_at_device_account">ukotveno u účtu tohoto zařízení</string>
+    <string name="m3_rooted_at_linked_account">ukotveno u vašeho propojeného účtu %1$s…</string>
+    <string name="m3_safety_prefix">bezpečnost %1$s…</string>
+    <string name="m3_seal_segments_failed">nepodařilo se zapečetit segmenty: %1$s</string>
+    <string name="m3_segment_name_label">NÁZEV SEGMENTU (kontextový štítek)</string>
+    <string name="m3_segments">Segmenty</string>
+    <string name="m3_segments_desc">Kontextové dílčí identity pod vaším účtem. Každý segment se ověřuje vlastním klíčem, takže různé segmenty nelze vzájemně propojit — přesto kontakt, který pozná váš účet, pozná každý segment. Použijte jeden pro každý kontext (práce, aktivismus, …).</string>
+    <string name="m3_start_link_offer">Zahájit nabídku propojení</string>
+    <string name="m3_starting_link_offer">zahajování nabídky propojení…</string>
+    <string name="m3_this_device_is_linked">TOTO ZAŘÍZENÍ JE PROPOJENO</string>
+    <string name="m3_unlink">Zrušit propojení</string>
+    <string name="m3_unlink_body">Odstraní certifikát propojení — kontakty již nebudou toto zařízení rozpoznávat jako součást účtu, dokud je znovu nepropojíte.</string>
+    <string name="m3_unlink_this_device">Zrušit propojení tohoto zařízení</string>
+    <string name="m3_unlink_this_device_q">Zrušit propojení tohoto zařízení?</string>
+    <string name="m3_unlinked">propojení zrušeno</string>
+    <string name="m3_username_prefix">uživatelské jméno %1$s</string>
+    <string name="m3_verify_oob_account_sn">OVĚŘTE MIMO KANÁL — bezpečnostní číslo účtu:</string>
+    <string name="m3_wifi_off">Wi-Fi je vypnutá — zapněte ji pro Wi-Fi Direct (Bluetooth stále funguje)</string>
+
+    <!-- ===== MainActivity: kotvy, omezený hostitel, obrazovka chatu (rozsah m4) ===== -->
+    <string name="m4_anchors_title">Kotvy</string>
+    <string name="m4_anchors_desc">Adresář uživatelských jmen, který vytvoříte nebo na který ukážete podle umístění. Jména odpovídají klíčům účtů; ověřte bezpečnostní čísla mimo kanál.</string>
+    <string name="m4_your_account">VÁŠ ÚČET</string>
+    <string name="m4_deriving">odvozování…</string>
+    <string name="m4_unavailable">nedostupné</string>
+    <string name="m4_spawn_my_anchor">Vytvořit vlastní kotvu</string>
+    <string name="m4_or_use_known_anchor">— nebo použít známou kotvu —</string>
+    <string name="m4_anchor_location_label">UMÍSTĚNÍ KOTVY (URI talkrypt://)</string>
+    <string name="m4_username_label">UŽIVATELSKÉ JMÉNO</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Zaregistrovat zde mé uživatelské jméno</string>
+    <string name="m4_enter_anchor_uri_username">zadejte URI kotvy + uživatelské jméno</string>
+    <string name="m4_resolve_this_username">Přeložit toto uživatelské jméno</string>
+    <string name="m4_back">Zpět</string>
+    <string name="m4_already_spawning">již se vytváří…</string>
+    <string name="m4_spawning_anchor">vytváření kotvy…</string>
+    <string name="m4_anchor_failed">kotva se nezdařila: %1$s</string>
+    <string name="m4_anchor_running_title">Kotva běží</string>
+    <string name="m4_anchor_running_desc">Ostatní zde registrují/překládají uživatelská jména. Sdílejte toto umístění (naskenujte nebo zkopírujte). Běží, dokud je aplikace otevřená.</string>
+    <string name="m4_registering">registrace…</string>
+    <string name="m4_register_success">✓ zaregistrováno “%1$s” → váš účet u této kotvy</string>
+    <string name="m4_register_failed">! registrace se nezdařila: %1$s</string>
+    <string name="m4_resolving">překládání…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → bezpečnostní číslo účtu:\n%2$s\n(před důvěrou ověřte mimo kanál)</string>
+    <string name="m4_resolve_not_registered">“%1$s” zde není zaregistrováno (nebo se registry neshodly)</string>
+    <string name="m4_resolve_failed">! překlad se nezdařil: %1$s</string>
+    <string name="m4_registry_restricted_title">Chat omezený registrem</string>
+    <string name="m4_registry_restricted_desc">K %1$s se mohou připojit pouze členové zvoleného registru. Vybrat můžete pouze registry, u kterých jste vázáni; nedostupné (nebo ty, kterým chybí váš záznam) jsou zašedlé.</string>
+    <string name="m4_not_registered_any_anchor">Zatím nejste zaregistrováni u žádné kotvy. Nejprve otevřete Kotvy a zaregistrujte uživatelské jméno.</string>
+    <string name="m4_checking_anchor">kontrola %1$s …</string>
+    <string name="m4_host_gated_by">Hostitel omezen “%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — nedostupné nebo bez záznamu</string>
+    <string name="m4_creating_restricted_chat">vytváření omezeného chatu…</string>
+    <string name="m4_registry_restricted_members">omezeno registrem — připojit se mohou pouze členové kotvy %1$s</string>
+    <string name="m4_sender_invite">pozvánka</string>
+    <string name="m4_restricted_host_failed">omezený hostitel se nezdařil: %1$s</string>
+    <string name="m4_tier_ephemeral">dočasné</string>
+    <string name="m4_tier_always_on">stále zapnuté</string>
+    <string name="m4_tier_persistent">trvalé</string>
+    <string name="m4_members_prefix">"%1$s členů · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sbezpečnost %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Nabídka chatu</string>
+    <string name="m4_message_hint">Zpráva</string>
+    <string name="m4_send">Odeslat</string>
+    <string name="m4_delivery_delivered">doručeno</string>
+    <string name="m4_delivery_not_delivered">nedoručeno</string>
+    <string name="m4_delivery_sent">odesláno</string>
+    <string name="m4_already_creating_chat">chat se již vytváří…</string>
+    <string name="m4_starting_chat_over">Spouštění chatu přes %1$s…</string>
+    <string name="m4_creating_chat">vytváření chatu…</string>
+    <string name="m4_hosting_share_invite">hostování — sdílejte pozvánku, aby se přítel mohl připojit:</string>
+
+    <!-- ===== MainActivity: příprava připojení, připojování, odesílání, lomítkové příkazy (rozsah m5) ===== -->
+    <string name="m5_host_failed">hostování se nezdařilo: %1$s</string>
+    <string name="m5_join_chat">Připojit se k chatu</string>
+    <string name="m5_join_restricted_explainer">Pokud je tento chat omezen registrem, budete přijati pouze jako člen. Předložte aktivní členství, nebo se připojte pod pseudonymem (pouze otevřené chaty).</string>
+    <string name="m5_no_memberships">Zatím nemáte žádná členství v registru — zaregistrujte se u kotvy, abyste se mohli připojit k omezeným chatům.</string>
+    <string name="m5_present_a_membership">PŘEDLOŽTE ČLENSTVÍ</string>
+    <string name="m5_checking_anchor">kontrola %1$s …</string>
+    <string name="m5_join_as_member">Připojit se jako “%1$s@%2$s”</string>
+    <string name="m5_or_separator">— nebo —</string>
+    <string name="m5_join_with_account">Připojit se se svým účtem (bez uživatelského jména)</string>
+    <string name="m5_join_as_pseudonym">Připojit se pod pseudonymem (nepropojitelné)</string>
+    <string name="m5_back">Zpět</string>
+    <string name="m5_already_joining">již probíhá připojování…</string>
+    <string name="m5_joined">připojeno</string>
+    <string name="m5_as_suffix">" jako %1$s"</string>
+    <string name="m5_joined_as_pseudonym">připojeno pod pseudonymem</string>
+    <string name="m5_failed">nezdařilo se: %1$s</string>
+    <string name="m5_join_failed">připojení se nezdařilo</string>
+    <string name="m5_connecting_title">Připojování</string>
+    <string name="m5_bootstrapping_tor">Spouštění Toru…</string>
+    <string name="m5_connecting">Připojování…</string>
+    <string name="m5_first_tor_slow">První připojení k Toru je pomalé; další jsou okamžitá.</string>
+    <string name="m5_cancel">Zrušit</string>
+    <string name="m5_bootstrapping_tor_pct">Spouštění Toru… %1$s%%</string>
+    <string name="m5_building_circuit">Budování okruhu + navazování spojení…</string>
+    <string name="m5_cant_reconnect">nelze se znovu připojit — žádná uložená pozvánka</string>
+    <string name="m5_reconnecting_over">opětovné připojování přes %1$s…</string>
+    <string name="m5_reconnected_over">znovu připojeno přes %1$s</string>
+    <string name="m5_reconnect_failed_detail">opětovné připojení se nezdařilo (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">opětovné připojení se nezdařilo</string>
+    <string name="m5_reconnecting_text_kept">opětovné připojování — váš text je zachován, zkuste to za okamžik znovu</string>
+    <string name="m5_send_failed">odeslání se nezdařilo</string>
+    <string name="m5_name_book_empty">kniha jmen je prázdná — přidáte příkazem /name &lt;callsign&gt;</string>
+    <string name="m5_tier_account_linked">propojeno s účtem</string>
+    <string name="m5_tier_bare">holé</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">uloženo “%1$s” do knihy jmen</string>
+    <string name="m5_switched_to">přepnuto na “%1$s” a oznámeno</string>
+    <string name="m5_no_saved_name">žádné uložené jméno “%1$s”</string>
+    <string name="m5_calling_verified">🔗 vystupujete jako ověřené “%1$s”</string>
+    <string name="m5_name_cleared">jméno vymazáno</string>
+    <string name="m5_calling_as">vystupujete jako “%1$s”</string>
+    <string name="m5_cq_announced">CQ — vaše jméno oznámeno</string>
+    <string name="m5_cq_cadence_off">Kadence CQ vypnuta</string>
+    <string name="m5_cq_cadence_every">Kadence CQ: každých %1$s min</string>
+    <string name="m5_state_on">zapnuto</string>
+    <string name="m5_state_off">vypnuto</string>
+    <string name="m5_cq_onmsg">Jmenné ID CQ u zprávy: %1$s</string>
+    <string name="m5_name_usage">použití: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Přidat “%1$s” jako kontakt</string>
+    <string name="m5_added_contact">přidán kontakt %1$s</string>
+    <string name="m5_could_not_add">nelze přidat (účet nebyl viděn)</string>
+    <string name="m5_invite_qr">QR kód pozvánky</string>
+    <string name="m5_share">Sdílet</string>
+    <string name="m5_close">Zavřít</string>
+
+    <!-- ===== ChatNet: přívětivé chyby přenosu ===== -->
+    <string name="net_host_unreachable_tor">hostitel nedostupný přes Tor — jeho onion neodpověděl (offline nebo dosud znovu nezveřejněn)</string>
+    <string name="net_timed_out_host">vypršel čas při spojení s hostitelem (nedostupný z této sítě?)</string>
+    <string name="net_tor_not_ready">Tor ještě není připraven (stále se spouští)</string>
+    <string name="net_cant_reconnect_no_invite">nelze se znovu připojit — žádná uložená pozvánka pro tento chat</string>
+    <string name="net_unknown_error">neznámá chyba</string>
+
+    <!-- ===== QrScanActivity: nápovědy skeneru + obnovení oprávnění kamery ===== -->
+    <string name="qr_point_at_talkrypt">Namiřte na QR kód talkrypt</string>
+    <string name="qr_cancel_scan">Zrušit skenování</string>
+    <string name="qr_open_app_settings">Otevřít nastavení aplikace</string>
+    <string name="qr_camera_access_off">Přístup ke kameře je vypnutý — povolte jej ke skenování, nebo zrušte a místo toho vložte pozvánku.</string>
+    <string name="qr_no_camera_found">Nenalezena žádná kamera</string>
+    <string name="qr_camera_error">Chyba kamery %1$d</string>
+    <string name="qr_camera_unavailable">Kamera nedostupná: %1$s</string>
+    <string name="qr_camera_config_failed">Konfigurace kamery se nezdařila</string>
+    <string name="qr_not_talkrypt_keep_scanning">Není to QR kód talkrypt — pokračujte ve skenování</string>
+
+    <!-- ===== ChatService: oznámení služby na popředí + opětovné připojení ===== -->
+    <string name="svc_reconnecting">opětovné připojování “%1$s” přes %2$s…</string>
+    <string name="svc_reconnected">znovu připojeno “%1$s” přes %2$s</string>
+    <string name="svc_reconnect_failed_retry">opětovné připojení “%1$s” se nezdařilo (%2$s): %3$s — opakování…</string>
+    <string name="svc_reconnect_failed">opětovné připojení “%1$s” se nezdařilo (%2$s): %3$s</string>
+    <string name="svc_channel_name">připojení talkrypt</string>
+    <string name="svc_status_none">žádné stále zapnuté chaty</string>
+    <string name="svc_status_all_connected">%1$d stále zapnutých · vše připojeno</string>
+    <string name="svc_status_partial">%1$d stále zapnutých · %2$d připojeno, %3$d offline</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Rádia/majáky v okolí: chyby zobrazené uživateli ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct není na tomto zařízení podporováno</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct je zaneprázdněno — zkuste to za okamžik znovu</string>
+    <string name="radio_wifidirect_wifi_off">Zapněte Wi-Fi pro použití Wi-Fi Direct</string>
+    <string name="radio_wifidirect_error">Chyba Wi-Fi Direct</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct selhalo (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Oprávnění Wi-Fi v okolí odepřeno</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct nedostupné</string>
+    <string name="radio_wifidirect_connect_failed">Připojení Wi-Fi Direct se nezdařilo (%1$d)</string>
+    <string name="radio_wifidirect_peer">Protějšek Wi-Fi Direct</string>
+    <string name="radio_ble_bt_off">Bluetooth je vypnutý</string>
+    <string name="radio_ble_no_scanner">Žádný BLE skener</string>
+    <string name="radio_ble_scan_failed">Skenování BLE se nezdařilo (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Oprávnění ke skenování Bluetooth odepřeno</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth je vypnutý</string>
+    <string name="radio_beacon_ble_no_scanner">Žádný BLE skener</string>
+    <string name="radio_beacon_ble_scan_failed">Skenování BLE se nezdařilo (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Oprávnění ke skenování Bluetooth odepřeno</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD nedostupné</string>
+    <string name="radio_beacon_wifi_discovery_failed">zjišťování se nezdařilo (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">chyba zjišťování</string>
+</resources>

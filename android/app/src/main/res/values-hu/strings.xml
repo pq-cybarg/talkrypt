@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Magyar nyelvű karakterlánc katalógus a talkrypt Android alkalmazáshoz.
+
+  A lokalizáció az Android erőforrás rendszerére épül: minden felhasználó számára
+  látható karakterlánc, amelyet a Context ismerő felületi réteg jelenít meg, a
+  Loc.s(R.string.*) függvényen megy keresztül (lásd Loc.kt), amely az eszköz
+  aktuális területi beállítása szerint oldódik fel. Új nyelv hozzáadásához helyezz
+  el egy res/values-<lang>/strings.xml fájlt ugyanazokkal a lefordított nevekkel
+  (lásd values-es).
+
+  NEM tanúsított / NEM auditált (az egész projektre). A biztonsági/felelősség
+  kizáró szöveg itt szó szerint szerepel, és minden területi beállításban hűen
+  kell lefordítani (soha nem megerősítve tanúsítási/megfelelőségi állítássá).
+
+  A szándékosan felület nélküli megosztott modell (ChatEvents.kt) rövid
+  állapotsorokat állít elő forráskódbeli angolul, tervezés szerint (fejléc nélkül
+  tesztelve a sima JVM felett, ahol nincs erőforrás tábla; az AndroidX hiánya
+  kizárja a Robolectricet). A partnerek üzeneteinek szövegét a felhasználó írja, és
+  soha nem fordítjuk le. Lásd a megjegyzést a ChatEvents.kt fájlban.
+
+  Megjegyzés: a "talkrypt" márkanevet szándékosan nem fordítjuk le.
+-->
+<resources>
+
+    <!-- ===== MainActivity: új csevegés, csevegéslista, csevegéssor menü (m1 tartomány) ===== -->
+    <string name="m1_opening_invite">meghívó megnyitása…</string>
+    <string name="m1_not_a_talkrypt_qr">Nem talkrypt QR-kód</string>
+    <string name="m1_nym_credential_imported">Nym hitelesítő adat importálva — fizetős mixnet kész (nincs szükség mnemonikra)</string>
+    <string name="m1_import_failed">importálás sikertelen: %1$s</string>
+    <string name="m1_new_chat">Új csevegés</string>
+    <string name="m1_channel">CSATORNA</string>
+    <string name="m1_posture">BIZTONSÁGI SZINT</string>
+    <string name="m1_access">HOZZÁFÉRÉS</string>
+    <string name="m1_name_display_signal_style">Signal-stílus (csak jelvények)</string>
+    <string name="m1_name_display_warn">Figyelmeztetés a hasonló nevek ütközésére</string>
+    <string name="m1_name_display_suppress">Ütköző nevek elrejtése</string>
+    <string name="m1_name_display">NÉVMEGJELENÍTÉS</string>
+    <string name="m1_persistence_ephemeral">Ideiglenes (csak memória)</string>
+    <string name="m1_persistence_persistent">Tartós (mentve, újracsatlakoztatható)</string>
+    <string name="m1_persistence_always_on">Mindig bekapcsolva (2. fázis)</string>
+    <string name="m1_persistence">TARTÓSSÁG</string>
+    <string name="m1_route_over_tor">Útvonal Toron keresztül (.onion; lassan indul)</string>
+    <string name="m1_route_over_nym">Útvonal a Nym mixneten keresztül is (választható; a meghívót több hálózatra teszi)</string>
+    <string name="m1_paid_nym_bandwidth">A fizetős Nym sávszélesség (tárcamnemonik / hitelesítő adat) a Beállításokban állítható be.</string>
+    <string name="m1_host_a_chat">Csevegés üzemeltetése</string>
+    <string name="m1_registry_restricted_chat">Névjegyzékre korlátozott csevegés</string>
+    <string name="m1_or_join">— vagy csatlakozás —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Csatlakozás</string>
+    <string name="m1_paste_invite">talkrypt:// meghívó beillesztése</string>
+    <string name="m1_scan_qr">QR-kód beolvasása</string>
+    <string name="m1_in_person">— személyesen —</string>
+    <string name="m1_find_nearby_host">Közeli üzemeltető keresése (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Alkalmazás megosztása (P2P Wi-Fin keresztül)</string>
+    <string name="m1_back">Vissza</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Továbbiak</string>
+    <string name="m1_new_chat_button">＋  Új csevegés</string>
+    <string name="m1_no_chats_yet">Még nincsenek csevegések — koppints a ＋ gombra az üzemeltetéshez vagy csatlakozáshoz.</string>
+    <string name="m1_preview_you">te: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">üzemeltetés</string>
+    <string name="m1_joined">csatlakozva</string>
+    <string name="m1_preview_members">%1$s · %2$d tag</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">offline</string>
+    <string name="m1_online">online</string>
+    <string name="m1_online_count">%1$d online</string>
+    <string name="m1_connecting">csatlakozás</string>
+    <string name="m1_time_now">most</string>
+    <string name="m1_time_minutes">%1$dp</string>
+    <string name="m1_time_hours">%1$dó</string>
+    <string name="m1_time_days">%1$dn</string>
+    <string name="m1_no_invite">nincs meghívó</string>
+    <string name="m1_safety_number_title">Biztonsági szám</string>
+    <string name="m1_safety_number_body">%1$s\n\nHasonlítsd össze ezt a partnereddel egy másik csatornán keresztül; az eltérés azt jelenti, hogy a csatorna nem azzal beszél, akivel gondolod.</string>
+    <string name="m1_copy">Másolás</string>
+    <string name="m1_copied">másolva</string>
+    <string name="m1_close">Bezárás</string>
+
+    <!-- ===== MainActivity: beállítások, identitás, nym, biztonság (m2 tartomány) ===== -->
+    <string name="m2_delete_chat_title">„%1$s” törlése?</string>
+    <string name="m2_delete_chat_body">Törli ezt a csevegést és előzményeit erről az eszközről. Ez nem vonható vissza.</string>
+    <string name="m2_delete">Törlés</string>
+    <string name="m2_connect_first">előbb csatlakozz</string>
+    <string name="m2_beacon_msg">jeladó: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 a csevegés sugárzása a közelben (BLE + Wi-Fi) + keresés</string>
+    <string name="m2_nearby_beacon_stopped">a közeli jeladó leállt</string>
+    <string name="m2_no_ble_scanner">nincs BLE kereső</string>
+    <string name="m2_mesh_linked">📻 háló: %1$s csomópont összekapcsolva — az üzenetek LoRán is utaznak</string>
+    <string name="m2_mesh_scan_failed">háló: BLE keresés sikertelen (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 %1$s csomópont keresése BLE-n keresztül…</string>
+    <string name="m2_ble_scan_denied">BLE keresési engedély megtagadva</string>
+    <string name="m2_mesh_stopped">háló leállítva</string>
+    <string name="m2_start_beacon_first">előbb indítsd el a jeladót</string>
+    <string name="m2_no_blob_yet">még nincs hirdetett adat — próbáld újra egy pillanat múlva</string>
+    <string name="m2_beacon_selftest">jeladó önteszt: visszatápláltuk a saját lezárt jeladónkat (várj egy 📡 észlelést)</string>
+    <string name="m2_callsigns">Hívójelek</string>
+    <string name="m2_callsigns_desc">Nevek, amelyeket az üzeneteiddel sugárzol ebben a csevegésben.</string>
+    <string name="m2_connect_to_manage_names">Csatlakozz ehhez a csevegéshez a nevek kezeléséhez.</string>
+    <string name="m2_back">Vissza</string>
+    <string name="m2_your_names">A NEVEID</string>
+    <string name="m2_none_yet_add">Még egy sincs — adj hozzá egyet alább.</string>
+    <string name="m2_use">Használat</string>
+    <string name="m2_calling_as">„%1$s” néven jelentkezel</string>
+    <string name="m2_failed">sikertelen</string>
+    <string name="m2_removed">eltávolítva</string>
+    <string name="m2_new_callsign">Új hívójel</string>
+    <string name="m2_save_to_name_book">Mentés a névkönyvbe</string>
+    <string name="m2_set_announce_now">Beállítás + azonnali bejelentés</string>
+    <string name="m2_set_verified">Beállítás MEGERŐSÍTETTKÉNT (🔗 fiókhoz kötve)</string>
+    <string name="m2_verified_name">megerősített név: „%1$s”</string>
+    <string name="m2_verified_desc">A megerősítés a fiókkulcsodat használja, így egy nevet nem tud meghamisítani egy másik tag.</string>
+    <string name="m2_cq_beacon">CQ JELADÓ</string>
+    <string name="m2_periodic_on">Időszakos újrasugárzás: BE (5 perc)</string>
+    <string name="m2_periodic_off">Időszakos újrasugárzás: ki</string>
+    <string name="m2_onmsg_on">Üzenet melletti név-azonosító: BE</string>
+    <string name="m2_onmsg_off">Üzenet melletti név-azonosító: ki</string>
+    <string name="m2_onmsg_desc">Az üzenet melletti név-azonosító lehetővé teszi, hogy a partnerek észrevegyék, ha átnevezed magad, és elvessék az elavult hívójeled.</string>
+    <string name="m2_show_others">MÁSOK NEVEINEK MEGJELENÍTÉSE</string>
+    <string name="m2_nametrust_signal">Signal-stílus (csak jelvények)</string>
+    <string name="m2_nametrust_warn">Figyelmeztetés a hasonló nevek ütközésére</string>
+    <string name="m2_nametrust_suppress">Ütköző nevek elrejtése</string>
+    <string name="m2_apply_nametrust">Név-bizalom beállítás alkalmazása</string>
+    <string name="m2_nametrust_set">név-bizalom: %1$s</string>
+    <string name="m2_tighten_only">A csevegés alapbeállítását csak szigorítani tudod, lazítani soha.</string>
+    <string name="m2_whos_here">KI VAN ITT</string>
+    <string name="m2_safety_suffix">  ·  biztonság %1$s</string>
+    <string name="m2_safety_number">biztonsági szám: %1$s</string>
+    <string name="m2_share_invite">Meghívó megosztása</string>
+    <string name="m2_more">Továbbiak</string>
+    <string name="m2_anchors">Horgonyok (felhasználónév-jegyzék)</string>
+    <string name="m2_contacts">Névjegyek</string>
+    <string name="m2_linked_devices">Összekapcsolt eszközök</string>
+    <string name="m2_segments">Szegmensek (kontextuális identitások)</string>
+    <string name="m2_settings">Beállítások</string>
+    <string name="m2_seal_mnemonic_err">nem sikerült lezárni a mnemonikot: %1$s</string>
+    <string name="m2_identity">IDENTITÁS</string>
+    <string name="m2_account_safety_number">Fiók biztonsági szám</string>
+    <string name="m2_deriving">levezetés…</string>
+    <string name="m2_still_deriving">levezetés folyamatban…</string>
+    <string name="m2_copied">másolva</string>
+    <string name="m2_linked_secondary">Összekapcsolva másodlagos eszközként</string>
+    <string name="m2_account_short">fiók %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">BIZTONSÁG</string>
+    <string name="m2_key_custody_loading">Kulcsőrzés: …</string>
+    <string name="m2_key_custody_desc">Hol tudja ez az eszköz tárolni a kulcsokat (StrongBox &gt; TEE &gt; szoftver). A partnereknek az őrzési szintedként jelentve.</string>
+    <string name="m2_safety_tap_copy">%1$s — koppints a másoláshoz. Hasonlítsd össze egy másik csatornán az azonosításodhoz.</string>
+    <string name="m2_key_custody">Kulcsőrzés: %1$s</string>
+    <string name="m2_secrets_sealed">A titkok nyugalmi állapotban lezárva</string>
+    <string name="m2_secrets_sealed_desc">Az identitásmagok és a Nym mnemonik egy nem exportálható Android Keystore kulccsal vannak titkosítva (StrongBox, ha elérhető).</string>
+    <string name="m2_sealing_degraded">A lezárás korlátozott</string>
+    <string name="m2_sealing_degraded_desc">A Keystore jelentése: %1$s. Azok a titkok, amelyeket nem sikerült lezárni, az alkalmazás saját, titkosítatlan tárolójában maradnak, amíg helyre nem áll.</string>
+    <string name="m2_nym_paid_bw">NYM FIZETŐS SÁVSZÉLESSÉG (OPCIONÁLIS)</string>
+    <string name="m2_nym_mnemonic_hint">NYM tárcamnemonik — üres = ingyenes mixnet</string>
+    <string name="m2_show_mnemonic">Mnemonik megjelenítése</string>
+    <string name="m2_ticketbook_desc">Vagy importálj egy saját Nym eszközeiddel létrehozott ticketbook hitelesítő adatot (a tárca magja soha nem kerül be ebbe az alkalmazásba):</string>
+    <string name="m2_import_nym_cred">Nym hitelesítő adat importálása</string>
+    <string name="m2_network_defaults">HÁLÓZATI ALAPÉRTELMEZÉSEK ÚJ CSEVEGÉSEKHEZ</string>
+    <string name="m2_route_tor">Útvonal Toron keresztül (.onion)</string>
+    <string name="m2_route_nym">Útvonal a Nym mixneten keresztül is</string>
+    <string name="m2_notifications">ÉRTESÍTÉSEK</string>
+    <string name="m2_always_on_chats">Mindig bekapcsolt csevegések</string>
+    <string name="m2_always_on_desc">Egy előtérbeli szolgáltatás tartja kapcsolatban, állandó értesítéssel. Koppints a rendszerbeállításokban való módosításhoz.</string>
+    <string name="m2_open_notif_err">nem sikerült megnyitni az értesítési beállításokat</string>
+    <string name="m2_about">NÉVJEGY</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Poszt-kvantum végpontok közötti titkosított csevegés Toron keresztül. NEM tanúsított · NEM akkreditált · NEM auditált — kísérleti szoftver; a besorolási jelölések csak tájékoztató jellegű címkék.</string>
+    <string name="m2_contacts_desc">Fiókok, amelyeket felismersz. Csak felismerés — a névjegy (vagy barát) státusz nem ad csatornahozzáférést; azt csevegésenként kell beállítani.</string>
+    <string name="m2_no_contacts">Még nincsenek névjegyek. Egy csevegésben, amikor egy fiók bemutatkozik, koppints a „Hozzáadás névjegyként” lehetőségre.</string>
+    <string name="m2_friend_suffix">  [barát]</string>
+    <string name="m2_starting_share">helyi megosztás indítása…</string>
+    <string name="m2_no_wifi">Nincs Wi-Fi/LAN cím — előbb csatlakozz egy Wi-Fi hálózathoz vagy hotspothoz</string>
+    <string name="m2_share_talkrypt">talkrypt megosztása</string>
+    <string name="m2_share_instructions">Ugyanazon a Wi-Fin vagy hotspoton a másik telefon beolvassa ezt a kódot (vagy megnyitja az URL-t), letölti az alkalmazást, és telepíti (engedélyezd egyszer az „ismeretlen alkalmazások telepítését”).</string>
+    <string name="m2_apk_computing">APK SHA-256: számítás…</string>
+
+    <!-- ===== MainActivity: kulcsőrzés, szegmensek, közeli felderítés (m3 tartomány) ===== -->
+    <string name="m3_accept_link_on_this_device">Összekapcsolás elfogadása ezen az eszközön</string>
+    <string name="m3_account_prefix">fiók %1$s…</string>
+    <string name="m3_already_linking">összekapcsolás már folyamatban…</string>
+    <string name="m3_already_starting">indítás már folyamatban…</string>
+    <string name="m3_apk_fingerprint_failed">nem sikerült kiszámítani az APK ujjlenyomatát</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (első 16): %1$s — ellenőrizd a fogadó telefonon</string>
+    <string name="m3_back">Vissza</string>
+    <string name="m3_beacon_perm_needed">a közeli jeladáshoz / hálóhoz Bluetooth engedély szükséges</string>
+    <string name="m3_broadcasting_nearby">sugárzás a közelben (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Mégse</string>
+    <string name="m3_create_segment">Szegmens létrehozása</string>
+    <string name="m3_created_segment">létrehozott szegmens: „%1$s”</string>
+    <string name="m3_delete">Törlés</string>
+    <string name="m3_delete_name">„%1$s” törlése</string>
+    <string name="m3_delete_segment_body">Törli ennek a szegmensnek a kulcsát — az alatta csatlakoztatott csevegésekhez nem lehet ugyanazzal az identitással újracsatlakozni. Ez nem vonható vissza.</string>
+    <string name="m3_delete_segment_q">„%1$s” szegmens törlése?</string>
+    <string name="m3_device_not_linked">ez az eszköz nincs összekapcsolva</string>
+    <string name="m3_device_prefix">eszköz %1$s…</string>
+    <string name="m3_done">Kész</string>
+    <string name="m3_hint_work">munka</string>
+    <string name="m3_join_a_chat">CSATLAKOZÁS CSEVEGÉSHEZ (talkrypt:// meghívó)</string>
+    <string name="m3_join_as_name">Csatlakozás „%1$s” néven</string>
+    <string name="m3_join_as_this_account">Csatlakozás ezzel a fiókkal</string>
+    <string name="m3_join_chat_as_account">CSATLAKOZÁS CSEVEGÉSHEZ EZZEL A FIÓKKAL (talkrypt:// meghívó)</string>
+    <string name="m3_join_failed">csatlakozás sikertelen: %1$s</string>
+    <string name="m3_join_peer">Csatlakozás: %1$s</string>
+    <string name="m3_joined_as_linked_account">csatlakozva összekapcsolt fiókként</string>
+    <string name="m3_joined_as_segment">csatlakozva „%1$s” szegmensként</string>
+    <string name="m3_joining_as_linked">csatlakozás összekapcsolt fiókként…</string>
+    <string name="m3_joining_as_name">csatlakozás „%1$s” néven…</string>
+    <string name="m3_link_another_device">MÁSIK ESZKÖZ ÖSSZEKAPCSOLÁSA A FIÓKOMMAL</string>
+    <string name="m3_link_another_device_desc">Ez az eszköz tárolja a fiókot. Mutass egy egyszer használatos QR-kódot, amelyet az új eszköz beolvas.</string>
+    <string name="m3_link_failed">összekapcsolás sikertelen: %1$s</string>
+    <string name="m3_link_offer_failed">összekapcsolási ajánlat sikertelen: %1$s</string>
+    <string name="m3_link_offer_label">ÖSSZEKAPCSOLÁSI AJÁNLAT (talkrypt:// az elsődlegestől)</string>
+    <string name="m3_link_offer_running">Összekapcsolási ajánlat fut</string>
+    <string name="m3_link_offer_running_desc">Az ÚJ eszközön olvasd be ezt (vagy illeszd be az URI-t az Összekapcsolt eszközök → Összekapcsolás elfogadása menüben). A fiókkulcs ezen az eszközön marad.</string>
+    <string name="m3_link_this_device_desc">Ez EZT az eszközt tanúsítja az összekapcsolást felkínáló fiók alatt. Utána egy másik csatornán ellenőrizd, hogy a megjelenített fiók biztonsági szám egyezik a másik eszközével.</string>
+    <string name="m3_link_this_device_q">Összekapcsolod ezt az eszközt?</string>
+    <string name="m3_link_this_device_to_account">EZ AZ ESZKÖZ ÖSSZEKAPCSOLÁSA EGY FIÓKKAL</string>
+    <string name="m3_linked_devices">Összekapcsolt eszközök</string>
+    <string name="m3_linked_devices_desc">Kapcsold össze ezt az eszközt a fiókoddal egy másik eszközön, hogy a névjegyek az összes eszközödet egy fiókként ismerjék fel. A fiókkulcs soha nem hagyja el az azt tároló eszközt — csak egy aláírt tanúsítvány kerül át a hálózaton.</string>
+    <string name="m3_linked_to_account">összekapcsolva a(z) %1$s fiókkal…</string>
+    <string name="m3_linking_this_device">eszköz összekapcsolása…</string>
+    <string name="m3_loading_segments">szegmensek betöltése…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">nevezd el a szegmenst</string>
+    <string name="m3_nearby_hosts">Közeli üzemeltetők</string>
+    <string name="m3_nearby_perm_needed">a közeli felderítéshez Bluetooth / közeli Wi-Fi engedély szükséges</string>
+    <string name="m3_nearby_scanning">Keresés Bluetooth LE-n és Wi-Fi Directen keresztül. Koppints egy üzemeltetőre a csatlakozáshoz.</string>
+    <string name="m3_new_segment">— új szegmens —</string>
+    <string name="m3_no_segments_yet">Még nincsenek szegmensek — hozz létre egyet alább.</string>
+    <string name="m3_notifications_blocked">az értesítések le vannak tiltva — a mindig bekapcsolt csevegések továbbra is futnak, de állapotértesítés nélkül</string>
+    <string name="m3_or_relink">— vagy újrakapcsolás —</string>
+    <string name="m3_paste_link_offer_uri">illeszd be az összekapcsolási ajánlat URI-ját</string>
+    <string name="m3_paste_talkrypt_invite">illeszd be egy talkrypt:// meghívót</string>
+    <string name="m3_paste_talkrypt_invite_above">illeszd be fentebb egy talkrypt:// meghívót</string>
+    <string name="m3_qr_too_large">(a QR túl nagy a megjelenítéshez — használd a szöveget)</string>
+    <string name="m3_rooted_at_device_account">ennek az eszköznek a fiókjához kötve</string>
+    <string name="m3_rooted_at_linked_account">az összekapcsolt fiókodhoz kötve: %1$s…</string>
+    <string name="m3_safety_prefix">biztonság %1$s…</string>
+    <string name="m3_seal_segments_failed">nem sikerült lezárni a szegmenseket: %1$s</string>
+    <string name="m3_segment_name_label">SZEGMENS NEVE (kontextuscímke)</string>
+    <string name="m3_segments">Szegmensek</string>
+    <string name="m3_segments_desc">Kontextuális al-identitások a fiókod alatt. Minden szegmens a saját kulcsával hitelesít, így a különböző szegmensek nem köthetők össze egymással — ám egy névjegy, amely felismeri a fiókodat, minden szegmenst felismer. Használj egyet kontextusonként (munka, aktivizmus, …).</string>
+    <string name="m3_start_link_offer">Összekapcsolási ajánlat indítása</string>
+    <string name="m3_starting_link_offer">összekapcsolási ajánlat indítása…</string>
+    <string name="m3_this_device_is_linked">EZ AZ ESZKÖZ ÖSSZE VAN KAPCSOLVA</string>
+    <string name="m3_unlink">Szétkapcsolás</string>
+    <string name="m3_unlink_body">Eltávolítja az összekapcsolási tanúsítványt — a névjegyek többé nem ismerik fel ezt az eszközt a fiók részeként, amíg újra össze nem kapcsolod.</string>
+    <string name="m3_unlink_this_device">Eszköz szétkapcsolása</string>
+    <string name="m3_unlink_this_device_q">Szétkapcsolod ezt az eszközt?</string>
+    <string name="m3_unlinked">szétkapcsolva</string>
+    <string name="m3_username_prefix">felhasználónév %1$s</string>
+    <string name="m3_verify_oob_account_sn">ELLENŐRIZD EGY MÁSIK CSATORNÁN — fiók biztonsági szám:</string>
+    <string name="m3_wifi_off">A Wi-Fi ki van kapcsolva — kapcsold be a Wi-Fi Directhez (a Bluetooth továbbra is működik)</string>
+
+    <!-- ===== MainActivity: horgonyok, korlátozott üzemeltetés, csevegés képernyő (m4 tartomány) ===== -->
+    <string name="m4_anchors_title">Horgonyok</string>
+    <string name="m4_anchors_desc">Egy felhasználónév-jegyzék, amelyet létrehozol vagy helyszín alapján megadsz. A nevek fiókkulcsokhoz tartoznak; ellenőrizd a biztonsági számokat egy másik csatornán.</string>
+    <string name="m4_your_account">A FIÓKOD</string>
+    <string name="m4_deriving">levezetés…</string>
+    <string name="m4_unavailable">nem elérhető</string>
+    <string name="m4_spawn_my_anchor">Saját horgony létrehozása</string>
+    <string name="m4_or_use_known_anchor">— vagy használj ismert horgonyt —</string>
+    <string name="m4_anchor_location_label">HORGONY HELYE (talkrypt:// URI)</string>
+    <string name="m4_username_label">FELHASZNÁLÓNÉV</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Felhasználónevem regisztrálása itt</string>
+    <string name="m4_enter_anchor_uri_username">adj meg egy horgony URI-t + felhasználónevet</string>
+    <string name="m4_resolve_this_username">Felhasználónév feloldása</string>
+    <string name="m4_back">Vissza</string>
+    <string name="m4_already_spawning">létrehozás már folyamatban…</string>
+    <string name="m4_spawning_anchor">horgony létrehozása…</string>
+    <string name="m4_anchor_failed">horgony sikertelen: %1$s</string>
+    <string name="m4_anchor_running_title">Horgony fut</string>
+    <string name="m4_anchor_running_desc">Mások itt regisztrálnak/oldanak fel felhasználóneveket. Oszd meg ezt a helyet (olvasd be vagy másold). Addig fut, amíg az alkalmazás nyitva van.</string>
+    <string name="m4_registering">regisztrálás…</string>
+    <string name="m4_register_success">✓ regisztrálva „%1$s” → a fiókod ennél a horgonynál</string>
+    <string name="m4_register_failed">! regisztráció sikertelen: %1$s</string>
+    <string name="m4_resolving">feloldás…</string>
+    <string name="m4_resolve_safety_number">„%1$s” → fiók biztonsági szám:\n%2$s\n(ellenőrizd egy másik csatornán, mielőtt megbíznál benne)</string>
+    <string name="m4_resolve_not_registered">„%1$s” nincs itt regisztrálva (vagy a névjegyzékek nem értettek egyet)</string>
+    <string name="m4_resolve_failed">! feloldás sikertelen: %1$s</string>
+    <string name="m4_registry_restricted_title">Névjegyzékre korlátozott csevegés</string>
+    <string name="m4_registry_restricted_desc">Csak a kiválasztott névjegyzék tagjai csatlakozhatnak: %1$s. Csak olyan névjegyzékeket választhatsz, amelyekhez kötve vagy; az elérhetetlenek (vagy azok, ahol nincs rekordod) ki vannak szürkítve.</string>
+    <string name="m4_not_registered_any_anchor">Még egyetlen horgonynál sem vagy regisztrálva. Nyisd meg a Horgonyokat, és előbb regisztrálj egy felhasználónevet.</string>
+    <string name="m4_checking_anchor">%1$s ellenőrzése …</string>
+    <string name="m4_host_gated_by">Az üzemeltetőt a(z) „%1$s@%2$s” korlátozza</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — elérhetetlen vagy nincs rekord</string>
+    <string name="m4_creating_restricted_chat">korlátozott csevegés létrehozása…</string>
+    <string name="m4_registry_restricted_members">névjegyzékre korlátozott — csak a(z) %1$s horgonytag csatlakozhat</string>
+    <string name="m4_sender_invite">meghívó</string>
+    <string name="m4_restricted_host_failed">korlátozott üzemeltetés sikertelen: %1$s</string>
+    <string name="m4_tier_ephemeral">ideiglenes</string>
+    <string name="m4_tier_always_on">mindig bekapcsolt</string>
+    <string name="m4_tier_persistent">tartós</string>
+    <string name="m4_members_prefix">"%1$s tag · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sbiztonság %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Csevegés menü</string>
+    <string name="m4_message_hint">Üzenet</string>
+    <string name="m4_send">Küldés</string>
+    <string name="m4_delivery_delivered">kézbesítve</string>
+    <string name="m4_delivery_not_delivered">nem kézbesítve</string>
+    <string name="m4_delivery_sent">elküldve</string>
+    <string name="m4_already_creating_chat">csevegés létrehozása már folyamatban…</string>
+    <string name="m4_starting_chat_over">A csevegésed indítása a(z) %1$s felett…</string>
+    <string name="m4_creating_chat">csevegés létrehozása…</string>
+    <string name="m4_hosting_share_invite">üzemeltetés — oszd meg a meghívót, hogy egy barát csatlakozhasson:</string>
+
+    <!-- ===== MainActivity: csatlakozás előkészítése, csatlakozás, küldés, perjeles parancsok (m5 tartomány) ===== -->
+    <string name="m5_host_failed">üzemeltetés sikertelen: %1$s</string>
+    <string name="m5_join_chat">Csatlakozás a csevegéshez</string>
+    <string name="m5_join_restricted_explainer">Ha ez a csevegés névjegyzékre korlátozott, csak tagként engednek be. Mutass be egy élő tagságot, vagy csatlakozz álnéven (csak nyílt csevegésekhez).</string>
+    <string name="m5_no_memberships">Még nincs névjegyzéki tagságod — regisztrálj egy horgonynál a korlátozott csevegésekhez való csatlakozáshoz.</string>
+    <string name="m5_present_a_membership">TAGSÁG BEMUTATÁSA</string>
+    <string name="m5_checking_anchor">%1$s ellenőrzése …</string>
+    <string name="m5_join_as_member">Csatlakozás „%1$s@%2$s” néven</string>
+    <string name="m5_or_separator">— vagy —</string>
+    <string name="m5_join_with_account">Csatlakozás a fiókommal (felhasználónév nélkül)</string>
+    <string name="m5_join_as_pseudonym">Csatlakozás álnéven (nem összeköthető)</string>
+    <string name="m5_back">Vissza</string>
+    <string name="m5_already_joining">csatlakozás már folyamatban…</string>
+    <string name="m5_joined">csatlakozva</string>
+    <string name="m5_as_suffix">" %1$s néven"</string>
+    <string name="m5_joined_as_pseudonym">csatlakozva álnéven</string>
+    <string name="m5_failed">sikertelen: %1$s</string>
+    <string name="m5_join_failed">csatlakozás sikertelen</string>
+    <string name="m5_connecting_title">Csatlakozás</string>
+    <string name="m5_bootstrapping_tor">Tor indítása…</string>
+    <string name="m5_connecting">Csatlakozás…</string>
+    <string name="m5_first_tor_slow">Az első Tor-csatlakozás lassú; a későbbiek azonnaliak.</string>
+    <string name="m5_cancel">Mégse</string>
+    <string name="m5_bootstrapping_tor_pct">Tor indítása… %1$s%%</string>
+    <string name="m5_building_circuit">Áramkör építése + kézfogás…</string>
+    <string name="m5_cant_reconnect">nem lehet újracsatlakozni — nincs mentett meghívó</string>
+    <string name="m5_reconnecting_over">újracsatlakozás a(z) %1$s felett…</string>
+    <string name="m5_reconnected_over">újracsatlakozva a(z) %1$s felett</string>
+    <string name="m5_reconnect_failed_detail">újracsatlakozás sikertelen (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">újracsatlakozás sikertelen</string>
+    <string name="m5_reconnecting_text_kept">újracsatlakozás — a szöveged megmarad, próbáld újra egy pillanat múlva</string>
+    <string name="m5_send_failed">küldés sikertelen</string>
+    <string name="m5_name_book_empty">a névkönyv üres — /name &lt;hívójel&gt; egy hozzáadásához</string>
+    <string name="m5_tier_account_linked">fiókhoz kötve</string>
+    <string name="m5_tier_bare">csupasz</string>
+    <string name="m5_name_list_entry">%1$s%2$s  „%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">„%1$s” elmentve a névkönyvbe</string>
+    <string name="m5_switched_to">átváltva „%1$s” névre és bejelentve</string>
+    <string name="m5_no_saved_name">nincs „%1$s” nevű mentett név</string>
+    <string name="m5_calling_verified">🔗 megerősített „%1$s” néven jelentkezel</string>
+    <string name="m5_name_cleared">név törölve</string>
+    <string name="m5_calling_as">„%1$s” néven jelentkezel</string>
+    <string name="m5_cq_announced">CQ — bejelentette a neved</string>
+    <string name="m5_cq_cadence_off">CQ ütem kikapcsolva</string>
+    <string name="m5_cq_cadence_every">CQ ütem: %1$s percenként</string>
+    <string name="m5_state_on">be</string>
+    <string name="m5_state_off">ki</string>
+    <string name="m5_cq_onmsg">CQ üzenet melletti név-azonosító: %1$s</string>
+    <string name="m5_name_usage">használat: /name &lt;hívójel&gt;|link &lt;hj&gt;|new &lt;hj&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;perc&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">„%1$s” hozzáadása névjegyként</string>
+    <string name="m5_added_contact">névjegy hozzáadva: %1$s</string>
+    <string name="m5_could_not_add">nem sikerült hozzáadni (a fiók nem látható)</string>
+    <string name="m5_invite_qr">Meghívó QR</string>
+    <string name="m5_share">Megosztás</string>
+    <string name="m5_close">Bezárás</string>
+
+    <!-- ===== ChatNet: közérthető transzport hibák ===== -->
+    <string name="net_host_unreachable_tor">az üzemeltető nem érhető el Toron keresztül — az onionja nem válaszolt (offline, vagy még nincs újraközzétéve)</string>
+    <string name="net_timed_out_host">időtúllépés az üzemeltető elérésekor (nem érhető el erről a hálózatról?)</string>
+    <string name="net_tor_not_ready">A Tor még nem áll készen (még indul)</string>
+    <string name="net_cant_reconnect_no_invite">nem lehet újracsatlakozni — nincs mentett meghívó ehhez a csevegéshez</string>
+    <string name="net_unknown_error">ismeretlen hiba</string>
+
+    <!-- ===== QrScanActivity: beolvasási tippek + kamera engedély helyreállítása ===== -->
+    <string name="qr_point_at_talkrypt">Irányítsd egy talkrypt QR-kódra</string>
+    <string name="qr_cancel_scan">Beolvasás megszakítása</string>
+    <string name="qr_open_app_settings">Alkalmazásbeállítások megnyitása</string>
+    <string name="qr_camera_access_off">A kamera-hozzáférés ki van kapcsolva — engedélyezd a beolvasáshoz, vagy szakítsd meg, és illeszd be inkább a meghívót.</string>
+    <string name="qr_no_camera_found">Nem található kamera</string>
+    <string name="qr_camera_error">Kamerahiba %1$d</string>
+    <string name="qr_camera_unavailable">A kamera nem elérhető: %1$s</string>
+    <string name="qr_camera_config_failed">A kamera konfigurálása sikertelen</string>
+    <string name="qr_not_talkrypt_keep_scanning">Nem talkrypt QR-kód — folytasd a beolvasást</string>
+
+    <!-- ===== ChatService: előtérbeli szolgáltatás értesítése + újracsatlakozás ===== -->
+    <string name="svc_reconnecting">„%1$s” újracsatlakoztatása a(z) %2$s felett…</string>
+    <string name="svc_reconnected">„%1$s” újracsatlakoztatva a(z) %2$s felett</string>
+    <string name="svc_reconnect_failed_retry">„%1$s” újracsatlakoztatása sikertelen (%2$s): %3$s — újrapróbálkozás…</string>
+    <string name="svc_reconnect_failed">„%1$s” újracsatlakoztatása sikertelen (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt kapcsolatok</string>
+    <string name="svc_status_none">nincsenek mindig bekapcsolt csevegések</string>
+    <string name="svc_status_all_connected">%1$d mindig bekapcsolt · mind csatlakoztatva</string>
+    <string name="svc_status_partial">%1$d mindig bekapcsolt · %2$d csatlakoztatva, %3$d offline</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Közeli rádiók/jeladók: felhasználónak megjelenített hibák ===== -->
+    <string name="radio_wifidirect_unsupported">A Wi-Fi Direct nem támogatott ezen az eszközön</string>
+    <string name="radio_wifidirect_busy">A Wi-Fi Direct foglalt — próbáld újra egy pillanat múlva</string>
+    <string name="radio_wifidirect_wifi_off">Kapcsold be a Wi-Fit a Wi-Fi Direct használatához</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct hiba</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct sikertelen (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Közeli Wi-Fi engedély megtagadva</string>
+    <string name="radio_wifidirect_unavailable">A Wi-Fi Direct nem elérhető</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct csatlakozás sikertelen (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct partner</string>
+    <string name="radio_ble_bt_off">A Bluetooth ki van kapcsolva</string>
+    <string name="radio_ble_no_scanner">Nincs BLE kereső</string>
+    <string name="radio_ble_scan_failed">BLE keresés sikertelen (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth keresési engedély megtagadva</string>
+    <string name="radio_beacon_ble_bt_off">A Bluetooth ki van kapcsolva</string>
+    <string name="radio_beacon_ble_no_scanner">Nincs BLE kereső</string>
+    <string name="radio_beacon_ble_scan_failed">BLE keresés sikertelen (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth keresési engedély megtagadva</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">Az NSD nem elérhető</string>
+    <string name="radio_beacon_wifi_discovery_failed">felderítés sikertelen (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">felderítési hiba</string>
+</resources>

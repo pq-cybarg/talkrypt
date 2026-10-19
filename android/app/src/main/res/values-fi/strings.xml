@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Suomenkielinen merkkijonoluettelo talkrypt-Android-sovellukselle.
+
+  Lokalisointi nojaa Androidin resurssijärjestelmään: jokainen käyttäjälle
+  näkyvä merkkijono, jonka Context-tietoinen käyttöliittymäkerros piirtää, kulkee
+  Loc.s(R.string.*) -kutsun kautta (katso Loc.kt), joka ratkaistaan laitteen
+  nykyisen kieliasetuksen mukaan. Lisätäksesi kielen pudota
+  res/values-<lang>/strings.xml, jossa on samat nimet käännettyinä (katso values-es).
+
+  EI sertifioitu / EI auditoitu (koko projektissa). Turvallisuus- ja
+  vastuuvapauslausekkeiden teksti säilytetään tässä sanatarkasti ja se on
+  käännettävä uskollisesti (koskaan vahvistamatta sitä sertifiointi- tai
+  vaatimustenmukaisuusväitteeksi) jokaisessa kieliasetuksessa.
+
+  Tarkoituksellisesti käyttöliittymätön jaettu malli (ChatEvents.kt) tuottaa
+  lyhyitä tilarivejä lähdekoodin englanniksi tarkoituksella (yksikkötestattu
+  headless-tilassa tavallisella JVM:llä, jossa resurssitaulua ei ole; AndroidX:n
+  puuttuminen estää Robolectricin). Vertaisviestien sisällöt kirjoittaa käyttäjä,
+  eikä niitä koskaan käännetä. Katso huomautus tiedostosta ChatEvents.kt.
+
+  Huomautus: brändinimeä "talkrypt" ei tarkoituksella käännetä.
+-->
+<resources>
+
+    <!-- ===== MainActivity: uusi keskustelu, keskustelulista, keskustelurivin valikko (alue m1) ===== -->
+    <string name="m1_opening_invite">avataan kutsua…</string>
+    <string name="m1_not_a_talkrypt_qr">Ei talkrypt-QR-koodia</string>
+    <string name="m1_nym_credential_imported">Nym-tunnus tuotu — maksullinen mixnet valmis (muistilausetta ei tarvita)</string>
+    <string name="m1_import_failed">tuonti epäonnistui: %1$s</string>
+    <string name="m1_new_chat">Uusi keskustelu</string>
+    <string name="m1_channel">KANAVA</string>
+    <string name="m1_posture">TURVALLISUUSTILA</string>
+    <string name="m1_access">KÄYTTÖOIKEUS</string>
+    <string name="m1_name_display_signal_style">Signal-tyyli (vain merkit)</string>
+    <string name="m1_name_display_warn">Varoita samannäköisistä törmäyksistä</string>
+    <string name="m1_name_display_suppress">Piilota törmäävät nimet</string>
+    <string name="m1_name_display">NIMEN NÄYTTÖ</string>
+    <string name="m1_persistence_ephemeral">Tilapäinen (vain muistissa)</string>
+    <string name="m1_persistence_persistent">Pysyvä (tallennettu, uudelleenyhdistettävä)</string>
+    <string name="m1_persistence_always_on">Aina päällä (vaihe 2)</string>
+    <string name="m1_persistence">PYSYVYYS</string>
+    <string name="m1_route_over_tor">Reititä Torin kautta (.onion; hidas käynnistyä)</string>
+    <string name="m1_route_over_nym">Reititä myös Nym-mixnetin kautta (valinnainen; monikotittaa kutsun)</string>
+    <string name="m1_paid_nym_bandwidth">Maksullinen Nym-kaistanleveys (lompakon muistilause / tunnus) määritetään Asetuksissa.</string>
+    <string name="m1_host_a_chat">Isännöi keskustelua</string>
+    <string name="m1_registry_restricted_chat">Rekisteriin rajattu keskustelu</string>
+    <string name="m1_or_join">— tai liity —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Liity</string>
+    <string name="m1_paste_invite">Liitä talkrypt://-kutsu</string>
+    <string name="m1_scan_qr">Skannaa QR-koodi</string>
+    <string name="m1_in_person">— kasvokkain —</string>
+    <string name="m1_find_nearby_host">Etsi lähellä oleva isäntä (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Jaa sovellus (P2P Wi-Fin kautta)</string>
+    <string name="m1_back">Takaisin</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Lisää</string>
+    <string name="m1_new_chat_button">＋  Uusi keskustelu</string>
+    <string name="m1_no_chats_yet">Ei vielä keskusteluja — napauta ＋ isännöidäksesi tai liittyäksesi.</string>
+    <string name="m1_preview_you">sinä: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">isännöidään</string>
+    <string name="m1_joined">liitytty</string>
+    <string name="m1_preview_members">%1$s · %2$d jäsentä</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">ei verkossa</string>
+    <string name="m1_online">verkossa</string>
+    <string name="m1_online_count">%1$d verkossa</string>
+    <string name="m1_connecting">yhdistetään</string>
+    <string name="m1_time_now">nyt</string>
+    <string name="m1_time_minutes">%1$dmin</string>
+    <string name="m1_time_hours">%1$dt</string>
+    <string name="m1_time_days">%1$dpv</string>
+    <string name="m1_no_invite">ei kutsua</string>
+    <string name="m1_safety_number_title">Turvanumero</string>
+    <string name="m1_safety_number_body">%1$s\n\nVertaa tätä vastapuolesi kanssa erillistä kanavaa pitkin; ristiriita tarkoittaa, että kanava ei keskustele sen kanssa, kenen luulet.</string>
+    <string name="m1_copy">Kopioi</string>
+    <string name="m1_copied">kopioitu</string>
+    <string name="m1_close">Sulje</string>
+
+    <!-- ===== MainActivity: asetukset, identiteetti, nym, turvallisuus (alue m2) ===== -->
+    <string name="m2_delete_chat_title">Poistetaanko ”%1$s”?</string>
+    <string name="m2_delete_chat_body">Poistaa tämän keskustelun ja sen historian tältä laitteelta. Tätä ei voi perua.</string>
+    <string name="m2_delete">Poista</string>
+    <string name="m2_connect_first">yhdistä ensin</string>
+    <string name="m2_beacon_msg">majakka: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 lähetetään majakkaa tästä keskustelusta lähistölle (BLE + Wi-Fi) + skannataan</string>
+    <string name="m2_nearby_beacon_stopped">lähimajakka pysäytetty</string>
+    <string name="m2_no_ble_scanner">ei BLE-skanneria</string>
+    <string name="m2_mesh_linked">📻 mesh: linkitettiin %1$s-solmu — viestit kulkevat myös LoRan kautta</string>
+    <string name="m2_mesh_scan_failed">mesh: BLE-skannaus epäonnistui (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 etsitään %1$s-solmua BLE:n kautta…</string>
+    <string name="m2_ble_scan_denied">BLE-skannausoikeus evätty</string>
+    <string name="m2_mesh_stopped">mesh pysäytetty</string>
+    <string name="m2_start_beacon_first">käynnistä majakka ensin</string>
+    <string name="m2_no_blob_yet">ei vielä mainostettua dataa — yritä hetken kuluttua uudelleen</string>
+    <string name="m2_beacon_selftest">majakan itsetesti: syötettiin oma sinetöity majakka takaisin (odota 📡-havaintoa)</string>
+    <string name="m2_callsigns">Kutsutunnukset</string>
+    <string name="m2_callsigns_desc">Nimet, joita lähetät viestiesi mukana tässä keskustelussa.</string>
+    <string name="m2_connect_to_manage_names">Yhdistä tähän keskusteluun hallitaksesi nimiä.</string>
+    <string name="m2_back">Takaisin</string>
+    <string name="m2_your_names">SINUN NIMESI</string>
+    <string name="m2_none_yet_add">Ei vielä yhtään — lisää alle.</string>
+    <string name="m2_use">Käytä</string>
+    <string name="m2_calling_as">kutsutaan nimellä ”%1$s”</string>
+    <string name="m2_failed">epäonnistui</string>
+    <string name="m2_removed">poistettu</string>
+    <string name="m2_new_callsign">Uusi kutsutunnus</string>
+    <string name="m2_save_to_name_book">Tallenna nimikirjaan</string>
+    <string name="m2_set_announce_now">Aseta + ilmoita nyt</string>
+    <string name="m2_set_verified">Aseta VAHVISTETUKSI (🔗 tiliin linkitetty)</string>
+    <string name="m2_verified_name">vahvistettu nimi ”%1$s”</string>
+    <string name="m2_verified_desc">Vahvistus käyttää tiliavaintasi, jotta toinen jäsen ei voi väärentää nimeä.</string>
+    <string name="m2_cq_beacon">CQ-MAJAKKA</string>
+    <string name="m2_periodic_on">Säännöllinen uudelleenmajakointi: PÄÄLLÄ (5 min)</string>
+    <string name="m2_periodic_off">Säännöllinen uudelleenmajakointi: pois</string>
+    <string name="m2_onmsg_on">Viestikohtainen nimitunniste: PÄÄLLÄ</string>
+    <string name="m2_onmsg_off">Viestikohtainen nimitunniste: pois</string>
+    <string name="m2_onmsg_desc">Viestikohtaisen nimitunnisteen avulla vastapuolet huomaavat, jos vaihdat nimeä, ja hylkäävät vanhentuneen kutsutunnuksesi.</string>
+    <string name="m2_show_others">NÄYTÄ MUIDEN NIMET</string>
+    <string name="m2_nametrust_signal">Signal-tyyli (vain merkit)</string>
+    <string name="m2_nametrust_warn">Varoita samannäköisistä törmäyksistä</string>
+    <string name="m2_nametrust_suppress">Piilota törmäävät nimet</string>
+    <string name="m2_apply_nametrust">Käytä nimiluottamusasetusta</string>
+    <string name="m2_nametrust_set">nimiluottamus: %1$s</string>
+    <string name="m2_tighten_only">Voit vain tiukentaa keskustelun perustasoa, et koskaan löysentää sitä.</string>
+    <string name="m2_whos_here">KETÄ ON PAIKALLA</string>
+    <string name="m2_safety_suffix">  ·  turva %1$s</string>
+    <string name="m2_safety_number">turvanumero: %1$s</string>
+    <string name="m2_share_invite">Jaa kutsu</string>
+    <string name="m2_more">Lisää</string>
+    <string name="m2_anchors">Ankkurit (käyttäjänimihakemisto)</string>
+    <string name="m2_contacts">Yhteystiedot</string>
+    <string name="m2_linked_devices">Linkitetyt laitteet</string>
+    <string name="m2_segments">Segmentit (kontekstuaaliset identiteetit)</string>
+    <string name="m2_settings">Asetukset</string>
+    <string name="m2_seal_mnemonic_err">muistilausetta ei voitu sinetöidä: %1$s</string>
+    <string name="m2_identity">IDENTITEETTI</string>
+    <string name="m2_account_safety_number">Tilin turvanumero</string>
+    <string name="m2_deriving">johdetaan…</string>
+    <string name="m2_still_deriving">johdetaan yhä…</string>
+    <string name="m2_copied">kopioitu</string>
+    <string name="m2_linked_secondary">Linkitetty toissijaiseksi laitteeksi</string>
+    <string name="m2_account_short">tili %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">TURVALLISUUS</string>
+    <string name="m2_key_custody_loading">Avainten säilytys: …</string>
+    <string name="m2_key_custody_desc">Missä tämä laite voi säilyttää avaimia (StrongBox &gt; TEE &gt; ohjelmisto). Ilmoitetaan vastapuolille säilytystasonasi.</string>
+    <string name="m2_safety_tap_copy">%1$s — napauta kopioidaksesi. Vertaa erillistä kanavaa pitkin vahvistaaksesi henkilöllisyytesi.</string>
+    <string name="m2_key_custody">Avainten säilytys: %1$s</string>
+    <string name="m2_secrets_sealed">Salaisuudet sinetöity levossa</string>
+    <string name="m2_secrets_sealed_desc">Identiteettisiemenet ja Nym-muistilause salataan ei-vietävällä Android Keystore -avaimella (StrongBox kun saatavilla).</string>
+    <string name="m2_sealing_degraded">Sinetöinti heikentynyt</string>
+    <string name="m2_sealing_degraded_desc">Keystore ilmoitti: %1$s. Salaisuudet, joita ei voitu sinetöidä, jäävät sovelluksen yksityiseksi selkotekstiksi, kunnes se palautuu.</string>
+    <string name="m2_nym_paid_bw">NYM MAKSULLINEN KAISTANLEVEYS (VALINNAINEN)</string>
+    <string name="m2_nym_mnemonic_hint">NYM-lompakon muistilause — tyhjä = ilmainen mixnet</string>
+    <string name="m2_show_mnemonic">Näytä muistilause</string>
+    <string name="m2_ticketbook_desc">Tai tuo ticketbook-tunnus, joka on luotu omilla Nym-työkaluillasi (lompakon siemen ei koskaan päädy tähän sovellukseen):</string>
+    <string name="m2_import_nym_cred">Tuo Nym-tunnus</string>
+    <string name="m2_network_defaults">UUSIEN KESKUSTELUJEN VERKKOASETUKSET</string>
+    <string name="m2_route_tor">Reititä Torin kautta (.onion)</string>
+    <string name="m2_route_nym">Reititä myös Nym-mixnetin kautta</string>
+    <string name="m2_notifications">ILMOITUKSET</string>
+    <string name="m2_always_on_chats">Aina päällä olevat keskustelut</string>
+    <string name="m2_always_on_desc">Pidetään yhdistettynä edustapalvelulla, jolla on pysyvä ilmoitus. Napauta säätääksesi sitä järjestelmäasetuksissa.</string>
+    <string name="m2_open_notif_err">ilmoitusasetuksia ei voitu avata</string>
+    <string name="m2_about">TIETOJA</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Postkvantti päästä päähän -salattu keskustelu Torin kautta. EI sertifioitu · EI akkreditoitu · EI auditoitu — kokeellista ohjelmistoa; luokittelumerkinnät ovat vain neuvoa-antavia nimilappuja.</string>
+    <string name="m2_contacts_desc">Tilit, jotka tunnistat. Vain tunnistamiseen — yhteystietona (tai kaverina) oleminen ei myönnä kanavan käyttöoikeutta; se asetetaan keskustelukohtaisesti.</string>
+    <string name="m2_no_contacts">Ei vielä yhteystietoja. Kun tili esittäytyy keskustelussa, napauta ”Lisää yhteystiedoksi”.</string>
+    <string name="m2_friend_suffix">  [kaveri]</string>
+    <string name="m2_starting_share">aloitetaan paikallinen jako…</string>
+    <string name="m2_no_wifi">Ei Wi-Fi/LAN-osoitetta — liity ensin Wi-Fi-verkkoon tai yhteyspisteeseen</string>
+    <string name="m2_share_talkrypt">Jaa talkrypt</string>
+    <string name="m2_share_instructions">Samassa Wi-Fissä tai yhteyspisteessä toinen puhelin skannaa tämän koodin (tai avaa URL-osoitteen), lataa sovelluksen ja asentaa sen (salli ”tuntemattomien sovellusten asennus” kerran).</string>
+    <string name="m2_apk_computing">APK SHA-256: lasketaan…</string>
+
+    <!-- ===== MainActivity: säilytys, segmentit, lähietsintä (alue m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Hyväksy linkitys tällä laitteella</string>
+    <string name="m3_account_prefix">tili %1$s…</string>
+    <string name="m3_already_linking">linkitetään jo…</string>
+    <string name="m3_already_starting">käynnistetään jo…</string>
+    <string name="m3_apk_fingerprint_failed">APK:n sormenjälkeä ei voitu laskea</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (ensimmäiset 16): %1$s — vahvista vastaanottavalla puhelimella</string>
+    <string name="m3_back">Takaisin</string>
+    <string name="m3_beacon_perm_needed">lähimajakka / mesh tarvitsee Bluetooth-oikeuden</string>
+    <string name="m3_broadcasting_nearby">lähetetään lähistölle (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">Peruuta</string>
+    <string name="m3_create_segment">Luo segmentti</string>
+    <string name="m3_created_segment">luotiin segmentti ”%1$s”</string>
+    <string name="m3_delete">Poista</string>
+    <string name="m3_delete_name">Poista ”%1$s”</string>
+    <string name="m3_delete_segment_body">Poistaa tämän segmentin avaimen — sen alla liittymiisi keskusteluihin ei voi liittyä uudelleen samana identiteettinä. Tätä ei voi perua.</string>
+    <string name="m3_delete_segment_q">Poistetaanko segmentti ”%1$s”?</string>
+    <string name="m3_device_not_linked">tätä laitetta ei ole linkitetty</string>
+    <string name="m3_device_prefix">laite %1$s…</string>
+    <string name="m3_done">Valmis</string>
+    <string name="m3_hint_work">työ</string>
+    <string name="m3_join_a_chat">LIITY KESKUSTELUUN (talkrypt://-kutsu)</string>
+    <string name="m3_join_as_name">Liity nimellä ”%1$s”</string>
+    <string name="m3_join_as_this_account">Liity tällä tilillä</string>
+    <string name="m3_join_chat_as_account">LIITY KESKUSTELUUN TÄLLÄ TILILLÄ (talkrypt://-kutsu)</string>
+    <string name="m3_join_failed">liittyminen epäonnistui: %1$s</string>
+    <string name="m3_join_peer">Liity %1$s</string>
+    <string name="m3_joined_as_linked_account">liityttiin linkitettynä tilinä</string>
+    <string name="m3_joined_as_segment">liityttiin segmenttinä ”%1$s”</string>
+    <string name="m3_joining_as_linked">liitytään linkitettynä tilinä…</string>
+    <string name="m3_joining_as_name">liitytään nimellä ”%1$s”…</string>
+    <string name="m3_link_another_device">LINKITÄ TOINEN LAITE TILIINI</string>
+    <string name="m3_link_another_device_desc">Tämä laite säilyttää tilin. Näytä kertakäyttöinen QR, jonka uusi laite skannaa.</string>
+    <string name="m3_link_failed">linkitys epäonnistui: %1$s</string>
+    <string name="m3_link_offer_failed">linkitystarjous epäonnistui: %1$s</string>
+    <string name="m3_link_offer_label">LINKITYSTARJOUS (talkrypt:// ensisijaiselta)</string>
+    <string name="m3_link_offer_running">Linkitystarjous käynnissä</string>
+    <string name="m3_link_offer_running_desc">Skannaa tämä UUDELLA laitteella (tai liitä URI kohtaan Linkitetyt laitteet → Hyväksy linkitys). Tiliavain pysyy tällä laitteella.</string>
+    <string name="m3_link_this_device_desc">Tämä sertifioi TÄMÄN laitteen linkitystä tarjoavan tilin alle. Tarkista jälkeenpäin erillistä kanavaa pitkin, että näytetty tilin turvanumero vastaa toista laitetta.</string>
+    <string name="m3_link_this_device_q">Linkitetäänkö tämä laite?</string>
+    <string name="m3_link_this_device_to_account">LINKITÄ TÄMÄ LAITE TILIIN</string>
+    <string name="m3_linked_devices">Linkitetyt laitteet</string>
+    <string name="m3_linked_devices_desc">Linkitä tämä laite tiliisi toisella laitteella, jotta yhteystiedot tunnistavat kaikki laitteesi yhdeksi tiliksi. Tiliavain ei koskaan poistu sitä säilyttävältä laitteelta — vain allekirjoitettu sertifikaatti kulkee verkon yli.</string>
+    <string name="m3_linked_to_account">linkitetty tiliin %1$s…</string>
+    <string name="m3_linking_this_device">linkitetään tätä laitetta…</string>
+    <string name="m3_loading_segments">ladataan segmenttejä…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">nimeä segmentti</string>
+    <string name="m3_nearby_hosts">Lähellä olevat isännät</string>
+    <string name="m3_nearby_perm_needed">lähietsintä tarvitsee Bluetooth / lähi-Wi-Fi-oikeuden</string>
+    <string name="m3_nearby_scanning">Skannataan Bluetooth LE:n ja Wi-Fi Directin kautta. Napauta isäntää liittyäksesi.</string>
+    <string name="m3_new_segment">— uusi segmentti —</string>
+    <string name="m3_no_segments_yet">Ei vielä segmenttejä — luo yksi alle.</string>
+    <string name="m3_notifications_blocked">ilmoitukset estetty — aina päällä olevat keskustelut toimivat silti, mutta ilman tilailmoitusta</string>
+    <string name="m3_or_relink">— tai linkitä uudelleen —</string>
+    <string name="m3_paste_link_offer_uri">liitä linkitystarjouksen URI</string>
+    <string name="m3_paste_talkrypt_invite">liitä talkrypt://-kutsu</string>
+    <string name="m3_paste_talkrypt_invite_above">liitä talkrypt://-kutsu yläpuolelle</string>
+    <string name="m3_qr_too_large">(QR liian suuri näytettäväksi — käytä tekstiä)</string>
+    <string name="m3_rooted_at_device_account">juurrutettu tämän laitteen tiliin</string>
+    <string name="m3_rooted_at_linked_account">juurrutettu linkitettyyn tiliisi %1$s…</string>
+    <string name="m3_safety_prefix">turva %1$s…</string>
+    <string name="m3_seal_segments_failed">segmenttejä ei voitu sinetöidä: %1$s</string>
+    <string name="m3_segment_name_label">SEGMENTIN NIMI (kontekstimerkintä)</string>
+    <string name="m3_segments">Segmentit</string>
+    <string name="m3_segments_desc">Kontekstuaaliset ali-identiteetit tilisi alla. Jokainen segmentti todennetaan omalla avaimellaan, joten eri segmenttejä ei voi yhdistää toisiinsa — mutta yhteystieto, joka tunnistaa tilisi, tunnistaa jokaisen segmentin. Käytä yhtä kutakin kontekstia kohti (työ, aktivismi, …).</string>
+    <string name="m3_start_link_offer">Aloita linkitystarjous</string>
+    <string name="m3_starting_link_offer">aloitetaan linkitystarjousta…</string>
+    <string name="m3_this_device_is_linked">TÄMÄ LAITE ON LINKITETTY</string>
+    <string name="m3_unlink">Poista linkitys</string>
+    <string name="m3_unlink_body">Poistaa linkityssertifikaatin — yhteystiedot eivät enää tunnista tätä laitetta osaksi tiliä, ennen kuin linkität uudelleen.</string>
+    <string name="m3_unlink_this_device">Poista tämän laitteen linkitys</string>
+    <string name="m3_unlink_this_device_q">Poistetaanko tämän laitteen linkitys?</string>
+    <string name="m3_unlinked">linkitys poistettu</string>
+    <string name="m3_username_prefix">käyttäjänimi %1$s</string>
+    <string name="m3_verify_oob_account_sn">VAHVISTA ERILLISTÄ KANAVAA PITKIN — tilin turvanumero:</string>
+    <string name="m3_wifi_off">Wi-Fi on pois päältä — ota se käyttöön Wi-Fi Directiä varten (Bluetooth toimii silti)</string>
+
+    <!-- ===== MainActivity: ankkurit, rajattu isännöinti, keskustelunäkymä (alue m4) ===== -->
+    <string name="m4_anchors_title">Ankkurit</string>
+    <string name="m4_anchors_desc">Käyttäjänimihakemisto, jonka luot tai johon osoitat sijainnin perusteella. Nimet yhdistyvät tiliavaimiin; vahvista turvanumerot erillistä kanavaa pitkin.</string>
+    <string name="m4_your_account">SINUN TILISI</string>
+    <string name="m4_deriving">johdetaan…</string>
+    <string name="m4_unavailable">ei saatavilla</string>
+    <string name="m4_spawn_my_anchor">Luo oma ankkuri</string>
+    <string name="m4_or_use_known_anchor">— tai käytä tunnettua ankkuria —</string>
+    <string name="m4_anchor_location_label">ANKKURIN SIJAINTI (talkrypt://-URI)</string>
+    <string name="m4_username_label">KÄYTTÄJÄNIMI</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Rekisteröi käyttäjänimeni tänne</string>
+    <string name="m4_enter_anchor_uri_username">anna ankkurin URI + käyttäjänimi</string>
+    <string name="m4_resolve_this_username">Selvitä tämä käyttäjänimi</string>
+    <string name="m4_back">Takaisin</string>
+    <string name="m4_already_spawning">luodaan jo…</string>
+    <string name="m4_spawning_anchor">luodaan ankkuria…</string>
+    <string name="m4_anchor_failed">ankkuri epäonnistui: %1$s</string>
+    <string name="m4_anchor_running_title">Ankkuri käynnissä</string>
+    <string name="m4_anchor_running_desc">Muut rekisteröivät/selvittävät käyttäjänimiä täällä. Jaa tämä sijainti (skannaa tai kopioi). Se on käynnissä sovelluksen ollessa auki.</string>
+    <string name="m4_registering">rekisteröidään…</string>
+    <string name="m4_register_success">✓ rekisteröitiin ”%1$s” → tilisi tässä ankkurissa</string>
+    <string name="m4_register_failed">! rekisteröinti epäonnistui: %1$s</string>
+    <string name="m4_resolving">selvitetään…</string>
+    <string name="m4_resolve_safety_number">”%1$s” → tilin turvanumero:\n%2$s\n(vahvista erillistä kanavaa pitkin ennen luottamista)</string>
+    <string name="m4_resolve_not_registered">”%1$s” ei ole rekisteröity tänne (tai rekisterit olivat eri mieltä)</string>
+    <string name="m4_resolve_failed">! selvitys epäonnistui: %1$s</string>
+    <string name="m4_registry_restricted_title">Rekisteriin rajattu keskustelu</string>
+    <string name="m4_registry_restricted_desc">Vain valitun rekisterin jäsenet voivat liittyä %1$s. Voit valita vain rekistereitä, joihin olet sidottu; tavoittamattomat (tai ne, joista tietueesi puuttuu) näkyvät harmaina.</string>
+    <string name="m4_not_registered_any_anchor">Et ole vielä rekisteröitynyt mihinkään ankkuriin. Avaa Ankkurit ja rekisteröi ensin käyttäjänimi.</string>
+    <string name="m4_checking_anchor">tarkistetaan %1$s …</string>
+    <string name="m4_host_gated_by">Isäntä rajattu tunnuksella ”%1$s@%2$s”</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — tavoittamaton tai ei tietuetta</string>
+    <string name="m4_creating_restricted_chat">luodaan rajattua keskustelua…</string>
+    <string name="m4_registry_restricted_members">rekisteriin rajattu — vain %1$s ankkurin jäsen(tä) voi liittyä</string>
+    <string name="m4_sender_invite">kutsu</string>
+    <string name="m4_restricted_host_failed">rajattu isännöinti epäonnistui: %1$s</string>
+    <string name="m4_tier_ephemeral">tilapäinen</string>
+    <string name="m4_tier_always_on">aina päällä</string>
+    <string name="m4_tier_persistent">pysyvä</string>
+    <string name="m4_members_prefix">"%1$s jäsentä · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sturva %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Keskusteluvalikko</string>
+    <string name="m4_message_hint">Viesti</string>
+    <string name="m4_send">Lähetä</string>
+    <string name="m4_delivery_delivered">toimitettu</string>
+    <string name="m4_delivery_not_delivered">ei toimitettu</string>
+    <string name="m4_delivery_sent">lähetetty</string>
+    <string name="m4_already_creating_chat">luodaan jo keskustelua…</string>
+    <string name="m4_starting_chat_over">Aloitetaan keskusteluasi %1$s kautta…</string>
+    <string name="m4_creating_chat">luodaan keskustelua…</string>
+    <string name="m4_hosting_share_invite">isännöidään — jaa kutsu, jotta kaveri voi liittyä:</string>
+
+    <!-- ===== MainActivity: liittymisen esitarkistus, yhdistäminen, lähetys, kauttaviivakomennot (alue m5) ===== -->
+    <string name="m5_host_failed">isännöinti epäonnistui: %1$s</string>
+    <string name="m5_join_chat">Liity keskusteluun</string>
+    <string name="m5_join_restricted_explainer">Jos tämä keskustelu on rekisteriin rajattu, sinut hyväksytään vain jäsenenä. Esitä elävä jäsenyys tai liity salanimellä (vain avoimet keskustelut).</string>
+    <string name="m5_no_memberships">Sinulla ei ole vielä rekisterijäsenyyksiä — rekisteröidy ankkuriin liittyäksesi rajattuihin keskusteluihin.</string>
+    <string name="m5_present_a_membership">ESITÄ JÄSENYYS</string>
+    <string name="m5_checking_anchor">tarkistetaan %1$s …</string>
+    <string name="m5_join_as_member">Liity tunnuksella ”%1$s@%2$s”</string>
+    <string name="m5_or_separator">— tai —</string>
+    <string name="m5_join_with_account">Liity tililläni (ei käyttäjänimeä)</string>
+    <string name="m5_join_as_pseudonym">Liity salanimellä (ei yhdistettävissä)</string>
+    <string name="m5_back">Takaisin</string>
+    <string name="m5_already_joining">liitytään jo…</string>
+    <string name="m5_joined">liitytty</string>
+    <string name="m5_as_suffix">" nimellä %1$s"</string>
+    <string name="m5_joined_as_pseudonym">liityttiin salanimellä</string>
+    <string name="m5_failed">epäonnistui: %1$s</string>
+    <string name="m5_join_failed">liittyminen epäonnistui</string>
+    <string name="m5_connecting_title">Yhdistetään</string>
+    <string name="m5_bootstrapping_tor">Käynnistetään Toria…</string>
+    <string name="m5_connecting">Yhdistetään…</string>
+    <string name="m5_first_tor_slow">Ensimmäinen Tor-yhteys on hidas; myöhemmät ovat välittömiä.</string>
+    <string name="m5_cancel">Peruuta</string>
+    <string name="m5_bootstrapping_tor_pct">Käynnistetään Toria… %1$s%%</string>
+    <string name="m5_building_circuit">Rakennetaan piiriä + kättely…</string>
+    <string name="m5_cant_reconnect">ei voi yhdistää uudelleen — ei tallennettua kutsua</string>
+    <string name="m5_reconnecting_over">yhdistetään uudelleen %1$s kautta…</string>
+    <string name="m5_reconnected_over">yhdistetty uudelleen %1$s kautta</string>
+    <string name="m5_reconnect_failed_detail">uudelleenyhdistäminen epäonnistui (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">uudelleenyhdistäminen epäonnistui</string>
+    <string name="m5_reconnecting_text_kept">yhdistetään uudelleen — tekstisi säilytetään, yritä hetken kuluttua uudelleen</string>
+    <string name="m5_send_failed">lähetys epäonnistui</string>
+    <string name="m5_name_book_empty">nimikirja tyhjä — /name &lt;kutsutunnus&gt; lisätäksesi yhden</string>
+    <string name="m5_tier_account_linked">tiliin linkitetty</string>
+    <string name="m5_tier_bare">paljas</string>
+    <string name="m5_name_list_entry">%1$s%2$s  ”%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">tallennettiin ”%1$s” nimikirjaan</string>
+    <string name="m5_switched_to">vaihdettiin nimeen ”%1$s” ja ilmoitettiin</string>
+    <string name="m5_no_saved_name">ei tallennettua nimeä ”%1$s”</string>
+    <string name="m5_calling_verified">🔗 kutsutaan vahvistettuna ”%1$s”</string>
+    <string name="m5_name_cleared">nimi tyhjennetty</string>
+    <string name="m5_calling_as">kutsutaan nimellä ”%1$s”</string>
+    <string name="m5_cq_announced">CQ — ilmoitettiin nimesi</string>
+    <string name="m5_cq_cadence_off">CQ-tahti pois</string>
+    <string name="m5_cq_cadence_every">CQ-tahti: joka %1$s min</string>
+    <string name="m5_state_on">päällä</string>
+    <string name="m5_state_off">pois</string>
+    <string name="m5_cq_onmsg">CQ viestikohtainen nimitunniste: %1$s</string>
+    <string name="m5_name_usage">käyttö: /name &lt;kutsutunnus&gt;|link &lt;kt&gt;|new &lt;kt&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;min&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">Lisää ”%1$s” yhteystiedoksi</string>
+    <string name="m5_added_contact">lisättiin yhteystieto %1$s</string>
+    <string name="m5_could_not_add">ei voitu lisätä (tiliä ei nähty)</string>
+    <string name="m5_invite_qr">Kutsu-QR</string>
+    <string name="m5_share">Jaa</string>
+    <string name="m5_close">Sulje</string>
+
+    <!-- ===== ChatNet: ystävälliset siirtovirheet ===== -->
+    <string name="net_host_unreachable_tor">isäntä tavoittamaton Torin kautta — sen onion ei vastannut (ei verkossa tai ei vielä uudelleenjulkaistu)</string>
+    <string name="net_timed_out_host">aikakatkaisu isäntää tavoitettaessa (tavoittamaton tästä verkosta?)</string>
+    <string name="net_tor_not_ready">Tor ei ole vielä valmis (käynnistyy yhä)</string>
+    <string name="net_cant_reconnect_no_invite">ei voi yhdistää uudelleen — ei tallennettua kutsua tälle keskustelulle</string>
+    <string name="net_unknown_error">tuntematon virhe</string>
+
+    <!-- ===== QrScanActivity: skannerin vihjeet + kameraoikeuden palautus ===== -->
+    <string name="qr_point_at_talkrypt">Osoita talkrypt-QR-koodiin</string>
+    <string name="qr_cancel_scan">Peruuta skannaus</string>
+    <string name="qr_open_app_settings">Avaa sovelluksen asetukset</string>
+    <string name="qr_camera_access_off">Kameran käyttöoikeus on pois — ota se käyttöön skannataksesi tai peruuta ja liitä kutsu sen sijaan.</string>
+    <string name="qr_no_camera_found">Kameraa ei löytynyt</string>
+    <string name="qr_camera_error">Kameravirhe %1$d</string>
+    <string name="qr_camera_unavailable">Kamera ei saatavilla: %1$s</string>
+    <string name="qr_camera_config_failed">Kameran määritys epäonnistui</string>
+    <string name="qr_not_talkrypt_keep_scanning">Ei talkrypt-QR-koodia — jatka skannausta</string>
+
+    <!-- ===== ChatService: edustapalvelun ilmoitus + uudelleenyhdistäminen ===== -->
+    <string name="svc_reconnecting">yhdistetään uudelleen ”%1$s” %2$s kautta…</string>
+    <string name="svc_reconnected">yhdistetty uudelleen ”%1$s” %2$s kautta</string>
+    <string name="svc_reconnect_failed_retry">uudelleenyhdistäminen epäonnistui keskustelulle ”%1$s” (%2$s): %3$s — yritetään uudelleen…</string>
+    <string name="svc_reconnect_failed">uudelleenyhdistäminen epäonnistui keskustelulle ”%1$s” (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt-yhteydet</string>
+    <string name="svc_status_none">ei aina päällä olevia keskusteluja</string>
+    <string name="svc_status_all_connected">%1$d aina päällä · kaikki yhdistetty</string>
+    <string name="svc_status_partial">%1$d aina päällä · %2$d yhdistetty, %3$d ei verkossa</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Lähiradiot/majakat: käyttäjälle näkyvät virheet ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct ei ole tuettu tällä laitteella</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct on varattu — yritä hetken kuluttua uudelleen</string>
+    <string name="radio_wifidirect_wifi_off">Ota Wi-Fi käyttöön käyttääksesi Wi-Fi Directiä</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct -virhe</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct epäonnistui (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Lähi-Wi-Fi-oikeus evätty</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct ei saatavilla</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct -yhteys epäonnistui (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct -vertainen</string>
+    <string name="radio_ble_bt_off">Bluetooth on pois päältä</string>
+    <string name="radio_ble_no_scanner">Ei BLE-skanneria</string>
+    <string name="radio_ble_scan_failed">BLE-skannaus epäonnistui (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth-skannausoikeus evätty</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth on pois päältä</string>
+    <string name="radio_beacon_ble_no_scanner">Ei BLE-skanneria</string>
+    <string name="radio_beacon_ble_scan_failed">BLE-skannaus epäonnistui (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth-skannausoikeus evätty</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD ei saatavilla</string>
+    <string name="radio_beacon_wifi_discovery_failed">etsintä epäonnistui (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">etsintävirhe</string>
+</resources>

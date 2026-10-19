@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  talkrypt Android uygulaması için Türkçe dize kataloğu.
+
+  Yerelleştirme Android'in kaynak sistemi tarafından desteklenir: Context
+  erişimli arayüz katmanının oluşturduğu kullanıcıya görünen her dize
+  Loc.s(R.string.*) üzerinden geçer (bkz. Loc.kt) ve cihazın geçerli yereline
+  göre çözülür. Bir dil eklemek için aynı adlar çevrilmiş olarak bir
+  res/values-<lang>/strings.xml dosyası bırakın (bkz. values-es).
+
+  Sertifikalı DEĞİL / denetlenmiş DEĞİL (proje genelinde). Güvenlik/sorumluluk
+  reddi ifadeleri burada olduğu gibi korunur ve her yerelde sadık biçimde
+  çevrilmelidir (asla bir sertifikasyon/uyumluluk iddiasına güçlendirilmeden).
+
+  Bilinçli olarak arayüzsüz olan paylaşılan model (ChatEvents.kt), tasarım
+  gereği kısa durum satırlarını kaynak İngilizce olarak üretir. Eş mesaj
+  gövdeleri kullanıcı tarafından yazılır ve asla çevrilmez. Notu için
+  ChatEvents.kt dosyasına bakın.
+
+  Not: "talkrypt" marka adı bilinçli olarak çevrilmemiştir.
+-->
+<resources>
+
+    <!-- ===== MainActivity: yeni sohbet, sohbet listesi, sohbet satırı menüsü (aralık m1) ===== -->
+    <string name="m1_opening_invite">davet açılıyor…</string>
+    <string name="m1_not_a_talkrypt_qr">talkrypt QR kodu değil</string>
+    <string name="m1_nym_credential_imported">Nym kimlik bilgisi içe aktarıldı — ücretli mixnet hazır (anımsatıcı gerekmez)</string>
+    <string name="m1_import_failed">içe aktarma başarısız: %1$s</string>
+    <string name="m1_new_chat">Yeni sohbet</string>
+    <string name="m1_channel">KANAL</string>
+    <string name="m1_posture">DURUŞ</string>
+    <string name="m1_access">ERİŞİM</string>
+    <string name="m1_name_display_signal_style">Signal tarzı (yalnızca rozetler)</string>
+    <string name="m1_name_display_warn">Benzer görünümlü çakışmalarda uyar</string>
+    <string name="m1_name_display_suppress">Çakışan adları gizle</string>
+    <string name="m1_name_display">AD GÖSTERİMİ</string>
+    <string name="m1_persistence_ephemeral">Geçici (yalnızca bellek)</string>
+    <string name="m1_persistence_persistent">Kalıcı (kaydedilir, yeniden bağlanılabilir)</string>
+    <string name="m1_persistence_always_on">Her zaman açık (Aşama 2)</string>
+    <string name="m1_persistence">KALICILIK</string>
+    <string name="m1_route_over_tor">Tor üzerinden yönlendir (.onion; başlaması yavaş)</string>
+    <string name="m1_route_over_nym">Ayrıca Nym mixnet üzerinden de yönlendir (isteğe bağlı; daveti çok yuvalı yapar)</string>
+    <string name="m1_paid_nym_bandwidth">Ücretli Nym bant genişliği (cüzdan anımsatıcısı / kimlik bilgisi) Ayarlar\'da yapılandırılır.</string>
+    <string name="m1_host_a_chat">Sohbet barındır</string>
+    <string name="m1_registry_restricted_chat">Kayıt defteriyle kısıtlı sohbet</string>
+    <string name="m1_or_join">— ya da katıl —</string>
+    <string name="m1_join_invite_hint">talkrypt://…</string>
+    <string name="m1_join">Katıl</string>
+    <string name="m1_paste_invite">talkrypt:// davetini yapıştır</string>
+    <string name="m1_scan_qr">QR kodu tara</string>
+    <string name="m1_in_person">— yüz yüze —</string>
+    <string name="m1_find_nearby_host">Yakındaki barındırıcıyı bul (BLE / Wi-Fi Direct)</string>
+    <string name="m1_share_app">Uygulamayı paylaş (Wi-Fi üzerinden P2P)</string>
+    <string name="m1_back">Geri</string>
+    <string name="m1_tier_line_placeholder">🔒 … · ML-DSA-87</string>
+    <string name="m1_tier_line">🔒 %1$s · ML-DSA-87</string>
+    <string name="m1_more">Daha fazla</string>
+    <string name="m1_new_chat_button">＋  Yeni sohbet</string>
+    <string name="m1_no_chats_yet">Henüz sohbet yok — barındırmak veya katılmak için ＋ simgesine dokun.</string>
+    <string name="m1_preview_you">sen: %1$s</string>
+    <string name="m1_preview_sender">%1$s: %2$s</string>
+    <string name="m1_hosting">barındırılıyor</string>
+    <string name="m1_joined">katılındı</string>
+    <string name="m1_preview_members">%1$s · %2$d üye</string>
+    <string name="m1_conn_dot">● %1$s</string>
+    <string name="m1_offline">çevrimdışı</string>
+    <string name="m1_online">çevrimiçi</string>
+    <string name="m1_online_count">%1$d çevrimiçi</string>
+    <string name="m1_connecting">bağlanılıyor</string>
+    <string name="m1_time_now">şimdi</string>
+    <string name="m1_time_minutes">%1$ddk</string>
+    <string name="m1_time_hours">%1$dsa</string>
+    <string name="m1_time_days">%1$dg</string>
+    <string name="m1_no_invite">davet yok</string>
+    <string name="m1_safety_number_title">Güvenlik numarası</string>
+    <string name="m1_safety_number_body">%1$s\n\nBunu eşinle bant dışı bir yolla karşılaştır; bir uyuşmazlık, kanalın düşündüğün kişiyle konuşmadığı anlamına gelir.</string>
+    <string name="m1_copy">Kopyala</string>
+    <string name="m1_copied">kopyalandı</string>
+    <string name="m1_close">Kapat</string>
+
+    <!-- ===== MainActivity: ayarlar, kimlik, nym, güvenlik (aralık m2) ===== -->
+    <string name="m2_delete_chat_title">“%1$s” silinsin mi?</string>
+    <string name="m2_delete_chat_body">Bu sohbeti ve geçmişini bu cihazdan siler. Bu işlem geri alınamaz.</string>
+    <string name="m2_delete">Sil</string>
+    <string name="m2_connect_first">önce bağlan</string>
+    <string name="m2_beacon_msg">işaret: %1$s</string>
+    <string name="m2_beaconing_nearby">📡 bu sohbet yakında yayınlanıyor (BLE + Wi-Fi) + taranıyor</string>
+    <string name="m2_nearby_beacon_stopped">yakın işaret durduruldu</string>
+    <string name="m2_no_ble_scanner">BLE tarayıcı yok</string>
+    <string name="m2_mesh_linked">📻 ağ: bir %1$s düğümü bağlandı — mesajlar ayrıca LoRa üzerinden de taşınır</string>
+    <string name="m2_mesh_scan_failed">ağ: BLE taraması başarısız (%1$d)</string>
+    <string name="m2_mesh_looking">🔎 BLE üzerinden bir %1$s düğümü aranıyor…</string>
+    <string name="m2_ble_scan_denied">BLE tarama izni reddedildi</string>
+    <string name="m2_mesh_stopped">ağ durduruldu</string>
+    <string name="m2_start_beacon_first">önce işareti başlat</string>
+    <string name="m2_no_blob_yet">henüz yayınlanan veri yok — birazdan yeniden dene</string>
+    <string name="m2_beacon_selftest">işaret öz testi: kendi mühürlü işaretimizi geri besledik (bir 📡 görülmesi beklenir)</string>
+    <string name="m2_callsigns">Çağrı adları</string>
+    <string name="m2_callsigns_desc">Bu sohbette mesajlarınla birlikte yayınladığın adlar.</string>
+    <string name="m2_connect_to_manage_names">Adları yönetmek için bu sohbete bağlan.</string>
+    <string name="m2_back">Geri</string>
+    <string name="m2_your_names">ADLARIN</string>
+    <string name="m2_none_yet_add">Henüz yok — aşağıdan bir tane ekle.</string>
+    <string name="m2_use">Kullan</string>
+    <string name="m2_calling_as">“%1$s” olarak anılıyor</string>
+    <string name="m2_failed">başarısız</string>
+    <string name="m2_removed">kaldırıldı</string>
+    <string name="m2_new_callsign">Yeni çağrı adı</string>
+    <string name="m2_save_to_name_book">Ad defterine kaydet</string>
+    <string name="m2_set_announce_now">Ayarla + şimdi duyur</string>
+    <string name="m2_set_verified">DOĞRULANMIŞ olarak ayarla (🔗 hesap bağlantılı)</string>
+    <string name="m2_verified_name">doğrulanmış ad “%1$s”</string>
+    <string name="m2_verified_desc">Doğrulanmış, hesap anahtarını kullanır; böylece bir ad başka bir üye tarafından taklit edilemez.</string>
+    <string name="m2_cq_beacon">CQ İŞARETİ</string>
+    <string name="m2_periodic_on">Düzenli yeniden işaret: AÇIK (5 dk)</string>
+    <string name="m2_periodic_off">Düzenli yeniden işaret: kapalı</string>
+    <string name="m2_onmsg_on">Mesajda ad kimliği: AÇIK</string>
+    <string name="m2_onmsg_off">Mesajda ad kimliği: kapalı</string>
+    <string name="m2_onmsg_desc">Mesajda ad kimliği, adını değiştirirsen eşlerin bunu fark etmesini ve eski çağrı adını bırakmasını sağlar.</string>
+    <string name="m2_show_others">BAŞKALARININ ADLARINI GÖSTER</string>
+    <string name="m2_nametrust_signal">Signal tarzı (yalnızca rozetler)</string>
+    <string name="m2_nametrust_warn">Benzer görünümlü çakışmalarda uyar</string>
+    <string name="m2_nametrust_suppress">Çakışan adları gizle</string>
+    <string name="m2_apply_nametrust">Ad güveni ayarını uygula</string>
+    <string name="m2_nametrust_set">ad güveni: %1$s</string>
+    <string name="m2_tighten_only">Sohbetin temel düzeyini yalnızca sıkılaştırabilirsin, asla gevşetemezsin.</string>
+    <string name="m2_whos_here">KİMLER BURADA</string>
+    <string name="m2_safety_suffix">  ·  güvenlik %1$s</string>
+    <string name="m2_safety_number">güvenlik numarası: %1$s</string>
+    <string name="m2_share_invite">Daveti paylaş</string>
+    <string name="m2_more">Daha fazla</string>
+    <string name="m2_anchors">Çapalar (kullanıcı adı dizini)</string>
+    <string name="m2_contacts">Kişiler</string>
+    <string name="m2_linked_devices">Bağlı cihazlar</string>
+    <string name="m2_segments">Bölümler (bağlamsal kimlikler)</string>
+    <string name="m2_settings">Ayarlar</string>
+    <string name="m2_seal_mnemonic_err">anımsatıcı mühürlenemedi: %1$s</string>
+    <string name="m2_identity">KİMLİK</string>
+    <string name="m2_account_safety_number">Hesap güvenlik numarası</string>
+    <string name="m2_deriving">türetiliyor…</string>
+    <string name="m2_still_deriving">hâlâ türetiliyor…</string>
+    <string name="m2_copied">kopyalandı</string>
+    <string name="m2_linked_secondary">İkincil cihaz olarak bağlandı</string>
+    <string name="m2_account_short">hesap %1$s</string>
+    <string name="m2_username_handle"> · @%1$s</string>
+    <string name="m2_security">GÜVENLİK</string>
+    <string name="m2_key_custody_loading">Anahtar muhafazası: …</string>
+    <string name="m2_key_custody_desc">Bu cihazın anahtarları nerede tutabileceği (StrongBox &gt; TEE &gt; yazılım). Eşlere muhafaza kademesi olarak bildirilir.</string>
+    <string name="m2_safety_tap_copy">%1$s — kopyalamak için dokun. Seni doğrulamak için bant dışı karşılaştır.</string>
+    <string name="m2_key_custody">Anahtar muhafazası: %1$s</string>
+    <string name="m2_secrets_sealed">Gizli bilgiler beklemede mühürlü</string>
+    <string name="m2_secrets_sealed_desc">Kimlik tohumları ve Nym anımsatıcısı, dışa aktarılamayan bir Android Keystore anahtarıyla şifrelenir (varsa StrongBox).</string>
+    <string name="m2_sealing_degraded">Mühürleme zayıfladı</string>
+    <string name="m2_sealing_degraded_desc">Keystore şunu bildirdi: %1$s. Mühürlenemeyen gizli bilgiler, düzelene kadar uygulamaya özel düz metin olarak kalır.</string>
+    <string name="m2_nym_paid_bw">NYM ÜCRETLİ BANT GENİŞLİĞİ (İSTEĞE BAĞLI)</string>
+    <string name="m2_nym_mnemonic_hint">NYM cüzdan anımsatıcısı — boş = ücretsiz mixnet</string>
+    <string name="m2_show_mnemonic">Anımsatıcıyı göster</string>
+    <string name="m2_ticketbook_desc">Ya da kendi Nym araçlarınla üretilmiş bir ticketbook kimlik bilgisini içe aktar (cüzdan tohumu bu uygulamaya hiç girmez):</string>
+    <string name="m2_import_nym_cred">Nym kimlik bilgisini içe aktar</string>
+    <string name="m2_network_defaults">YENİ SOHBETLER İÇİN AĞ VARSAYILANLARI</string>
+    <string name="m2_route_tor">Tor üzerinden yönlendir (.onion)</string>
+    <string name="m2_route_nym">Ayrıca Nym mixnet üzerinden de yönlendir</string>
+    <string name="m2_notifications">BİLDİRİMLER</string>
+    <string name="m2_always_on_chats">Her zaman açık sohbetler</string>
+    <string name="m2_always_on_desc">Kalıcı bir bildirimle bir ön plan hizmeti tarafından bağlı tutulur. Sistem ayarlarında düzenlemek için dokun.</string>
+    <string name="m2_open_notif_err">bildirim ayarları açılamadı</string>
+    <string name="m2_about">HAKKINDA</string>
+    <string name="m2_about_version">talkrypt %1$s</string>
+    <string name="m2_about_desc">Tor üzerinden post-kuantum uçtan uca şifreli sohbet. Sertifikalı DEĞİL · akredite DEĞİL · denetlenmiş DEĞİL — deneysel yazılım; sınıflandırma işaretleri yalnızca tavsiye niteliğinde etiketlerdir.</string>
+    <string name="m2_contacts_desc">Tanıdığın hesaplar. Yalnızca tanıma — bir kişi (ya da arkadaş) olmak kanal erişimi vermez; bu her sohbet için ayrı ayarlanır.</string>
+    <string name="m2_no_contacts">Henüz kişi yok. Bir sohbette, bir hesap kendini tanıttığında “Kişi olarak ekle” seçeneğine dokun.</string>
+    <string name="m2_friend_suffix">  [arkadaş]</string>
+    <string name="m2_starting_share">yerel paylaşım başlatılıyor…</string>
+    <string name="m2_no_wifi">Wi-Fi/LAN adresi yok — önce bir Wi-Fi ağına veya etkin noktaya bağlan</string>
+    <string name="m2_share_talkrypt">talkrypt\'i paylaş</string>
+    <string name="m2_share_instructions">Aynı Wi-Fi veya etkin noktada, diğer telefon bu kodu tarar (ya da URL\'yi açar), uygulamayı indirir ve kurar (bir kez “bilinmeyen uygulamaların kurulumuna” izin ver).</string>
+    <string name="m2_apk_computing">APK SHA-256: hesaplanıyor…</string>
+
+    <!-- ===== MainActivity: muhafaza, bölümler, yakın keşif (aralık m3) ===== -->
+    <string name="m3_accept_link_on_this_device">Bağlantıyı bu cihazda kabul et</string>
+    <string name="m3_account_prefix">hesap %1$s…</string>
+    <string name="m3_already_linking">zaten bağlanıyor…</string>
+    <string name="m3_already_starting">zaten başlatılıyor…</string>
+    <string name="m3_apk_fingerprint_failed">APK parmak izi hesaplanamadı</string>
+    <string name="m3_apk_sha256_verify">APK SHA-256 (ilk 16): %1$s — alıcı telefonda doğrula</string>
+    <string name="m3_back">Geri</string>
+    <string name="m3_beacon_perm_needed">yakın işaret / ağ için Bluetooth izni gerekir</string>
+    <string name="m3_broadcasting_nearby">yakında yayınlanıyor (BLE + Wi-Fi Direct)</string>
+    <string name="m3_cancel">İptal</string>
+    <string name="m3_create_segment">Bölüm oluştur</string>
+    <string name="m3_created_segment">“%1$s” bölümü oluşturuldu</string>
+    <string name="m3_delete">Sil</string>
+    <string name="m3_delete_name">“%1$s” sil</string>
+    <string name="m3_delete_segment_body">Bu bölümün anahtarını siler — bu bölüm altında katılınan sohbetlere aynı kimlikle yeniden katılınamaz. Bu işlem geri alınamaz.</string>
+    <string name="m3_delete_segment_q">“%1$s” bölümü silinsin mi?</string>
+    <string name="m3_device_not_linked">bu cihaz bağlı değil</string>
+    <string name="m3_device_prefix">cihaz %1$s…</string>
+    <string name="m3_done">Bitti</string>
+    <string name="m3_hint_work">iş</string>
+    <string name="m3_join_a_chat">BİR SOHBETE KATIL (talkrypt:// daveti)</string>
+    <string name="m3_join_as_name">“%1$s” olarak katıl</string>
+    <string name="m3_join_as_this_account">Bu hesapla katıl</string>
+    <string name="m3_join_chat_as_account">BU HESAPLA BİR SOHBETE KATIL (talkrypt:// daveti)</string>
+    <string name="m3_join_failed">katılma başarısız: %1$s</string>
+    <string name="m3_join_peer">Katıl: %1$s</string>
+    <string name="m3_joined_as_linked_account">bağlı hesap olarak katılındı</string>
+    <string name="m3_joined_as_segment">“%1$s” bölümü olarak katılındı</string>
+    <string name="m3_joining_as_linked">bağlı hesap olarak katılınıyor…</string>
+    <string name="m3_joining_as_name">“%1$s” olarak katılınıyor…</string>
+    <string name="m3_link_another_device">HESABIMA BAŞKA BİR CİHAZ BAĞLA</string>
+    <string name="m3_link_another_device_desc">Hesabı bu cihaz tutar. Yeni cihazın tarayacağı tek seferlik bir QR göster.</string>
+    <string name="m3_link_failed">bağlama başarısız: %1$s</string>
+    <string name="m3_link_offer_failed">bağlantı teklifi başarısız: %1$s</string>
+    <string name="m3_link_offer_label">BAĞLANTI TEKLİFİ (birincilden talkrypt://)</string>
+    <string name="m3_link_offer_running">Bağlantı teklifi çalışıyor</string>
+    <string name="m3_link_offer_running_desc">YENİ cihazda bunu tara (ya da URI\'yi Bağlı cihazlar → Bağlantıyı kabul et bölümüne yapıştır). Hesap anahtarı bu cihazda kalır.</string>
+    <string name="m3_link_this_device_desc">Bu, BU cihazı bağlantıyı sunan hesabın altında sertifikalandırır. Ardından, gösterilen hesap güvenlik numarasının diğer cihazdakiyle eşleştiğini bant dışı bir yolla doğrula.</string>
+    <string name="m3_link_this_device_q">Bu cihaz bağlansın mı?</string>
+    <string name="m3_link_this_device_to_account">BU CİHAZI BİR HESABA BAĞLA</string>
+    <string name="m3_linked_devices">Bağlı cihazlar</string>
+    <string name="m3_linked_devices_desc">Bu cihazı başka bir cihazdaki hesabına bağla; böylece kişiler tüm cihazlarını tek bir hesap olarak tanır. Hesap anahtarı onu tutan cihazdan asla ayrılmaz — hat üzerinden yalnızca imzalı bir sertifika geçer.</string>
+    <string name="m3_linked_to_account">%1$s hesabına bağlandı…</string>
+    <string name="m3_linking_this_device">bu cihaz bağlanıyor…</string>
+    <string name="m3_loading_segments">bölümler yükleniyor…</string>
+    <string name="m3_name_paren_suffix"> (%1$s)</string>
+    <string name="m3_name_the_segment">bölümü adlandır</string>
+    <string name="m3_nearby_hosts">Yakındaki barındırıcılar</string>
+    <string name="m3_nearby_perm_needed">yakın keşif için Bluetooth / yakın Wi-Fi izni gerekir</string>
+    <string name="m3_nearby_scanning">Bluetooth LE ve Wi-Fi Direct üzerinden taranıyor. Katılmak için bir barındırıcıya dokun.</string>
+    <string name="m3_new_segment">— yeni bölüm —</string>
+    <string name="m3_no_segments_yet">Henüz bölüm yok — aşağıdan bir tane oluştur.</string>
+    <string name="m3_notifications_blocked">bildirimler engellendi — her zaman açık sohbetler yine de çalışır, ancak durum bildirimi olmadan</string>
+    <string name="m3_or_relink">— ya da yeniden bağla —</string>
+    <string name="m3_paste_link_offer_uri">bağlantı teklifi URI\'sini yapıştır</string>
+    <string name="m3_paste_talkrypt_invite">bir talkrypt:// daveti yapıştır</string>
+    <string name="m3_paste_talkrypt_invite_above">yukarıya bir talkrypt:// daveti yapıştır</string>
+    <string name="m3_qr_too_large">(QR işlenemeyecek kadar büyük — metni kullan)</string>
+    <string name="m3_rooted_at_device_account">bu cihazın hesabında köklendi</string>
+    <string name="m3_rooted_at_linked_account">%1$s… bağlı hesabında köklendi</string>
+    <string name="m3_safety_prefix">güvenlik %1$s…</string>
+    <string name="m3_seal_segments_failed">bölümler mühürlenemedi: %1$s</string>
+    <string name="m3_segment_name_label">BÖLÜM ADI (bağlam etiketi)</string>
+    <string name="m3_segments">Bölümler</string>
+    <string name="m3_segments_desc">Hesabın altındaki bağlamsal alt kimlikler. Her bölüm kendi anahtarıyla kimlik doğrular; böylece farklı bölümler birbirine bağlanamaz — yine de hesabını tanıyan bir kişi her bölümü tanır. Her bağlam için bir tane kullan (iş, aktivizm, …).</string>
+    <string name="m3_start_link_offer">Bağlantı teklifi başlat</string>
+    <string name="m3_starting_link_offer">bağlantı teklifi başlatılıyor…</string>
+    <string name="m3_this_device_is_linked">BU CİHAZ BAĞLI</string>
+    <string name="m3_unlink">Bağlantıyı kaldır</string>
+    <string name="m3_unlink_body">Bağlantı sertifikasını kaldırır — yeniden bağlayana kadar kişiler bu cihazı hesabın parçası olarak tanımaz.</string>
+    <string name="m3_unlink_this_device">Bu cihazın bağlantısını kaldır</string>
+    <string name="m3_unlink_this_device_q">Bu cihazın bağlantısı kaldırılsın mı?</string>
+    <string name="m3_unlinked">bağlantı kaldırıldı</string>
+    <string name="m3_username_prefix">kullanıcı adı %1$s</string>
+    <string name="m3_verify_oob_account_sn">BANT DIŞI DOĞRULA — hesap güvenlik numarası:</string>
+    <string name="m3_wifi_off">Wi-Fi kapalı — Wi-Fi Direct için aç (Bluetooth yine de çalışır)</string>
+
+    <!-- ===== MainActivity: çapalar, kısıtlı barındırma, sohbet ekranı (aralık m4) ===== -->
+    <string name="m4_anchors_title">Çapalar</string>
+    <string name="m4_anchors_desc">Konuma göre oluşturduğun ya da işaret ettiğin bir kullanıcı adı dizini. Adlar hesap anahtarlarıyla eşleşir; güvenlik numaralarını bant dışı doğrula.</string>
+    <string name="m4_your_account">HESABIN</string>
+    <string name="m4_deriving">türetiliyor…</string>
+    <string name="m4_unavailable">kullanılamıyor</string>
+    <string name="m4_spawn_my_anchor">Kendi çapamı oluştur</string>
+    <string name="m4_or_use_known_anchor">— ya da bilinen bir çapa kullan —</string>
+    <string name="m4_anchor_location_label">ÇAPA KONUMU (talkrypt:// URI)</string>
+    <string name="m4_username_label">KULLANICI ADI</string>
+    <string name="m4_username_hint">alice</string>
+    <string name="m4_register_username_here">Kullanıcı adımı burada kaydet</string>
+    <string name="m4_enter_anchor_uri_username">bir çapa URI\'si + kullanıcı adı gir</string>
+    <string name="m4_resolve_this_username">Bu kullanıcı adını çöz</string>
+    <string name="m4_back">Geri</string>
+    <string name="m4_already_spawning">zaten oluşturuluyor…</string>
+    <string name="m4_spawning_anchor">çapa oluşturuluyor…</string>
+    <string name="m4_anchor_failed">çapa başarısız: %1$s</string>
+    <string name="m4_anchor_running_title">Çapa çalışıyor</string>
+    <string name="m4_anchor_running_desc">Başkaları burada kullanıcı adlarını kaydeder/çözer. Bu konumu paylaş (tara ya da kopyala). Uygulama açıkken çalışır.</string>
+    <string name="m4_registering">kaydediliyor…</string>
+    <string name="m4_register_success">✓ “%1$s” kaydedildi → bu çapadaki hesabın</string>
+    <string name="m4_register_failed">! kayıt başarısız: %1$s</string>
+    <string name="m4_resolving">çözülüyor…</string>
+    <string name="m4_resolve_safety_number">“%1$s” → hesap güvenlik numarası:\n%2$s\n(güvenmeden önce bant dışı doğrula)</string>
+    <string name="m4_resolve_not_registered">“%1$s” burada kayıtlı değil (ya da kayıt defterleri uyuşmadı)</string>
+    <string name="m4_resolve_failed">! çözme başarısız: %1$s</string>
+    <string name="m4_registry_restricted_title">Kayıt defteriyle kısıtlı sohbet</string>
+    <string name="m4_registry_restricted_desc">%1$s sohbetine yalnızca seçilen kayıt defterinin üyeleri katılabilir. Yalnızca bağlı olduğun kayıt defterlerini seçebilirsin; erişilemeyenler (ya da kaydın bulunmayanlar) soluk gösterilir.</string>
+    <string name="m4_not_registered_any_anchor">Henüz hiçbir çapaya kayıtlı değilsin. Önce Çapalar\'ı aç ve bir kullanıcı adı kaydet.</string>
+    <string name="m4_checking_anchor">%1$s denetleniyor …</string>
+    <string name="m4_host_gated_by">Barındırıcı “%1$s@%2$s” ile kısıtlanmış</string>
+    <string name="m4_anchor_unreachable">✗ %1$s — erişilemiyor ya da kayıt yok</string>
+    <string name="m4_creating_restricted_chat">kısıtlı sohbet oluşturuluyor…</string>
+    <string name="m4_registry_restricted_members">kayıt defteriyle kısıtlı — yalnızca %1$s çapa üyesi katılabilir</string>
+    <string name="m4_sender_invite">davet</string>
+    <string name="m4_restricted_host_failed">kısıtlı barındırma başarısız: %1$s</string>
+    <string name="m4_tier_ephemeral">geçici</string>
+    <string name="m4_tier_always_on">her zaman açık</string>
+    <string name="m4_tier_persistent">kalıcı</string>
+    <string name="m4_members_prefix">"%1$s üye · "</string>
+    <string name="m4_chat_detail">"  ·  %1$sgüvenlik %2$s · %3$s"</string>
+    <string name="m4_chat_menu">Sohbet menüsü</string>
+    <string name="m4_message_hint">Mesaj</string>
+    <string name="m4_send">Gönder</string>
+    <string name="m4_delivery_delivered">iletildi</string>
+    <string name="m4_delivery_not_delivered">iletilmedi</string>
+    <string name="m4_delivery_sent">gönderildi</string>
+    <string name="m4_already_creating_chat">zaten bir sohbet oluşturuluyor…</string>
+    <string name="m4_starting_chat_over">Sohbetin %1$s üzerinden başlatılıyor…</string>
+    <string name="m4_creating_chat">sohbet oluşturuluyor…</string>
+    <string name="m4_hosting_share_invite">barındırılıyor — bir arkadaşının katılması için daveti paylaş:</string>
+
+    <!-- ===== MainActivity: katılma ön denetimi, bağlanma, gönderme, eğik çizgi komutları (aralık m5) ===== -->
+    <string name="m5_host_failed">barındırma başarısız: %1$s</string>
+    <string name="m5_join_chat">Sohbete katıl</string>
+    <string name="m5_join_restricted_explainer">Bu sohbet kayıt defteriyle kısıtlıysa, yalnızca bir üye olarak kabul edilirsin. Canlı bir üyelik sun ya da takma adla katıl (yalnızca açık sohbetler).</string>
+    <string name="m5_no_memberships">Henüz hiçbir kayıt defteri üyeliğin yok — kısıtlı sohbetlere katılmak için bir çapaya kaydol.</string>
+    <string name="m5_present_a_membership">BİR ÜYELİK SUN</string>
+    <string name="m5_checking_anchor">%1$s denetleniyor …</string>
+    <string name="m5_join_as_member">“%1$s@%2$s” olarak katıl</string>
+    <string name="m5_or_separator">— ya da —</string>
+    <string name="m5_join_with_account">Hesabımla katıl (kullanıcı adı yok)</string>
+    <string name="m5_join_as_pseudonym">Takma adla katıl (bağlanamaz)</string>
+    <string name="m5_back">Geri</string>
+    <string name="m5_already_joining">zaten katılınıyor…</string>
+    <string name="m5_joined">katılındı</string>
+    <string name="m5_as_suffix">" %1$s olarak"</string>
+    <string name="m5_joined_as_pseudonym">takma adla katılındı</string>
+    <string name="m5_failed">başarısız: %1$s</string>
+    <string name="m5_join_failed">katılma başarısız</string>
+    <string name="m5_connecting_title">Bağlanılıyor</string>
+    <string name="m5_bootstrapping_tor">Tor başlatılıyor…</string>
+    <string name="m5_connecting">Bağlanılıyor…</string>
+    <string name="m5_first_tor_slow">İlk Tor bağlantısı yavaştır; sonrakiler anındadır.</string>
+    <string name="m5_cancel">İptal</string>
+    <string name="m5_bootstrapping_tor_pct">Tor başlatılıyor… %1$s%%</string>
+    <string name="m5_building_circuit">Devre kuruluyor + el sıkışılıyor…</string>
+    <string name="m5_cant_reconnect">yeniden bağlanılamıyor — kayıtlı davet yok</string>
+    <string name="m5_reconnecting_over">%1$s üzerinden yeniden bağlanılıyor…</string>
+    <string name="m5_reconnected_over">%1$s üzerinden yeniden bağlanıldı</string>
+    <string name="m5_reconnect_failed_detail">yeniden bağlanma başarısız (%1$s): %2$s</string>
+    <string name="m5_reconnect_failed">yeniden bağlanma başarısız</string>
+    <string name="m5_reconnecting_text_kept">yeniden bağlanılıyor — metnin korunuyor, birazdan yeniden dene</string>
+    <string name="m5_send_failed">gönderme başarısız</string>
+    <string name="m5_name_book_empty">ad defteri boş — bir tane eklemek için /name &lt;callsign&gt;</string>
+    <string name="m5_tier_account_linked">hesap bağlantılı</string>
+    <string name="m5_tier_bare">çıplak</string>
+    <string name="m5_name_list_entry">%1$s%2$s  “%3$s”  (%4$s)</string>
+    <string name="m5_saved_to_name_book">“%1$s” ad defterine kaydedildi</string>
+    <string name="m5_switched_to">“%1$s” olarak değiştirildi ve duyuruldu</string>
+    <string name="m5_no_saved_name">kayıtlı ad yok “%1$s”</string>
+    <string name="m5_calling_verified">🔗 doğrulanmış “%1$s” olarak anılıyor</string>
+    <string name="m5_name_cleared">ad temizlendi</string>
+    <string name="m5_calling_as">“%1$s” olarak anılıyor</string>
+    <string name="m5_cq_announced">CQ — adın duyuruldu</string>
+    <string name="m5_cq_cadence_off">CQ temposu kapalı</string>
+    <string name="m5_cq_cadence_every">CQ temposu: her %1$s dakikada</string>
+    <string name="m5_state_on">açık</string>
+    <string name="m5_state_off">kapalı</string>
+    <string name="m5_cq_onmsg">CQ mesajda ad kimliği: %1$s</string>
+    <string name="m5_name_usage">kullanım: /name &lt;callsign&gt;|link &lt;cs&gt;|new &lt;cs&gt;|list|use &lt;id&gt;|off  ·  /cq [periodic &lt;mins&gt;|off] [onmsg on|off]</string>
+    <string name="m5_add_as_contact">“%1$s” kişi olarak ekle</string>
+    <string name="m5_added_contact">%1$s kişi olarak eklendi</string>
+    <string name="m5_could_not_add">eklenemedi (hesap görülmedi)</string>
+    <string name="m5_invite_qr">Davet QR kodu</string>
+    <string name="m5_share">Paylaş</string>
+    <string name="m5_close">Kapat</string>
+
+    <!-- ===== ChatNet: anlaşılır taşıma hataları ===== -->
+    <string name="net_host_unreachable_tor">barındırıcıya Tor üzerinden erişilemiyor — onion adresi yanıt vermedi (çevrimdışı ya da henüz yeniden yayınlanmadı)</string>
+    <string name="net_timed_out_host">barındırıcıya ulaşma zaman aşımına uğradı (bu ağdan erişilemiyor mu?)</string>
+    <string name="net_tor_not_ready">Tor henüz hazır değil (hâlâ başlatılıyor)</string>
+    <string name="net_cant_reconnect_no_invite">yeniden bağlanılamıyor — bu sohbet için kayıtlı davet yok</string>
+    <string name="net_unknown_error">bilinmeyen hata</string>
+
+    <!-- ===== QrScanActivity: tarayıcı ipuçları + kamera izni kurtarma ===== -->
+    <string name="qr_point_at_talkrypt">Bir talkrypt QR koduna doğrult</string>
+    <string name="qr_cancel_scan">Taramayı iptal et</string>
+    <string name="qr_open_app_settings">Uygulama ayarlarını aç</string>
+    <string name="qr_camera_access_off">Kamera erişimi kapalı — taramak için etkinleştir ya da iptal edip bunun yerine daveti yapıştır.</string>
+    <string name="qr_no_camera_found">Kamera bulunamadı</string>
+    <string name="qr_camera_error">Kamera hatası %1$d</string>
+    <string name="qr_camera_unavailable">Kamera kullanılamıyor: %1$s</string>
+    <string name="qr_camera_config_failed">Kamera yapılandırması başarısız</string>
+    <string name="qr_not_talkrypt_keep_scanning">talkrypt QR kodu değil — taramaya devam et</string>
+
+    <!-- ===== ChatService: ön plan hizmeti bildirimi + yeniden bağlanma ===== -->
+    <string name="svc_reconnecting">“%1$s” %2$s üzerinden yeniden bağlanıyor…</string>
+    <string name="svc_reconnected">“%1$s” %2$s üzerinden yeniden bağlandı</string>
+    <string name="svc_reconnect_failed_retry">“%1$s” için yeniden bağlanma başarısız (%2$s): %3$s — yeniden deneniyor…</string>
+    <string name="svc_reconnect_failed">“%1$s” için yeniden bağlanma başarısız (%2$s): %3$s</string>
+    <string name="svc_channel_name">talkrypt bağlantıları</string>
+    <string name="svc_status_none">her zaman açık sohbet yok</string>
+    <string name="svc_status_all_connected">%1$d her zaman açık · tümü bağlı</string>
+    <string name="svc_status_partial">%1$d her zaman açık · %2$d bağlı, %3$d çevrimdışı</string>
+    <string name="svc_notif_title">talkrypt</string>
+
+    <!-- ===== Yakın radyolar/işaretler: kullanıcıya gösterilen hatalar ===== -->
+    <string name="radio_wifidirect_unsupported">Wi-Fi Direct bu cihazda desteklenmiyor</string>
+    <string name="radio_wifidirect_busy">Wi-Fi Direct meşgul — birazdan yeniden dene</string>
+    <string name="radio_wifidirect_wifi_off">Wi-Fi Direct kullanmak için Wi-Fi\'yi aç</string>
+    <string name="radio_wifidirect_error">Wi-Fi Direct hatası</string>
+    <string name="radio_wifidirect_failed">Wi-Fi Direct başarısız (%1$d)</string>
+    <string name="radio_wifidirect_permission_denied">Yakın Wi-Fi izni reddedildi</string>
+    <string name="radio_wifidirect_unavailable">Wi-Fi Direct kullanılamıyor</string>
+    <string name="radio_wifidirect_connect_failed">Wi-Fi Direct bağlantısı başarısız (%1$d)</string>
+    <string name="radio_wifidirect_peer">Wi-Fi Direct eşi</string>
+    <string name="radio_ble_bt_off">Bluetooth kapalı</string>
+    <string name="radio_ble_no_scanner">BLE tarayıcı yok</string>
+    <string name="radio_ble_scan_failed">BLE taraması başarısız (%1$d)</string>
+    <string name="radio_ble_scan_permission_denied">Bluetooth tarama izni reddedildi</string>
+    <string name="radio_beacon_ble_bt_off">Bluetooth kapalı</string>
+    <string name="radio_beacon_ble_no_scanner">BLE tarayıcı yok</string>
+    <string name="radio_beacon_ble_scan_failed">BLE taraması başarısız (%1$d)</string>
+    <string name="radio_beacon_ble_scan_permission_denied">Bluetooth tarama izni reddedildi</string>
+    <string name="radio_beacon_wifi_nsd_unavailable">NSD kullanılamıyor</string>
+    <string name="radio_beacon_wifi_discovery_failed">keşif başarısız (%1$d)</string>
+    <string name="radio_beacon_wifi_discovery_error">keşif hatası</string>
+</resources>
