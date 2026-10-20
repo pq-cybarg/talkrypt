@@ -10578,6 +10578,7 @@ dependencies = [
  "qrcode",
  "talkrypt-core",
  "talkrypt-crypto",
+ "talkrypt-replcmd",
  "talkrypt-topology",
  "talkrypt-transport",
  "tokio",
@@ -10681,6 +10682,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "talkrypt-replcmd"
+version = "0.1.0"
+dependencies = [
+ "talkrypt-core",
+ "talkrypt-crypto",
+ "talkrypt-transport",
+]
+
+[[package]]
 name = "talkrypt-server"
 version = "0.1.0"
 dependencies = [
@@ -10736,6 +10746,7 @@ dependencies = [
  "ratatui",
  "talkrypt-core",
  "talkrypt-crypto",
+ "talkrypt-replcmd",
  "talkrypt-topology",
  "talkrypt-transport",
  "tokio",

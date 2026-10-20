@@ -180,6 +180,9 @@ async fn run(
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Input>,
     app: &mut App,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The TUI starts as an unlinkable pseudonym; `/account new` creates one. The
+    // same shared command logic the CLI uses drives every slash command.
+    let mut repl_state = talkrypt_replcmd::ReplState::new(None, None);
     terminal.draw(|f| ui(f, app))?;
     loop {
         tokio::select! {
@@ -251,20 +254,34 @@ async fn run(
                                 // Sending returns the user to the newest line.
                                 app.scroll_offset = 0;
                                 if line.is_empty() {
-                                } else if let Some(cmd) = line.strip_prefix('/') {
-                                    match cmd.split_whitespace().next().unwrap_or("") {
+                                } else if let Some(rest) = line.strip_prefix('/') {
+                                    // Split the command line the same way the CLI
+                                    // REPL does: first token is the command, the
+                                    // remainder is the argument.
+                                    let mut parts = rest.splitn(2, ' ');
+                                    let cmd = parts.next().unwrap_or("");
+                                    let arg = parts.next().unwrap_or("").trim();
+                                    match cmd {
                                         "quit" | "q" => break,
-                                        "help" => app.push(
-                                            "commands: /help /invite /verify /peers /quit  |  keys: Enter send · Ctrl-C/Esc quit · PgUp/PgDn/Home/End scroll",
-                                        ),
-                                        "invite" => {
-                                            let uri = core.descriptor().to_uri();
-                                            app.push(uri.clone());
-                                            app.push_qr(&uri);
+                                        _ => {
+                                            // Dispatch through the shared slash-command
+                                            // logic and render each returned line.
+                                            for out_line in talkrypt_replcmd::run_command(
+                                                core,
+                                                &mut repl_state,
+                                                cmd,
+                                                arg,
+                                            )
+                                            .await
+                                            {
+                                                app.push(out_line);
+                                            }
+                                            // `/invite` also renders the invite as a
+                                            // scannable QR, like the CLI's print_qr.
+                                            if cmd == "invite" {
+                                                app.push_qr(&core.descriptor().to_uri());
+                                            }
                                         }
-                                        "verify" => app.push(format!("safety number: {}", app.safety_number)),
-                                        "peers" => app.push(format!("connected peers: {}", core.peer_count())),
-                                        other => app.push(format!("unknown command: /{other}")),
                                     }
                                 } else {
                                     match core.send(&line).await {
