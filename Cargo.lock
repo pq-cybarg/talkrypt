@@ -10689,6 +10689,7 @@ dependencies = [
  "talkrypt-core",
  "talkrypt-crypto",
  "talkrypt-transport",
+ "tokio",
 ]
 
 [[package]]

@@ -9,9 +9,12 @@
 
 use std::sync::Arc;
 
-use talkrypt_core::{resolve_across, ChatDescriptor, Core, RegistryClient};
+use talkrypt_core::{
+    resolve_across, ChatDescriptor, Core, LinkClient, LinkHost, Persistence, RegistryClient,
+    TopologyKind,
+};
 use talkrypt_crypto::{
-    IdentityChain, IdentityKeyPair, Revocation, SignedClaim, SuiteRegistry,
+    IdentityChain, IdentityKeyPair, Revocation, SignedClaim, SuiteRegistry, DEFAULT_SUITE_ID,
 };
 use talkrypt_transport::TcpTransport;
 
@@ -70,6 +73,9 @@ commands:
   /register <registry-uri>       publish username->account to a registry
   /resolve <name> <uri>[ <uri>…] [add]
                                  cross-compare a name; `add` saves it as a contact
+  device linking (certify another device under your account):
+  /link offer [listen]           offer to link a NEW device (needs /account); prints a URI
+  /link accept <uri> [label]     accept a link offer on this device; saves the account→device cert
   /quit                          leave";
 
 /// Handle one slash command (everything except /quit, handled by the caller).
@@ -157,6 +163,7 @@ pub async fn run_command(core: &Core, state: &mut ReplState, cmd: &str, arg: &st
         "register" => out.extend(cmd_register(core, state, arg).await),
         "revoke" => out.extend(cmd_revoke(core, state, arg).await),
         "resolve" => out.extend(cmd_resolve(core, arg).await),
+        "link" => out.extend(cmd_link(state, arg).await),
         "name" => out.extend(cmd_name(core, state, arg).await),
         "cq" => {
             let a = arg.trim();
@@ -783,6 +790,148 @@ pub async fn present(core: &Core, account: &IdentityKeyPair, username: Option<St
     core.present_identity(chain, username);
     core.announce_identity().await;
     Vec::new()
+}
+
+/// `/link offer [listen]` / `/link accept <uri> [label]` — device linking.
+///
+/// The account holder (`/account`) runs `offer` to certify a NEW device: it
+/// spins up a one-time, single-use, auto-approving [`LinkHost`] in the
+/// background and prints a linking URI (scan/paste it on the new device). The
+/// new device runs `accept <uri>` to receive a signed account→device cert chain
+/// (saved locally) — the account key never crosses the wire. Confirmation stays
+/// out of band: compare the account safety number shown on both ends by hand
+/// (carrying it over a transport would defeat the MITM defense).
+///
+/// Transport note: the rendezvous currently binds a LAN TCP listener — pass a
+/// reachable `listen` (e.g. your LAN `ip:port`) for cross-device linking. Tor/
+/// mesh-mediated linking is a planned extension (the descriptor already models
+/// `.onion`/multi-homed endpoints); device REVOCATION (`/revoke`) already rides
+/// whatever transport the chat uses, so it is not LAN-bound.
+async fn cmd_link(state: &ReplState, arg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = arg.splitn(2, ' ');
+    let sub = it.next().unwrap_or("");
+    let rest = it.next().unwrap_or("").trim();
+    match sub {
+        "offer" => {
+            let Some(acct) = state.account.as_ref() else {
+                out.push("no account — run /account new|load first (you certify the new device)".into());
+                return out;
+            };
+            // IdentityKeyPair isn't Clone; re-derive an owned copy from its seed
+            // for the LinkHost (which takes ownership of the account key).
+            let account = IdentityKeyPair::from_secret_bytes(acct.export_secret());
+            let listen = if rest.is_empty() { "127.0.0.1:9200".to_string() } else { rest.to_string() };
+            let suite = match SuiteRegistry::with_defaults().get(DEFAULT_SUITE_ID) {
+                Ok(s) => s,
+                Err(e) => { out.push(format!("link offer failed: {e}")); return out; }
+            };
+            let account_sn = account.public().safety_number();
+            let desc = ChatDescriptor::new(
+                TopologyKind::P2P,
+                Persistence::Ephemeral,
+                DEFAULT_SUITE_ID,
+                vec![listen.clone()],
+                "#link",
+            );
+            let uri = desc.to_uri();
+            let transport = Arc::new(TcpTransport::new(&listen));
+            let host = LinkHost::new(
+                account,
+                IdentityKeyPair::generate(),
+                suite,
+                transport,
+                &desc,
+                state.username.clone(),
+                now_secs(),
+            )
+            .auto_approve();
+            // Bind + serve in the background so the command returns with the URI;
+            // the spawned task owns the host, keeping the one-time offer alive.
+            match host.run().await {
+                Ok(_) => {
+                    tokio::spawn(async move {
+                        let _host = host; // held alive
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        }
+                    });
+                    out.push(format!("linking offer for account {account_sn}"));
+                    out.push(format!("hosting on {listen} — on the NEW device run:"));
+                    out.push(format!("  /link accept {uri}"));
+                    out.push(uri);
+                    out.push("the account key never leaves this device — only a signed device cert is sent".into());
+                    out.push("after linking, compare the account safety number out of band".into());
+                }
+                Err(e) => out.push(format!("link offer failed to bind {listen}: {e}")),
+            }
+        }
+        "accept" => {
+            let uri = rest.split_whitespace().next().unwrap_or("");
+            if uri.is_empty() {
+                out.push("usage: /link accept <uri> [label]".into());
+                return out;
+            }
+            let label = rest.strip_prefix(uri).map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("device").to_string();
+            let desc = match ChatDescriptor::from_uri(uri) {
+                Ok(d) => d,
+                Err(e) => { out.push(format!("bad link URI: {e}")); return out; }
+            };
+            let suite = match SuiteRegistry::with_defaults().get_by_scheme_hash(&desc.scheme_hash()) {
+                Ok(s) => s,
+                Err(_) => { out.push("this link offer's scheme is not registered in this build".into()); return out; }
+            };
+            let Some(endpoint) = desc.endpoints.first().cloned() else {
+                out.push("link URI carries no endpoint address".into());
+                return out;
+            };
+            // Persist a device key so the received chain stays valid across runs.
+            let device_path = expand_tilde("~/.talkrypt/device.key");
+            let device_kp = match load_account(&device_path) {
+                Ok(kp) => kp,
+                Err(_) => {
+                    let kp = IdentityKeyPair::generate();
+                    if let Err(e) = save_account(&device_path, &kp) {
+                        out.push(format!("could not save device key: {e}"));
+                        return out;
+                    }
+                    out.push(format!("new device key saved to {device_path}"));
+                    kp
+                }
+            };
+            let transport = Arc::new(TcpTransport::new("127.0.0.1:0"));
+            match LinkClient::request(&device_kp, suite, transport, &desc, &endpoint, label, now_secs()).await {
+                Ok(linked) => {
+                    let chain_path = expand_tilde("~/.talkrypt/chain.bin");
+                    if let Err(e) = save_chain(&chain_path, &linked.chain) {
+                        out.push(format!("linked but could not save chain: {e}"));
+                        return out;
+                    }
+                    out.push(format!("linked to account: {}", linked.account.safety_number()));
+                    if let Some(u) = &linked.username {
+                        out.push(format!("account username: {u}"));
+                    }
+                    out.push(format!("saved account→device chain to {chain_path}"));
+                    out.push(format!("this device fingerprint (give to the account holder to revoke if lost):\n  {}", hex48(&device_kp.public().fingerprint())));
+                    out.push("verify the account safety number above matches the offering device out of band".into());
+                }
+                Err(e) => out.push(format!("link accept failed: {e}")),
+            }
+        }
+        _ => out.push("usage: /link offer [listen]   |   /link accept <uri> [label]".into()),
+    }
+    out
+}
+
+/// Save an encoded identity chain to a file (parent dirs created).
+fn save_chain(path: &str, chain: &IdentityChain) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, chain.encode())?;
+    Ok(())
 }
 
 /// Connect to a registry from its URI and return a client + the parsed
