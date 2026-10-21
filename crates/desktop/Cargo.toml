@@ -43,6 +43,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net",
 talkrypt-core = { path = "../core" }
 talkrypt-crypto = { path = "../crypto" }
 talkrypt-transport = { path = "../transport" }
+# Shared interactive slash-command logic (one impl across CLI / TUI / desktop).
+talkrypt-replcmd = { path = "../replcmd" }
 
 # Linux desktop windowing backends — added only when targeting Linux so macOS /
 # Windows builds don't pull X11/Wayland. Keeps the GUI first-class on the full
