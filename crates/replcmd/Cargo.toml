@@ -12,3 +12,6 @@ talkrypt-crypto.workspace = true
 # `registry_connect` dials a registry over the TCP transport, so the shared
 # command logic needs the transport crate (the only non-core/crypto dep).
 talkrypt-transport.workspace = true
+# `/link offer` spins up a background LinkHost that outlives the command, so we
+# need tokio's runtime handle (spawn) + timer (keep-alive). Minimal features.
+tokio = { workspace = true, features = ["rt", "time"] }
