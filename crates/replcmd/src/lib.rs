@@ -789,7 +789,7 @@ pub async fn present(core: &Core, account: &IdentityKeyPair, username: Option<St
 /// descriptor (so callers can label output).
 async fn registry_connect(
     uri: &str,
-) -> Result<(RegistryClient, ChatDescriptor), Box<dyn std::error::Error>> {
+) -> Result<(RegistryClient, ChatDescriptor), Box<dyn std::error::Error + Send + Sync>> {
     let desc = ChatDescriptor::from_uri(uri)?;
     let reg = SuiteRegistry::with_defaults();
     let suite = reg
@@ -855,14 +855,14 @@ fn parse_seed_hex(s: &str) -> Result<[u8; 32], String> {
 }
 
 /// Load an account keypair from a seed file.
-fn load_account(path: &str) -> Result<IdentityKeyPair, Box<dyn std::error::Error>> {
+fn load_account(path: &str) -> Result<IdentityKeyPair, Box<dyn std::error::Error + Send + Sync>> {
     let contents = std::fs::read_to_string(path)?;
     let seed = parse_seed_hex(&contents)?;
     Ok(IdentityKeyPair::from_secret_bytes(seed))
 }
 
 /// Save an account seed to a file with owner-only permissions (0600 on unix).
-fn save_account(path: &str, kp: &IdentityKeyPair) -> Result<(), Box<dyn std::error::Error>> {
+fn save_account(path: &str, kp: &IdentityKeyPair) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;

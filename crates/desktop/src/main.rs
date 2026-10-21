@@ -513,6 +513,14 @@ enum Cmd {
         name: String,
         friend: bool,
     },
+    /// Run a raw interactive slash-command (`/verify`, `/vouch <fp>`, `/username
+    /// <name>`, …) through the shared `talkrypt-replcmd` logic — the same engine
+    /// the CLI and TUI use. The worker dispatches it against this session's `Core`
+    /// + `ReplState` and returns the output lines as a [`UiEvt::CommandOutput`].
+    RunCommand {
+        id: u64,
+        line: String,
+    },
 }
 
 /// Map a posture label to a KEM profile (mirrors the CLI / mobile postures).
@@ -548,6 +556,9 @@ enum UiEvt {
     /// Only constructed on a Tor build (init_tor); harmless dead variant otherwise.
     #[cfg_attr(not(feature = "tor"), allow(dead_code))]
     TorProgress(f32),
+    /// Output lines from a [`Cmd::RunCommand`] slash-command, rendered into the
+    /// transcript as system lines (one per line, in order).
+    CommandOutput { id: u64, lines: Vec<String> },
 }
 
 /// LAN IPv4 to advertise, found via the default route (no packets sent). Falls
@@ -580,6 +591,10 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
     // stream is drained by its own forwarder task (spawn_forwarder) that tags
     // events with the id, so all sessions stay live concurrently.
     let mut cores: HashMap<u64, Core> = HashMap::new();
+    // Per-session REPL state (account/username) for the shared slash-command
+    // engine. Each chat starts as an unlinkable pseudonym; `/account new` makes
+    // one — exactly like the CLI/TUI.
+    let mut repl_states: HashMap<u64, talkrypt_replcmd::ReplState> = HashMap::new();
     // Joined sessions remember their dial endpoint so Reconnect can re-dial.
     let mut rejoin: HashMap<u64, String> = HashMap::new();
     // The per-launch EPHEMERAL identity: one fresh key for this process run, used
@@ -743,6 +758,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         let _ = ui_tx.send(UiEvt::Status { id, text: format!("hosting · {net} · {posture} · {access} · {tier}") });
                         spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
                         cores.insert(id, c);
+                        repl_states.insert(id, talkrypt_replcmd::ReplState::new(None, None));
                     }
                     Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("host failed: {e}") }); }
                 }
@@ -792,6 +808,7 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                                 rejoin.insert(id, endpoint);
                                 spawn_forwarder(id, rx, ui_tx.clone(), on_event.clone());
                                 cores.insert(id, c);
+                                repl_states.insert(id, talkrypt_replcmd::ReplState::new(None, None));
                             }
                             Err(e) => { let _ = ui_tx.send(UiEvt::Status { id, text: format!("join failed: {e}") }); }
                         }
@@ -817,6 +834,21 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                     } else {
                         let _ = ui_tx.send(UiEvt::Status { id, text: "could not add contact (account not presented yet)".into() });
                     }
+                }
+            }
+            Cmd::RunCommand { id, line } => {
+                // Dispatch a slash-command through the shared engine (same as the
+                // CLI/TUI): split off the leading `/`, first token is the command,
+                // the remainder is the argument, then render the returned lines.
+                if let (Some(c), Some(state)) = (cores.get(&id), repl_states.get_mut(&id)) {
+                    let rest = line.trim_start_matches('/');
+                    let mut parts = rest.splitn(2, ' ');
+                    let cmd = parts.next().unwrap_or("");
+                    let arg = parts.next().unwrap_or("").trim();
+                    let lines = talkrypt_replcmd::run_command(c, state, cmd, arg).await;
+                    let _ = ui_tx.send(UiEvt::CommandOutput { id, lines });
+                } else {
+                    let _ = ui_tx.send(UiEvt::Status { id, text: "connect to a chat first".into() });
                 }
             }
             Cmd::SetName { id, label } => {
@@ -1195,6 +1227,15 @@ impl App {
                 UiEvt::TorProgress(frac) => {
                     // Clear once fully bootstrapped; otherwise show the fraction.
                     self.tor_progress = if frac >= 1.0 { None } else { Some(frac) };
+                }
+                UiEvt::CommandOutput { id, lines } => {
+                    if let Some(s) = self.session_mut(id) {
+                        // Render each returned line as a centered system line, like
+                        // the TUI pushes them into its log.
+                        for line in lines {
+                            s.transcript.push(Msg { mine: false, who: "•".into(), text: line, delivery: Delivery::Delivered });
+                        }
+                    }
                 }
             }
         }
@@ -1587,6 +1628,32 @@ impl App {
             }
         });
         ui.add_space(4.0);
+        // Trust & identity toolbar — discoverable buttons for the key trust-model
+        // views; each fires a slash-command through the shared engine and the
+        // output lands in the transcript. The full ~40-command surface (vouch,
+        // username, access, contacts, opsec, grouping, register/resolve, …) is
+        // reachable by typing `/command …` in the message box below.
+        ui.horizontal_wrapped(|ui| {
+            let run = |line: &str| {
+                let _ = self.cmd_tx.send(Cmd::RunCommand { id, line: line.to_string() });
+            };
+            if ui.button("🔐 Verify").on_hover_text("Show safety numbers — compare out of band to defeat MITM").clicked() {
+                run("/verify");
+            }
+            if ui.button("Who am I").on_hover_text("Your device + account identity and contact count").clicked() {
+                run("/whoami");
+            }
+            if ui.button("Vouches").on_hover_text("Heard vouches (SUB-SPEC C; display-only, never gates access)").clicked() {
+                run("/vouches");
+            }
+            if ui.button("Sybil").on_hover_text("Honest distinct-people estimate for this chat").clicked() {
+                run("/sybil");
+            }
+            if ui.button("Commands…").on_hover_text("List every slash command (type them in the message box)").clicked() {
+                run("/help");
+            }
+        });
+        ui.add_space(4.0);
         // Message row: padded field + a Send button the SAME height.
         ui.horizontal(|ui| {
             let send_w = 64.0;
@@ -1607,7 +1674,15 @@ impl App {
                 )
                 .clicked();
             if (clicked || enter) && !self.msg_input.trim().is_empty() {
-                let _ = self.cmd_tx.send(Cmd::Send { id, text: self.msg_input.trim().to_string() });
+                let text = self.msg_input.trim().to_string();
+                // A `/`-prefixed line is a slash-command (full CLI/TUI surface via
+                // the shared engine), not a chat message — route it accordingly so
+                // the desktop console reaches contacts, access, vouch, name, etc.
+                if text.starts_with('/') {
+                    let _ = self.cmd_tx.send(Cmd::RunCommand { id, line: text });
+                } else {
+                    let _ = self.cmd_tx.send(Cmd::Send { id, text });
+                }
                 self.msg_input.clear();
                 resp.request_focus();
             }

@@ -120,6 +120,12 @@ pub fn run(args: &[String]) -> i32 {
             }
             UiEvt::Dropped { count, .. } => format!("DROPPED {count}"),
             UiEvt::PeerIdentity { name, .. } => format!("IDENTITY {name}"),
+            UiEvt::CommandOutput { lines, .. } => {
+                for l in lines {
+                    let _ = writeln!(out, "CMD {l}");
+                }
+                continue;
+            }
         };
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
