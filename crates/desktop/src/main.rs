@@ -521,6 +521,11 @@ enum Cmd {
         id: u64,
         line: String,
     },
+    /// Leave + delete a chat: drop this session's `Core` (disconnecting it) and
+    /// its per-session state, so dead chats don't leak in the worker.
+    Close {
+        id: u64,
+    },
 }
 
 /// Map a posture label to a KEM profile (mirrors the CLI / mobile postures).
@@ -835,6 +840,13 @@ async fn worker_loop<F: Fn() + Clone + Send + 'static>(
                         let _ = ui_tx.send(UiEvt::Status { id, text: "could not add contact (account not presented yet)".into() });
                     }
                 }
+            }
+            Cmd::Close { id } => {
+                // Drop the Core (its transport/listeners close) and forget the
+                // session's worker-side state. The UI already removed its own copy.
+                cores.remove(&id);
+                repl_states.remove(&id);
+                rejoin.remove(&id);
             }
             Cmd::RunCommand { id, line } => {
                 // Dispatch a slash-command through the shared engine (same as the
@@ -1490,6 +1502,7 @@ impl App {
         let mut go_home = false;
         let mut toggle_invite = false;
         let mut do_reconnect = false;
+        let mut close_chat = false;
         let mut add_contact: Option<bool> = None; // Some(friend?)
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new(egui::RichText::new("< Back").color(FG)).fill(PANEL)).clicked() {
@@ -1497,6 +1510,15 @@ impl App {
             }
             ui.label(egui::RichText::new(&title).strong().color(FG));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Leave + delete this chat: disconnects (worker drops the Core) and
+                // removes it from the list so dead chats don't accumulate forever.
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("✕ Close").color(egui::Color32::from_rgb(220, 90, 90))).fill(PANEL))
+                    .on_hover_text("Leave and delete this chat (disconnects; removes it from the list)")
+                    .clicked()
+                {
+                    close_chat = true;
+                }
                 if invite.is_some() && ui.add(egui::Button::new(egui::RichText::new("Invite").color(ACCENT)).fill(PANEL)).clicked() {
                     toggle_invite = true;
                 }
@@ -1532,6 +1554,17 @@ impl App {
             let _ = self.cmd_tx.send(Cmd::AddContact { id, account_fp: *fp, name: name.clone(), friend });
         }
         if go_home {
+            self.screen = Screen::Home;
+            return;
+        }
+        if close_chat {
+            // Tell the worker to drop the Core (disconnects), then forget the
+            // session locally and return to the chat list.
+            let _ = self.cmd_tx.send(Cmd::Close { id });
+            self.sessions.retain(|s| s.id != id);
+            if self.active == Some(id) {
+                self.active = None;
+            }
             self.screen = Screen::Home;
             return;
         }
@@ -1574,7 +1607,11 @@ impl App {
         egui::ScrollArea::vertical()
             .id_salt("transcript")
             .auto_shrink([false, false])
-            .max_height((avail - 52.0).max(80.0))
+            // Reserve the full height of the controls that render BELOW the
+            // transcript — the name row, the trust toolbar, and the composer
+            // (plus inter-row spacing) — so none of them get clipped off the
+            // bottom. (Was 52px, which only accounted for the composer.)
+            .max_height((avail - 136.0).max(80.0))
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 for Msg { mine, who, text, delivery } in &self.sessions[idx].transcript {
@@ -1827,6 +1864,10 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 640.0])
+            // Floor the window so it can't be dragged smaller than the chat
+            // controls (header + transcript + name row + trust toolbar + composer)
+            // need — below this the composer gets clipped off the bottom.
+            .with_min_inner_size([360.0, 480.0])
             .with_title("talkrypt"),
         ..Default::default()
     };
