@@ -83,9 +83,16 @@ in a throwaway VM — not the host.
   existing `why3`/`z3` (`--external` options). A host crash then wiped the scratch
   build. **Re-runnable**: install `nightly-2026-08-03`, `cargo run --bin
   creusot-install -- --external why3 --external z3`, then `cargo creusot` the file.
-- **Aeneas → F\***: **skipped** on this host because its Charon frontend has 11 CVEs.
-  It is the highest-leverage route (heap disappears; lands in talkrypt's existing
-  F\* toolchain) and worth doing **in a VM**.
+- **Aeneas → F\***: **unblocked (2026-10).** Charon's CVEs were all transitive
+  networking crates (`quinn-proto`/`rustls`/`rustls-webpki`/`bytes`/`crossbeam-epoch`,
+  irrelevant to offline extraction) with patched point-releases; a plain
+  `cargo update` clears them — `cargo audit` then exits **0** (only 8 advisory
+  *warnings* remain: unmaintained/unsound dev deps, accepted). `cargo update` /
+  `cargo audit` run no build scripts, so the CVE gate clears **on the host**; only
+  the subsequent build runs third-party scripts, so it stays a **VM** step. This is
+  the highest-leverage route (heap disappears; lands in talkrypt's existing F\*
+  toolchain). The pipeline (CVE-fix recipe + turnkey VM build + extraction targets)
+  is wired in [`formal/decoder-totality/`](../formal/decoder-totality/README.md).
 
 ## Recommendation
 
