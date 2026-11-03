@@ -32,8 +32,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring"], opti
 # --- optional: Nym mixnet transport (enabled by the `nym` feature) ---
 # The `Stream` module (mixnet::stream) is Git-only — the crates.io release
 # (v1.20.4) predates it — so we pin a `nymtech/nym` revision rather than a
-# crates.io version. This rev is develop @ 2026-06-18, the newest that carries
-# the Stream module; re-verify the API used in src/nym.rs when bumping the pin.
+# crates.io version. Bumped 2026-11 (7cee643 / nym-sdk 1.21.1 -> e416f724 /
+# nym-sdk 2.0.0) to clear the nym-tree security advisories AT SOURCE: nym 2.0
+# updated its PQ crypto (libcrux 0.0.7/0.0.8 -> 0.0.10/0.0.11, and dropped the
+# unfixable libcrux-aesgcm), clearing all the HIGH libcrux advisories. src/nym.rs
+# compiled against 2.0 unchanged (Stream/TicketType/ImportableTicketBook API
+# stable); re-verify it on every bump. Residual: nym's cosmos/zk-nym credential
+# path still pulls cosmrs 0.22 -> tendermint-rpc -> reqwest 0.11 (old rustls
+# 0.21/webpki/h2/crypto-bigint) — a client-to-nym-API chain, pinned upstream.
 #
 # Linking nym-sdk alongside Arti forces both monorepo graphs into one binary.
 # The shared-crate clashes are resolved WITHOUT downgrading Arti:
@@ -44,12 +50,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring"], opti
 #     vendored sqlx-sqlite whose libsqlite3-sys range is widened to match
 #     upstream 0.9.0 (`>=0.30.1, <0.38.0`). See [patch.crates-io] in the
 #     workspace-root Cargo.toml and vendor/sqlx-sqlite/.
-nym-sdk = { git = "https://github.com/nymtech/nym", rev = "7cee643c8577c21ee002a6044002bfc6789c02fe", optional = true }
+nym-sdk = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", optional = true }
 # `TicketType` for the paid-bandwidth (zk-nym) flow — pinned to the same rev.
-nym-credentials-interface = { git = "https://github.com/nymtech/nym", rev = "7cee643c8577c21ee002a6044002bfc6789c02fe", optional = true }
+nym-credentials-interface = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", optional = true }
 # `ImportableTicketBook` (de)serialisation for the no-mnemonic credential-import
 # path — lets a user reuse a ticketbook minted by Nym's own tooling.
-nym-credentials = { git = "https://github.com/nymtech/nym", rev = "7cee643c8577c21ee002a6044002bfc6789c02fe", optional = true }
+nym-credentials = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", optional = true }
 
 # base64 keeps talkrypt fragments text-safe inside Meshcore's UTF-8 channel-text
 # field. Always available (tiny, pure Rust) so the Meshcore codec — used by both the
