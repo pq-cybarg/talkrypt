@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": -32603,
+    "data": "height must be greater than 0, but got 0",
+    "message": "Internal error"
+  },
+  "id": "02e1e336-eecb-438f-926d-01518b470fff",
+  "jsonrpc": "2.0"
+}

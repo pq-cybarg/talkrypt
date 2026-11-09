@@ -1,0 +1,1815 @@
+// Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::nym_api::error::NymAPIError;
+use crate::nym_api::routes::{ecash, CORE_STATUS_COUNT, SINCE_ARG};
+use crate::nym_nodes::SkimmedNodesWithMetadata;
+use crate::ValidatorClientError;
+use async_trait::async_trait;
+use nym_api_requests::ecash::models::{
+    AggregatedCoinIndicesSignatureResponse, AggregatedExpirationDateSignatureResponse,
+    BatchRedeemTicketsBody, EcashBatchTicketRedemptionResponse, EcashSignerStatusResponse,
+    EcashTicketVerificationResponse, IssuedTicketbooksChallengeCommitmentRequest,
+    IssuedTicketbooksChallengeCommitmentResponse, IssuedTicketbooksDataRequest,
+    IssuedTicketbooksDataResponse, IssuedTicketbooksForCountResponse, IssuedTicketbooksForResponse,
+    VerifyEcashTicketBody,
+};
+use nym_api_requests::ecash::VerificationKeyResponse;
+
+use nym_api_requests::models::node_families::NodeFamily;
+use nym_api_requests::models::{
+    AnnotationResponseV1, AnnotationResponseV2, ApiHealthResponse, BinaryBuildInformationOwned,
+    ChainBlocksStatusResponse, ChainStatusResponse, KeyRotationInfoResponse,
+    NodePerformanceResponse, NodeRefreshBody, PerformanceHistoryResponse, RewardedSetResponse,
+    SignerInformationResponse,
+};
+use nym_api_requests::pagination::PaginatedResponse;
+use nym_contract_attestation::{
+    AttestedSubset, DirectorySnapshotData, SignedDigestSnapshot, SignedSubsetDigest,
+};
+use nym_http_api_client::{ApiClient, NO_PARAMS};
+use nym_mixnet_contract_common::{IdentityKeyRef, NodeId, NymNodeDetails};
+use std::net::IpAddr;
+use time::format_description::BorrowedFormatItem;
+use time::macros::format_description;
+use time::Date;
+use tracing::{debug, instrument};
+
+use nym_api_requests::models::described::v1::NymNodeDescriptionV1;
+use nym_api_requests::models::described::v2::NymNodeDescriptionV2;
+use nym_api_requests::models::directory::{
+    DirectoryEntriesIdentitiesResponse, DirectoryEntriesRecordsResponse,
+};
+use nym_api_requests::models::v3::{
+    KnownNetworkMonitorResponse, LivenessTestBatchSubmission, LivenessTestBatchSubmissionResponse,
+    StressTestBatchSubmission, StressTestBatchSubmissionResponse,
+};
+pub use nym_api_requests::{
+    ecash::{
+        models::SpentCredentialsResponse, BlindSignRequestBody, BlindedSignatureResponse,
+        PartialCoinIndicesSignatureResponse, PartialExpirationDateSignatureResponse,
+        VerifyEcashCredentialBody,
+    },
+    models::{
+        GatewayCoreStatusResponse, GatewayStatusReportResponse, GatewayUptimeHistoryResponse,
+        MixnodeCoreStatusResponse, MixnodeStatusReportResponse, MixnodeStatusResponse,
+        MixnodeUptimeHistoryResponse, StakeSaturationResponse, UptimeResponse,
+    },
+    nym_nodes::{
+        CachedNodesResponse, LpSkimmedNodesWithMetadata, NodesByAddressesRequestBody,
+        NodesByAddressesResponse, PaginatedCachedNodesResponseV1, PaginatedCachedNodesResponseV2,
+        SemiSkimmedNodeV1, SemiSkimmedNodeV3, SemiSkimmedNodesWithMetadata, SkimmedNodeV1,
+        SkimmedNodeV2,
+    },
+    NymNetworkDetailsV1Response, NymNetworkDetailsV2Response,
+};
+pub use nym_coconut_dkg_common::types::EpochId;
+use nym_directory_contract_common::DirectoryEntryRecord;
+
+pub mod error;
+pub mod routes;
+
+pub const RFC_3339_DATE_FORMAT: &[BorrowedFormatItem<'static>] =
+    format_description!("[year]-[month]-[day]");
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait NymApiClientExt: ApiClient {
+    /// Get the current API URL being used by the client
+    fn api_url(&self) -> &url::Url;
+
+    async fn health(&self) -> Result<ApiHealthResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::API_STATUS_ROUTES,
+                routes::HEALTH,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn build_information(&self) -> Result<BinaryBuildInformationOwned, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::API_STATUS_ROUTES,
+                routes::BUILD_INFORMATION,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_node_performance_history(
+        &self,
+        node_id: NodeId,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PerformanceHistoryResponse, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_PERFORMANCE_HISTORY,
+                &*node_id.to_string(),
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    #[deprecated(note = "use .get_nodes_described_v2 instead")]
+    async fn get_nodes_described(
+        &self,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedResponse<NymNodeDescriptionV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_DESCRIBED,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_nodes_described_v2(
+        &self,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedResponse<NymNodeDescriptionV2>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(
+            &[
+                routes::V2_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_DESCRIBED,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    async fn get_current_rewarded_set(&self) -> Result<RewardedSetResponse, NymAPIError> {
+        self.get_rewarded_set().await
+    }
+
+    async fn get_all_basic_nodes_with_metadata(
+        &self,
+    ) -> Result<SkimmedNodesWithMetadata, NymAPIError> {
+        // unroll first loop iteration in order to obtain the metadata
+        let mut page = 0;
+        let res = self
+            .get_basic_nodes_v2(false, Some(page), None, true)
+            .await?;
+        let mut nodes = res.nodes.data;
+        let metadata = res.metadata;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(SkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let mut res = self
+                .get_basic_nodes_v2(false, Some(page), None, true)
+                .await?;
+
+            if !metadata.consistency_check(&res.metadata) {
+                // Create a custom error for inconsistent metadata
+                return Err(NymAPIError::InternalResponseInconsistency {
+                    url: self.api_url().clone(),
+                    details: "Inconsistent paged metadata".to_string(),
+                });
+            }
+
+            nodes.append(&mut res.nodes.data);
+            if nodes.len() >= res.nodes.pagination.total {
+                break;
+            } else {
+                page += 1
+            }
+        }
+
+        Ok(SkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    async fn get_all_basic_active_mixing_assigned_nodes_with_metadata(
+        &self,
+    ) -> Result<SkimmedNodesWithMetadata, NymAPIError> {
+        // Get all mixing nodes that are in the active/rewarded set
+        let mut page = 0;
+        let res = self
+            .get_basic_active_mixing_assigned_nodes_v2(false, Some(page), None, false)
+            .await?;
+
+        let metadata = res.metadata;
+        let mut nodes = res.nodes.data;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(SkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let res = self
+                .get_basic_active_mixing_assigned_nodes_v2(false, Some(page), None, false)
+                .await?;
+
+            if !metadata.consistency_check(&res.metadata) {
+                return Err(NymAPIError::InternalResponseInconsistency {
+                    url: self.api_url().clone(),
+                    details: "Inconsistent paged metadata".to_string(),
+                });
+            }
+
+            nodes.append(&mut res.nodes.data.clone());
+
+            // Check if we've got all nodes
+            if nodes.len() >= res.nodes.pagination.total {
+                break;
+            } else {
+                page += 1;
+            }
+        }
+
+        Ok(SkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    async fn get_all_basic_entry_assigned_nodes_with_metadata(
+        &self,
+    ) -> Result<SkimmedNodesWithMetadata, NymAPIError> {
+        // Get all nodes that can act as entry gateways
+        let mut page = 0;
+        let res = self
+            .get_basic_entry_assigned_nodes_v2(false, Some(page), None, false)
+            .await?;
+
+        let metadata = res.metadata;
+        let mut nodes = res.nodes.data;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(SkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let res = self
+                .get_basic_entry_assigned_nodes_v2(false, Some(page), None, false)
+                .await?;
+
+            if !metadata.consistency_check(&res.metadata) {
+                return Err(NymAPIError::InternalResponseInconsistency {
+                    url: self.api_url().clone(),
+                    details: "Inconsistent paged metadata".to_string(),
+                });
+            }
+
+            nodes.append(&mut res.nodes.data.clone());
+
+            // Check if we've got all nodes
+            if nodes.len() >= res.nodes.pagination.total {
+                break;
+            } else {
+                page += 1;
+            }
+        }
+
+        Ok(SkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    async fn get_all_basic_exit_assigned_nodes_with_metadata(
+        &self,
+    ) -> Result<SkimmedNodesWithMetadata, NymAPIError> {
+        // Get all nodes that can act as exit gateways
+        let mut page = 0;
+        let res = self
+            .get_basic_exit_assigned_nodes_v2(false, Some(page), None, false)
+            .await?;
+
+        let metadata = res.metadata;
+        let mut nodes = res.nodes.data;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(SkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let res = self
+                .get_basic_exit_assigned_nodes_v2(false, Some(page), None, false)
+                .await?;
+
+            if !metadata.consistency_check(&res.metadata) {
+                return Err(NymAPIError::InternalResponseInconsistency {
+                    url: self.api_url().clone(),
+                    details: "Inconsistent paged metadata".to_string(),
+                });
+            }
+
+            nodes.append(&mut res.nodes.data.clone());
+
+            // Check if we've got all nodes
+            if nodes.len() >= res.nodes.pagination.total {
+                break;
+            } else {
+                page += 1;
+            }
+        }
+
+        Ok(SkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    #[deprecated(note = "use .get_all_described_nodes_v2 instead")]
+    #[allow(deprecated)]
+    async fn get_all_described_nodes(&self) -> Result<Vec<NymNodeDescriptionV1>, NymAPIError> {
+        // TODO: deal with paging in macro or some helper function or something, because it's the same pattern everywhere
+        let mut page = 0;
+        let mut descriptions = Vec::new();
+
+        loop {
+            let mut res = self.get_nodes_described(Some(page), None).await?;
+
+            descriptions.append(&mut res.data);
+            if descriptions.len() < res.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+
+        Ok(descriptions)
+    }
+
+    async fn get_all_described_nodes_v2(&self) -> Result<Vec<NymNodeDescriptionV2>, NymAPIError> {
+        // TODO: deal with paging in macro or some helper function or something, because it's the same pattern everywhere
+        let mut page = 0;
+        let mut descriptions = Vec::new();
+
+        loop {
+            let mut res = self.get_nodes_described_v2(Some(page), None).await?;
+
+            descriptions.append(&mut res.data);
+            if descriptions.len() < res.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+
+        Ok(descriptions)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_nym_nodes(
+        &self,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedResponse<NymNodeDetails>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_BONDED,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    async fn get_all_bonded_nym_nodes(&self) -> Result<Vec<NymNodeDetails>, ValidatorClientError> {
+        // TODO: deal with paging in macro or some helper function or something, because it's the same pattern everywhere
+        let mut page = 0;
+        let mut bonds = Vec::new();
+
+        loop {
+            let mut res = self.get_nym_nodes(Some(page), None).await?;
+
+            bonds.append(&mut res.data);
+            if bonds.len() < res.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+
+        Ok(bonds)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_node_families(
+        &self,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedResponse<NodeFamily>, NymAPIError> {
+        let mut params = Vec::new();
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+        self.get_json(
+            &[routes::V1_API_VERSION, routes::NODE_FAMILIES_ROUTES],
+            &params,
+        )
+        .await
+    }
+
+    async fn get_all_node_families(&self) -> Result<Vec<NodeFamily>, NymAPIError> {
+        // TODO: deal with paging in macro or some helper function or something, because it's the same pattern everywhere
+        let mut page = 0;
+        let mut families = Vec::new();
+
+        loop {
+            let mut res = self.get_node_families(Some(page), None).await?;
+
+            families.append(&mut res.data);
+            if families.len() < res.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+
+        Ok(families)
+    }
+
+    #[deprecated]
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_basic_mixnodes(&self) -> Result<CachedNodesResponse<SkimmedNodeV1>, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "mixnodes",
+                "skimmed",
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_gateways(&self) -> Result<CachedNodesResponse<SkimmedNodeV1>, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "gateways",
+                "skimmed",
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_rewarded_set(&self) -> Result<RewardedSetResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_REWARDED_SET,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes are capable of operating as an entry gateway
+    /// this includes legacy gateways and nym-nodes
+    #[deprecated(note = "use get_basic_entry_assigned_nodes_v2")]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_entry_assigned_nodes(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV1<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "entry-gateways",
+                "all",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes are capable of operating as an entry gateway
+    /// this includes legacy gateways and nym-nodes
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_entry_assigned_nodes_v2(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "entry-gateways",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes are capable of operating as an exit gateway
+    /// this includes legacy gateways and nym-nodes
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_exit_assigned_nodes_v2(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "exit-gateways",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes that got assigned 'mixing' node in this epoch
+    /// this includes legacy mixnodes and nym-nodes
+    #[deprecated(note = "use get_basic_active_mixing_assigned_nodes_v2")]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_active_mixing_assigned_nodes(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV1<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "mixnodes",
+                "active",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes that got assigned 'mixing' node in this epoch
+    /// this includes legacy mixnodes and nym-nodes
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_active_mixing_assigned_nodes_v2(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "mixnodes",
+                "active",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes that got assigned 'mixing' node in this epoch
+    /// this includes legacy mixnodes and nym-nodes
+    #[deprecated(note = "use get_basic_mixing_capable_nodes_v2")]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_mixing_capable_nodes(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV1<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "mixnodes",
+                "all",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// retrieve basic information for nodes that got assigned 'mixing' node in this epoch
+    /// this includes legacy mixnodes and nym-nodes
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_mixing_capable_nodes_v2(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+                "mixnodes",
+                "all",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[deprecated(note = "use get_basic_nodes_v2")]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_nodes(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV1<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_nodes_v2(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// The skimmed listing that carries LP details.
+    ///
+    /// Describes a smaller network than [`Self::get_basic_nodes_v2`]: a node that published no LP
+    /// details has no address on an LP route, so it is absent here and present there.
+    #[instrument(level = "debug", skip(self))]
+    async fn get_basic_nodes_v3(
+        &self,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedCachedNodesResponseV2<SkimmedNodeV2>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_response(
+            &[
+                routes::V3_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "skimmed",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    /// Every node an LP route can name, paged out and collected.
+    ///
+    /// The twin of [`Self::get_all_basic_nodes_with_metadata`] against that listing, with a single retry in case of metadata inconsistency
+    #[instrument(level = "debug", skip(self))]
+    async fn get_all_lp_nodes_with_metadata(
+        &self,
+    ) -> Result<LpSkimmedNodesWithMetadata, NymAPIError> {
+        match self.get_all_lp_nodes_with_metadata_no_retry().await {
+            Err(NymAPIError::InternalResponseInconsistency { .. }) => {
+                debug!("LP node metadat inconsitency, retrying a single time");
+                self.get_all_lp_nodes_with_metadata_no_retry().await
+            }
+            res => res,
+        }
+    }
+
+    /// [`Self::get_all_lp_nodes_with_metadata`] without the second attempt: fails as soon as a
+    /// page disagrees with the first one about the epoch.
+    #[instrument(level = "debug", skip(self))]
+    async fn get_all_lp_nodes_with_metadata_no_retry(
+        &self,
+    ) -> Result<LpSkimmedNodesWithMetadata, NymAPIError> {
+        // unroll first loop iteration in order to obtain the metadata
+        let mut page = 0;
+        let res = self.get_basic_nodes_v3(Some(page), None).await?;
+        let mut nodes = res.nodes.data;
+        let metadata = res.metadata;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(LpSkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let mut res = self.get_basic_nodes_v3(Some(page), None).await?;
+
+            if !metadata.consistency_check(&res.metadata) {
+                return Err(NymAPIError::InternalResponseInconsistency {
+                    url: self.api_url().clone(),
+                    details: "Inconsistent paged metadata".to_string(),
+                });
+            }
+
+            nodes.append(&mut res.nodes.data);
+            if nodes.len() >= res.nodes.pagination.total {
+                break;
+            } else {
+                page += 1
+            }
+        }
+
+        Ok(LpSkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_expanded_nodes(
+        &self,
+        no_legacy: bool,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<PaginatedCachedNodesResponseV2<SemiSkimmedNodeV1>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if no_legacy {
+            params.push(("no_legacy", "true".to_string()))
+        }
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(
+            &[
+                routes::V2_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                "semi-skimmed",
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_expanded_nodes_v3(
+        &self,
+        use_bincode: bool,
+    ) -> Result<PaginatedCachedNodesResponseV2<SemiSkimmedNodeV3>, NymAPIError> {
+        let mut params = Vec::new();
+
+        if use_bincode {
+            params.push(("output", "bincode".to_string()))
+        }
+
+        self.get_response("/v3/unstable/nym-nodes/semi-skimmed", &params)
+            .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_mixnode_report(
+        &self,
+        mix_id: NodeId,
+    ) -> Result<MixnodeStatusReportResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::STATUS,
+                routes::MIXNODE,
+                &mix_id.to_string(),
+                routes::REPORT,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_gateway_report(
+        &self,
+        identity: IdentityKeyRef<'_>,
+    ) -> Result<GatewayStatusReportResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::STATUS,
+                routes::GATEWAY,
+                identity,
+                routes::REPORT,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_mixnode_history(
+        &self,
+        mix_id: NodeId,
+    ) -> Result<MixnodeUptimeHistoryResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::STATUS,
+                routes::MIXNODE,
+                &mix_id.to_string(),
+                routes::HISTORY,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_gateway_history(
+        &self,
+        identity: IdentityKeyRef<'_>,
+    ) -> Result<GatewayUptimeHistoryResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::STATUS,
+                routes::GATEWAY,
+                identity,
+                routes::HISTORY,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_gateway_core_status_count(
+        &self,
+        identity: IdentityKeyRef<'_>,
+        since: Option<i64>,
+    ) -> Result<GatewayCoreStatusResponse, NymAPIError> {
+        if let Some(since) = since {
+            self.get_json(
+                &[
+                    routes::V1_API_VERSION,
+                    routes::STATUS_ROUTES,
+                    routes::GATEWAY,
+                    identity,
+                    CORE_STATUS_COUNT,
+                ],
+                &[(SINCE_ARG, since.to_string())],
+            )
+            .await
+        } else {
+            self.get_json(
+                &[
+                    routes::V1_API_VERSION,
+                    routes::STATUS_ROUTES,
+                    routes::GATEWAY,
+                    identity,
+                ],
+                NO_PARAMS,
+            )
+            .await
+        }
+    }
+
+    #[deprecated]
+    #[instrument(level = "debug", skip(self))]
+    async fn get_mixnode_core_status_count(
+        &self,
+        mix_id: NodeId,
+        since: Option<i64>,
+    ) -> Result<MixnodeCoreStatusResponse, NymAPIError> {
+        if let Some(since) = since {
+            self.get_json(
+                &[
+                    routes::V1_API_VERSION,
+                    routes::STATUS_ROUTES,
+                    routes::MIXNODE,
+                    &mix_id.to_string(),
+                    CORE_STATUS_COUNT,
+                ],
+                &[(SINCE_ARG, since.to_string())],
+            )
+            .await
+        } else {
+            self.get_json(
+                &[
+                    routes::V1_API_VERSION,
+                    routes::STATUS_ROUTES,
+                    routes::MIXNODE,
+                    &mix_id.to_string(),
+                    CORE_STATUS_COUNT,
+                ],
+                NO_PARAMS,
+            )
+            .await
+        }
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_current_node_performance(
+        &self,
+        node_id: NodeId,
+    ) -> Result<NodePerformanceResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_PERFORMANCE,
+                &node_id.to_string(),
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    async fn get_node_annotation(
+        &self,
+        node_id: NodeId,
+    ) -> Result<AnnotationResponseV1, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_ANNOTATION,
+                &node_id.to_string(),
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    async fn get_node_annotation_v2(
+        &self,
+        node_id: NodeId,
+    ) -> Result<AnnotationResponseV2, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V2_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_ANNOTATION,
+                &node_id.to_string(),
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[deprecated]
+    async fn get_mixnode_avg_uptime(&self, mix_id: NodeId) -> Result<UptimeResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::STATUS_ROUTES,
+                routes::MIXNODE,
+                &mix_id.to_string(),
+                routes::AVG_UPTIME,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self, request_body))]
+    /// `epoch_id` names the epoch whose material is being collected. Worth stating whenever this
+    /// is one of several requests for the same credential: a DKG ceremony concluding partway
+    /// through moves the signer's default, and shares from two epochs cannot be aggregated.
+    async fn blind_sign(
+        &self,
+        request_body: &BlindSignRequestBody,
+        epoch_id: Option<EpochId>,
+    ) -> Result<BlindedSignatureResponse, NymAPIError> {
+        let params = match epoch_id {
+            None => Vec::new(),
+            Some(epoch_id) => vec![(ecash::EPOCH_ID_PARAM, epoch_id.to_string())],
+        };
+
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::ECASH_BLIND_SIGN,
+            ],
+            &params,
+            request_body,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self, request_body))]
+    async fn verify_ecash_ticket(
+        &self,
+        request_body: &VerifyEcashTicketBody,
+    ) -> Result<EcashTicketVerificationResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::VERIFY_ECASH_TICKET,
+            ],
+            NO_PARAMS,
+            request_body,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self, request_body))]
+    async fn batch_redeem_ecash_tickets(
+        &self,
+        request_body: &BatchRedeemTicketsBody,
+    ) -> Result<EcashBatchTicketRedemptionResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::BATCH_REDEEM_ECASH_TICKETS,
+            ],
+            NO_PARAMS,
+            request_body,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn partial_expiration_date_signatures(
+        &self,
+        expiration_date: Option<Date>,
+        epoch_id: Option<EpochId>,
+    ) -> Result<PartialExpirationDateSignatureResponse, NymAPIError> {
+        let mut params = match expiration_date {
+            None => Vec::new(),
+            Some(exp) => vec![(
+                ecash::EXPIRATION_DATE_PARAM,
+                exp.format(RFC_3339_DATE_FORMAT).unwrap(),
+            )],
+        };
+
+        if let Some(epoch_id) = epoch_id {
+            params.push((ecash::EPOCH_ID_PARAM, epoch_id.to_string()));
+        }
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::PARTIAL_EXPIRATION_DATE_SIGNATURES,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn partial_coin_indices_signatures(
+        &self,
+        epoch_id: Option<EpochId>,
+    ) -> Result<PartialCoinIndicesSignatureResponse, NymAPIError> {
+        let params = match epoch_id {
+            None => Vec::new(),
+            Some(epoch_id) => vec![(ecash::EPOCH_ID_PARAM, epoch_id.to_string())],
+        };
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::PARTIAL_COIN_INDICES_SIGNATURES,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn global_expiration_date_signatures(
+        &self,
+        expiration_date: Option<Date>,
+        epoch_id: Option<EpochId>,
+    ) -> Result<AggregatedExpirationDateSignatureResponse, NymAPIError> {
+        let mut params = match expiration_date {
+            None => Vec::new(),
+            Some(exp) => vec![(
+                ecash::EXPIRATION_DATE_PARAM,
+                exp.format(RFC_3339_DATE_FORMAT).unwrap(),
+            )],
+        };
+
+        if let Some(epoch_id) = epoch_id {
+            params.push((ecash::EPOCH_ID_PARAM, epoch_id.to_string()));
+        }
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::GLOBAL_EXPIRATION_DATE_SIGNATURES,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn global_coin_indices_signatures(
+        &self,
+        epoch_id: Option<EpochId>,
+    ) -> Result<AggregatedCoinIndicesSignatureResponse, NymAPIError> {
+        let params = match epoch_id {
+            None => Vec::new(),
+            Some(epoch_id) => vec![(ecash::EPOCH_ID_PARAM, epoch_id.to_string())],
+        };
+
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::GLOBAL_COIN_INDICES_SIGNATURES,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn master_verification_key(
+        &self,
+        epoch_id: Option<EpochId>,
+    ) -> Result<VerificationKeyResponse, NymAPIError> {
+        let params = match epoch_id {
+            None => Vec::new(),
+            Some(epoch_id) => vec![(ecash::EPOCH_ID_PARAM, epoch_id.to_string())],
+        };
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                ecash::MASTER_VERIFICATION_KEY,
+            ],
+            &params,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn force_refresh_describe_cache(
+        &self,
+        request: &NodeRefreshBody,
+    ) -> Result<(), NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::NYM_NODES_REFRESH_DESCRIBED,
+            ],
+            NO_PARAMS,
+            request,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn issued_ticketbooks_for(
+        &self,
+        expiration_date: Date,
+    ) -> Result<IssuedTicketbooksForResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::ECASH_ISSUED_TICKETBOOKS_FOR,
+                &expiration_date.to_string(),
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn issued_ticketbooks_for_count(
+        &self,
+        expiration_date: Date,
+    ) -> Result<IssuedTicketbooksForCountResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::ECASH_ISSUED_TICKETBOOKS_FOR_COUNT,
+                &expiration_date.to_string(),
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn issued_ticketbooks_challenge_commitment(
+        &self,
+        request: &IssuedTicketbooksChallengeCommitmentRequest,
+    ) -> Result<IssuedTicketbooksChallengeCommitmentResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::ECASH_ISSUED_TICKETBOOKS_CHALLENGE_COMMITMENT,
+            ],
+            NO_PARAMS,
+            request,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn issued_ticketbooks_data(
+        &self,
+        request: &IssuedTicketbooksDataRequest,
+    ) -> Result<IssuedTicketbooksDataResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::ECASH_ROUTES,
+                routes::ECASH_ISSUED_TICKETBOOKS_DATA,
+            ],
+            NO_PARAMS,
+            request,
+        )
+        .await
+    }
+
+    async fn nodes_by_addresses(
+        &self,
+        addresses: Vec<IpAddr>,
+    ) -> Result<NodesByAddressesResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V1_API_VERSION,
+                "unstable",
+                routes::NYM_NODES_ROUTES,
+                routes::nym_nodes::BY_ADDRESSES,
+            ],
+            NO_PARAMS,
+            &NodesByAddressesRequestBody { addresses },
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_network_details(&self) -> Result<NymNetworkDetailsV1Response, NymAPIError> {
+        self.get_json(
+            &[routes::V1_API_VERSION, routes::NETWORK, routes::DETAILS],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_network_details_v2(&self) -> Result<NymNetworkDetailsV2Response, NymAPIError> {
+        self.get_json(
+            &[routes::V2_API_VERSION, routes::NETWORK, routes::DETAILS],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_chain_status(&self) -> Result<ChainStatusResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::NETWORK,
+                routes::CHAIN_STATUS,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    async fn get_chain_blocks_status(&self) -> Result<ChainBlocksStatusResponse, NymAPIError> {
+        self.get_json("/v1/network/chain-blocks-status", NO_PARAMS)
+            .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_signer_status(&self) -> Result<EcashSignerStatusResponse, NymAPIError> {
+        self.get_json("/v1/ecash/signer-status", NO_PARAMS).await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_signer_information(&self) -> Result<SignerInformationResponse, NymAPIError> {
+        self.get_json("/v1/api-status/signer-information", NO_PARAMS)
+            .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_key_rotation_info(&self) -> Result<KeyRotationInfoResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V1_API_VERSION,
+                routes::EPOCH,
+                routes::KEY_ROTATION_INFO,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    /// Method to change the base API URLs being used by the client
+    fn change_base_urls(&mut self, urls: Vec<url::Url>);
+
+    /// Retrieve expanded information for all bonded nodes on the network
+    async fn get_all_expanded_nodes(&self) -> Result<SemiSkimmedNodesWithMetadata, NymAPIError> {
+        // Unroll the first iteration to get the metadata
+        let mut page = 0;
+
+        let res = self.get_expanded_nodes(false, Some(page), None).await?;
+        let mut nodes = res.nodes.data;
+        let metadata = res.metadata;
+
+        if res.nodes.pagination.total == nodes.len() {
+            return Ok(SemiSkimmedNodesWithMetadata::new(nodes, metadata));
+        }
+
+        page += 1;
+
+        loop {
+            let mut res = self.get_expanded_nodes(false, Some(page), None).await?;
+
+            nodes.append(&mut res.nodes.data);
+            if nodes.len() < res.nodes.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+
+        Ok(SemiSkimmedNodesWithMetadata::new(nodes, metadata))
+    }
+
+    /// Queries the nym-api for whether a particular ed25519 identity key is currently recognised
+    /// as an authorised network monitor permitted to submit stress testing results.
+    ///
+    /// `identity_key` is expected to be the base58-encoded form of the ed25519 public key.
+    #[instrument(level = "debug", skip(self))]
+    async fn get_known_network_monitor(
+        &self,
+        identity_key: IdentityKeyRef<'_>,
+    ) -> Result<KnownNetworkMonitorResponse, NymAPIError> {
+        self.get_json(
+            &[
+                routes::V3_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::STRESS_TESTING,
+                routes::STRESS_TESTING_KNOWN_MONITORS,
+                identity_key,
+            ],
+            NO_PARAMS,
+        )
+        .await
+    }
+
+    /// Submit a signed batch of stress-testing results to nym-api on behalf of a network monitor
+    /// orchestrator.
+    ///
+    /// The caller is expected to have produced `request` via
+    /// `StressTestBatchSubmissionContent::new(...)` and signed it with the orchestrator's ed25519
+    /// key; nym-api will reject submissions that are stale, replayed, unauthorised, or whose
+    /// signature fails to verify.
+    #[instrument(level = "debug", skip(self, request))]
+    async fn submit_stress_testing_results(
+        &self,
+        request: &StressTestBatchSubmission,
+    ) -> Result<StressTestBatchSubmissionResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V3_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::STRESS_TESTING,
+                routes::STRESS_TESTING_BATCH_SUBMIT,
+            ],
+            NO_PARAMS,
+            request,
+        )
+        .await
+    }
+
+    /// Submit a signed batch of liveness-testing results to nym-api on behalf of a network monitor
+    /// orchestrator.
+    ///
+    /// Posts to its own endpoint rather than sharing the stress one: nym-api keeps the replay
+    /// high-water mark per endpoint per signer, so two streams from the same orchestrator validated
+    /// against one shared mark would reject each other indefinitely.
+    ///
+    /// The caller is expected to have built the content and signed it with the orchestrator's
+    /// ed25519 key; nym-api will reject submissions that are stale, replayed, unauthorised, or
+    /// whose signature fails to verify.
+    #[instrument(level = "debug", skip(self, request))]
+    async fn submit_liveness_testing_results(
+        &self,
+        request: &LivenessTestBatchSubmission,
+    ) -> Result<LivenessTestBatchSubmissionResponse, NymAPIError> {
+        self.post_json(
+            &[
+                routes::V3_API_VERSION,
+                routes::NYM_NODES_ROUTES,
+                routes::LIVENESS_TESTING,
+                routes::LIVENESS_TESTING_BATCH_SUBMIT,
+            ],
+            NO_PARAMS,
+            request,
+        )
+        .await
+    }
+
+    /// This producer's latest signed directory snapshot (see `nym-contract-attestation`).
+    #[instrument(level = "debug", skip(self))]
+    async fn directory_snapshot_latest(&self) -> Result<SignedDigestSnapshot, NymAPIError> {
+        self.get_json_from("/v1/directory/snapshot/latest").await
+    }
+
+    /// This producer's signed directory snapshot at `height`, if still within its retained
+    /// window.
+    #[instrument(level = "debug", skip(self))]
+    async fn directory_snapshot_at(
+        &self,
+        height: u64,
+    ) -> Result<SignedDigestSnapshot, NymAPIError> {
+        self.get_json_from(format!("/v1/directory/snapshot/{height}"))
+            .await
+    }
+
+    /// This producer's signed digest for the subset `subset_id` at `height`.
+    #[instrument(level = "debug", skip(self))]
+    async fn directory_subset_digest(
+        &self,
+        subset_id: &str,
+        height: u64,
+    ) -> Result<SignedSubsetDigest, NymAPIError> {
+        self.get_json_from(format!("/v1/directory/subset/digest/{subset_id}/{height}"))
+            .await
+    }
+
+    /// This producer's attested subset `subset_id` at `height` (signed digest + canonical bytes).
+    #[instrument(level = "debug", skip(self))]
+    async fn directory_subset(
+        &self,
+        subset_id: &str,
+        height: u64,
+    ) -> Result<AttestedSubset, NymAPIError> {
+        self.get_json_from(format!("/v1/directory/subset/data/{subset_id}/{height}"))
+            .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_directory_snapshot_data(
+        &self,
+        height: u64,
+    ) -> Result<DirectorySnapshotData, NymAPIError> {
+        let records = self.get_all_directory_entries(height).await?;
+        let identities = self.get_directory_entries_identities(height).await?;
+        Ok(DirectorySnapshotData {
+            height: identities.height,
+            records,
+            node_identities: identities.node_identities,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_all_directory_entries(
+        &self,
+        height: u64,
+    ) -> Result<Vec<DirectoryEntryRecord>, NymAPIError> {
+        // TODO: deal with paging in macro or some helper function or something, because it's the same pattern everywhere
+        let mut page = 0;
+        let mut records = Vec::new();
+
+        loop {
+            let mut res = self
+                .get_directory_entries(height, Some(page), Some(500))
+                .await?;
+            records.append(&mut res.entries.data);
+            if records.len() < res.entries.pagination.total {
+                page += 1
+            } else {
+                break;
+            }
+        }
+        Ok(records)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_directory_entries(
+        &self,
+        height: u64,
+        page: Option<u32>,
+        per_page: Option<u32>,
+    ) -> Result<DirectoryEntriesRecordsResponse, NymAPIError> {
+        let mut params = Vec::new();
+
+        if let Some(page) = page {
+            params.push(("page", page.to_string()))
+        }
+
+        if let Some(per_page) = per_page {
+            params.push(("per_page", per_page.to_string()))
+        }
+
+        self.get_json(format!("/v1/directory/entries/{height}/records"), &params)
+            .await
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn get_directory_entries_identities(
+        &self,
+        height: u64,
+    ) -> Result<DirectoryEntriesIdentitiesResponse, NymAPIError> {
+        self.get_json_from(format!("/v1/directory/entries/{height}/node-identities"))
+            .await
+    }
+}
+
+// Client is already nym_http_api_client::Client (re-exported above), so just one impl needed
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl NymApiClientExt for nym_http_api_client::Client {
+    fn api_url(&self) -> &url::Url {
+        self.current_url().as_ref()
+    }
+
+    fn change_base_urls(&mut self, urls: Vec<url::Url>) {
+        self.change_base_urls(urls.into_iter().map(|u| u.into()).collect());
+    }
+}

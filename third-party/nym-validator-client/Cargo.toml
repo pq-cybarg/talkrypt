@@ -1,0 +1,94 @@
+# TALKRYPT PATCH — vendored standalone copy of nym's `common/client-libs/validator-client`
+# (nym-validator-client 2.0.0 @ nym rev e416f724), applied via
+# `[patch."https://github.com/nymtech/nym"]`. The ONLY substantive change is bumping the
+# DIRECT `bip32` dep from `^0.5` to `0.6` — the last nym crate pulling the old
+# `bip32 0.5 -> k256 0.13 -> elliptic-curve 0.13 -> crypto-bigint 0.5.5` stack
+# (RUSTSEC-2026-0387). bip32 0.6 rides k256 0.14 / crypto-bigint 0.7, and it also
+# re-unifies with cosmrs (whose vendored copy is already on bip32 0.6, so `XPrv` and
+# `cosmrs::bip32::DerivationPath` are the same version again). One source adjustment:
+# bip32 0.6's `XPrv::derive_from_path` takes `&[u8]` (see src/signing/*). All other
+# deps are pinned to nym's own `[workspace.dependencies]`; internal nym deps stay git
+# at the same rev. See third-party/nym-validator-client/TALKRYPT-PATCH.md.
+[package]
+name = "nym-validator-client"
+description = "Client for interacting with Nyx Cosmos SDK blockchain"
+version = "2.0.0"
+authors = ["Nym Technologies SA"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/nymtech/nym"
+documentation = "https://nymtech.net"
+rust-version = "1.85"
+readme = "README.md"
+publish = false
+
+[dependencies]
+base64 = "0.22.1"
+colored = "2.2"
+
+nym-coconut-dkg-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-contracts-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-mixnet-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-vesting-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-ecash-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-multisig-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-group-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-performance-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-network-monitors-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-node-families-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-contract-attestation = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-directory-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-geolocation-contract-common = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-serde-helpers = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", features = ["hex", "base64"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
+nym-http-api-client = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", features = ["network-defaults"] }
+thiserror = "2.0"
+tracing = "0.1.41"
+url = { version = "2.5", features = ["serde"] }
+tokio = { version = "1.47", features = ["sync", "time"] }
+time = { version = "0.3.41", features = ["formatting"] }
+futures = "0.3.31"
+
+nym-compact-ecash = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-network-defaults = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-api-requests = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+
+async-trait = "0.1.92"
+bip39 = { version = "3.0.0", features = ["rand", "zeroize"] }
+nym-config = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+cosmrs = { version = "0.22.0", features = ["bip32", "cosmwasm"] }
+# import it just for the `Client` trait
+tendermint-rpc = "0.40.4"
+
+# THE PATCH: ^0.5 -> 0.6 (bip32 0.6 rides k256 0.14 / crypto-bigint 0.7, and
+# re-unifies with cosmrs's own vendored bip32 0.6). bip32 0.6 dropped the `std`
+# feature (it's std-by-default); `secp256k1` (= `default`) provides `XPrv`.
+bip32 = { version = "0.6", features = ["secp256k1"] }
+
+eyre = "0.6.9"
+cw-utils = "=2.0.0"
+cw2 = "=2.0.0"
+cw3 = "=2.0.0"
+cw4 = "=2.0.0"
+cw-controllers = "=2.0.0"
+prost = { version = "0.13", default-features = false }
+flate2 = "1.1.1"
+sha2 = "0.10.3"
+itertools = "0.14.0"
+zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
+cosmwasm-std = "=2.2.2"
+
+[target."cfg(not(target_arch = \"wasm32\"))".dependencies.reqwest]
+version = "0.13.1"
+default-features = false
+features = ["json", "rustls"]
+
+[features]
+default = ["http-client"]
+http-client = ["cosmrs/rpc"]
+mocks = []
+generate-ts = []
+contract-testing = ["nym-mixnet-contract-common/contract-testing"]
+tendermint-rpc-http-client = ["tendermint-rpc/http-client"]
+tendermint-rpc-websocket-client = ["tendermint-rpc/websocket-client"]

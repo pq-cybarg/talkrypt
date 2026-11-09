@@ -1,0 +1,157 @@
+// Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::collect_paged;
+use crate::nyxd::contract_traits::NymContractsProvider;
+use crate::nyxd::error::NyxdError;
+use crate::nyxd::CosmWasmClient;
+use async_trait::async_trait;
+use cosmwasm_std::Coin;
+use nym_ecash_contract_common::deposit::LatestDepositResponse;
+use nym_ecash_contract_common::deposit_statistics::DepositsStatistics;
+use nym_ecash_contract_common::msg::QueryMsg as EcashQueryMsg;
+use serde::Deserialize;
+
+pub use nym_ecash_contract_common::blacklist::{
+    BlacklistedAccount, BlacklistedAccountResponse, PagedBlacklistedAccountResponse,
+};
+pub use nym_ecash_contract_common::deposit::{
+    Deposit, DepositData, DepositId, DepositResponse, PagedDepositsResponse,
+};
+pub use nym_ecash_contract_common::reduced_deposit::{
+    WhitelistedAccount, WhitelistedAccountsResponse,
+};
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait EcashQueryClient {
+    async fn query_ecash_contract<T>(&self, query: EcashQueryMsg) -> Result<T, NyxdError>
+    where
+        for<'a> T: Deserialize<'a>;
+
+    async fn get_blacklisted_account(
+        &self,
+        public_key: String,
+    ) -> Result<BlacklistedAccountResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetBlacklistedAccount { public_key })
+            .await
+    }
+
+    async fn get_blacklist_paged(
+        &self,
+        start_after: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<PagedBlacklistedAccountResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetBlacklistPaged { start_after, limit })
+            .await
+    }
+
+    async fn get_default_deposit_amount(&self) -> Result<Coin, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetDefaultDepositAmount {})
+            .await
+    }
+
+    async fn get_reduced_deposit_amount(&self, address: String) -> Result<Option<Coin>, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetReducedDepositAmount { address })
+            .await
+    }
+
+    async fn get_all_whitelisted_accounts(&self) -> Result<WhitelistedAccountsResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetAllWhitelistedAccounts {})
+            .await
+    }
+
+    async fn get_deposit(&self, deposit_id: u32) -> Result<DepositResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetDeposit { deposit_id })
+            .await
+    }
+
+    async fn get_latest_deposit(&self) -> Result<LatestDepositResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetLatestDeposit {})
+            .await
+    }
+
+    async fn get_deposits_paged(
+        &self,
+        start_after: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<PagedDepositsResponse, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetDepositsPaged { start_after, limit })
+            .await
+    }
+
+    async fn get_deposits_statistics(&self) -> Result<DepositsStatistics, NyxdError> {
+        self.query_ecash_contract(EcashQueryMsg::GetDepositsStatistics {})
+            .await
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait PagedEcashQueryClient: EcashQueryClient {
+    async fn get_all_blacklisted_accounts(&self) -> Result<Vec<BlacklistedAccount>, NyxdError> {
+        collect_paged!(self, get_blacklist_paged, accounts)
+    }
+
+    async fn get_all_deposits(&self) -> Result<Vec<DepositData>, NyxdError> {
+        collect_paged!(self, get_deposits_paged, deposits)
+    }
+}
+
+#[async_trait]
+impl<T> PagedEcashQueryClient for T where T: EcashQueryClient {}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<C> EcashQueryClient for C
+where
+    C: CosmWasmClient + NymContractsProvider + Send + Sync,
+{
+    async fn query_ecash_contract<T>(&self, query: EcashQueryMsg) -> Result<T, NyxdError>
+    where
+        for<'a> T: Deserialize<'a>,
+    {
+        let ecash_contract_address = self
+            .ecash_contract_address()
+            .ok_or_else(|| NyxdError::unavailable_contract_address("coconut bandwidth contract"))?;
+        self.query_contract_smart(ecash_contract_address, &query)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nyxd::contract_traits::tests::IgnoreValue;
+
+    // it's enough that this compiles and clippy is happy about it
+    #[allow(dead_code)]
+    fn all_query_variants_are_covered<C: EcashQueryClient + Send + Sync>(
+        client: C,
+        msg: EcashQueryMsg,
+    ) {
+        match msg {
+            EcashQueryMsg::GetBlacklistedAccount { public_key } => {
+                client.get_blacklisted_account(public_key).ignore()
+            }
+            EcashQueryMsg::GetBlacklistPaged { limit, start_after } => {
+                client.get_blacklist_paged(start_after, limit).ignore()
+            }
+            EcashQueryMsg::GetDeposit { deposit_id } => client.get_deposit(deposit_id).ignore(),
+            EcashQueryMsg::GetDepositsPaged { limit, start_after } => {
+                client.get_deposits_paged(start_after, limit).ignore()
+            }
+            EcashQueryMsg::GetDefaultDepositAmount {} => {
+                client.get_default_deposit_amount().ignore()
+            }
+            EcashQueryMsg::GetReducedDepositAmount { address } => {
+                client.get_reduced_deposit_amount(address).ignore()
+            }
+            EcashQueryMsg::GetAllWhitelistedAccounts {} => {
+                client.get_all_whitelisted_accounts().ignore()
+            }
+            EcashQueryMsg::GetLatestDeposit {} => client.get_latest_deposit().ignore(),
+            EcashQueryMsg::GetDepositsStatistics {} => client.get_deposits_statistics().ignore(),
+        };
+    }
+}

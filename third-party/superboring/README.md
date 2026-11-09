@@ -35,8 +35,16 @@ cargo zigbuild --target=x86_64-unknown-linux-musl
 ## What is currently implemented?
 
 - RSA operations: key generation (2048/3072/4096 bits), import/export (DER/PEM, PKCS1/PKCS8), encryption/decryption (PKCS1v15 and OAEP), signatures (PKCS1v15 and PSS with SHA-256/384/512)
-- ML-DSA post-quantum signatures: ML-DSA-44, ML-DSA-65 and ML-DSA-87, with key generation from random or seed, signing and verification
+- ML-DSA post-quantum signatures: ML-DSA-44, ML-DSA-65 and ML-DSA-87, with key generation from random or seed, public key serialization, signing and verification
 - AES key wrap: RFC 3394 key wrapping with AES-128 and AES-256
 - AES-GCM: authenticated encryption with AES-128-GCM and AES-256-GCM, with streaming support and additional authenticated data
 - Hash functions: SHA-256, SHA-384, SHA-512 (via `MessageDigest`)
 - HMAC: HMAC-SHA-256, HMAC-SHA-384, HMAC-SHA-512
+
+## WASI-Crypto
+
+When compiling for `wasm32-wasip1`, the optional `wasi-crypto` feature uses the WASI-Crypto host extension through the `wasi-crypto-guest` crate for supported operations. With WasmEdge's `wasi_crypto` plugin, this currently accelerates RSA key generation/signing/verification for the plugin's supported RSA signature algorithms, AES-128-GCM, AES-256-GCM, HMAC-SHA-256 and HMAC-SHA-512. Operations not exposed by the plugin, such as AES key wrap, RSA encryption/OAEP, HMAC-SHA-384 and ML-DSA, keep using the Rust implementations.
+
+```sh
+cargo test --target wasm32-wasip1 --features wasi-crypto
+```

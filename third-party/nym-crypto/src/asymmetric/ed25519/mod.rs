@@ -1,0 +1,643 @@
+// Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: Apache-2.0
+
+pub use ed25519_dalek::SignatureError;
+pub use ed25519_dalek::{PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Verifier};
+
+use ed25519_dalek::Signer;
+use nym_pemstore::traits::{PemStorableKey, PemStorableKeyPair};
+use std::fmt::{self, Debug, Display, Formatter};
+use std::str::FromStr;
+use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[cfg(feature = "serde")]
+pub mod serde_helpers;
+
+#[cfg(feature = "serde")]
+pub use serde_helpers::*;
+
+#[cfg(feature = "sphinx")]
+use nym_sphinx_types::{DESTINATION_ADDRESS_LENGTH, DestinationAddressBytes};
+
+use crate::asymmetric::x25519;
+#[cfg(feature = "rand")]
+use rand::{CryptoRng, RngExt};
+#[cfg(feature = "serde")]
+use serde::de::Error as SerdeError;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(feature = "serde")]
+use serde_bytes::{ByteBuf as SerdeByteBuf, Bytes as SerdeBytes};
+
+#[derive(Debug, Error)]
+pub enum Ed25519RecoveryError {
+    #[error(transparent)]
+    MalformedBytes(#[from] SignatureError),
+
+    #[error(transparent)]
+    BytesLengthError(#[from] std::array::TryFromSliceError),
+
+    #[error("the base58 representation of the public key was malformed - {source}")]
+    MalformedPublicKeyString {
+        #[source]
+        source: bs58::decode::Error,
+    },
+
+    #[error("the base58 representation of the private key was malformed - {source}")]
+    MalformedPrivateKeyString {
+        #[source]
+        source: bs58::decode::Error,
+    },
+
+    #[error("the base58 representation of the signature was malformed - {source}")]
+    MalformedSignatureString {
+        #[source]
+        source: bs58::decode::Error,
+    },
+}
+
+/// Keypair for usage in ed25519 EdDSA.
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct KeyPair {
+    private_key: PrivateKey,
+
+    // nothing secret about public key
+    #[zeroize(skip)]
+    public_key: PublicKey,
+
+    #[zeroize(skip)]
+    index: u32,
+}
+
+/// All keys will always have an index field populated this is to prevent anyone from figuring out if
+/// the keys are derived or random, and alter their behaviour based on that.
+impl KeyPair {
+    #[cfg(feature = "rand")]
+    pub fn new<R: CryptoRng>(rng: &mut R) -> Self {
+        let index = rng.random();
+        let ed25519_signing_key = ed25519_dalek::SigningKey::generate(rng);
+
+        KeyPair {
+            private_key: PrivateKey(ed25519_signing_key.to_bytes()),
+            public_key: PublicKey(ed25519_signing_key.verifying_key()),
+            index,
+        }
+    }
+
+    pub fn from_secret(secret: ed25519_dalek::SecretKey, index: u32) -> Self {
+        let ed25519_signing_key = ed25519_dalek::SigningKey::from(secret);
+
+        KeyPair {
+            private_key: PrivateKey(ed25519_signing_key.to_bytes()),
+            public_key: PublicKey(ed25519_signing_key.verifying_key()),
+            index,
+        }
+    }
+
+    pub fn private_key(&self) -> &PrivateKey {
+        &self.private_key
+    }
+
+    pub fn public_key(&self) -> &PublicKey {
+        &self.public_key
+    }
+
+    pub fn from_bytes(priv_bytes: &[u8], pub_bytes: &[u8]) -> Result<Self, Ed25519RecoveryError> {
+        Ok(KeyPair {
+            private_key: PrivateKey::from_bytes(priv_bytes)?,
+            public_key: PublicKey::from_bytes(pub_bytes)?,
+            index: fake_index(pub_bytes),
+        })
+    }
+
+    /// Converts this Ed25519 keypair to an X25519 keypair for ECDH.
+    ///
+    /// Uses the standard ed25519→x25519 conversion via SHA-512 hash and clamping.
+    /// This is the same approach as libsodium's `crypto_sign_ed25519_sk_to_curve25519`.
+    ///
+    /// # Returns
+    /// The converted X25519 keypair
+    pub fn to_x25519(&self) -> x25519::KeyPair {
+        let private_key = self.private_key.to_x25519();
+        x25519::KeyPair::from(private_key)
+    }
+}
+
+/// Reduces a byte slice into a u32 value by XOR-ing all its bytes into a 4-byte accumulator.
+/// The process iterates over every byte in the input slice, XOR-ing each one into a slot based on its index modulo 4.
+/// If the input slice contains fewer than 4 bytes, the remaining positions in the accumulator remain zero.
+/// Finally, the accumulator is interpreted in big-endian order to produce the resulting u32.
+/// Index is used to verify deterministic identity key, master key and salt are also requried for verification.
+// SAFETY: array has 4 elements and we're always accessing indexes modulo 4.
+#[allow(clippy::indexing_slicing)]
+fn fake_index(input: &[u8]) -> u32 {
+    let mut accumulator = [0u8; 4];
+    for (i, &byte) in input.iter().enumerate() {
+        accumulator[i % 4] ^= byte;
+    }
+    u32::from_be_bytes(accumulator)
+}
+
+impl From<PrivateKey> for KeyPair {
+    fn from(private_key: PrivateKey) -> Self {
+        let public_key = (&private_key).into();
+        KeyPair {
+            public_key,
+            private_key,
+            index: fake_index(public_key.to_bytes().as_ref()),
+        }
+    }
+}
+
+impl From<(PrivateKey, PublicKey)> for KeyPair {
+    fn from((private_key, public_key): (PrivateKey, PublicKey)) -> Self {
+        KeyPair {
+            private_key,
+            public_key,
+            index: fake_index(public_key.to_bytes().as_ref()),
+        }
+    }
+}
+
+impl PemStorableKeyPair for KeyPair {
+    type PrivatePemKey = PrivateKey;
+    type PublicPemKey = PublicKey;
+
+    fn private_key(&self) -> &Self::PrivatePemKey {
+        self.private_key()
+    }
+    fn public_key(&self) -> &Self::PublicPemKey {
+        self.public_key()
+    }
+
+    fn from_keys(private_key: Self::PrivatePemKey, public_key: Self::PublicPemKey) -> Self {
+        KeyPair {
+            private_key,
+            public_key,
+            index: fake_index(public_key.to_bytes().as_ref()),
+        }
+    }
+}
+
+/// ed25519 EdDSA Public Key
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct PublicKey(ed25519_dalek::VerifyingKey);
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.to_base58_string(), f)
+    }
+}
+
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.to_base58_string(), f)
+    }
+}
+
+impl PublicKey {
+    #[cfg(feature = "sphinx")]
+    pub fn derive_destination_address(&self) -> DestinationAddressBytes {
+        let mut temporary_address = [0u8; DESTINATION_ADDRESS_LENGTH];
+        let public_key_bytes = self.to_bytes();
+
+        assert_eq!(DESTINATION_ADDRESS_LENGTH, PUBLIC_KEY_LENGTH);
+
+        temporary_address.copy_from_slice(&public_key_bytes[..]);
+        DestinationAddressBytes::from_bytes(temporary_address)
+    }
+
+    /// Convert this public key to a byte array.
+    #[inline]
+    pub fn to_bytes(self) -> [u8; PUBLIC_KEY_LENGTH] {
+        self.0.to_bytes()
+    }
+
+    /// View this public key as a byte array.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_LENGTH] {
+        self.0.as_bytes()
+    }
+
+    #[inline]
+    pub fn from_bytes(b: &[u8]) -> Result<Self, Ed25519RecoveryError> {
+        Self::from_byte_array(b.try_into()?)
+    }
+
+    #[inline]
+    pub fn from_byte_array(b: &[u8; PUBLIC_KEY_LENGTH]) -> Result<Self, Ed25519RecoveryError> {
+        Ok(PublicKey(ed25519_dalek::VerifyingKey::from_bytes(b)?))
+    }
+
+    pub fn to_base58_string(self) -> String {
+        bs58::encode(self.to_bytes()).into_string()
+    }
+
+    pub fn from_base58_string<I: AsRef<[u8]>>(val: I) -> Result<Self, Ed25519RecoveryError> {
+        let bytes = bs58::decode(val)
+            .into_vec()
+            .map_err(|source| Ed25519RecoveryError::MalformedPublicKeyString { source })?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn verify<M: AsRef<[u8]>>(
+        &self,
+        message: M,
+        signature: &Signature,
+    ) -> Result<(), SignatureError> {
+        self.0.verify(message.as_ref(), &signature.0)
+    }
+
+    /// Converts this Ed25519 public key to an X25519 public key for ECDH.
+    ///
+    /// Uses the standard ed25519→x25519 conversion by converting the Edwards point
+    /// to Montgomery form. This is the same approach as libsodium's
+    /// `crypto_sign_ed25519_pk_to_curve25519`.
+    ///
+    /// # Returns
+    /// * `Ok(x25519::PublicKey)` - The converted X25519 public key
+    /// * `Err(Ed25519RecoveryError)` - If the conversion fails (e.g., low-order point)
+    pub fn to_x25519(&self) -> Result<crate::asymmetric::x25519::PublicKey, Ed25519RecoveryError> {
+        use curve25519_dalek::edwards::CompressedEdwardsY;
+
+        // Decompress the Ed25519 point
+        let compressed = CompressedEdwardsY((*self).to_bytes());
+        let edwards_point = compressed.decompress().ok_or_else(|| {
+            Ed25519RecoveryError::MalformedBytes(SignatureError::from_source(
+                "Failed to decompress Ed25519 point".to_string(),
+            ))
+        })?;
+
+        // Convert to Montgomery form
+        let montgomery = edwards_point.to_montgomery();
+
+        // Create X25519 public key
+        crate::asymmetric::x25519::PublicKey::from_bytes(montgomery.as_bytes()).map_err(|_| {
+            Ed25519RecoveryError::MalformedBytes(SignatureError::from_source(
+                "Failed to convert to X25519".to_string(),
+            ))
+        })
+    }
+}
+
+#[cfg(feature = "sphinx")]
+impl From<PublicKey> for DestinationAddressBytes {
+    fn from(value: PublicKey) -> Self {
+        value.derive_destination_address()
+    }
+}
+
+impl FromStr for PublicKey {
+    type Err = Ed25519RecoveryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PublicKey::from_base58_string(s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'d> Deserialize<'d> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'d>,
+    {
+        Ok(PublicKey(ed25519_dalek::VerifyingKey::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
+impl PemStorableKey for PublicKey {
+    type Error = Ed25519RecoveryError;
+
+    fn pem_type() -> &'static str {
+        "ED25519 PUBLIC KEY"
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        (*self).to_bytes().to_vec()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_bytes(bytes)
+    }
+}
+
+/// ed25519 EdDSA Private Key
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
+pub struct PrivateKey(ed25519_dalek::SecretKey);
+
+impl Display for PrivateKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_base58_string())
+    }
+}
+
+impl<'a> From<&'a PrivateKey> for PublicKey {
+    fn from(pk: &'a PrivateKey) -> Self {
+        PublicKey(ed25519_dalek::SigningKey::from_bytes(&pk.0).verifying_key())
+    }
+}
+
+impl FromStr for PrivateKey {
+    type Err = Ed25519RecoveryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PrivateKey::from_base58_string(s)
+    }
+}
+
+impl PrivateKey {
+    #[cfg(feature = "rand")]
+    pub fn new<R: CryptoRng>(rng: &mut R) -> Self {
+        let ed25519_secret = ed25519_dalek::SigningKey::generate(rng).to_bytes();
+
+        PrivateKey(ed25519_secret)
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.into()
+    }
+
+    pub fn to_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
+        self.0
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, Ed25519RecoveryError> {
+        Ok(PrivateKey(b.try_into()?))
+    }
+
+    pub fn to_base58_string(&self) -> String {
+        bs58::encode(&self.to_bytes()).into_string()
+    }
+
+    pub fn from_base58_string<I: AsRef<[u8]>>(val: I) -> Result<Self, Ed25519RecoveryError> {
+        let bytes = bs58::decode(val)
+            .into_vec()
+            .map_err(|source| Ed25519RecoveryError::MalformedPrivateKeyString { source })?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn sign<M: AsRef<[u8]>>(&self, message: M) -> Signature {
+        let signing_key: ed25519_dalek::SigningKey = self.0.into();
+        let sig = signing_key.sign(message.as_ref());
+        Signature(sig)
+    }
+
+    /// Signs text with the provided Ed25519 private key, returning a base58 signature
+    pub fn sign_text(&self, text: &str) -> String {
+        let signature_bytes = self.sign(text).to_bytes();
+        bs58::encode(signature_bytes).into_string()
+    }
+
+    /// Converts this Ed25519 private key to an X25519 private key for ECDH.
+    ///
+    /// Uses the standard ed25519→x25519 conversion via SHA-512 hash and clamping.
+    /// This is the same approach as libsodium's `crypto_sign_ed25519_sk_to_curve25519`.
+    ///
+    /// # Returns
+    /// The converted X25519 private key
+    pub fn to_x25519(&self) -> crate::asymmetric::x25519::PrivateKey {
+        use sha2::{Digest, Sha512};
+
+        // Hash the Ed25519 secret key with SHA-512
+        // Both hash and x25519_bytes wrapped in Zeroizing to clear key material
+        let mut hash = zeroize::Zeroizing::new([0u8; 64]);
+        hash.copy_from_slice(&Sha512::digest(self.0));
+
+        // Take first 32 bytes (clamping is done automatically by x25519_dalek::StaticSecret)
+        let mut x25519_bytes = zeroize::Zeroizing::new([0u8; 32]);
+
+        // SAFETY: output of sha512 is 64 bytes, so we can safely copy the first 32 bytes
+        #[allow(clippy::indexing_slicing)]
+        x25519_bytes.copy_from_slice(&hash[..32]);
+
+        #[allow(clippy::expect_used)]
+        crate::asymmetric::x25519::PrivateKey::from_bytes(&*x25519_bytes)
+            .expect("x25519 key conversion should never fail")
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for PrivateKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'d> Deserialize<'d> for PrivateKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'d>,
+    {
+        Ok(PrivateKey(ed25519_dalek::SecretKey::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
+impl PemStorableKey for PrivateKey {
+    type Error = Ed25519RecoveryError;
+
+    fn pem_type() -> &'static str {
+        "ED25519 PRIVATE KEY"
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_bytes().to_vec()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_bytes(bytes)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Signature(ed25519_dalek::Signature);
+
+impl Signature {
+    pub fn to_base58_string(&self) -> String {
+        bs58::encode(&self.to_bytes()).into_string()
+    }
+
+    pub fn from_base58_string<I: AsRef<[u8]>>(val: I) -> Result<Self, Ed25519RecoveryError> {
+        let bytes = bs58::decode(val)
+            .into_vec()
+            .map_err(|source| Ed25519RecoveryError::MalformedSignatureString { source })?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn to_bytes(&self) -> [u8; SIGNATURE_LENGTH] {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Ed25519RecoveryError> {
+        Ok(Signature(ed25519_dalek::Signature::from_bytes(
+            bytes.try_into()?,
+        )))
+    }
+}
+
+impl FromStr for Signature {
+    type Err = Ed25519RecoveryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Signature::from_base58_string(s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerdeBytes::new(&self.to_bytes()).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'d> Deserialize<'d> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'d>,
+    {
+        let bytes = <SerdeByteBuf>::deserialize(deserializer)?;
+        Signature::from_bytes(bytes.as_ref()).map_err(SerdeError::custom)
+    }
+}
+
+#[cfg(feature = "naive_jwt")]
+impl PublicKey {
+    pub fn to_jwt_compatible_key(&self) -> jwt_simple::algorithms::Ed25519PublicKey {
+        (*self).into()
+    }
+}
+
+#[cfg(feature = "naive_jwt")]
+impl From<PublicKey> for jwt_simple::algorithms::Ed25519PublicKey {
+    fn from(value: PublicKey) -> Self {
+        // SAFETY: we have a valid ed25519 pubkey, we're just changing to a different library wrapper
+        #[allow(clippy::unwrap_used)]
+        jwt_simple::algorithms::Ed25519PublicKey::from_bytes(&value.to_bytes()).unwrap()
+    }
+}
+
+#[cfg(feature = "naive_jwt")]
+impl PrivateKey {
+    pub fn to_jwt_compatible_keys(&self) -> jwt_simple::algorithms::Ed25519KeyPair {
+        let pub_key = self.public_key();
+        let mut bytes = zeroize::Zeroizing::new([0u8; SECRET_KEY_LENGTH + PUBLIC_KEY_LENGTH]);
+
+        // SAFETY: we have at least SECRET_KEY_LENGTH bytes
+        #[allow(clippy::indexing_slicing)]
+        bytes[..SECRET_KEY_LENGTH]
+            .copy_from_slice(zeroize::Zeroizing::new(self.to_bytes()).as_ref());
+        #[allow(clippy::indexing_slicing)]
+        bytes[SECRET_KEY_LENGTH..].copy_from_slice(&pub_key.to_bytes());
+
+        // SAFETY: we have a valid ed25519 keys, we're just changing to a different library wrapper
+        #[allow(clippy::unwrap_used)]
+        jwt_simple::algorithms::Ed25519KeyPair::from_bytes(bytes.as_ref()).unwrap()
+    }
+}
+
+#[cfg(feature = "naive_jwt")]
+impl KeyPair {
+    pub fn to_jwt_compatible_keys(&self) -> jwt_simple::algorithms::Ed25519KeyPair {
+        let mut bytes = zeroize::Zeroizing::new([0u8; SECRET_KEY_LENGTH + PUBLIC_KEY_LENGTH]);
+
+        // SAFETY: we have at least SECRET_KEY_LENGTH bytes
+        #[allow(clippy::indexing_slicing)]
+        bytes[..SECRET_KEY_LENGTH]
+            .copy_from_slice(zeroize::Zeroizing::new(self.private_key.to_bytes()).as_ref());
+
+        #[allow(clippy::indexing_slicing)]
+        bytes[SECRET_KEY_LENGTH..].copy_from_slice(&self.public_key.to_bytes());
+
+        // SAFETY: we have a valid ed25519 keys, we're just changing to a different library wrapper
+        #[allow(clippy::unwrap_used)]
+        jwt_simple::algorithms::Ed25519KeyPair::from_bytes(bytes.as_ref()).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    fn assert_zeroize<T: Zeroize>() {}
+
+    #[test]
+    fn private_key_is_zeroized() {
+        assert_zeroize::<PrivateKey>();
+        assert_zeroize_on_drop::<PrivateKey>();
+    }
+
+    #[test]
+    #[cfg(all(feature = "naive_jwt", feature = "rand"))]
+    fn check_jwt_key_compat_conversion() {
+        let mut rng = rand::rng();
+        let keys = KeyPair::new(&mut rng);
+        let jwt_keys = keys.to_jwt_compatible_keys();
+
+        // internally they're represented by hidden `Edwards25519KeyPair` (plus key_id)
+        // which has way nicer API for assertions
+        let jwt_keys_inner =
+            jwt_simple::algorithms::Edwards25519KeyPair::from_bytes(&jwt_keys.to_bytes()).unwrap();
+
+        let compact_ed25519 = jwt_keys_inner.as_ref();
+        assert!(
+            compact_ed25519
+                .sk
+                .validate_public_key(&compact_ed25519.pk)
+                .is_ok()
+        );
+
+        let dummy_message = "hello world";
+        let sig1 = keys.private_key.sign(dummy_message).to_bytes();
+        let sig2 = compact_ed25519.sk.sign(dummy_message, None).to_vec();
+
+        assert_eq!(sig1.to_vec(), sig2);
+    }
+
+    #[test]
+    #[cfg(feature = "rand")]
+    fn test_ed25519_to_x25519_ecdh() {
+        let mut rng = rand::rng();
+
+        // Create two ed25519 keypairs
+        let alice_ed = KeyPair::new(&mut rng);
+        let bob_ed = KeyPair::new(&mut rng);
+
+        // Convert to x25519
+        let alice_x25519_private = alice_ed.private_key().to_x25519();
+        let alice_x25519_public = alice_ed.public_key().to_x25519().unwrap();
+        let bob_x25519_private = bob_ed.private_key().to_x25519();
+        let bob_x25519_public = bob_ed.public_key().to_x25519().unwrap();
+
+        // Perform ECDH both ways
+        let alice_shared = alice_x25519_private.diffie_hellman(&bob_x25519_public);
+        let bob_shared = bob_x25519_private.diffie_hellman(&alice_x25519_public);
+
+        // Both should produce the same shared secret
+        assert_eq!(alice_shared, bob_shared);
+    }
+}

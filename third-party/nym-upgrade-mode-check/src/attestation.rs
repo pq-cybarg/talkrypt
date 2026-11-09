@@ -1,0 +1,154 @@
+// Copyright 2025 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: Apache-2.0
+
+use nym_crypto::asymmetric::ed25519;
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpgradeModeAttestation {
+    #[serde(flatten)]
+    pub content: UpgradeModeAttestationContent,
+
+    #[serde(with = "ed25519::bs58_ed25519_signature")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub signature: ed25519::Signature,
+}
+
+impl UpgradeModeAttestation {
+    pub fn authorised_to_issue_jwt(&self, key: &ed25519::PublicKey) -> bool {
+        self.content.authorised_jwt_issuers.contains(key)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type")]
+#[serde(rename = "upgrade_mode")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpgradeModeAttestationContent {
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub starting_time: OffsetDateTime,
+
+    #[serde(with = "ed25519::bs58_ed25519_pubkey")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub attester_public_key: ed25519::PublicKey,
+
+    #[serde(with = "ed25519::vec_bs58_ed25519_pubkey")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub authorised_jwt_issuers: Vec<ed25519::PublicKey>,
+}
+
+impl UpgradeModeAttestation {
+    pub fn verify(&self) -> bool {
+        self.content
+            .attester_public_key
+            .verify(self.content.as_json(), &self.signature)
+            .is_ok()
+    }
+}
+
+impl UpgradeModeAttestationContent {
+    pub fn as_json(&self) -> String {
+        // SAFETY: Serialize impl is valid and we have no non-string map keys
+        #[allow(clippy::unwrap_used)]
+        serde_json::to_string(&self).unwrap()
+    }
+}
+
+pub fn generate_new_attestation(
+    key: &ed25519::PrivateKey,
+    authorised_jwt_issuers: Vec<ed25519::PublicKey>,
+) -> UpgradeModeAttestation {
+    generate_new_attestation_with_starting_time(
+        key,
+        authorised_jwt_issuers,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+pub fn generate_new_attestation_with_starting_time(
+    key: &ed25519::PrivateKey,
+    authorised_jwt_issuers: Vec<ed25519::PublicKey>,
+    starting_time: OffsetDateTime,
+) -> UpgradeModeAttestation {
+    let content = UpgradeModeAttestationContent {
+        starting_time,
+        attester_public_key: key.into(),
+        authorised_jwt_issuers,
+    };
+    UpgradeModeAttestation {
+        signature: key.sign(content.as_json()),
+        content,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn attempt_retrieve_attestation(
+    url: &str,
+    user_agent: Option<nym_http_api_client::UserAgent>,
+) -> Result<Option<UpgradeModeAttestation>, crate::UpgradeModeCheckError> {
+    let retrieval_failure = |source| crate::UpgradeModeCheckError::AttestationRetrievalFailure {
+        url: url.to_string(),
+        source,
+    };
+
+    let attestation = reqwest::ClientBuilder::new()
+        .user_agent(user_agent.unwrap_or_else(|| nym_http_api_client::generate_user_agent!()))
+        .timeout(std::time::Duration::from_secs(5))
+        .no_hickory_dns()
+        .build()
+        .map_err(retrieval_failure)?
+        .get(url)
+        .send()
+        .await
+        .map_err(retrieval_failure)?
+        .json::<Option<UpgradeModeAttestation>>()
+        .await
+        .map_err(retrieval_failure)?;
+
+    Ok(attestation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_mode_attestation_serde_json() -> anyhow::Result<()> {
+        // unix timestamp: 1629720000
+        let starting_time = time::macros::datetime!(2021-08-23 12:00 UTC);
+
+        let key = ed25519::PrivateKey::from_bytes(&[
+            108, 49, 193, 21, 126, 161, 249, 85, 242, 207, 74, 195, 238, 6, 64, 149, 201, 140, 248,
+            163, 122, 170, 79, 198, 87, 85, 36, 29, 243, 92, 64, 161,
+        ])?;
+
+        let authorised_jwt_issuers = vec![ed25519::PublicKey::from_base58_string(
+            "Be9wH7xuXBRJAuV1pC7MALZv6a61RvWQ3SypsNarqTt",
+        )?];
+        let attestation = generate_new_attestation_with_starting_time(
+            &key,
+            authorised_jwt_issuers,
+            starting_time,
+        );
+
+        let attestation_json = serde_json::to_string(&attestation)?;
+        let attestation_content_json = attestation.content.as_json();
+
+        let expected_attestation = r#"{"type":"upgrade_mode","starting_time":"2021-08-23T12:00:00Z","attester_public_key":"3pkFcBXCEmbmXBT2G8CkFMuKisJcH54mbBGvncHaDibt","authorised_jwt_issuers":["Be9wH7xuXBRJAuV1pC7MALZv6a61RvWQ3SypsNarqTt"],"signature":"5Kt9dfwvnkdnDcENbwNyitrxghyckWUYycBv8jUUn7hJUMohWEMc6otb3scXQfCrAGSE7FD5m7kr6auBmkAmfczY"}"#;
+        let expected_content = r#"{"type":"upgrade_mode","starting_time":"2021-08-23T12:00:00Z","attester_public_key":"3pkFcBXCEmbmXBT2G8CkFMuKisJcH54mbBGvncHaDibt","authorised_jwt_issuers":["Be9wH7xuXBRJAuV1pC7MALZv6a61RvWQ3SypsNarqTt"]}"#;
+
+        assert_eq!(attestation_content_json, expected_content);
+        assert_eq!(attestation_json, expected_attestation);
+
+        let recovered_attestation = serde_json::from_str(&attestation_json)?;
+        assert_eq!(attestation, recovered_attestation);
+
+        let recovered_content = serde_json::from_str(&attestation_content_json)?;
+        assert_eq!(attestation.content, recovered_content);
+
+        Ok(())
+    }
+}

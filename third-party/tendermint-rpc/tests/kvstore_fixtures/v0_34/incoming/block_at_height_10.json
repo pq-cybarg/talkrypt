@@ -1,0 +1,65 @@
+{
+  "id": "b521989c-a7e9-4b38-bf82-f84352863885",
+  "jsonrpc": "2.0",
+  "result": {
+    "block": {
+      "data": {
+        "txs": []
+      },
+      "evidence": {
+        "evidence": []
+      },
+      "header": {
+        "app_hash": "0000000000000000",
+        "chain_id": "dockerchain",
+        "consensus_hash": "048091BC7DDC283F77BFBF91D73C44DA58C3DF8A9CBC867405D8B7F3DAADA22F",
+        "data_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "evidence_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "height": "10",
+        "last_block_id": {
+          "hash": "C84DC8FF0364FB7E79D3E0EA6ADDB5B1CC7A648B5F940D9480BF1063D7D8594A",
+          "parts": {
+            "hash": "6490012AB9FF265F7E7C23A85A118F4C0671BF37E5B3868A59F5F17F8FB292E2",
+            "total": 1
+          }
+        },
+        "last_commit_hash": "9F439795B974EC8482447F624110B141BC21B349187177EF0D1C07FEEDACF248",
+        "last_results_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "next_validators_hash": "6B95A63B261D3DDC1DFF6FA53F4C591AB8DA58BBA545700BFD45E6A54AAA2A84",
+        "proposer_address": "675F52E8FDA5F4047B8EAF498F946F551ED53DC2",
+        "time": "2022-09-22T18:57:27.243575136Z",
+        "validators_hash": "6B95A63B261D3DDC1DFF6FA53F4C591AB8DA58BBA545700BFD45E6A54AAA2A84",
+        "version": {
+          "app": "1",
+          "block": "11"
+        }
+      },
+      "last_commit": {
+        "block_id": {
+          "hash": "C84DC8FF0364FB7E79D3E0EA6ADDB5B1CC7A648B5F940D9480BF1063D7D8594A",
+          "parts": {
+            "hash": "6490012AB9FF265F7E7C23A85A118F4C0671BF37E5B3868A59F5F17F8FB292E2",
+            "total": 1
+          }
+        },
+        "height": "9",
+        "round": 0,
+        "signatures": [
+          {
+            "block_id_flag": 2,
+            "signature": "44oHR5mAbjwOGjAzFzCD28waXBOlwoRGFck9rKrnq3EmbYz5lY5LObmVXomuo48Fo3y7ZsS9wY4Mj1Gd912/BA==",
+            "timestamp": "2022-09-22T18:57:27.243575136Z",
+            "validator_address": "675F52E8FDA5F4047B8EAF498F946F551ED53DC2"
+          }
+        ]
+      }
+    },
+    "block_id": {
+      "hash": "6AA59493037B1673949755B88F86B840FB75285485D95FDBA5BE79D28588F2AC",
+      "parts": {
+        "hash": "0DCBB02A8DFB86E78859A24426ED1D9D2A2C9C3D5C6CD1851477B98705564DD8",
+        "total": 1
+      }
+    }
+  }
+}

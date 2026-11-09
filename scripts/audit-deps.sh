@@ -20,29 +20,24 @@ have() { command -v "$1" >/dev/null 2>&1; }
 echo "== cargo audit (RustSec advisory DB) =="
 if have cargo-audit; then
   # Fail on vulnerabilities (default). Unmaintained-crate notices print as
-  # warnings but do NOT fail the gate (they are not vulnerabilities). The ignore
-  # list below MUST mirror deny.toml [advisories].ignore (cargo-audit reads CLI
-  # flags, cargo-deny reads deny.toml) — each entry is justified there:
-  #   RUSTSEC-2023-0071  rsa (Marvin) — vendored + blinded; tor-only; absent by default.
-  #   RUSTSEC-2026-01xx / -2025-0141  Nym-feature-only advisories in the nym-sdk
-  #     transitive tree (libcrux-*, quick-xml, rustls-webpki via nym's rustls 0.21,
-  #     bincode). Absent from default AND tor builds; do NOT touch talkrypt's
-  #     content crypto (RustCrypto ML-KEM/ML-DSA). quinn-proto's advisory was
-  #     FIXED by upgrade (0.11.15), not ignored. See deny.toml for full rationale.
+  # warnings but do NOT fail the gate (they are not vulnerabilities), so they are
+  # NOT listed here — only in deny.toml (cargo-deny errors on them).
+  #
+  # >>> The ONLY vulnerability ignore is the Arti-pinned bundled-SQLite advisory. <<<
+  # Every other RustSec vulnerability that once rode the nym/tor trees was FIXED,
+  # not ignored — the whole nym cosmos/credential EC stack (crypto-bigint 0.5.5 /
+  # RUSTSEC-2026-0387), the old nym reqwest-0.11 TLS cluster (rustls 0.21,
+  # rustls-webpki 0.101, h2 0.3), and the libcrux PQ crates were all migrated to
+  # modern released versions via the vendored patches in third-party/. See each
+  # crate's TALKRYPT-PATCH.md and deny.toml for the full record.
   AUDIT_IGNORES=(
-    RUSTSEC-2023-0071
-    RUSTSEC-2026-0124 RUSTSEC-2026-0125 RUSTSEC-2026-0126
-    RUSTSEC-2026-0207 RUSTSEC-2026-0208            # libcrux-sha3 (nym; fix blocked by nym's pin)
-    RUSTSEC-2026-0209 RUSTSEC-2026-0211            # libcrux-aesgcm (nym's AEAD, not ours; no upstream fix)
-    RUSTSEC-2026-0212                              # libcrux-secrets (nym; fix blocked by nym's pin)
-    RUSTSEC-2026-0194 RUSTSEC-2026-0195
-    RUSTSEC-2026-0098 RUSTSEC-2026-0099 RUSTSEC-2026-0104
-    RUSTSEC-2025-0141
-    RUSTSEC-2026-0258                              # h2 0.3.27 (nym-only; tendermint-rpc→reqwest 0.11); 0.4 path FIXED by upgrade to 0.4.19
+    RUSTSEC-2026-0459  # libsqlite3-sys bundled SQLite < 3.54.0 — Arti's rusqlite 0.39
+                       # caps libsqlite3-sys at ^0.37; LOCAL attack needing a crafted
+                       # DB+-wal the victim opens (talkrypt only opens its OWN DBs).
+                       # tor/nym-only. Drop when Arti bumps to a SQLite >= 3.54 bundle.
   )
-  # NB RUSTSEC-2026-0204 (crossbeam-epoch) is FIXED by upgrade to 0.9.20, not ignored.
-  # NB RUSTSEC-2026-0257 (webbrowser BROWSER arg-injection) was FIXED by upgrade to 1.2.4, not ignored.
-  # NB RUSTSEC-2026-0258 (h2) 0.4 path was FIXED by upgrade to 0.4.19; only the nym-only 0.3.27 path is ignored above.
+  # NB RUSTSEC-2026-0387 (crypto-bigint 0.5.5) was FIXED by migrating the nym cosmos
+  # EC stack to k256/p256/p384 0.14 + ecdsa 0.17 + bip32 0.6 (third-party/), not ignored.
   IGNORE_FLAGS=()
   for id in "${AUDIT_IGNORES[@]}"; do IGNORE_FLAGS+=(--ignore "$id"); done
   cargo audit "${IGNORE_FLAGS[@]}" || rc=1

@@ -56,5 +56,15 @@ dist/
 # EasyCrypt compiled artifacts
 formal/*.eco
 
-# Local /export + /compact session transcripts (never commit)
+# Local /export + /compact session transcripts (never commit) — they contain the
+# full session, including local filesystem paths / the OS account username.
 *-this-session-is-being-continued-from-a-previous-c.txt
+conversation-*.txt
+
+# Vendored third-party crates ship SSH / PEM PRIVATE-KEY test fixtures, used only by
+# those crates' own test suites (talkrypt never runs them — they are [patch] lib
+# deps). Keep them on disk but NEVER track/push: GitHub secret-scanning (correctly)
+# blocks private keys. Public keys (*.pub) are not secrets and stay tracked.
+third-party/*/tests/examples/id_*
+!third-party/*/tests/examples/id_*.pub
+third-party/*/tests/**/*-priv.pem
