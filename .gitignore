@@ -49,6 +49,9 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+# Claude Code per-machine local config (permissions etc.) — never commit. The
+# shared project instructions live in the tracked top-level CLAUDE.md, NOT here.
+.claude/
 
 # Desktop packaging output (scripts/package.sh)
 dist/
