@@ -109,6 +109,40 @@ in a throwaway VM — not the host.
    `VouchTarget`). That trades a little allocation flexibility for making the whole
    parser surface BMC-tractable. Worth weighing against the deductive-tool route.
 
+## LANDED on-host (2026-11) — flat-model + differential binding (route 3, no type change)
+
+Recommendation 3's insight — *totality is a property of the grammar, not of the heap
+values the reads populate* — is now **landed in CI on the opsec host**, bound to the
+**literal** talkrypt decoders, with **no change to the production wire types** (so no
+re-fuzz of changed decoders, none of the allocation-flexibility tradeoff).
+
+`crates/core/src/linkage_fv.rs` models the **exact grammar** of
+`LinkageProof`/`LinkagePayload`/`NamePresence`/`Marking` + embedded
+`IdentityChain`/`SignedCert`/`Cert`/`Presentation` as a flat, **heap-free** position
+walker over `&[u8]` (only `usize` cursor arithmetic + guarded indexing — as cheap for
+CBMC as `wire::padded_len`). Two recombinable pieces:
+
+1. **Kani proves the structural model total** — seven `linkage_fv::proofs::*_model_total`
+   harnesses, all `VERIFICATION: SUCCESSFUL` (1–56 s each; run by name in `formal.yml`,
+   since a whole-crate `cargo kani -p talkrypt-core` would still pick up the intractable
+   heap decoders). This discharges the exact obligation (no panic / no OOB / termination)
+   the heap decoders could not carry.
+2. **A differential property test binds the model to the real decoders** — `cargo test
+   -p talkrypt-core linkage_fv` asserts `accepts_X(bytes) == X::decode(bytes).is_ok()`
+   (plus exact-length consume) over arbitrary, structured-valid, truncated, extended, and
+   single-byte-mutated bytes. The mutation sweep **caught a real fidelity gap** (a
+   corrupted-UTF-8 `label` the structural model wrongly accepted), which is why the model
+   carries a `const S: bool`: `S = false` is the Kani structural chunk (no `from_utf8`,
+   CBMC-tractable); `S = true` recombines the `from_utf8` chunk for an exact oracle — the
+   same chunk-and-recombine split `engine::decode_flat` uses for its onion
+   `String::from_utf8` (SECURITY-AUDIT R-6).
+
+Totality transfers: the literal decoder = (Kani-total structural walk) + (std-total,
+panic-free `from_utf8`) + (bounded `Vec`/`String` construction over already-validated
+lengths), so it is total. The **Aeneas→F\*** route (below / `formal/decoder-totality/`)
+remains the path to an *extraction-faithful* proof — the `linkage_fv` model is
+hand-written, though differentially pinned to the code — once a build VM is available.
+
 ## Reproducible artifact (Verus harness)
 
 ```rust

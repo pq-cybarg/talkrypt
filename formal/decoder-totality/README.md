@@ -16,13 +16,23 @@ proving `formal/GroupAuth.fst`.
 
 ## Status
 
+**Totality is already LANDED on-host, in CI, bound to the literal decoders** via the
+flat-model + differential-binding route (`crates/core/src/linkage_fv.rs`; seven
+Kani `linkage_fv::proofs::*_model_total` harnesses + a differential property test
+tying the proven model to `LinkageProof`/`LinkagePayload`/`NamePresence`/`Marking` +
+`IdentityChain`/`SignedCert`/`Cert`/`Presentation`). See `docs/fv-heap-decoder-spike.md`
+("LANDED on-host") and SECURITY-AUDIT §5. The Aeneas→F\* pipeline below remains the
+path to an **extraction-faithful** proof (the on-host model is hand-written, though
+differentially pinned to the code byte-for-byte) once a build VM is available.
+
 | Step | State |
 | --- | --- |
 | Proof-of-possibility (Verus, representative shape) | **Done** (spike doc) |
+| **On-host landing (flat model + differential binding to the real decoders)** | **Done** — `linkage_fv`, in the formal CI |
 | Charon (Aeneas frontend) supply-chain CVEs | **Cleared** — `cargo update`, `cargo audit` exit 0 (see below) |
 | Build Charon + Aeneas | **VM step** (`build-in-vm.sh`) — NOT on the opsec host |
 | Extract decoders → LLBC → F\* model | VM step |
-| Discharge totality in F\* + wire into `formal/` CI | VM step → commit the `.fst` here |
+| Discharge totality in F\* + wire into `formal/` CI (extraction-faithful) | VM step → commit the `.fst` here |
 
 ## The Charon CVE fix (host-safe — reproduced, audit exit 0)
 

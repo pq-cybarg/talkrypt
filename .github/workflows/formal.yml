@@ -16,6 +16,7 @@ on:
       - "crates/crypto/**"
       - "crates/wire/**"
       - "crates/transport/**"
+      - "crates/core/**"
       - "formal/**"
       - ".github/workflows/formal.yml"
   pull_request:
@@ -23,6 +24,7 @@ on:
       - "crates/crypto/**"
       - "crates/wire/**"
       - "crates/transport/**"
+      - "crates/core/**"
       - "formal/**"
   workflow_dispatch: {}
 
@@ -48,6 +50,23 @@ jobs:
         # proven harness by name (a whole-crate `cargo kani -p talkrypt-core` would also
         # pick up intractable decoders like Marking — see SECURITY-AUDIT R-6).
         run: cargo kani -p talkrypt-core --harness linkage::proofs::predicate_decode_never_panics
+      - name: Prove the nested-heap chain-embedding decoders are total (core)
+        # The nested-heap decoders (LinkageProof/LinkagePayload/NamePresence/Marking
+        # + embedded IdentityChain/SignedCert/Cert/Presentation) cannot be Kani-proven
+        # directly — CBMC blows up modelling their nested-heap RETURN TYPE (~34M clauses;
+        # SECURITY-AUDIT §5 / the fv-heap-decoder spike). `linkage_fv` discharges the
+        # obligation on a flat, heap-free MODEL of the exact grammar (the `S = false`
+        # structural chunk; `from_utf8` chunked out exactly as in `engine::decode_flat`),
+        # and `cargo test -p talkrypt-core linkage_fv` binds that proven model
+        # bit-for-bit to the literal decoders. Each harness solves in seconds.
+        run: |
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::signed_cert_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::identity_chain_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::linkage_proof_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::linkage_payload_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::presentation_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::name_presence_model_total
+          cargo kani -p talkrypt-core --harness linkage_fv::proofs::marking_model_total
       - name: Prove the Sub-spec C vouch decoders are total (core)
         # Flat decoders are CBMC-tractable; run the proven harnesses by name (a
         # whole-crate `cargo kani -p talkrypt-core` would also pick up intractable
