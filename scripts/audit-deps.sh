@@ -31,10 +31,11 @@ if have cargo-audit; then
   # modern released versions via the vendored patches in third-party/. See each
   # crate's TALKRYPT-PATCH.md and deny.toml for the full record.
   AUDIT_IGNORES=(
-    RUSTSEC-2026-0459  # libsqlite3-sys bundled SQLite < 3.54.0 — Arti's rusqlite 0.39
-                       # caps libsqlite3-sys at ^0.37; LOCAL attack needing a crafted
-                       # DB+-wal the victim opens (talkrypt only opens its OWN DBs).
-                       # tor/nym-only. Drop when Arti bumps to a SQLite >= 3.54 bundle.
+    RUSTSEC-2026-0459  # libsqlite3-sys 0.37.0 bundled SQLite < 3.54.0 — FIXED LOCALLY:
+                       # third-party/libsqlite3-sys swaps the bundled amalgamation
+                       # 3.51.3 -> PATCHED 3.54.1 (version stays 0.37.0 for the
+                       # `links=sqlite3` single-copy shared by Arti + nym). Advisory
+                       # matches by version only; this records the fix. tor/nym-only.
   )
   # NB RUSTSEC-2026-0387 (crypto-bigint 0.5.5) was FIXED by migrating the nym cosmos
   # EC stack to k256/p256/p384 0.14 + ecdsa 0.17 + bip32 0.6 (third-party/), not ignored.

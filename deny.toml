@@ -27,17 +27,16 @@ ignore = [
   # detected against our vendored, blinded rsa — see third-party/rsa/TALKRYPT-PATCH.md
   # for the mitigation that remains in place.)
 
-  # libsqlite3-sys 0.37.0 — RUSTSEC-2026-0459 (bundled C SQLite < 3.54.0 can return
-  # uninitialized page-cache bytes when opening a DB file alongside a `-wal` with a
-  # mismatched page size). UPSTREAM-PINNED, not accepted-as-is: the fix is a newer
-  # bundled SQLite (libsqlite3-sys >= 0.38), but Arti's rusqlite 0.39 (tor-dirmgr)
-  # caps libsqlite3-sys at ^0.37 — it can't be bumped without moving Arti. The
-  # attack vector is LOCAL and requires the victim to open an attacker-CRAFTED
-  # database+`-wal` pair; talkrypt only ever opens databases IT creates (Arti's
-  # on-disk directory cache under `tor`; nym's credential store under `nym`), never
-  # attacker-supplied files, so the precondition isn't met in our threat model.
-  # tor-only + nym-only (absent from the default build). Drop the moment Arti bumps
-  # rusqlite/libsqlite3-sys to a SQLite >= 3.54.0 bundle.
+  # libsqlite3-sys 0.37.0 — RUSTSEC-2026-0459 (bundled C SQLite < 3.54.0 page-cache
+  # UB). FIXED LOCALLY: the vendored libsqlite3-sys (third-party/libsqlite3-sys,
+  # applied via [patch.crates-io]) swaps its bundled SQLite amalgamation from 3.51.3
+  # to the PATCHED 3.54.1 — the actually-compiled SQLite is no longer vulnerable.
+  # The crate VERSION stays 0.37.0 because `links="sqlite3"` forces one shared copy
+  # and neither Arti's rusqlite ^0.37 nor nym's sqlx-sqlite accepts the 0.39 that
+  # bundles 3.54 upstream; advisory tooling matches by version, so this entry records
+  # the FIX, not an unmitigated risk (same pattern as the rsa Marvin mitigation).
+  # tor + nym feature only. See third-party/libsqlite3-sys/TALKRYPT-PATCH.md. Drop
+  # when Arti/sqlx move to libsqlite3-sys >= 0.39 and the version bump supersedes it.
   "RUSTSEC-2026-0459",
 
   # ---- Unmaintained-crate notices (NOT vulnerabilities; no fix available) ----
