@@ -1,0 +1,39 @@
+# TALKRYPT PATCH — vendored standalone copy of nym's `common/upgrade-mode-check`
+# (nym-upgrade-mode-check 2.0.0 @ nym rev e416f724), applied via
+# `[patch."https://github.com/nymtech/nym"]`. This is the SECOND (and last) nym crate
+# that pins `jwt-simple` — like nym-crypto, the ONLY change is loosening the pin from
+# `^0.12` to `0.13` so cargo pulls the real jwt-simple 0.13 (modern k256/p256/p384
+# 0.14 stack, clearing RUSTSEC-2026-0387). This crate uses jwt-simple for Ed25519
+# token verification only (Claims / Token / verify_token / Ed25519PublicKey), whose
+# API is stable across 0.12 -> 0.13, so `src/` is copied verbatim. De-workspace-ified
+# with every dep pinned to nym's own `[workspace.dependencies]`; internal nym deps
+# stay git at the same rev (nym-crypto redirects to our patched path copy).
+[package]
+name = "nym-upgrade-mode-check"
+description = "Functions and tests for checking Nym's Credential Proxy is being properly upgraded"
+version = "2.0.0"
+authors = ["Nym Technologies SA"]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/nymtech/nym"
+documentation = "https://nymtech.net"
+rust-version = "1.87.0"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# THE PATCH: ^0.12 -> 0.13.
+jwt-simple = { version = "0.13", default-features = false, features = ["pure-rust"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["rustls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
+time = { version = "0.3.41", features = ["serde", "formatting", "parsing"] }
+thiserror = "2.0"
+tracing = "0.1.41"
+utoipa = { version = "5.2", optional = true }
+
+nym-http-api-client = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+nym-crypto = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", features = ["asymmetric", "serde", "naive_jwt"] }
+
+[features]
+openapi = ["utoipa"]

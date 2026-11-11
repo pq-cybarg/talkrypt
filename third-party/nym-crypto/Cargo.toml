@@ -1,0 +1,73 @@
+# TALKRYPT PATCH — vendored standalone copy of nym's `common/crypto` (nym-crypto
+# 2.0.0 @ nym rev e416f724), applied via `[patch."https://github.com/nymtech/nym"]`
+# in the workspace-root Cargo.toml.
+#
+# The ONLY substantive change versus upstream is loosening the `jwt-simple` pin from
+# `^0.12` to `0.13`, so cargo pulls the upstream **jwt-simple 0.13** — which runs on
+# the modern `k256`/`p256`/`p384` 0.14 EC stack and thereby drops the RUSTSEC-2026-0387
+# `elliptic-curve 0.13 -> crypto-bigint 0.5.5` line from the graph. nym-crypto uses
+# jwt-simple for Ed25519 / EdDSA ONLY (Ed25519PublicKey / Ed25519KeyPair /
+# Edwards25519KeyPair), whose public API is identical across 0.12 -> 0.13, so the
+# crate's `src/` is copied verbatim and compiles unchanged.
+#
+# This Cargo.toml is a de-workspace-ified form of the original (which used
+# `{ workspace = true }` inheritance): every external dep is pinned to the EXACT
+# version from nym's own `[workspace.dependencies]` so the graph stays unified with
+# the rest of the (still-git) nym crates; the two internal nym deps are kept as git
+# at the same rev. See third-party/nym-crypto/TALKRYPT-PATCH.md.
+[package]
+name = "nym-crypto"
+description = "Crypto library for the nym mixnet"
+version = "2.0.0"
+authors = ["Nym Technologies SA"]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/nymtech/nym"
+documentation = "https://nymtech.net"
+rust-version = "1.87.0"
+readme = "README.md"
+publish = false
+
+[dependencies]
+aes-gcm-siv = { version = "0.12.1", optional = true }
+aes = { version = "0.9.3", optional = true }
+aead = { version = "0.6.1", optional = true }
+base64 = "0.22.1"
+bs58 = "0.5.1"
+blake3 = { version = ">=1.7, <1.8.4", features = ["traits-preview"], optional = true }
+ctr = { version = "0.10.1", optional = true }
+curve25519-dalek = { version = "5.0.0", optional = true }
+digest = { version = "0.10.7", optional = true }
+hybrid-array = { version = "0.4.15", optional = true }
+hkdf = { version = "0.12.3", optional = true }
+hmac = { version = "0.12.1", optional = true }
+# THE PATCH: ^0.12 -> 0.13 (the one change; everything else matches upstream).
+jwt-simple = { version = "0.13", default-features = false, features = ["pure-rust"], optional = true }
+libcrux-psq = { version = "0.0.11", optional = true }
+libcrux-curve25519 = { version = "0.0.9", optional = true }
+cipher = { version = "0.5.2", optional = true }
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"], optional = true }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "alloc"], optional = true }
+rand = { version = "0.10.2", optional = true }
+serde_bytes = { version = "0.11.17", optional = true }
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+sha2 = { version = "0.10.3", optional = true }
+subtle-encoding = { version = "0.5", features = ["bech32-preview"] }
+thiserror = "2.0"
+zeroize = { version = "1.7.0", optional = true, features = ["zeroize_derive"] }
+
+# internal nym crates — kept as git at the pinned rev (not vendored).
+nym-sphinx-types = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd", optional = true }
+nym-pemstore = { git = "https://github.com/nymtech/nym", rev = "e416f724ad4f6b7ebb1f91d3ceeb9e64543526bd" }
+
+[features]
+default = []
+aead = ["dep:aead", "aes-gcm-siv", "hybrid-array"]
+naive_jwt = ["asymmetric", "jwt-simple"]
+libcrux_x25519 = ["libcrux-psq", "libcrux-curve25519"]
+serde = ["dep:serde", "serde_bytes", "ed25519-dalek/serde", "x25519-dalek/serde"]
+asymmetric = ["x25519-dalek", "ed25519-dalek", "curve25519-dalek", "sha2", "zeroize"]
+rand = ["dep:rand"]
+hashing = ["blake3", "digest", "hkdf", "hmac", "hybrid-array", "sha2", "zeroize", "dep:rand"]
+stream_cipher = ["aes", "ctr", "cipher", "hybrid-array"]
+sphinx = ["nym-sphinx-types", "nym-sphinx-types/sphinx"]

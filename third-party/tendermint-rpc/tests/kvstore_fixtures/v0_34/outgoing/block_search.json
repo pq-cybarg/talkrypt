@@ -1,0 +1,11 @@
+{
+  "id": "e80a5681-d645-4cd1-98bb-212750a9e10f",
+  "jsonrpc": "2.0",
+  "method": "block_search",
+  "params": {
+    "order_by": "asc",
+    "page": "1",
+    "per_page": "100",
+    "query": "block.height > 1"
+  }
+}

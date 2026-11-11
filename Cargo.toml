@@ -62,6 +62,20 @@ strip = true
 # contain no `rsa`. Applied to every build/install of this workspace. The full
 # rationale and the exact change are in `third-party/rsa/TALKRYPT-PATCH.md`.
 [patch.crates-io]
+# Source-patched `libsqlite3-sys` 0.37.0 — swap the BUNDLED SQLite amalgamation
+# from 3.51.3 to 3.54.1 to fix RUSTSEC-2026-0459 (SQLite < 3.54.0 can return
+# uninitialized page-cache bytes when a DB is opened alongside a mismatched-page-
+# size `-wal`). The patched SQLite only ships in libsqlite3-sys 0.39 (rusqlite
+# 0.41), which NO released Arti (tor-dirmgr caps rusqlite < 0.41) or sqlx-sqlite
+# (caps libsqlite3-sys < 0.38) accepts, and `links = "sqlite3"` forces ONE shared
+# version. So we keep version 0.37.0 (satisfies Arti's rusqlite ^0.37 AND nym's
+# sqlx-sqlite) and replace only sqlite3.c/.h/ext.h with the 3.54.1 amalgamation
+# (lifted verbatim from libsqlite3-sys 0.39.1) + the matching version constants.
+# SQLite is strictly backward-compatible, so 0.37.0's FFI bindings (a subset of the
+# 3.54.1 C API) link unchanged. The advisory still VERSION-matches 0.37.0, so it is
+# documented (not silently ignored) in deny.toml. tor + nym feature only.
+# Rationale in third-party/libsqlite3-sys/TALKRYPT-PATCH.md.
+libsqlite3-sys = { path = "third-party/libsqlite3-sys" }
 rsa = { path = "third-party/rsa" }
 # Source-patched `sqlx-sqlite` (force-unify sqlite linkage under the `nym`
 # feature): verbatim sqlx-sqlite 0.8.6 with its `libsqlite3-sys` requirement
@@ -72,12 +86,81 @@ rsa = { path = "third-party/rsa" }
 # downgraded. Only pulled into the graph when the `nym` feature is enabled.
 # Rationale in third-party/sqlx-sqlite/Cargo.toml.
 sqlx-sqlite = { path = "third-party/sqlx-sqlite" }
-# Source-patched `superboring` (preserve nym's PQ-JWT, unify ml-dsa, no
-# downgrade): verbatim superboring 0.1.11 with its `ml-dsa` requirement widened
-# from the conservative `=0.1.0-rc.11` to `^0.1`. 0.1.11's mldsa code already
-# uses the released ml-dsa API, so it compiles against 0.1.1 — the SAME version
-# talkrypt's own ML-DSA-87 identity uses. Cargo can't carry both rc.11 and 0.1.1
-# (one 0.1.x slot), so without this the nym graph and our crypto are
-# irreconcilable. Only in the graph under the `nym` feature. Rationale in
-# third-party/superboring/Cargo.toml.
+# Vendored `superboring` — UPDATED 0.1.11 -> 0.1.15 (the version jwt-simple 0.13's
+# `pure-rust` backend now resolves). 0.1.15 declares `ml-dsa = "0.1.1"` natively, so
+# the former ml-dsa-widening source patch is NO LONGER NEEDED — this is now a verbatim,
+# pinned vendored copy. We keep it under `[patch]` (rather than deleting the vendored
+# copy) to retain supply-chain control over this PQ-JWT / ML-DSA crypto-adjacent
+# backend: a pinned, in-tree, inspectable copy we can re-patch immediately if an
+# advisory lands. Only in the graph under the `nym` feature.
 superboring = { path = "third-party/superboring" }
+# Source-patched `tendermint-rpc` 0.40.4 (bump its optional `reqwest` 0.11 -> 0.13):
+# nym's cosmos/zk-nym credential path (cosmrs 0.22 -> tendermint-rpc, and
+# nym-api-requests/nym-validator-client directly) pins tendermint-rpc 0.40.4, which
+# dragged in reqwest 0.11 and with it the RUSTSEC-flagged OLD TLS stack — rustls
+# 0.21.12 (RUSTSEC-2026-0346/-0349), rustls-webpki 0.101.7 (-0098/-0099/-0104/-0382)
+# and h2 0.3.27 (-2026-0258). Upstream tendermint-rpc has no reqwest-0.12/0.13
+# release and nym's `develop` still pins 0.40.4, so we patch it locally until they
+# move: the ONLY change is reqwest 0.11 -> 0.13 (features `rustls`), which rides the
+# modern rustls 0.23 / h2 0.4 already in this workspace — the OLD stack disappears
+# with no feature loss (nym already uses reqwest 0.13.4 elsewhere, so the tree
+# UNIFIES). Only in the graph under the `nym` feature. Rationale in
+# third-party/tendermint-rpc/TALKRYPT-PATCH.md.
+tendermint-rpc = { path = "third-party/tendermint-rpc" }
+# Source-patched `ssh-key-fork-arti` 0.6.7 (Arti's SSH-key fork, pulled by
+# tor-key-forge for onion-service key handling). Bumps its OPTIONAL, feature-off
+# p256/p384/p521 ECDSA deps 0.13 -> 0.14 — the last LOCKFILE source of
+# crypto-bigint 0.5.5 (RUSTSEC-2026-0387). The NIST-curve features are enabled by
+# no talkrypt build, so this is a dep-version-only change (gated code never
+# compiles). Rationale in third-party/ssh-key-fork-arti/TALKRYPT-PATCH.md.
+ssh-key-fork-arti = { path = "third-party/ssh-key-fork-arti" }
+# Source-patched `cosmrs` 0.22.0 (bump the secp256k1 signing stack off
+# the RUSTSEC-flagged crypto-bigint 0.5): nym's cosmos/zk-nym path pulls cosmrs
+# 0.22, whose `ecdsa 0.16 / k256 0.13 / bip32 0.5` pin `elliptic-curve 0.13 ->
+# crypto-bigint 0.5.5` (RUSTSEC-2026-0387, constant-time variability; fix only in
+# crypto-bigint >= 0.7.6). We bump cosmrs's crypto deps to the RELEASED newer
+# majors — ecdsa 0.17 / k256 0.14 / bip32 0.6 — which already ride elliptic-curve
+# 0.14 + crypto-bigint 0.7.10 (the patched line, and ALREADY in this tree via
+# nym's own ecdsa 0.17). No hand-rolled crypto: the primitives are upstream
+# releases; we only adapt cosmrs's ~13 secp256k1 call-sites to the 0.13->0.14 API.
+# Only in the graph under the `nym` feature. Rationale in
+# third-party/cosmrs/TALKRYPT-PATCH.md.
+cosmrs = { path = "third-party/cosmrs" }
+# Source-patched `cosmwasm-crypto` 2.3.3 + `tendermint` 0.40.4 — the remaining
+# nym-tree holders of the OLD RustCrypto EC stack (ecdsa 0.16 / k256 0.13 /
+# p256 0.13 -> elliptic-curve 0.13 -> crypto-bigint 0.5.5, RUSTSEC-2026-0387).
+# Each is bumped to the RELEASED k256/p256 0.14 + ecdsa 0.17 curves that ride
+# crypto-bigint 0.7.10 (the patched line). No hand-rolled primitives:
+# cosmwasm-crypto is a thin verify/recover wrapper (re-checked by its wycheproof +
+# rootberg KATs, ported to the prehash API); tendermint touches k256 in a handful
+# of type re-exports. Both are in the graph ONLY under the `nym` feature. Rationale
+# in each crate's third-party/<name>/TALKRYPT-PATCH.md.
+cosmwasm-crypto = { path = "third-party/cosmwasm-crypto" }
+# cosmwasm-std is cosmwasm-crypto's paired consumer: its test-mock calls
+# `ed25519_batch_verify`, whose RNG bound moved to rand_core 0.10 (ed25519-zebra 5)
+# with the cosmwasm-crypto bump. Patched to match (rand_core 0.6 -> 0.10, one
+# call-site). Rationale in third-party/cosmwasm-std/TALKRYPT-PATCH.md.
+cosmwasm-std = { path = "third-party/cosmwasm-std" }
+tendermint = { path = "third-party/tendermint" }
+
+# jwt-simple is NOT crates-io-patched: the real upstream jwt-simple 0.13 already
+# runs on the modern k256/p256/p384 0.14 stack, so instead of forking it we loosen
+# nym-crypto's `jwt-simple = ^0.12` pin to `0.13` (see the [patch."...nym"] block
+# below) and let cargo pull the genuine 0.13 release. jwt-simple 0.13's `pure-rust`
+# backend is superboring 0.1.14, which already uses ml-dsa 0.1.1 natively — so the
+# old superboring 0.1.11 widening patch is obsolete and dropped.
+
+# Patch nym's own `nym-crypto` crate (git) to loosen its jwt-simple pin. This is the
+# only nym-internal crate we vendor; all other nym crates still come from the pinned
+# git rev and unify against this patched copy (same name + version 2.0.0, identical
+# public API). Rationale in third-party/nym-crypto/TALKRYPT-PATCH.md.
+[patch."https://github.com/nymtech/nym"]
+nym-crypto = { path = "third-party/nym-crypto" }
+# The only other nym crate that pins jwt-simple ^0.12 (a credential-proxy upgrade
+# checker, pulled transitively via nym-credentials-interface). Same one-line pin
+# loosening so the whole graph lands on jwt-simple 0.13. See its TALKRYPT-PATCH.md.
+nym-upgrade-mode-check = { path = "third-party/nym-upgrade-mode-check" }
+# The last nym crate pulling the old EC stack: it has a DIRECT `bip32 ^0.5` dep
+# (-> k256 0.13 -> crypto-bigint 0.5.5). Bumped to bip32 0.6 (re-unifying with our
+# cosmrs's bip32 0.6). See third-party/nym-validator-client/TALKRYPT-PATCH.md.
+nym-validator-client = { path = "third-party/nym-validator-client" }

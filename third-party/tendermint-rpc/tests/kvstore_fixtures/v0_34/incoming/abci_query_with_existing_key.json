@@ -1,0 +1,17 @@
+{
+  "id": "32780c32-760c-47a2-8933-b58664f65b4f",
+  "jsonrpc": "2.0",
+  "result": {
+    "response": {
+      "code": 0,
+      "codespace": "",
+      "height": "89",
+      "index": "0",
+      "info": "",
+      "key": "dHgw",
+      "log": "exists",
+      "proofOps": null,
+      "value": "dmFsdWU="
+    }
+  }
+}
