@@ -17,6 +17,18 @@ no-cross-leaf-forgery (G1/G2), PoP soundness + non-transferability + domain-sepa
 straight-line, rewinding-free implication from the EUF-CMA axiom, so the reductions
 are **QROM-preserving** — the results hold against a quantum adversary.
 
+### `IdentityChain.fst` — F*, account->device->segment chain verification
+The logical-correctness counterpart to the decoder-totality work: proves the Rust
+`IdentityChain::verify` / `belongs_to_account` **acceptance decision** is sound. Same
+idealized EUF-CMA-in-the-QROM signature primitive. Nine theorems, all discharged, zero
+`admit`: fail-closed-on-empty, leaf-binding, **chain soundness** (acceptance => every
+link honestly signed by its issuer, by induction over the chain), account-roots-the-chain,
+**impersonation resistance** (an account whose ML-DSA secret is not held signs nothing,
+so NO chain verifies against it — forging friended-account membership is impossible),
+validity-window enforcement, **revocation unforgeability** (only the certifying account
+can revoke) + revoked-leaf-refused, decision determinism. Straight-line, rewinding-free
+=> QROM-preserving.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -63,6 +75,10 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | rotation `rebind` + auth-PCS (F*) | `update()` / `commit_update` `sig_update` rebinding `leaf_sig_keys` |
 | KEM `encap` / IND-CCA (EC) | `KemProfile` ML-KEM-1024 encapsulate/decapsulate (`hybrid.rs`) |
 | DEM `aead` one-time (EC) | AES-256-GCM `aead::seal/open` under fresh ratchet keys |
+| `cert_msg subject label vf exp` (F*, IdentityChain) | `Cert::encode` = subject_vk \| label \| valid_from \| expiry (`account.rs`) |
+| `walk` / `chain_verifies` (F*) | `IdentityChain::verify`: root-at-account, per-link `verify_signature()` + `valid_at`, issuer==prev.subject, ends-at-leaf (`account.rs`) |
+| `valid_at vf exp now skew` (F*) | `Cert::valid_at` with `CLOCK_SKEW_TOLERANCE` (`account.rs`) |
+| `revoke_msg` + `revocation_valid` (F*) | `Revocation` signed by the account key (`account.rs`) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -73,6 +89,7 @@ explicit reject branch. Together they cover the route both ways.
 | Layer | Tool | What it proves |
 | --- | --- | --- |
 | Protocol auth (symbolic) | **F\*** | The 9 authentication theorems, QROM-sound. |
+| Identity-chain acceptance | **F\*** | Chain-verify soundness, impersonation resistance, revocation (9 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |

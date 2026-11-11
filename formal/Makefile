@@ -1,5 +1,7 @@
 # Machine-checked formal verification of talkrypt's cryptographic core.
-#   * F*        — symbolic group-message authentication theorems (GroupAuth.fst)
+#   * F*        — symbolic group-message authentication theorems (GroupAuth.fst),
+#                 identity-chain verification soundness / impersonation resistance /
+#                 revocation (IdentityChain.fst), nested decoder totality (DecodeTotality.fst)
 #   * EasyCrypt — computational, QROM-sound reductions:
 #                   GroupAuthQROM.ec      (auth => EUF-CMA, all acceptance routes)
 #                   ConfidentialityQROM.ec (confidentiality => KEM IND-CCA + DEM)
@@ -14,6 +16,7 @@ verify: fstar easycrypt
 
 fstar:
 	$(FSTAR) GroupAuth.fst
+	$(FSTAR) IdentityChain.fst
 	$(FSTAR) DecodeTotality.fst
 
 easycrypt:
