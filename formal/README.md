@@ -41,6 +41,19 @@ from later keys — proven via a generation index no forward step decreases) and
 adversary cannot derive, the new root + first post-ratchet chain key are not
 derivable — proven by inversion on the root step). Straight-line => QROM-preserving.
 
+### `Handshake.fst` — F*, mutually-authenticated session handshake
+Models the SIGMA-style handshake (`core::handshake::initiate`/`respond`, H-1): both
+parties ML-DSA-sign the injective full transcript `tag | suite | id_i | n_i | id_r |
+prekey | n_r`, domain-separated by tag. Same idealized EUF-CMA primitive;
+session-key secrecy modeled as in `RatchetFS.fst` (one-way KDF from PSK + KEM secret).
+Six theorems, all discharged, zero `admit`: **mutual authentication** (initiator
+authenticates responder and vice versa), **agreement / no field substitution** (both
+sides bound to the same identities/nonces/prekey/suite — downgrade-resistant, via
+transcript injectivity), **domain separation** (a responder signature can never be
+replayed as an initiator confirm), and **session-key secrecy** — the session root is
+not derivable by an adversary lacking EITHER the invite-token PSK (a non-descriptor
+holder / MITM) OR the ML-KEM shared secret (IND-CCA), so the two protections compose.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -94,6 +107,10 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | `next_ck` / `mk_of` (F*, RatchetFS) | `kdf_ck(ck) = (next chain key, message-key seed)` (`kdf.rs`) |
 | `rk_root` / `rk_chain` (F*, RatchetFS) | `kdf_rk(root, ikm) = (new root, chain key)` (`kdf.rs`) |
 | `der` forward closure (F*) | the one-wayness of HKDF/KMAC256-SHA-384 chain/root steps (no inverse) |
+| `transcript tag suite idi ni idr pk nr` (F*, Handshake) | `handshake_transcript` = tag \| suite_id \| id_i \| nonce_i \| id_r \| prekey \| nonce_r (`handshake.rs`) |
+| `t_resp` / `t_confirm` (F*) | `T_RESP` / `T_CONFIRM` domain-separation tags (`handshake.rs`) |
+| `init_accepts` / `resp_accepts` (F*) | `peer_identity.verify(resp/confirm_transcript, sig)` in `initiate`/`respond` |
+| `kdf_hs psk kem_ss` (F*) | `suite.begin_session(root0, prekey)` / `accept_session` (PSK + ML-KEM) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -106,6 +123,7 @@ explicit reject branch. Together they cover the route both ways.
 | Protocol auth (symbolic) | **F\*** | The 9 authentication theorems, QROM-sound. |
 | Identity-chain acceptance | **F\*** | Chain-verify soundness, impersonation resistance, revocation (9 theorems). |
 | Pairwise ratchet secrecy | **F\*** | Double Ratchet forward secrecy + post-compromise security (4 theorems). |
+| Handshake auth + secrecy | **F\*** | Mutual authentication, agreement, domain separation, session-key secrecy (6 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |
