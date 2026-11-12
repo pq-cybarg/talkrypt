@@ -29,6 +29,18 @@ validity-window enforcement, **revocation unforgeability** (only the certifying 
 can revoke) + revoked-leaf-refused, decision determinism. Straight-line, rewinding-free
 => QROM-preserving.
 
+### `RatchetFS.fst` — F*, pairwise Double Ratchet forward secrecy + PCS
+Models the symmetric chain (`kdf_ck` = `next_ck`/`mk_of`) and root (`kdf_rk` =
+`rk_root`/`rk_chain`) KDF steps as idealized **one-way PRFs**, via an inductive
+DERIVABILITY relation `der ks k` whose only generators are the forward steps — the
+absence of any inverse constructor *is* the one-wayness assumption (computational
+analogue: HKDF/SHA-384 PRF-security). Four theorems, all discharged, zero `admit`:
+**forward secrecy** (a message / chain key at an earlier generation is not derivable
+from later keys — proven via a generation index no forward step decreases) and
+**post-compromise security** (after a root step mixing a fresh KEM secret the
+adversary cannot derive, the new root + first post-ratchet chain key are not
+derivable — proven by inversion on the root step). Straight-line => QROM-preserving.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -79,6 +91,9 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | `walk` / `chain_verifies` (F*) | `IdentityChain::verify`: root-at-account, per-link `verify_signature()` + `valid_at`, issuer==prev.subject, ends-at-leaf (`account.rs`) |
 | `valid_at vf exp now skew` (F*) | `Cert::valid_at` with `CLOCK_SKEW_TOLERANCE` (`account.rs`) |
 | `revoke_msg` + `revocation_valid` (F*) | `Revocation` signed by the account key (`account.rs`) |
+| `next_ck` / `mk_of` (F*, RatchetFS) | `kdf_ck(ck) = (next chain key, message-key seed)` (`kdf.rs`) |
+| `rk_root` / `rk_chain` (F*, RatchetFS) | `kdf_rk(root, ikm) = (new root, chain key)` (`kdf.rs`) |
+| `der` forward closure (F*) | the one-wayness of HKDF/KMAC256-SHA-384 chain/root steps (no inverse) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -90,6 +105,7 @@ explicit reject branch. Together they cover the route both ways.
 | --- | --- | --- |
 | Protocol auth (symbolic) | **F\*** | The 9 authentication theorems, QROM-sound. |
 | Identity-chain acceptance | **F\*** | Chain-verify soundness, impersonation resistance, revocation (9 theorems). |
+| Pairwise ratchet secrecy | **F\*** | Double Ratchet forward secrecy + post-compromise security (4 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |
