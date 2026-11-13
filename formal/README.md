@@ -67,6 +67,18 @@ forward secrecy** (an earlier epoch secret is not recoverable from a later one),
 leaf secret). Within-epoch per-sender message-key FS is the same `kdf_ck` one-wayness
 proven in `RatchetFS.fst`. Straight-line => QROM-preserving.
 
+### `EngineAuth.fst` — F*, control-plane authorization (F-17)
+Models the engine's authorization state machine — the checks that CONSUME group-message
+authenticity (`apply_commit` / `verify_host_sig` / `Frame::Roster` gating). Same
+idealized EUF-CMA primitive. Nine theorems, all discharged, zero `admit`: a **commit**
+is applied only if the committer is the host leaf AND the host signed it (so no member
+can inject a commit), with epoch binding; a **roster** is applied only if host-signed
+AND its epoch strictly advances (monotonic — anti-rollback/replay), with stale rosters
+dropped; commit/roster **domain separation**; and the inbound **access gate** is
+fail-closed (`Accounts` allow-list refuses non-listed peers; relationship gates require
+the flag). Authority is the signature, never the relay-stamped `from` — a forged commit
+is rejected regardless of sender restamping. Straight-line => QROM-preserving.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -126,6 +138,9 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | `kdf_hs psk kem_ss` (F*) | `suite.begin_session(root0, prekey)` / `accept_session` (PSK + ML-KEM) |
 | `derive_parent` / `derive_commit` (F*, TreeKemKS) | `derive_parent_secret` / `derive_commit_secret` — tree path → epoch secret (`treekem.rs`) |
 | `der` closure (F*, TreeKemKS) | fresh path secrets sealed via ML-KEM to current members only (`rekey_path`) |
+| `commit_transcript` / `apply_commit_ok` (F*, EngineAuth) | `commit_auth_transcript` + `apply_commit` host-leaf + sig check (`treekem.rs`) |
+| `roster_transcript` / `apply_roster_ok` (F*) | `roster_transcript` + host-sig + monotonic `last_roster_epoch` (`engine.rs`) |
+| `policy` / `allows` (F*) | `AccessPolicy` + `AccessPolicy::allows` inbound gate (`engine.rs`) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -140,6 +155,7 @@ explicit reject branch. Together they cover the route both ways.
 | Pairwise ratchet secrecy | **F\*** | Double Ratchet forward secrecy + post-compromise security (4 theorems). |
 | Handshake auth + secrecy | **F\*** | Mutual authentication, agreement, domain separation, session-key secrecy (6 theorems). |
 | Group key-schedule secrecy | **F\*** | TreeKEM post-compromise security + forward secrecy (removal, epoch, path — 4 theorems). |
+| Control-plane authorization | **F\*** | F-17 commit/roster gating: host-only, monotonic, fail-closed access (9 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |

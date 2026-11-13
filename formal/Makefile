@@ -4,7 +4,8 @@
 #                 revocation (IdentityChain.fst), pairwise Double Ratchet forward
 #                 secrecy + post-compromise security (RatchetFS.fst), handshake mutual
 #                 authentication + session-key secrecy (Handshake.fst), TreeKEM group
-#                 key-schedule PCS/FS (TreeKemKS.fst), nested decoder totality
+#                 key-schedule PCS/FS (TreeKemKS.fst), control-plane authorization /
+#                 F-17 commit+roster gating (EngineAuth.fst), nested decoder totality
 #                 (DecodeTotality.fst)
 #   * EasyCrypt — computational, QROM-sound reductions:
 #                   GroupAuthQROM.ec      (auth => EUF-CMA, all acceptance routes)
@@ -24,6 +25,7 @@ fstar:
 	$(FSTAR) RatchetFS.fst
 	$(FSTAR) Handshake.fst
 	$(FSTAR) TreeKemKS.fst
+	$(FSTAR) EngineAuth.fst
 	$(FSTAR) DecodeTotality.fst
 
 easycrypt:
