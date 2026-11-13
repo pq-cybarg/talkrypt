@@ -54,6 +54,19 @@ replayed as an initiator confirm), and **session-key secrecy** — the session r
 not derivable by an adversary lacking EITHER the invite-token PSK (a non-descriptor
 holder / MITM) OR the ML-KEM shared secret (IND-CCA), so the two protections compose.
 
+### `TreeKemKS.fst` — F*, TreeKEM group key-schedule PCS/FS
+The group-layer secrecy counterpart to `GroupAuth.fst` (which proves group-message
+*authentication*). Models the per-commit rekey (`derive_parent_secret` up the tree →
+`derive_commit_secret` → epoch secret) as one-way derivations via the same inductive
+`der` forward-closure as `RatchetFS.fst`. Four theorems, all discharged, zero `admit`:
+**post-compromise security** (a member compromised before a commit heals — the new
+epoch secret comes from a fresh root it cannot derive), **forward secrecy against
+removal** (a removed member cannot derive any post-removal epoch secret), **epoch
+forward secrecy** (an earlier epoch secret is not recoverable from a later one), and
+**path-secrecy propagation** (one-wayness composes up the tree path from the fresh
+leaf secret). Within-epoch per-sender message-key FS is the same `kdf_ck` one-wayness
+proven in `RatchetFS.fst`. Straight-line => QROM-preserving.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -111,6 +124,8 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | `t_resp` / `t_confirm` (F*) | `T_RESP` / `T_CONFIRM` domain-separation tags (`handshake.rs`) |
 | `init_accepts` / `resp_accepts` (F*) | `peer_identity.verify(resp/confirm_transcript, sig)` in `initiate`/`respond` |
 | `kdf_hs psk kem_ss` (F*) | `suite.begin_session(root0, prekey)` / `accept_session` (PSK + ML-KEM) |
+| `derive_parent` / `derive_commit` (F*, TreeKemKS) | `derive_parent_secret` / `derive_commit_secret` — tree path → epoch secret (`treekem.rs`) |
+| `der` closure (F*, TreeKemKS) | fresh path secrets sealed via ML-KEM to current members only (`rekey_path`) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -124,6 +139,7 @@ explicit reject branch. Together they cover the route both ways.
 | Identity-chain acceptance | **F\*** | Chain-verify soundness, impersonation resistance, revocation (9 theorems). |
 | Pairwise ratchet secrecy | **F\*** | Double Ratchet forward secrecy + post-compromise security (4 theorems). |
 | Handshake auth + secrecy | **F\*** | Mutual authentication, agreement, domain separation, session-key secrecy (6 theorems). |
+| Group key-schedule secrecy | **F\*** | TreeKEM post-compromise security + forward secrecy (removal, epoch, path — 4 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |

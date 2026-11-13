@@ -3,8 +3,9 @@
 #                 identity-chain verification soundness / impersonation resistance /
 #                 revocation (IdentityChain.fst), pairwise Double Ratchet forward
 #                 secrecy + post-compromise security (RatchetFS.fst), handshake mutual
-#                 authentication + session-key secrecy (Handshake.fst), nested decoder
-#                 totality (DecodeTotality.fst)
+#                 authentication + session-key secrecy (Handshake.fst), TreeKEM group
+#                 key-schedule PCS/FS (TreeKemKS.fst), nested decoder totality
+#                 (DecodeTotality.fst)
 #   * EasyCrypt — computational, QROM-sound reductions:
 #                   GroupAuthQROM.ec      (auth => EUF-CMA, all acceptance routes)
 #                   ConfidentialityQROM.ec (confidentiality => KEM IND-CCA + DEM)
@@ -22,6 +23,7 @@ fstar:
 	$(FSTAR) IdentityChain.fst
 	$(FSTAR) RatchetFS.fst
 	$(FSTAR) Handshake.fst
+	$(FSTAR) TreeKemKS.fst
 	$(FSTAR) DecodeTotality.fst
 
 easycrypt:
