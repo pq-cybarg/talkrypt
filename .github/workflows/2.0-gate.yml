@@ -1,0 +1,42 @@
+# talkrypt 2.0 research-branch gate (docs/2.0/CHARTER.md).
+#
+# Every 2.0 component must pass formal verification + independent security evaluation
+# + penetration testing before it may influence mainline. This workflow enforces the
+# AUTOMATABLE parts of that gate on the 2.0 branch and its sub-branches:
+#
+#   * honest-scope — no covert/undetectable/certification property asserted as a
+#     guarantee (only goals under evaluation), AND no component record claims
+#     `mainline-eligible: true` without all three gate fields `pass` + evidenced
+#     (ci/honest-scope-check.sh).
+#
+# The remaining gate parts run via their own workflows, which also trigger on this
+# branch once a component lands code:
+#   * formal verification — .github/workflows/formal.yml (Kani + F* + EasyCrypt);
+#   * supply chain        — .github/workflows/audit.yml (cargo audit + cargo deny).
+# Independent security evaluation and penetration testing are human processes; their
+# PASS/evidence is recorded in each component's assessment record and checked by the
+# honest-scope ledger above.
+name: 2.0-gate
+
+on:
+  push:
+    branches:
+      - "2.0"
+      - "2.0/**"
+  pull_request:
+    branches:
+      - "2.0"
+      - "2.0/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  honest-scope:
+    name: Honest-scope invariant + gate ledger
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Enforce honest-scope (no asserted covert/undetectable/cert guarantees)
+        run: bash ci/honest-scope-check.sh
