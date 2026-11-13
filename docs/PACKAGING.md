@@ -7,9 +7,12 @@ Argon2) and the default transport is plain TCP, so the binaries link **no C
 libraries** — they build as single, dependency-free executables on every
 desktop OS. (`--features tor` pulls Arti and is a separate, heavier build.)
 
-There is no separate desktop GUI: the CLI/TUI *are* the shipped clients, sharing
-the same audited core the Android app consumes through `crates/ffi`. A Tauri GUI
-on top of the FFI is possible later (see `docs/PLATFORMS.md`) but is not built.
+There is also a **native desktop GUI** — `crates/desktop` (`talkrypt-desktop`,
+egui/eframe, links the core directly) — CI-built but **not yet folded into the
+packaging scripts below** (`package.sh` currently stages CLI/TUI/helper/relsign
+only). Adding it to the release artifacts is tracked in
+[`RELEASE-READINESS.md`](RELEASE-READINESS.md) (punch-list item 3). All clients
+share the same audited core the Android app consumes through `crates/ffi`.
 
 ## Scripts
 

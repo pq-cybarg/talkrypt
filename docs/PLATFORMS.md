@@ -67,15 +67,18 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -o app/src/main/jniLibs \
 
 ## Desktop (macOS / Windows 10 / Linux)
 
-Two options, both over the same FFI/core:
+Three clients, all over the same core:
 
-1. **Native CLI/TUI** — already shipped (`talkrypt`, `talkrypt-tui`), runs on
-   all three OSes today.
-2. **Tauri GUI** — a `tauri` app whose Rust backend depends on `talkrypt-ffi`
-   (or `talkrypt-core` directly) and exposes commands to a minimal web UI.
-   Scaffold with `cargo create-tauri-app`; the backend `#[tauri::command]`s map
-   1:1 to the FFI methods. Building the bundle needs the platform's webview
-   libs + the Tauri CLI (documented, not in CI).
+1. **Native CLI/TUI** — shipped (`talkrypt`, `talkrypt-tui`), runs on all three
+   OSes today.
+2. **Native desktop GUI** — **built**: `crates/desktop` (`talkrypt-desktop`) is
+   an **egui/eframe** GUI that links `talkrypt-core` directly (no FFI), CI-built
+   on every push; host shows a big QR a phone scans to join. It is **not yet in
+   the packaging pipeline** (`scripts/package.sh` omits it) — see
+   [`RELEASE-READINESS.md`](RELEASE-READINESS.md), punch-list item 3. (A Tauri/
+   webview shell was the earlier idea; the egui app superseded it and is the one
+   that exists.)
+3. **Key-custody helper** (`talkrypt-helper`) — below.
 
 ## Desktop key-custody helper (`talkrypt-helper`)
 

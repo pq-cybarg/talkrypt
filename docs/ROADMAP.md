@@ -1,9 +1,16 @@
-# Platform roadmap (planned — not built)
+# Platform roadmap (mixed status — see RELEASE-READINESS.md for ground truth)
 
-> **Status: PLANNED.** Nothing in this document is implemented yet. It records
-> the intended platform matrix so it isn't lost; each item is future work. What
-> *is* built today is in [`PLATFORMS.md`](PLATFORMS.md) (Rust core + `uniffi`
-> FFI, CLI/TUI, the documented Android/Tauri integration paths).
+> **Status: MIXED — this roadmap is partly implemented.** The one-line
+> "nothing is built" header this file used to carry was stale: several items
+> below are now built and some are hardware-validated (desktop `OsKeystore` on
+> all three OSes; the helper + Windows Named-Pipe transport; the mobile StrongBox
+> path on a Solana Seeker; the LoRa mesh codecs), while others (browser
+> extensions, web app, companion bridges, iOS app shell) remain unbuilt. For the
+> **authoritative built / builds / planned status of every target**, read
+> [`RELEASE-READINESS.md`](RELEASE-READINESS.md); what is shipped-and-integration-
+> ready is in [`PLATFORMS.md`](PLATFORMS.md). Treat the matrix below as the
+> *intended direction + item IDs*, annotated in-line where an item has since
+> been built.
 >
 > This roadmap was imported from sibling planning notes; the bracketed
 > `#NNN` / `APP-*` codes are roadmap item IDs carried over as stable
