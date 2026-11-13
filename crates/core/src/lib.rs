@@ -18,6 +18,11 @@ pub mod handshake;
 pub mod history;
 pub mod keeper;
 pub mod linkage;
+/// Formal-verification companion for the nested-heap chain-embedding decoders:
+/// a flat, heap-free grammar model that Kani proves total (the obligation the
+/// heap decoders cannot carry) plus a differential test binding it to the
+/// literal decoders. See `docs/fv-heap-decoder-spike.md` / SECURITY-AUDIT §5.
+mod linkage_fv;
 pub mod linking;
 pub mod marking;
 pub mod nametrust;

@@ -298,27 +298,35 @@ mod proofs {
         let _ = Predicate::decode(&data[..len]);
     }
 
-    // ---- LinkageProof::decode totality — diagnosed, not landed (honest) ----
+    // ---- LinkageProof::decode totality — LANDED (on-host, in CI) ----
     //
-    // `decode` now delegates to the injectable `decode_with` (dependency injection), a
+    // `decode` delegates to the injectable `decode_with` (dependency injection), a
     // genuine decoupling that makes the compositional argument explicit: the wrapper is
     // total IFF its wire reads are total (Kani-proven in `talkrypt-wire`) and its
     // injected sub-decoders are total.
     //
-    // Four Kani attempts (monolithic; `kani::stub` ×2; dependency-injection with total
-    // stub closures) ALL blew up to ~34M clauses. The DI attempt is the diagnostic: with
-    // the real `IdentityChain::decode`/`SignedCert::decode` NEVER called (trivial stub
-    // closures passed), it was STILL 34M clauses — so the sub-decoders are NOT the
-    // bottleneck. The real cost is the NESTED-HEAP RETURN TYPE: `LinkageProof` holds
-    // `IdentityChain(Vec<SignedCert>)`, and each `SignedCert` has a `String` + multiple
-    // `Vec<u8>`; CBMC models constructing and DROPPING that nested heap expensively,
-    // independent of the parse logic. (This is why the flat, fixed-array `VouchTarget`
-    // decoder verifies in ~3 s and this cannot.) Discharging it would need a CBMC/Kani
-    // that models nested heap drops cheaply, or a proof formulation that avoids
-    // constructing the value. Until then `LinkageProof`/`LinkagePayload`/`NamePresence`
-    // stay covered by the `linkage_parser`/`identity_chain`/`signed_claim` fuzz targets
-    // + property tests, NOT Kani. See SECURITY-AUDIT §5. The `decode_with` seam is kept
-    // so the proof lands as soon as the tooling allows.
+    // Four earlier Kani attempts (monolithic; `kani::stub` ×2; dependency-injection with
+    // total stub closures) ALL blew up to ~34M clauses. The DI attempt was the
+    // diagnostic: with the real `IdentityChain::decode`/`SignedCert::decode` NEVER called
+    // (trivial stub closures passed), it was STILL 34M clauses — so the sub-decoders are
+    // NOT the bottleneck. The real cost is the NESTED-HEAP RETURN TYPE: `LinkageProof`
+    // holds `IdentityChain(Vec<SignedCert>)`, and each `SignedCert` has a `String` +
+    // multiple `Vec<u8>`; CBMC models constructing and DROPPING that nested heap
+    // expensively, independent of the parse logic. (This is why the flat, fixed-array
+    // `VouchTarget` decoder verifies in ~3 s and this could not.)
+    //
+    // The spike's "proof formulation that avoids constructing the value" (recommendation
+    // 3) is now realized in `crate::linkage_fv`: a flat, heap-free MODEL of the EXACT
+    // grammar of `LinkageProof`/`LinkagePayload`/`NamePresence`/`Marking` + the embedded
+    // `IdentityChain`/`SignedCert`/`Cert`/`Presentation`. Kani proves that model total
+    // (`linkage_fv::proofs::*_model_total`, in the formal CI — the obligation above),
+    // and a differential property test (`cargo test -p talkrypt-core linkage_fv`) binds
+    // the proven model bit-for-bit to THESE literal decoders. `from_utf8` is chunked out
+    // of the Kani path and recombined in the differential oracle, exactly as
+    // `engine::decode_flat` does. See SECURITY-AUDIT §5 and `docs/fv-heap-decoder-spike.md`.
+    // The real decoders remain fuzz + property covered as defense-in-depth; the zero-
+    // source-change Aeneas→F* extraction (`formal/decoder-totality/`) stays the path to
+    // an extraction-faithful proof once a build VM is available.
 }
 
 #[cfg(test)]

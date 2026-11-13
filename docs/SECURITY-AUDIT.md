@@ -434,18 +434,27 @@ re-broadcasts. **Wiring:** a `Frame::MemberCommit` handled host-side like
   verify the async `talkrypt-core` crate; the flat `Predicate::decode` is now
   **Kani-proven** total (`linkage::proofs::predicate_decode_never_panics`, in the
   formal CI). The flat vouch decoders `VouchTarget`/`Vouch`/`VouchPolicy` are also
-  now **Kani-proven** total. **Tractability boundary (empirically diagnosed):** the
-  `SignedCert`/`IdentityChain`-embedding decoders (`LinkageProof`/`LinkagePayload`/
-  `NamePresence`) are CBMC-intractable (~34M clauses, no convergence). Root cause,
-  pinned down by a dependency-injection experiment (`LinkageProof::decode_with`):
-  with the sub-decoders replaced by trivial total stubs — so the crypto internals
-  are NEVER explored — it STILL blew up. So the bottleneck is NOT the sub-decoders;
-  it is the **nested-heap RETURN TYPE** (`IdentityChain(Vec<SignedCert{String, Vec,
-  Vec}>)`), whose construct-and-drop CBMC models expensively regardless of the parse
-  logic — which is why flat, fixed-array decoders (`VouchTarget`) verify in ~3 s and
-  these cannot. `Marking::decode` (its own nested/`String` structure) is the same
-  class. These stay fuzz + property-tested, not Kani, until a CBMC/Kani that models
-  nested heap drops cheaply; the `decode_with` seam is kept so the proof lands then.
+  now **Kani-proven** total. The `SignedCert`/`IdentityChain`-embedding decoders
+  (`LinkageProof`/`LinkagePayload`/`NamePresence`/`Marking`) cannot be Kani-proven
+  *directly* (~34M clauses, no convergence). Root cause, pinned down by a
+  dependency-injection experiment (`LinkageProof::decode_with`): with the sub-decoders
+  replaced by trivial total stubs — so the crypto internals are NEVER explored — it
+  STILL blew up. The bottleneck is NOT the sub-decoders; it is the **nested-heap
+  RETURN TYPE** (`IdentityChain(Vec<SignedCert{String, Vec, Vec}>)`), whose
+  construct-and-drop CBMC models expensively regardless of the parse logic — which is
+  why flat, fixed-array decoders (`VouchTarget`) verify in ~3 s and these cannot.
+  **Totality is nonetheless LANDED on-host, in CI** (`crate::linkage_fv`): a flat,
+  heap-free MODEL of the exact grammar of all four decoders + their embedded
+  `IdentityChain`/`SignedCert`/`Cert`/`Presentation` is **Kani-proven total** (seven
+  `linkage_fv::proofs::*_model_total` harnesses, in the formal CI), and a
+  **differential property test** (`cargo test -p talkrypt-core linkage_fv`) binds that
+  proven model bit-for-bit to THE LITERAL decoders over arbitrary + structured-valid +
+  single-byte-mutated bytes (that mutation sweep caught — and forced the model to
+  recombine — the `from_utf8` chunk). `from_utf8` is chunked out of the Kani path and
+  recombined in the differential oracle, exactly as `engine::decode_flat` does (R-6).
+  The real decoders stay fuzz + property covered as defense-in-depth; the zero-source-
+  change Aeneas→F\* extraction (`formal/decoder-totality/`) remains the path to an
+  extraction-faithful proof once a build VM is available.
 - **Invite/descriptor parsing** (`descriptor.rs`): parses attacker-influenceable
   `talkrypt://` URIs; **fuzzed** (`descriptor_parser`).
 - **Identity resolution** (`contacts.rs`, `account.rs`, `engine.rs::handle_identity`):
