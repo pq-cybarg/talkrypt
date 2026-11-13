@@ -63,6 +63,8 @@ formal/*.eco
 # full session, including local filesystem paths / the OS account username.
 *-this-session-is-being-continued-from-a-previous-c.txt
 conversation-*.txt
+*conversation*.txt
+do-not-commit-*
 
 # Vendored third-party crates ship SSH / PEM PRIVATE-KEY test fixtures, used only by
 # those crates' own test suites (talkrypt never runs them — they are [patch] lib
