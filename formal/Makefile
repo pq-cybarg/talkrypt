@@ -5,8 +5,9 @@
 #                 secrecy + post-compromise security (RatchetFS.fst), handshake mutual
 #                 authentication + session-key secrecy (Handshake.fst), TreeKEM group
 #                 key-schedule PCS/FS (TreeKemKS.fst), control-plane authorization /
-#                 F-17 commit+roster gating (EngineAuth.fst), nested decoder totality
-#                 (DecodeTotality.fst)
+#                 F-17 commit+roster gating (EngineAuth.fst), gossip dedup soundness +
+#                 eventual-delivery-under-connectivity (GossipLiveness.fst), nested
+#                 decoder totality (DecodeTotality.fst)
 #   * EasyCrypt — computational, QROM-sound reductions:
 #                   GroupAuthQROM.ec      (auth => EUF-CMA, all acceptance routes)
 #                   ConfidentialityQROM.ec (confidentiality => KEM IND-CCA + DEM)
@@ -26,6 +27,7 @@ fstar:
 	$(FSTAR) Handshake.fst
 	$(FSTAR) TreeKemKS.fst
 	$(FSTAR) EngineAuth.fst
+	$(FSTAR) GossipLiveness.fst
 	$(FSTAR) DecodeTotality.fst
 
 easycrypt:
