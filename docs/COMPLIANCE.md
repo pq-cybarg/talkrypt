@@ -8,7 +8,10 @@
 > NOT CSfC-accredited, NOT NSA-approved, NOT authorized for any classification
 > level, and NOT independently audited.**
 
-Companion documents: `SECURITY-AUDIT.md` (internal security audit), `docs/CSFC.md`
+Companion documents: `docs/SPECIFICATION.md` (overall system & security spec — the
+assurance picture this feeds), `docs/compliance/STANDARDS-MAP.md` (technology-only map to
+NIST SP 800-series / IETF / IEEE / HIPAA §164.312 / IEC 62443 — this doc owns the
+FIPS/CNSA rows it references), `SECURITY-AUDIT.md` (internal security audit), `docs/CSFC.md`
 (CSfC layered-architecture mapping), `docs/POSTURE.md` (KEM posture), `docs/WIRE.md`
 (frozen wire format). Reproduce the algorithm inventory below with
 `scripts/crypto-inventory.sh`.
