@@ -79,6 +79,18 @@ fail-closed (`Accounts` allow-list refuses non-listed peers; relationship gates 
 the flag). Authority is the signature, never the relay-stamped `from` — a forged commit
 is rejected regardless of sender restamping. Straight-line => QROM-preserving.
 
+### `GossipLiveness.fst` — F*, gossip dedup soundness + eventual delivery
+Models the relay/forward flooding mesh (`core::relay`, `core::engine::SeenSet`). **Honest
+scope:** full temporal liveness depends on a network connectivity/fairness assumption
+(outside F*/Kani); what is proven is the gossip LOGIC that enables it. Six theorems, all
+discharged, zero `admit`: **dedup soundness** (a novel frame is always forwarded — no
+message loss; a duplicate is dropped), **loop freedom / termination** (a frame is
+forwarded by a node at most once, so the flood cannot storm), **insert monotonicity**,
+and **eventual delivery under connectivity** (modeling the flood as reachability: every
+node reachable from the source is delivered the frame — a reachability induction over the
+forwarding rule) plus **delivery monotonicity** (progress is one-way). Connectivity is
+the explicit assumption; the forwarding logic itself starves no reachable node.
+
 ### `GroupAuthQROM.ec` — EasyCrypt, computational reduction + ALL routes
 - `group_auth_reduces_to_eufcma`: a tight, **black-box, straight-line** reduction —
   any group-message forger yields an EUF-CMA forger with equal probability. Black-box
@@ -141,6 +153,8 @@ audited line-by-line (`crates/crypto/src/treekem.rs`):
 | `commit_transcript` / `apply_commit_ok` (F*, EngineAuth) | `commit_auth_transcript` + `apply_commit` host-leaf + sig check (`treekem.rs`) |
 | `roster_transcript` / `apply_roster_ok` (F*) | `roster_transcript` + host-sig + monotonic `last_roster_epoch` (`engine.rs`) |
 | `policy` / `allows` (F*) | `AccessPolicy` + `AccessPolicy::allows` inbound gate (`engine.rs`) |
+| `insert` dedup (F*, GossipLiveness) | `SeenSet::insert` novel/duplicate decision (`engine.rs`) |
+| `delivered` / `path` closure (F*) | `forward_loop` flooding over the connected relay mesh (`relay.rs`) |
 
 F* folds the epoch check into the signed transcript (a wrong-epoch message needs a
 different signature); the EasyCrypt `accepts_route` models the epoch check as an
@@ -156,6 +170,7 @@ explicit reject branch. Together they cover the route both ways.
 | Handshake auth + secrecy | **F\*** | Mutual authentication, agreement, domain separation, session-key secrecy (6 theorems). |
 | Group key-schedule secrecy | **F\*** | TreeKEM post-compromise security + forward secrecy (removal, epoch, path — 4 theorems). |
 | Control-plane authorization | **F\*** | F-17 commit/roster gating: host-only, monotonic, fail-closed access (9 theorems). |
+| Gossip liveness logic | **F\*** | Dedup soundness (no loss, loop-free) + eventual delivery under connectivity (6 theorems). |
 | Protocol auth (computational) | **EasyCrypt** | Tight EUF-CMA reduction + every acceptance route. |
 | Confidentiality | **EasyCrypt** | KEM IND-CCA-QROM + DEM model; observable message-independence. |
 | Wire decoders | **Kani** (BMC) | Message + membership parsers total & memory-safe on ALL inputs. |
