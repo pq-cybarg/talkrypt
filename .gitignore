@@ -17,6 +17,9 @@ Cargo.lock.bak
 !/fuzz/corpus/*/regression-*
 
 # --- key material / secrets: NEVER track ---
+# The repo holds NO keys of ANY kind — public or secret. Release signing keys are
+# injected at build/verify time from the environment (TALKRYPT_RELEASE_PUBKEY /
+# TALKRYPT_RELEASE_SK*) or obtained out of band; never committed. See docs/PACKAGING.md.
 *.key
 *.onion_key
 *.secret
@@ -26,8 +29,14 @@ Cargo.lock.bak
 hs_ed25519_secret_key
 *identity*.bin
 *.seed
+RELEASE_PUBKEY*.hex
+*release*pubkey*.hex
+*.pubkey
 /keys/
 /secrets/
+# Session transcripts / exports — NEVER commit (local paths, OS account, full session).
+*conversation*.txt
+do-not-commit-*
 /state/
 /.talkrypt/
 *.sealed

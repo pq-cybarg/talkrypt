@@ -9,10 +9,12 @@
 //! **Anyone can sign — not just the project.** There is no central signing authority:
 //! generate your OWN keypair with `keygen`, sign your own copies/rebuilds/mirrors,
 //! and hand your public key to the people you distribute to; they verify against it.
-//! The project signs its releases the same way with its release key (published as
-//! the repo's `docs/RELEASE_PUBKEY.hex`). Deliberately PQ and CA-free: no dependency
-//! on Apple notarization or a Debian archive key. Keep your seed (secret) offline or
-//! in a CI secret; publish only the public key.
+//! The project signs its releases the same way with its release key, whose PUBLIC
+//! half is **published with each release** (written into `dist/` next to the
+//! artifacts, and injected into the binaries at build time) — the git repo holds
+//! **no key material of any kind**. Deliberately PQ and CA-free: no dependency on
+//! Apple notarization or a Debian archive key. Keep your seed (secret) offline or in
+//! a CI secret; publish only the public key, and pin the copy you got out of band.
 //!
 //! Usage:
 //!   talkrypt-relsign keygen                      # -> SEED (secret) + PUBKEY (hex) on stdout
@@ -87,6 +89,17 @@ fn main() {
                  `verify <file> <file>.sig <pubkey>`."
             );
         }
+        Some("pubkey") => {
+            // Derive the PUBLIC verify key from a signing seed, so a release can
+            // PUBLISH the pubkey (into dist/, next to the artifacts) without any key
+            // ever living in the git repo. Trust anchor is still obtained out of band.
+            let seed_arg = args
+                .get(1)
+                .unwrap_or_else(|| die("usage: pubkey <seed-hex-or-path>"));
+            let seed = load_seed(seed_arg).unwrap_or_else(|e| die(&e));
+            let kp = IdentityKeyPair::from_secret_bytes(seed);
+            println!("{}", hex_encode(&kp.public().sig_vk));
+        }
         Some("sign") => {
             let (file, seed_arg) = match (args.get(1), args.get(2)) {
                 (Some(f), Some(s)) => (f, s),
@@ -123,7 +136,7 @@ fn main() {
                 }
             }
         }
-        _ => die("usage: keygen | sign <file> <seed> | verify <file> <sig> <pubkey>"),
+        _ => die("usage: keygen | pubkey <seed> | sign <file> <seed> | verify <file> <sig> <pubkey>"),
     }
 }
 
@@ -177,6 +190,20 @@ mod tests {
         assert!(
             wrong.verify(msg, &sig).is_err(),
             "a signature must not verify under a different release key"
+        );
+    }
+
+    #[test]
+    fn pubkey_subcommand_derives_the_published_verify_key_from_the_seed() {
+        // The `pubkey <seed>` subcommand must reproduce exactly the verify key that
+        // `keygen` prints, so a release can PUBLISH the pubkey derived from the
+        // offline secret — with no key file ever committed to the repo.
+        let kp = IdentityKeyPair::generate();
+        let derived = IdentityKeyPair::from_secret_bytes(kp.export_secret());
+        assert_eq!(
+            derived.public().sig_vk,
+            kp.public().sig_vk,
+            "pubkey derived from the seed equals the keygen-published verify key"
         );
     }
 

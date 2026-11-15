@@ -73,6 +73,12 @@ The canonical signed manifest is **`SHA384SUMS`** (SHA-2 family, CNSA-named). Bo
 files list the same artifacts, so signing one binds all artifact hashes; a verifier
 checks that both digests match *and* that every present signature verifies.
 
+**No keys in the repo — ever (public or secret).** Every `RELEASE_PUBKEY*.hex` above is
+**derived from the signing secret at release time** (`relsign pubkey --algo …`) and written
+into `dist/` (a published artifact, gitignored — never committed), and injected into the
+binaries at build time from `TALKRYPT_RELEASE_PUBKEY*` env vars. The **posted builds carry
+the pubkeys** so users can verify; the git tree stores none.
+
 ### 2.3 Verify flow (`verify.sh` / `verify.ps1`)
 
 1. Check **SHA-384** (sha384sum/shasum -a 384) and **SHA3-384** (openssl 3.x / python3 /
@@ -82,8 +88,9 @@ checks that both digests match *and* that every present signature verifies.
    `RELEASE_PUBKEY_{LMS,SLH}.hex`), verify it. **All present signatures must pass**; a bad
    one fails the whole verification. Absent tool/key ⇒ that signature is *advisory*
    (reported, skipped) exactly as today — never silently passed.
-3. Trust anchor: pin the public key obtained **out of band** (the repo copy for an
-   official build), never one bundled by an untrusted mirror.
+3. Trust anchor: pin the public key obtained **out of band** (the release-page copy for
+   an official build — never a repo file, the repo has none), not one bundled by an
+   untrusted mirror.
 
 ### 2.4 Key custody (the stateful hazard, handled)
 
@@ -140,8 +147,9 @@ talkrypt-relsign verify --algo <...> <file> <sigfile> <pubkey>
 
 ## 4. Out of scope / follow-ups
 
-- Publishing the **real** `RELEASE_PUBKEY_*.hex` trust anchors (needs the offline keys) —
-  tracked separately; until then signatures stay advisory, as today.
+- Generating the **real offline release keys** and injecting/publishing their pubkeys at
+  tag time (the repo stores no key, so this is a maintainer/CI-secret action) — tracked
+  separately; until then signatures stay advisory, as today.
 - XMSS (the other SP 800-208 scheme) is not added; LMS covers the CNSA-designated
   stateful requirement. Revisit if a verifier specifically needs XMSS.
 - OS-native code signing (Apple notarization / Debian archive key) remains deliberately

@@ -86,8 +86,9 @@ that exist vs. remain:
 - ✅ Reproducible build scripts (`package.sh`, `PKGBUILD`, `build-apk.sh`).
 - ✅ Dual-checksum manifest (`hash-dist.sh`) + PQ artifact signing (`relsign`, F-8).
 - ✅ Gate roster is primary-sourced and closed (only SecureBlue open).
-- ⏳ A **real published release key** (`docs/RELEASE_PUBKEY.hex` is a guarded
-  placeholder) so sidecar signatures chain to a key downstreams can trust.
+- ⏳ A **real release key generated offline** (the repo holds no key material) whose
+  pubkey is injected into builds at tag time and published *with* each release, so
+  manifest + sidecar signatures chain to a key downstreams can trust.
 - ⏳ A **CI publishing pipeline** (GitHub Actions) that runs these recipes on tag,
   signs, and attaches artifacts to a release channel per format (deb repo /
   AUR push / APK release). Today CI *builds and lints* (`desktop.yml`,

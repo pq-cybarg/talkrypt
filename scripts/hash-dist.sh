@@ -104,10 +104,16 @@ if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
   fi
   if [[ -x "$RELSIGN" ]]; then
     "$RELSIGN" sign SHA256SUMS "$TALKRYPT_RELEASE_SK" >/dev/null
-    # Publish the verify key alongside; its TRUST ANCHOR is the copy committed to
-    # the repo (docs/RELEASE_PUBKEY.hex) — a bundled copy is convenience only.
-    [[ -f "$ROOT/docs/RELEASE_PUBKEY.hex" ]] && cp "$ROOT/docs/RELEASE_PUBKEY.hex" .
-    echo "==> signed SHA256SUMS -> SHA256SUMS.sig (ML-DSA-87 release key)"
+    # PUBLISH the verify key WITH the release (into dist/), DERIVED from the secret —
+    # the git repo holds NO key material of any kind. The posted build therefore
+    # carries the pubkey so users can verify; the strongest trust anchor is still the
+    # copy you pin OUT OF BAND (release page / signed notes), not one from a mirror.
+    {
+      echo "# talkrypt release public key (ML-DSA-87) — PUBLISHED WITH THIS RELEASE."
+      echo "# Pin the copy you obtained OUT OF BAND; a mirror could swap both file + key."
+      "$RELSIGN" pubkey "$TALKRYPT_RELEASE_SK"
+    } > RELEASE_PUBKEY.hex
+    echo "==> signed SHA256SUMS -> SHA256SUMS.sig (ML-DSA-87); published RELEASE_PUBKEY.hex"
   else
     echo "WARNING: TALKRYPT_RELEASE_SK set but talkrypt-relsign unavailable — SHA256SUMS.sig NOT written."
   fi

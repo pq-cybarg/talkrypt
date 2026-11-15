@@ -141,13 +141,18 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// embedded release key.
 const ML_DSA_87_VK_LEN: usize = 2592;
 
-/// The project's committed release public key (ML-DSA-87), embedded at build time
-/// from `docs/RELEASE_PUBKEY.hex`. `None` while that file is an unfilled
-/// placeholder (comments only). This is the trust anchor for launch-time
-/// self-attestation when no key is supplied via the environment — verifiers pin
-/// *this* compiled-in copy, not a downloaded one.
+/// The project's release public key (ML-DSA-87), injected at **build time** from
+/// the `TALKRYPT_RELEASE_PUBKEY` environment variable (hex, `#`-comment-tolerant).
+///
+/// The git repository stores **no key material of any kind** (public or secret):
+/// an official build sets this env var from an out-of-band / CI secret, so the key
+/// is baked into that binary without ever being committed. A normal build leaves
+/// the var unset → `None`, and launch-time self-attestation is then inactive unless
+/// a key is supplied at runtime via `TALKRYPT_ATTEST_PUBKEY`. Verifiers pin the key
+/// they obtained **out of band** (release page / signed notes), never one from the
+/// source tree.
 pub fn release_pubkey() -> Option<Vec<u8>> {
-    parse_hex_with_comments(include_str!("../../../docs/RELEASE_PUBKEY.hex"))
+    parse_hex_with_comments(option_env!("TALKRYPT_RELEASE_PUBKEY")?)
 }
 
 /// Parse a hex blob that may be interleaved with `#` comment lines and whitespace
@@ -280,10 +285,11 @@ mod tests {
     }
 
     #[test]
-    fn committed_release_pubkey_is_an_unfilled_placeholder() {
-        // Documents current state: docs/RELEASE_PUBKEY.hex has no key yet, so the
-        // embedded trust anchor is absent and attestation is env-only until it is
-        // published. Update this test when a real release key lands.
+    fn release_pubkey_is_absent_unless_injected_at_build_time() {
+        // The repo holds NO key material. `release_pubkey()` is sourced from the
+        // `TALKRYPT_RELEASE_PUBKEY` build-time env var (via option_env!), which is
+        // unset in this (and any ordinary) build, so the embedded trust anchor is
+        // absent and attestation is env-only until an official build injects a key.
         assert_eq!(release_pubkey(), None);
     }
 

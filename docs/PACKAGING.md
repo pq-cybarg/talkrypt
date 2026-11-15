@@ -171,9 +171,11 @@ identical; the only difference is *which* public key a verifier trusts.
 - **Generate your keypair (once):** `cargo run -p talkrypt-relsign -- keygen` prints a
   `SEED` (secret) and a `PUBKEY`. Keep the SEED offline or in a CI secret; publish the
   PUBKEY to whoever verifies your copies. The project keeps its SEED in
-  `TALKRYPT_RELEASE_SK` and publishes its PUBKEY as `docs/RELEASE_PUBKEY.hex` (its
-  trust anchor); a downstream packager or an individual user uses their own key
-  identically.
+  `TALKRYPT_RELEASE_SK` and **publishes its PUBKEY *with each release*** — `hash-dist.sh`
+  derives it from the secret (`talkrypt-relsign pubkey`) and writes `dist/RELEASE_PUBKEY.hex`
+  next to the artifacts, and the binaries bake it in at build time from
+  `TALKRYPT_RELEASE_PUBKEY`. **The git repository holds no key material of any kind;**
+  a downstream packager or individual user uses their own key identically.
 - **Sign:** `talkrypt-relsign sign SHA256SUMS <seed>` writes `SHA256SUMS.sig`. At an
   official release `hash-dist.sh` does this automatically when `TALKRYPT_RELEASE_SK`
   is set; a user re-signing their own copy just runs the tool directly. `<seed>` and
@@ -181,9 +183,9 @@ identical; the only difference is *which* public key a verifier trusts.
 - **Verify:** `verify.sh` checks the dual checksums always, and — if `talkrypt-relsign`
   is on PATH and a signer public key is provided (`TALKRYPT_RELEASE_PUBKEY` or a
   pinned `RELEASE_PUBKEY.hex`) — also verifies the signature; a bad signature fails
-  the whole verification. **Pin the public key you obtained out of band** (the repo's
-  for an official build, or the person's who gave you their copy) — never a key
-  bundled by an untrusted mirror, which could swap both file and key. An ML-DSA
+  the whole verification. **Pin the public key you obtained out of band** (the release
+  page / signed notes for an official build, or the person's who gave you their copy) —
+  never a key bundled by an untrusted mirror, which could swap both file and key. An ML-DSA
   signature cannot be checked in pure shell, so this step needs the tool; it is
   advisory (skipped, reported) when the tool or a real key is absent.
 
@@ -191,7 +193,8 @@ identical; the only difference is *which* public key a verifier trusts.
 
 Separate from the *manifest* signature above, each shipped **executable** can carry
 a detached `<binary>.sig` (ML-DSA-87) that the binary verifies against its
-compiled-in release key (`docs/RELEASE_PUBKEY.hex`) **at startup** when run with
+compiled-in release key (injected at build time from `TALKRYPT_RELEASE_PUBKEY`,
+never a repo file) **at startup** when run with
 `TALKRYPT_HARDEN=1` — an in-process, post-quantum integrity check independent of
 the OS code-signature stack (for hosts with SIP/AMFI relaxed; see
 `docs/custody-options.md`).
@@ -204,8 +207,8 @@ the OS code-signature stack (for hosts with SIP/AMFI relaxed; see
 - **Verify (at runtime):** set `TALKRYPT_HARDEN=1`; the binary resolves the key
   from `TALKRYPT_ATTEST_PUBKEY` (else the embedded release key) and the signature
   from `TALKRYPT_ATTEST_SIG` (else the `<binary>.sig` sidecar), and **refuses to
-  start** on a mismatch. Inactive-by-default until `docs/RELEASE_PUBKEY.hex` holds
-  a real key and a sidecar is shipped.
+  start** on a mismatch. Inactive-by-default until an official build injects a release
+  key (`TALKRYPT_RELEASE_PUBKEY`) and a sidecar is shipped — the repo holds no key.
 
 **Still no OS code-signing authority:** macOS bundles remain ad-hoc (`codesign -s -`)
 and un-notarized and the `.deb`s remain unsigned — those need an Apple Developer ID /
