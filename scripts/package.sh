@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Package talkrypt for desktop distribution: real installers/archives, not just
 # bare binaries (that's `scripts/build-portable.sh`). For every Rust target whose
-# toolchain is present, this builds the CLI + TUI + key-custody helper, then
-# assembles platform-native packages:
+# toolchain is present, this builds the CLI + TUI + key-custody helper (plus the
+# egui desktop GUI for the HOST OS only — its windowing libs don't cross-compile),
+# then assembles platform-native packages:
 #
 #   macOS    universal .app bundle + .dmg disk image (ad-hoc codesigned)
 #   Linux    .tar.gz + a Debian .deb (built portably with `ar`+`tar`,
@@ -31,6 +32,13 @@ VERSION="$(grep -m1 '^version' crates/cli/Cargo.toml | sed -E 's/.*"([^"]+)".*/\
 [[ -z "$VERSION" ]] && VERSION="0.0.0"
 GITREV="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# The egui desktop GUI (crates/desktop) is a first-class client but builds
+# NATIVELY per-OS — its windowing / GL system libs do not cross-compile like the
+# headless CLI/TUI. So it ships only in the HOST-OS package. Default features
+# (Tor) = the real product; set TALKRYPT_DESKTOP=off to skip it.
+HOST="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+DESKTOP_BUILT=""
 
 # Targets we know how to package, in priority order. The host target is always
 # attempted; others only if their rustup std + linker are present.
@@ -97,6 +105,12 @@ archive_target() {
     cp "$reldir/$name$ext" "$pkgdir/" 2>/dev/null || true
     strip "$pkgdir/$name$ext" 2>/dev/null || true
   done
+  # The egui desktop GUI rides in the HOST-OS package only (built natively; see
+  # DESKTOP_BUILT below). Staged BEFORE signing so its sidecar is written too.
+  if [[ "$t" == "$HOST" && -n "${DESKTOP_BUILT:-}" && -f "$DESKTOP_BUILT" ]]; then
+    cp "$DESKTOP_BUILT" "$pkgdir/talkrypt-desktop$ext" 2>/dev/null \
+      && strip "$pkgdir/talkrypt-desktop$ext" 2>/dev/null || true
+  fi
   # Launch-attestation sidecars next to each binary (self-integrity; see
   # docs/custody-testing-status.md). Only when a release key is present, so
   # unsigned packaging stays byte-identical. Must run AFTER strip (the signature
@@ -112,6 +126,8 @@ talkrypt $VERSION ($GITREV) — post-quantum E2E encrypted chat
   talkrypt link-offer/-accept   link a second device to your account
   talkrypt registry             host a username directory
   talkrypt version              build banner + honesty disclaimer
+Also in this package (host OS): talkrypt-tui (terminal UI), talkrypt-helper
+(key custody), and — on the host-OS package only — talkrypt-desktop (native GUI).
 Run 'talkrypt --help' for all flags. NOT certified / NOT audited.
 EOF
   local archive
@@ -125,6 +141,17 @@ EOF
   ARTIFACTS+=("$archive")
   echo "    -> $archive"
 }
+
+# ---- desktop GUI (egui): built natively for the HOST only ----
+if [[ -n "$HOST" && "${TALKRYPT_DESKTOP:-on}" != "off" ]]; then
+  echo "==> building desktop GUI (talkrypt-desktop) for host $HOST"
+  if cargo build --release -p talkrypt-desktop --target "$HOST" >/dev/null 2>&1; then
+    DESKTOP_BUILT="target/$HOST/release/talkrypt-desktop"
+    echo "    -> $DESKTOP_BUILT"
+  else
+    SKIPPED+=("$HOST — 'talkrypt-desktop' (egui GUI) failed to build; CLI/TUI packages unaffected")
+  fi
+fi
 
 # ---- build each target, collect release dirs ----
 declare -A RELDIR
