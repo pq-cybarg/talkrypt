@@ -31,7 +31,7 @@ This wiki is the feature map. Each page links to the authoritative spec in
 | 🗝️ Key custody | **[Key Custody & Storage](Key-Custody.md)** | custody tiers, at-rest sealing, hardware-backed sealing (StrongBox/Secure Enclave/TPM), the desktop helper |
 | 🏷️ Classification | **[Classification & Compliance](Classification-and-Compliance.md)** | markings, CNSA 2.0, FIPS posture, CSfC alignment, the honesty posture |
 | 💻 Platforms | **[Platforms & Clients](Platforms-and-Clients.md)** | CLI, TUI, the FFI, Android, iOS, the desktop helper, the roadmap |
-| 📦 Packaging | **[Packaging & Release](Packaging-and-Release.md)** | build scripts, every artifact, dual SHA-256 + SHA3-256 hashing, the verifiers |
+| 📦 Packaging | **[Packaging & Release](Packaging-and-Release.md)** | build scripts, every artifact, dual SHA-384 + SHA3-384 hashing, the verifiers |
 | 🛡️ Assurance | **[Security Assurance](Security-Assurance.md)** | the self-audit (F-1…F-15 / R-1…R-8), fuzzing, Miri, dependency scanning, the threat model |
 
 ## In one paragraph

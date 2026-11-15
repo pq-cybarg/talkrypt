@@ -22,7 +22,7 @@ current host.
 | `scripts/package.sh` | Desktop: macOS `.dmg`+`.tar.gz`, Linux `.tar.gz`+`.deb`, Windows `.zip` |
 | `scripts/package-mobile.sh` | Android `.apk` (+ iOS `.xcframework` on a Mac with Xcode) |
 | `scripts/build-ios.sh` | iOS XCFramework + Swift bindings; `--testflight` to archive + upload |
-| `scripts/hash-dist.sh` | SHA-256 **and** SHA3-256 over all of `dist/` + the verifiers |
+| `scripts/hash-dist.sh` | SHA-384 **and** SHA3-384 over all of `dist/` + the verifiers |
 | `scripts/build-portable.sh` | Bare self-contained per-target `talkrypt` binaries |
 
 ## Artifacts
@@ -40,17 +40,17 @@ The glibc `.deb` is the package **`talkrypt`**; the fully-static musl `.deb` is
 **`talkrypt-static`** (it Conflicts/Provides `talkrypt`, so install one). Linux
 targets cross-compile via [`cross`](https://github.com/cross-rs/cross) (Docker).
 
-## Dual-family integrity (SHA-256 + SHA3-256)
+## Dual-family integrity (SHA-384 + SHA3-384)
 
-Every release ships **two** independent checksum files — `SHA256SUMS` (SHA-256,
-FIPS 180-4, Merkle–Damgård) and `SHA3-256SUMS` (SHA3-256, FIPS 202, Keccak
+Every release ships **two** independent checksum files — `SHA384SUMS` (SHA-384,
+FIPS 180-4, Merkle–Damgård) and `SHA3-384SUMS` (SHA3-384, FIPS 202, Keccak
 sponge). **Both must match** for every file: the families are structurally
 unrelated, so a cryptanalytic break or deliberate collision in one cannot also
 satisfy the other.
 
 `verify.sh` (bash) and `verify.ps1` (PowerShell) check both, print OK/FAIL per
 file, and exit non-zero on any mismatch. They auto-detect a SHA3 backend
-(`openssl` 3.x / `python3` / `rhash`, or .NET 8's `SHA3_256` on Windows) and fall
+(`openssl` 3.x / `python3` / `rhash`, or .NET 8's `SHA3_384` on Windows) and fall
 back gracefully. `MANIFEST.txt` lists sizes, both digests, and every **skipped**
 target with the reason (e.g. "no Xcode → iOS skipped"), never a silent omission.
 

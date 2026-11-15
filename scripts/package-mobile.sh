@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Package the mobile artifacts into dist/ and fold them into the SAME dual-hash
-# manifest as the desktop build (one SHA256SUMS / SHA3-256SUMS over everything).
+# manifest as the desktop build (one SHA384SUMS / SHA3-384SUMS over everything).
 #
 #   Android — builds the APK (android/build-apk.sh: FFI .so via cargo-ndk +
 #             uniffi Kotlin bindings + Gradle) and copies it in as
@@ -14,7 +14,7 @@
 #   TALKRYPT_TOR=1 bash scripts/package-mobile.sh  # APK with the Arti/Tor transport
 #
 # Run after (or before) scripts/package.sh; hash-dist.sh re-hashes the whole
-# dist/, so the final SHA256SUMS/SHA3-256SUMS cover desktop + Android + iOS.
+# dist/, so the final SHA384SUMS/SHA3-384SUMS cover desktop + Android + iOS.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

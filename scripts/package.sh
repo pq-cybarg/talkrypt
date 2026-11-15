@@ -9,7 +9,7 @@
 #            so it needs no dpkg-deb and works on any host)
 #   Windows  .zip
 #
-# It then writes SHA256SUMS over every artifact and a MANIFEST.txt recording
+# It then writes SHA384SUMS over every artifact and a MANIFEST.txt recording
 # versions, sizes, checksums, what was built, and — crucially — what was SKIPPED
 # and why (no silent truncation: a missing cross-toolchain is reported, never
 # hidden). Honors the packaging political filter in docs/packaging-policy.md.
@@ -280,7 +280,7 @@ for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux
   [[ -n "${RELDIR[$t]:-}" ]] && build_deb "$t" "${RELDIR[$t]}"
 done
 
-# ---- checksums (SHA-256 + SHA3-256) + manifest ----
+# ---- checksums (SHA-384 + SHA3-384) + manifest ----
 # Hashing is owned by scripts/hash-dist.sh (the single authority over the whole
 # dist/, so desktop + mobile share one set of sums). Record what we skipped so
 # hash-dist.sh folds it into MANIFEST.txt, then hand off.

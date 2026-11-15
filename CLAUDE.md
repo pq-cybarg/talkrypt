@@ -27,7 +27,7 @@ touch it.
 - `android/` — Kotlin app (Gradle); consumes the generated `uniffi.talkrypt` bindings
 - `fuzz/` — cargo-fuzz package (excluded from the workspace; built only via `cargo fuzz`)
 - `docs/` — design/spec docs; `docs/plans/` holds numbered TDD implementation plans
-- `scripts/` — packaging, release, artifact verification (`verify.sh` checks SHA-256 **and** SHA3-256)
+- `scripts/` — packaging, release, artifact verification (`verify.sh` checks SHA-384 **and** SHA3-384, plus every PQ co-signature present: ML-DSA-87 + SLH-DSA, via `talkrypt-relsign`; no keys live in the repo)
 - `ci/` — FIPS-posture checks (`fips-compliance-check.sh`, `fips.Dockerfile`)
 - `third-party/` — vendored source-patched crates (`rsa`, `sqlx-sqlite`, `superboring`) wired via `[patch.crates-io]`; read their `TALKRYPT-PATCH.md`/Cargo.toml rationale before touching
 
