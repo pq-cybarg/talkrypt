@@ -25,7 +25,107 @@
 //! may carry `#` comment lines (only the hex is read).
 
 use std::process::exit;
+
+use rand::{rngs::StdRng, SeedableRng};
 use talkrypt_crypto::{IdentityKeyPair, IdentityPublic};
+
+/// Release-signing algorithm. ML-DSA-87 (FIPS 204) is the general/default signer;
+/// SLH-DSA (FIPS 205, stateless hash-based) is the NIST stateless software-signing
+/// scheme added for release co-signing. (LMS / SP 800-208 — the CNSA-designated
+/// stateful scheme — is the next addition; see `docs/plans/0003-release-cosigning.md`.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Algo {
+    MlDsa,
+    SlhDsa,
+}
+
+impl Algo {
+    /// Extract an optional `--algo <name>` flag from the args (default ML-DSA),
+    /// removing it so the positional args that follow are unaffected.
+    fn take_from(args: &mut Vec<String>) -> Algo {
+        if let Some(i) = args.iter().position(|a| a == "--algo") {
+            let val = args.get(i + 1).cloned();
+            args.remove(i); // drop the flag
+            if i < args.len() {
+                args.remove(i); // drop its value (now shifted into position i)
+            }
+            match val.as_deref() {
+                Some("ml-dsa") | Some("mldsa") => Algo::MlDsa,
+                Some("slh-dsa") | Some("slhdsa") | Some("slh") => Algo::SlhDsa,
+                other => die(&format!(
+                    "unknown --algo {:?} (expected ml-dsa | slh-dsa)",
+                    other.unwrap_or("")
+                )),
+            }
+        } else {
+            Algo::MlDsa
+        }
+    }
+
+    /// Detached-signature filename suffix. ML-DSA keeps the historic `<file>.sig`
+    /// (back-compat); other schemes get `<file>.<algo>.sig` so one manifest can carry
+    /// multiple co-signatures side by side.
+    fn sig_suffix(self) -> &'static str {
+        match self {
+            Algo::MlDsa => "sig",
+            Algo::SlhDsa => "slh.sig",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Algo::MlDsa => "ML-DSA-87",
+            Algo::SlhDsa => "SLH-DSA-SHA2-256s",
+        }
+    }
+}
+
+/// SLH-DSA (FIPS 205) release-signing, parameter set **SLH-DSA-SHA2-256s** (SHA-2
+/// family for CNSA-hash consistency; the small-signature "s" variant). Keys derive
+/// deterministically from a 32-byte seed via a seeded CSPRNG, so the offline secret
+/// is a single 32-byte value exactly like the ML-DSA path, and signing is
+/// deterministic (hedged = false) so re-signing a manifest is reproducible.
+mod slhdsa {
+    use super::StdRng;
+    use fips205::slh_dsa_sha2_256s as p;
+    use fips205::traits::{SerDes, Signer, Verifier};
+    use rand::SeedableRng;
+
+    fn keypair(seed: [u8; 32]) -> (p::PublicKey, p::PrivateKey) {
+        let mut rng = StdRng::from_seed(seed);
+        p::try_keygen_with_rng(&mut rng).expect("SLH-DSA key generation")
+    }
+
+    /// Public verify key bytes derived from the 32-byte seed.
+    pub fn public_key(seed: [u8; 32]) -> Vec<u8> {
+        keypair(seed).0.into_bytes().to_vec()
+    }
+
+    /// Deterministically sign `msg` (hedged = false → reproducible).
+    pub fn sign(seed: [u8; 32], msg: &[u8]) -> Vec<u8> {
+        let (_pk, sk) = keypair(seed);
+        sk.try_sign(msg, &[], false)
+            .expect("SLH-DSA signing")
+            .to_vec()
+    }
+
+    /// Verify `sig` over `msg` under `pk_bytes`. Any malformed input (wrong length,
+    /// bad key) is a clean `false`, never a panic.
+    pub fn verify(pk_bytes: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        let pk_arr: [u8; p::PK_LEN] = match pk_bytes.try_into() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let sig_arr: [u8; p::SIG_LEN] = match sig.try_into() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        match p::PublicKey::try_from_bytes(pk_arr) {
+            Ok(pk) => pk.verify(msg, &sig_arr, &[]),
+            Err(_) => false,
+        }
+    }
+}
 
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -76,17 +176,25 @@ fn die(msg: &str) -> ! {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let algo = Algo::take_from(&mut args);
     match args.first().map(String::as_str) {
         Some("keygen") => {
-            let kp = IdentityKeyPair::generate();
-            // The seed is the SECRET (keep offline); sig_vk is the PUBLIC verify key.
-            println!("SEED   {}", hex_encode(&kp.export_secret()));
-            println!("PUBKEY {}", hex_encode(&kp.public().sig_vk));
+            // The seed is the SECRET (keep offline); the pubkey is PUBLIC. For both
+            // schemes the secret is a single 32-byte seed.
+            let seed = IdentityKeyPair::generate().export_secret();
+            let pubkey = match algo {
+                Algo::MlDsa => hex_encode(&IdentityKeyPair::from_secret_bytes(seed).public().sig_vk),
+                Algo::SlhDsa => hex_encode(&slhdsa::public_key(seed)),
+            };
+            println!("SEED   {}", hex_encode(&seed));
+            println!("PUBKEY {pubkey}");
             eprintln!(
-                "\nThis is YOUR signing keypair. Keep SEED secret (offline / CI secret); give\n\
-                 PUBKEY to whoever verifies your copies. `sign <file> <seed>` then\n\
-                 `verify <file> <file>.sig <pubkey>`."
+                "\nThis is YOUR {} signing keypair. Keep SEED secret (offline / CI secret);\n\
+                 give PUBKEY to whoever verifies your copies. `sign <file> <seed>` then\n\
+                 `verify <file> <file>.{} <pubkey>`.",
+                algo.label(),
+                algo.sig_suffix()
             );
         }
         Some("pubkey") => {
@@ -95,48 +203,55 @@ fn main() {
             // ever living in the git repo. Trust anchor is still obtained out of band.
             let seed_arg = args
                 .get(1)
-                .unwrap_or_else(|| die("usage: pubkey <seed-hex-or-path>"));
+                .unwrap_or_else(|| die("usage: [--algo A] pubkey <seed-hex-or-path>"));
             let seed = load_seed(seed_arg).unwrap_or_else(|e| die(&e));
-            let kp = IdentityKeyPair::from_secret_bytes(seed);
-            println!("{}", hex_encode(&kp.public().sig_vk));
+            let pubkey = match algo {
+                Algo::MlDsa => hex_encode(&IdentityKeyPair::from_secret_bytes(seed).public().sig_vk),
+                Algo::SlhDsa => hex_encode(&slhdsa::public_key(seed)),
+            };
+            println!("{pubkey}");
         }
         Some("sign") => {
             let (file, seed_arg) = match (args.get(1), args.get(2)) {
                 (Some(f), Some(s)) => (f, s),
-                _ => die("usage: sign <file> <seed-hex-or-path>"),
+                _ => die("usage: [--algo A] sign <file> <seed-hex-or-path>"),
             };
             let seed = load_seed(seed_arg).unwrap_or_else(|e| die(&e));
             let data = std::fs::read(file).unwrap_or_else(|e| die(&format!("read {file}: {e}")));
-            let kp = IdentityKeyPair::from_secret_bytes(seed);
-            let sig = kp.sign(&data);
-            let sig_path = format!("{file}.sig");
+            let sig = match algo {
+                Algo::MlDsa => IdentityKeyPair::from_secret_bytes(seed).sign(&data),
+                Algo::SlhDsa => slhdsa::sign(seed, &data),
+            };
+            let sig_path = format!("{file}.{}", algo.sig_suffix());
             std::fs::write(&sig_path, hex_encode(&sig))
                 .unwrap_or_else(|e| die(&format!("write {sig_path}: {e}")));
-            println!("signed {file} -> {sig_path} (ML-DSA-87)");
-            println!("verify key: {}", hex_encode(&kp.public().sig_vk));
+            println!("signed {file} -> {sig_path} ({})", algo.label());
         }
         Some("verify") => {
             let (file, sig_file, pk) = match (args.get(1), args.get(2), args.get(3)) {
                 (Some(f), Some(s), Some(p)) => (f, s, p),
-                _ => die("usage: verify <file> <sig-file> <pubkey-hex>"),
+                _ => die("usage: [--algo A] verify <file> <sig-file> <pubkey-hex>"),
             };
             let data = std::fs::read(file).unwrap_or_else(|e| die(&format!("read {file}: {e}")));
-            let sig_hex =
-                std::fs::read_to_string(sig_file).unwrap_or_else(|e| die(&format!("read {sig_file}: {e}")));
+            let sig_hex = std::fs::read_to_string(sig_file)
+                .unwrap_or_else(|e| die(&format!("read {sig_file}: {e}")));
             let sig = hex_decode(sig_hex.trim()).unwrap_or_else(|e| die(&e));
-            let sig_vk = load_hex(pk).unwrap_or_else(|e| die(&e));
-            let public = IdentityPublic { sig_vk };
-            match public.verify(&data, &sig) {
-                Ok(()) => {
-                    println!("OK: {file} signature verifies under the given key");
-                }
-                Err(_) => {
-                    eprintln!("FAIL: {file} signature does NOT verify (tampered or wrong key)");
-                    exit(1);
-                }
+            let pk_bytes = load_hex(pk).unwrap_or_else(|e| die(&e));
+            let ok = match algo {
+                Algo::MlDsa => IdentityPublic { sig_vk: pk_bytes }.verify(&data, &sig).is_ok(),
+                Algo::SlhDsa => slhdsa::verify(&pk_bytes, &data, &sig),
+            };
+            if ok {
+                println!("OK: {file} signature verifies under the given key ({})", algo.label());
+            } else {
+                eprintln!("FAIL: {file} signature does NOT verify (tampered or wrong key)");
+                exit(1);
             }
         }
-        _ => die("usage: keygen | pubkey <seed> | sign <file> <seed> | verify <file> <sig> <pubkey>"),
+        _ => die(
+            "usage: [--algo ml-dsa|slh-dsa] keygen | pubkey <seed> | \
+             sign <file> <seed> | verify <file> <sig> <pubkey>",
+        ),
     }
 }
 
@@ -213,5 +328,38 @@ mod tests {
         let seed_hex = hex_encode(&kp.export_secret());
         assert_eq!(load_seed(&seed_hex).unwrap(), kp.export_secret());
         assert!(load_seed("00").is_err(), "too-short seed rejected");
+    }
+
+    #[test]
+    fn slhdsa_pubkey_is_deterministic_from_the_seed() {
+        let seed = [7u8; 32];
+        assert_eq!(
+            slhdsa::public_key(seed),
+            slhdsa::public_key(seed),
+            "same seed -> same SLH-DSA public key (so a release can republish it)"
+        );
+    }
+
+    #[test]
+    fn slhdsa_sign_then_verify_roundtrips_and_rejects_tampering() {
+        let seed = [42u8; 32];
+        let pk = slhdsa::public_key(seed);
+        let manifest = b"deadbeef  talkrypt-desktop.tar.gz\n";
+        let sig = slhdsa::sign(seed, manifest);
+        assert!(slhdsa::verify(&pk, manifest, &sig), "valid SLH-DSA signature verifies");
+        assert!(
+            !slhdsa::verify(&pk, b"TAMPERED manifest", &sig),
+            "a modified manifest must fail the SLH-DSA signature"
+        );
+    }
+
+    #[test]
+    fn slhdsa_wrong_key_and_malformed_inputs_fail_cleanly() {
+        let sig = slhdsa::sign([1u8; 32], b"manifest");
+        let wrong_pk = slhdsa::public_key([2u8; 32]);
+        assert!(!slhdsa::verify(&wrong_pk, b"manifest", &sig), "wrong key rejected");
+        // Malformed inputs must be a clean `false`, never a panic.
+        assert!(!slhdsa::verify(b"short-pk", b"manifest", &sig));
+        assert!(!slhdsa::verify(&wrong_pk, b"manifest", b"short-sig"));
     }
 }

@@ -2536,7 +2536,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha3 0.12.0",
- "strum 0.26.3",
+ "strum 0.28.0",
  "syn 2.0.118",
  "unicode-ident",
  "void",
@@ -3334,6 +3334,18 @@ name = "finl_unicode"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
+
+[[package]]
+name = "fips205"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a5a5dcc490a93ad15deabf0534af8b2b6e9d20e01e8066f6fcba4da7e316100"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "zeroize",
+]
 
 [[package]]
 name = "fixedbitset"
@@ -9982,6 +9994,7 @@ checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
 dependencies = [
  "digest 0.10.7",
  "keccak 0.1.6",
+ "zeroize",
 ]
 
 [[package]]
@@ -10879,6 +10892,8 @@ dependencies = [
 name = "talkrypt-relsign"
 version = "0.1.0"
 dependencies = [
+ "fips205",
+ "rand 0.8.8",
  "talkrypt-crypto",
 ]
 
