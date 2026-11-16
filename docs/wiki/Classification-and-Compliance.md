@@ -1,7 +1,9 @@
 # Classification & Compliance
 
 What talkrypt aligns with — and, just as importantly, what it is **not**. Deep
-specs: `docs/POSTURE.md`, `docs/COMPLIANCE.md`, `docs/CSFC.md`. Source:
+specs: `docs/SPECIFICATION.md` (overall system & security spec),
+`docs/compliance/STANDARDS-MAP.md` (technology-only map to NIST/IETF/IEEE/HIPAA/IEC),
+`docs/POSTURE.md`, `docs/COMPLIANCE.md`, `docs/CSFC.md`. Source:
 `crates/core/marking.rs`, `crates/core/csfc.rs`, `crates/crypto/suite.rs`.
 
 ## Classification markings
