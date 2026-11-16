@@ -67,6 +67,23 @@ fn io<E: std::fmt::Display>(e: E) -> TransportError {
     TransportError::Io(e.to_string())
 }
 
+/// Exponential-backoff delay schedule (seconds) BETWEEN the `max` onion-rendezvous
+/// dial attempts: `base, base*2, …`, each capped at `cap`. Length is `max - 1`
+/// (there is no wait after the final attempt). Pure + bounded so it is unit-tested
+/// directly; the dial loop sleeps these between `TorClient::connect` retries.
+/// Rationale: Arti's fresh-onion establishment + client rendezvous can take minutes
+/// (a freshly published descriptor is still propagating; Arti is slower here than
+/// C-tor), so a one-shot dial would abort a join on a transient first failure.
+fn onion_retry_delays(max: usize, base: u64, cap: u64) -> Vec<u64> {
+    let mut d = base.max(1);
+    let mut out = Vec::new();
+    for _ in 1..max {
+        out.push(d.min(cap));
+        d = d.saturating_mul(2);
+    }
+    out
+}
+
 /// Onion-service key persistence mode.
 #[derive(Clone, Debug)]
 pub enum OnionPersistence {
@@ -366,12 +383,36 @@ impl Transport for ArtiTransport {
                 "refusing non-onion Tor dial target {target:?}: Arti dials onion services only"
             )));
         }
-        let ds = self
-            .client
-            .connect(target.as_str())
-            .await
-            .map_err(|e| io(format!("connect {target}: {e}")))?;
-        Ok(Box::new(ArtiStream::new(ds)))
+        // Onion rendezvous frequently fails on the FIRST attempt even when the
+        // service is fine: a freshly published descriptor is still propagating to
+        // the HSDir ring, intro points are still settling, or — under a degraded /
+        // DoS'd Tor network — rendezvous-circuit construction fails transiently
+        // ("Failed to obtain hidden service circuit"). A one-shot dial would abort
+        // the whole join on such a transient. So retry with bounded exponential
+        // backoff; a genuinely-unreachable onion still errors out after the budget.
+        // (The F-23 onion-only guard above runs ONCE, before any retry — never
+        // retried, so a non-onion target still fails fast.)
+        const MAX_ATTEMPTS: usize = 6;
+        let delays = onion_retry_delays(MAX_ATTEMPTS, 2, 30);
+        let mut last = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.client.connect(target.as_str()).await {
+                Ok(ds) => return Ok(Box::new(ArtiStream::new(ds))),
+                Err(e) => {
+                    last = e.to_string();
+                    if let Some(&secs) = delays.get(attempt - 1) {
+                        eprintln!(
+                            "tor: onion {target} not reachable yet (attempt {attempt}/{MAX_ATTEMPTS}: {last}); \
+                             retrying in {secs}s (descriptor may still be propagating)…"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    }
+                }
+            }
+        }
+        Err(io(format!(
+            "connect {target}: {last} (after {MAX_ATTEMPTS} onion-rendezvous attempts)"
+        )))
     }
 
     fn status(&self) -> TransportStatus {
@@ -407,6 +448,20 @@ mod tests {
         assert!(!is_onion_target("localhost:9100"));
         // A clearnet host merely CONTAINING "onion" as a label is still clearnet.
         assert!(!is_onion_target("onion.example.com:443"));
+    }
+
+    #[test]
+    fn onion_retry_backoff_is_exponential_bounded_and_capped() {
+        // 6 attempts → 5 waits, doubling from 2s, capped at 30s.
+        assert_eq!(onion_retry_delays(6, 2, 30), vec![2, 4, 8, 16, 30]);
+        // A single attempt means no waits at all.
+        assert_eq!(onion_retry_delays(1, 2, 30), Vec::<u64>::new());
+        // Every delay stays within the cap, and the schedule has max-1 entries.
+        let d = onion_retry_delays(10, 2, 30);
+        assert_eq!(d.len(), 9);
+        assert!(d.iter().all(|&s| s <= 30), "no delay exceeds the cap");
+        // Monotonic non-decreasing (exponential until the cap pins it).
+        assert!(d.windows(2).all(|w| w[0] <= w[1]));
     }
 
     /// Live end-to-end onion test. Requires network + several minutes for Tor
