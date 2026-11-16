@@ -47,8 +47,10 @@ TARGETS=(
   x86_64-apple-darwin
   x86_64-unknown-linux-gnu
   aarch64-unknown-linux-gnu
+  armv7-unknown-linux-gnueabihf
   x86_64-unknown-linux-musl
   aarch64-unknown-linux-musl
+  armv7-unknown-linux-musleabihf
   x86_64-pc-windows-gnu
 )
 
@@ -234,6 +236,7 @@ build_deb() {
   case "$t" in
     x86_64-*) arch="amd64" ;;
     aarch64-*) arch="arm64" ;;
+    armv7-*) arch="armhf" ;;
     *) return 0 ;;
   esac
   if [[ "$t" == *musl* ]]; then
