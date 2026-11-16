@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Hash EVERY release artifact in dist/ with two independent families — SHA-256
-# (FIPS 180-4) and SHA3-256 (FIPS 202 / Keccak) — and write SHA256SUMS,
-# SHA3-256SUMS, MANIFEST.txt, and the verify.sh / verify.ps1 checkers.
+# Hash EVERY release artifact in dist/ with two independent families — SHA-384
+# (FIPS 180-4) and SHA3-384 (FIPS 202 / Keccak) — and write SHA384SUMS,
+# SHA3-384SUMS, MANIFEST.txt, and the verify.sh / verify.ps1 checkers.
 #
 # This is the single hashing authority for the whole release: the desktop
 # packager (package.sh) and the mobile packager (package-mobile.sh) each drop
@@ -11,8 +11,9 @@
 #
 #   bash scripts/hash-dist.sh
 #
-# Two unrelated hash families mean a cryptanalytic break or deliberate collision
-# in one cannot also satisfy the other.
+# Two unrelated 384-bit hash families — the CNSA-aligned SHA-384 and the FIPS 202
+# SHA3-384 that talkrypt's own crypto uses — mean a cryptanalytic break or
+# deliberate collision in one cannot also satisfy the other.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -34,85 +35,101 @@ done
 shopt -u nullglob
 [[ ${#ARTIFACTS[@]} -eq 0 ]] && { echo "no release artifacts in $OUT/"; exit 1; }
 
-# --- SHA-256 ---
-sha256_hex() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+# --- SHA-384 (FIPS 180-4) ---
+sha384_hex() {
+  if command -v sha384sum >/dev/null 2>&1; then sha384sum "$1" | cut -d' ' -f1
+  else shasum -a 384 "$1" | cut -d' ' -f1; fi
 }
 
-# --- SHA3-256: openssl 3.x (LibreSSL lacks SHA3) -> python3 hashlib -> rhash ---
+# --- SHA3-384 (FIPS 202): openssl 3.x (LibreSSL lacks SHA3) -> python3 hashlib -> rhash ---
 SHA3_BACKEND=""
-if command -v openssl >/dev/null 2>&1 && echo | openssl dgst -sha3-256 >/dev/null 2>&1; then SHA3_BACKEND="openssl"
-elif command -v python3 >/dev/null 2>&1 && python3 -c "import hashlib;hashlib.sha3_256" >/dev/null 2>&1; then SHA3_BACKEND="python"
+if command -v openssl >/dev/null 2>&1 && echo | openssl dgst -sha3-384 >/dev/null 2>&1; then SHA3_BACKEND="openssl"
+elif command -v python3 >/dev/null 2>&1 && python3 -c "import hashlib;hashlib.sha3_384" >/dev/null 2>&1; then SHA3_BACKEND="python"
 elif command -v rhash >/dev/null 2>&1; then SHA3_BACKEND="rhash"; fi
-sha3_256_hex() {
+sha3_384_hex() {
   case "$SHA3_BACKEND" in
-    openssl) openssl dgst -sha3-256 "$1" | sed -E 's/^.*= *//' ;;
+    openssl) openssl dgst -sha3-384 "$1" | sed -E 's/^.*= *//' ;;
     python)  python3 - "$1" <<'PY'
 import hashlib,sys
-print(hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest())
+print(hashlib.sha3_384(open(sys.argv[1],'rb').read()).hexdigest())
 PY
       ;;
-    rhash)   rhash --sha3-256 --simple "$1" | cut -d' ' -f1 ;;
+    rhash)   rhash --sha3-384 --simple "$1" | cut -d' ' -f1 ;;
     *)       return 1 ;;
   esac
 }
 
 cd "$OUT"
-rm -f SHA256SUMS SHA3-256SUMS
+rm -f SHA384SUMS SHA3-384SUMS
 for a in "${ARTIFACTS[@]}"; do
-  printf "%s  %s\n" "$(sha256_hex "$a")" "$a" >> SHA256SUMS
-  [[ -n "$SHA3_BACKEND" ]] && printf "%s  %s\n" "$(sha3_256_hex "$a")" "$a" >> SHA3-256SUMS
+  printf "%s  %s\n" "$(sha384_hex "$a")" "$a" >> SHA384SUMS
+  [[ -n "$SHA3_BACKEND" ]] && printf "%s  %s\n" "$(sha3_384_hex "$a")" "$a" >> SHA3-384SUMS
 done
 cp "$ROOT/scripts/verify.sh" "$ROOT/scripts/verify.ps1" . 2>/dev/null || true
 
 {
   echo "talkrypt $VERSION  ($GITREV)  hashed $STAMP"
   echo "host: $(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
-  echo "hashes: SHA-256 (SHA256SUMS) + SHA3-256 (SHA3-256SUMS); verify with verify.sh / verify.ps1"
+  echo "hashes: SHA-384 (SHA384SUMS) + SHA3-384 (SHA3-384SUMS); verify with verify.sh / verify.ps1"
   echo
   echo "ARTIFACTS:"
   for a in "${ARTIFACTS[@]}"; do
     sz=$(du -h "$a" | cut -f1)
     printf "  %s  (%s)\n" "$a" "$sz"
-    printf "      sha256:   %s\n" "$(sha256_hex "$a")"
-    [[ -n "$SHA3_BACKEND" ]] && printf "      sha3-256: %s\n" "$(sha3_256_hex "$a")"
+    printf "      sha-384:   %s\n" "$(sha384_hex "$a")"
+    [[ -n "$SHA3_BACKEND" ]] && printf "      sha3-384:  %s\n" "$(sha3_384_hex "$a")"
   done
   if [[ -s SKIPPED.txt ]]; then
     echo
     echo "SKIPPED (not silently — install the toolchain to include these):"
     sed 's/^/  - /' SKIPPED.txt
   fi
-  [[ -z "$SHA3_BACKEND" ]] && { echo; echo "WARNING: no SHA3 backend (install openssl 3.x / python3 / rhash) — SHA3-256SUMS not written."; }
+  [[ -z "$SHA3_BACKEND" ]] && { echo; echo "WARNING: no SHA3 backend (install openssl 3.x / python3 / rhash) — SHA3-384SUMS not written."; }
   echo
   echo "Packaging endorsement is gated by docs/packaging-policy.md (the political"
   echo "filter). The software itself is Apache-2.0 and buildable everywhere."
   echo "NOT FIPS-validated · NOT CSfC-accredited · NOT NSA-approved · NOT audited."
 } > MANIFEST.txt
 
-# --- PQ release signature (SECURITY-AUDIT F-8) -------------------------------
-# If a release secret key is available, sign SHA256SUMS with the project's own
-# ML-DSA-87 release key so integrity chains artifact -> SHA-256 -> signed manifest
-# -> the published release public key (a signing authority the project controls,
-# not a bare checksum). `TALKRYPT_RELEASE_SK` is a 64-hex seed OR a path to a file
-# holding it; keep it offline / in a CI secret. Skipped (with a notice) when unset.
-if [[ -n "${TALKRYPT_RELEASE_SK:-}" ]]; then
-  RELSIGN="$ROOT/target/release/talkrypt-relsign"
-  [[ -x "$RELSIGN" ]] || RELSIGN="$ROOT/target/debug/talkrypt-relsign"
-  if [[ ! -x "$RELSIGN" ]]; then
-    ( cd "$ROOT" && cargo build -q -p talkrypt-relsign ) && RELSIGN="$ROOT/target/debug/talkrypt-relsign"
-  fi
-  if [[ -x "$RELSIGN" ]]; then
-    "$RELSIGN" sign SHA256SUMS "$TALKRYPT_RELEASE_SK" >/dev/null
-    # Publish the verify key alongside; its TRUST ANCHOR is the copy committed to
-    # the repo (docs/RELEASE_PUBKEY.hex) — a bundled copy is convenience only.
-    [[ -f "$ROOT/docs/RELEASE_PUBKEY.hex" ]] && cp "$ROOT/docs/RELEASE_PUBKEY.hex" .
-    echo "==> signed SHA256SUMS -> SHA256SUMS.sig (ML-DSA-87 release key)"
-  else
-    echo "WARNING: TALKRYPT_RELEASE_SK set but talkrypt-relsign unavailable — SHA256SUMS.sig NOT written."
-  fi
-else
-  echo "note: TALKRYPT_RELEASE_SK unset — release is checksum-only (unsigned). See docs/PACKAGING.md."
+# --- PQ release co-signatures (SECURITY-AUDIT F-8) -----------------------------
+# Sign SHA384SUMS with each scheme whose signing SECRET is provided in the env — a
+# SELECTABLE co-signature set; the verifier requires every signature PRESENT to
+# verify. The git repo holds NO keys: each pubkey is DERIVED from its secret here
+# and PUBLISHED into dist/ (and injected into binaries at build time), so the
+# posted build carries the pubkey while the source tree stores nothing.
+#   ML-DSA-87 (general)              : TALKRYPT_RELEASE_SK      -> SHA384SUMS.sig,     RELEASE_PUBKEY.hex
+#   SLH-DSA   (FIPS 205, stateless)  : TALKRYPT_RELEASE_SK_SLH  -> SHA384SUMS.slh.sig, RELEASE_PUBKEY_SLH.hex
+# LMS (SP 800-208 — the CNSA-designated STATEFUL signer) is an OFFLINE-only
+# follow-up: a stateful one-time-key MUST NOT run in CI (index reuse is
+# catastrophic). See docs/plans/0003-release-cosigning.md.
+RELSIGN="$ROOT/target/release/talkrypt-relsign"
+[[ -x "$RELSIGN" ]] || RELSIGN="$ROOT/target/debug/talkrypt-relsign"
+if [[ ! -x "$RELSIGN" ]]; then
+  ( cd "$ROOT" && cargo build -q -p talkrypt-relsign ) && RELSIGN="$ROOT/target/debug/talkrypt-relsign"
 fi
 
-echo "==> hashed ${#ARTIFACTS[@]} artifact(s) in $OUT/ (SHA-256 + SHA3-256); wrote SHA256SUMS, SHA3-256SUMS, MANIFEST.txt"
+# sign_one <algo-flag> <secret> <expected-sig-file> <pubkey-file> <label>
+sign_one() {
+  local algo="$1" sk="$2" sig="$3" pub="$4" label="$5"
+  [[ -z "$sk" ]] && return 0
+  if [[ ! -x "$RELSIGN" ]]; then
+    echo "WARNING: $label secret set but talkrypt-relsign unavailable — $sig NOT written."
+    return 0
+  fi
+  "$RELSIGN" --algo "$algo" sign SHA384SUMS "$sk" >/dev/null   # writes $sig
+  {
+    echo "# talkrypt release public key ($label) — PUBLISHED WITH THIS RELEASE."
+    echo "# Pin the copy you obtained OUT OF BAND; a mirror could swap both file + key."
+    "$RELSIGN" --algo "$algo" pubkey "$sk"
+  } > "$pub"
+  echo "==> signed SHA384SUMS -> $sig ($label); published $pub"
+}
+
+if [[ -n "${TALKRYPT_RELEASE_SK:-}${TALKRYPT_RELEASE_SK_SLH:-}" ]]; then
+  sign_one ml-dsa  "${TALKRYPT_RELEASE_SK:-}"     SHA384SUMS.sig     RELEASE_PUBKEY.hex     "ML-DSA-87"
+  sign_one slh-dsa "${TALKRYPT_RELEASE_SK_SLH:-}" SHA384SUMS.slh.sig RELEASE_PUBKEY_SLH.hex "SLH-DSA-SHA2-256s"
+else
+  echo "note: no TALKRYPT_RELEASE_SK* set — release is checksum-only (unsigned). See docs/PACKAGING.md."
+fi
+
+echo "==> hashed ${#ARTIFACTS[@]} artifact(s) in $OUT/ (SHA-384 + SHA3-384); wrote SHA384SUMS, SHA3-384SUMS, MANIFEST.txt"

@@ -2,9 +2,9 @@
 # Sign shipped executables for talkrypt's LAUNCH-TIME self-attestation
 # (permissive-security hardening). For each binary, writes a detached
 # `<binary>.sig` sidecar (ML-DSA-87, hex) that `talkrypt_crypto::harden` reads at
-# startup and verifies against the embedded release public key
-# (docs/RELEASE_PUBKEY.hex) when `TALKRYPT_HARDEN` is set. See
-# docs/custody-options.md and docs/hardware-backed-sealing.md.
+# startup and verifies against the embedded release public key (injected at build
+# time from TALKRYPT_RELEASE_PUBKEY — the repo holds no key) when `TALKRYPT_HARDEN`
+# is set. See docs/custody-options.md and docs/hardware-backed-sealing.md.
 #
 # This is SEPARATE from the release-manifest signature (hash-dist.sh signs
 # SHA256SUMS). This one lets a running binary attest its OWN integrity in-process,

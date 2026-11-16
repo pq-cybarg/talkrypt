@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Package talkrypt for desktop distribution: real installers/archives, not just
 # bare binaries (that's `scripts/build-portable.sh`). For every Rust target whose
-# toolchain is present, this builds the CLI + TUI + key-custody helper, then
-# assembles platform-native packages:
+# toolchain is present, this builds the CLI + TUI + key-custody helper (plus the
+# egui desktop GUI for the HOST OS only — its windowing libs don't cross-compile),
+# then assembles platform-native packages:
 #
 #   macOS    universal .app bundle + .dmg disk image (ad-hoc codesigned)
 #   Linux    .tar.gz + a Debian .deb (built portably with `ar`+`tar`,
 #            so it needs no dpkg-deb and works on any host)
 #   Windows  .zip
 #
-# It then writes SHA256SUMS over every artifact and a MANIFEST.txt recording
+# It then writes SHA384SUMS over every artifact and a MANIFEST.txt recording
 # versions, sizes, checksums, what was built, and — crucially — what was SKIPPED
 # and why (no silent truncation: a missing cross-toolchain is reported, never
 # hidden). Honors the packaging political filter in docs/packaging-policy.md.
@@ -32,6 +33,13 @@ VERSION="$(grep -m1 '^version' crates/cli/Cargo.toml | sed -E 's/.*"([^"]+)".*/\
 GITREV="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# The egui desktop GUI (crates/desktop) is a first-class client but builds
+# NATIVELY per-OS — its windowing / GL system libs do not cross-compile like the
+# headless CLI/TUI. So it ships only in the HOST-OS package. Default features
+# (Tor) = the real product; set TALKRYPT_DESKTOP=off to skip it.
+HOST="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+DESKTOP_BUILT=""
+
 # Targets we know how to package, in priority order. The host target is always
 # attempted; others only if their rustup std + linker are present.
 TARGETS=(
@@ -39,8 +47,10 @@ TARGETS=(
   x86_64-apple-darwin
   x86_64-unknown-linux-gnu
   aarch64-unknown-linux-gnu
+  armv7-unknown-linux-gnueabihf
   x86_64-unknown-linux-musl
   aarch64-unknown-linux-musl
+  armv7-unknown-linux-musleabihf
   x86_64-pc-windows-gnu
 )
 
@@ -97,6 +107,12 @@ archive_target() {
     cp "$reldir/$name$ext" "$pkgdir/" 2>/dev/null || true
     strip "$pkgdir/$name$ext" 2>/dev/null || true
   done
+  # The egui desktop GUI rides in the HOST-OS package only (built natively; see
+  # DESKTOP_BUILT below). Staged BEFORE signing so its sidecar is written too.
+  if [[ "$t" == "$HOST" && -n "${DESKTOP_BUILT:-}" && -f "$DESKTOP_BUILT" ]]; then
+    cp "$DESKTOP_BUILT" "$pkgdir/talkrypt-desktop$ext" 2>/dev/null \
+      && strip "$pkgdir/talkrypt-desktop$ext" 2>/dev/null || true
+  fi
   # Launch-attestation sidecars next to each binary (self-integrity; see
   # docs/custody-testing-status.md). Only when a release key is present, so
   # unsigned packaging stays byte-identical. Must run AFTER strip (the signature
@@ -112,6 +128,8 @@ talkrypt $VERSION ($GITREV) — post-quantum E2E encrypted chat
   talkrypt link-offer/-accept   link a second device to your account
   talkrypt registry             host a username directory
   talkrypt version              build banner + honesty disclaimer
+Also in this package (host OS): talkrypt-tui (terminal UI), talkrypt-helper
+(key custody), and — on the host-OS package only — talkrypt-desktop (native GUI).
 Run 'talkrypt --help' for all flags. NOT certified / NOT audited.
 EOF
   local archive
@@ -125,6 +143,17 @@ EOF
   ARTIFACTS+=("$archive")
   echo "    -> $archive"
 }
+
+# ---- desktop GUI (egui): built natively for the HOST only ----
+if [[ -n "$HOST" && "${TALKRYPT_DESKTOP:-on}" != "off" ]]; then
+  echo "==> building desktop GUI (talkrypt-desktop) for host $HOST"
+  if cargo build --release -p talkrypt-desktop --target "$HOST" >/dev/null 2>&1; then
+    DESKTOP_BUILT="target/$HOST/release/talkrypt-desktop"
+    echo "    -> $DESKTOP_BUILT"
+  else
+    SKIPPED+=("$HOST — 'talkrypt-desktop' (egui GUI) failed to build; CLI/TUI packages unaffected")
+  fi
+fi
 
 # ---- build each target, collect release dirs ----
 declare -A RELDIR
@@ -207,6 +236,7 @@ build_deb() {
   case "$t" in
     x86_64-*) arch="amd64" ;;
     aarch64-*) arch="arm64" ;;
+    armv7-*) arch="armhf" ;;
     *) return 0 ;;
   esac
   if [[ "$t" == *musl* ]]; then
@@ -280,7 +310,7 @@ for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux
   [[ -n "${RELDIR[$t]:-}" ]] && build_deb "$t" "${RELDIR[$t]}"
 done
 
-# ---- checksums (SHA-256 + SHA3-256) + manifest ----
+# ---- checksums (SHA-384 + SHA3-384) + manifest ----
 # Hashing is owned by scripts/hash-dist.sh (the single authority over the whole
 # dist/, so desktop + mobile share one set of sums). Record what we skipped so
 # hash-dist.sh folds it into MANIFEST.txt, then hand off.

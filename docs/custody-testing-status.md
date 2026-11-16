@@ -39,7 +39,7 @@ Legend:
 | Item | Status | Evidence |
 |---|---|---|
 | PQ self-integrity (`attest::verify_bytes/verify_file/verify_self`) | ✅ 🔬 | Unit tests incl. **signing the running test binary and self-verifying** (+ tamper / wrong-key reject). |
-| `release_pubkey()` embed + `parse_hex_with_comments` (2592-byte guard) | ✅ | Tests: comment-stripped real vk parses; placeholder → `None`; wrong length → `None`. Current `RELEASE_PUBKEY.hex` is a placeholder (documented by a test). |
+| `release_pubkey()` embed + `parse_hex_with_comments` (2592-byte guard) | ✅ | Tests: comment-stripped real vk parses; wrong length → `None`. Sourced from the `TALKRYPT_RELEASE_PUBKEY` build-time env var (`option_env!`) — the repo holds no key, so it is `None` in ordinary builds (documented by a test). |
 | `deny_debugger()` (`PT_DENY_ATTACH`) | 🔬 | Not unit-tested (side-effecting syscall), but observed `debugger_denied: true` when running the real helper/desktop on M5. |
 | Injection-env scan + `PostureReport::is_acceptable` | ✅ | Unit test sets/clears `DYLD_INSERT_LIBRARIES`; `from_env` hex/path + attest-gate tests. |
 | **Helper entry point** refuse-to-start | 🔬 | Ran `talkrypt-helper` on M5: `LD_PRELOAD` → refuses; bogus attest → `self_attested: Some(false)` → refuses. |
@@ -62,5 +62,6 @@ builds. clippy clean; scripts `bash -n` clean.
   vendor-module quirks. SoftHSM recipe is in the `pkcs11.rs` `it` test module.
 - Real **SEALSQ** chip driver — needs vendor SDK + silicon.
 - Windows TPM/CNG wrapper **runtime** — built + compile-checked; needs a Windows host with a TPM.
-- Launch-attestation **on by default** — needs a published `RELEASE_PUBKEY.hex`
-  + shipped `<exe>.sig` (maintainer/opsec action).
+- Launch-attestation **on by default** — needs an official build that injects the
+  release pubkey (`TALKRYPT_RELEASE_PUBKEY`, from an offline/CI secret; no repo key)
+  + a shipped `<exe>.sig` (maintainer/opsec action).

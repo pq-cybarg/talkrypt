@@ -10,7 +10,7 @@ Onboarding extras (mobile, QR, P2P sharing): `docs/onboarding.md`.
 - **Prebuilt packages**: download a [release artifact](Packaging-and-Release.md)
   for your platform, then **verify it** before use:
   ```sh
-  bash verify.sh            # checks SHA-256 AND SHA3-256 (macOS/Linux/WSL)
+  bash verify.sh            # checks SHA-384 AND SHA3-384 (macOS/Linux/WSL)
   pwsh ./verify.ps1         # same, on Windows / cross-platform
   ```
   - macOS: open the `.dmg`, drag `talkrypt.app` to Applications (ad-hoc signed —

@@ -22,7 +22,7 @@ share the same audited core the Android app consumes through `crates/ffi`.
 | `scripts/package.sh` | Desktop **distributables**: macOS `.app` + `.dmg`, Linux `.tar.gz` + `.deb`, Windows `.zip`. |
 | `scripts/package-mobile.sh` | Mobile: Android `.apk` (and, on a Mac with Xcode, the iOS `.xcframework`). |
 | `scripts/build-ios.sh` | iOS XCFramework + Swift bindings; `--testflight` archives + uploads (needs Xcode app project + Apple account). |
-| `scripts/hash-dist.sh` | Hashes **all** of `dist/` with SHA-256 **and** SHA3-256; writes `SHA256SUMS`, `SHA3-256SUMS`, `MANIFEST.txt`, and the `verify.sh` / `verify.ps1` checkers. The single hashing authority. |
+| `scripts/hash-dist.sh` | Hashes **all** of `dist/` with SHA-384 **and** SHA3-384; writes `SHA384SUMS`, `SHA3-384SUMS`, `MANIFEST.txt`, and the `verify.sh` / `verify.ps1` checkers. The single hashing authority. |
 | `scripts/build-portable.sh` | Bare, self-contained `talkrypt` binaries per target (hand one to a peer; it just runs). |
 | `scripts/gen-icons.sh` | Regenerate the app icons (macOS `.icns`, Linux PNGs) from `assets/talkrypt-logo.svg`. |
 
@@ -45,8 +45,8 @@ bash scripts/package-mobile.sh     # mobile only (folds into the same checksums)
   any Linux of that arch). Linux targets cross-compile via
   [`cross`](https://github.com/cross-rs/cross) (Docker) when it is installed.
 - **Windows** — a `.zip` of the `.exe`s (cross-compiled via `x86_64-pc-windows-gnu`).
-- **All** — **two** independent checksum files, `SHA256SUMS` (FIPS 180-4) and
-  `SHA3-256SUMS` (FIPS 202 / Keccak), so a weakness in one hash family can't mask
+- **All** — **two** independent checksum files, `SHA384SUMS` (FIPS 180-4) and
+  `SHA3-384SUMS` (FIPS 202 / Keccak), so a weakness in one hash family can't mask
   a tampered artifact; the `verify.sh` / `verify.ps1` checkers; and a
   `MANIFEST.txt` that lists sizes, both digests, and — explicitly — **every
   target it skipped and why** (a missing cross-toolchain is reported, never
@@ -79,7 +79,7 @@ binary builds — on a Linux host, or via `cross` for the musl targets.
 ## Mobile
 
 `scripts/package-mobile.sh` builds the mobile artifacts and folds them into the
-**same** `SHA256SUMS` / `SHA3-256SUMS` as the desktop set (one manifest covers
+**same** `SHA384SUMS` / `SHA3-384SUMS` as the desktop set (one manifest covers
 every platform).
 
 | Platform | Artifact | Built by | Needs |
@@ -125,8 +125,8 @@ every platform).
 
 ## Integrity
 
-Every release ships **two** independent checksum files — `SHA256SUMS` (SHA-256,
-FIPS 180-4, a Merkle–Damgård construction) and `SHA3-256SUMS` (SHA3-256, FIPS
+Every release ships **two** independent checksum files — `SHA384SUMS` (SHA-384,
+FIPS 180-4, a Merkle–Damgård construction) and `SHA3-384SUMS` (SHA3-384, FIPS
 202, a Keccak sponge). Both must match for every file: the two families are
 structurally unrelated, so a cryptanalytic break or a deliberate collision in
 one cannot also satisfy the other. Verify before installing.
@@ -140,17 +140,17 @@ bash verify.sh                                 # bash: macOS / Linux / *BSD / WS
 pwsh ./verify.ps1                              # PowerShell: Windows / cross-platform
 ```
 
-`verify.sh` uses `sha256sum`/`shasum` for SHA-256 and auto-detects a SHA3-256
+`verify.sh` uses `sha384sum`/`shasum` for SHA-384 and auto-detects a SHA3-384
 backend (`openssl` 3.x, `python3`, or `rhash`). `verify.ps1` uses the built-in
-`Get-FileHash` for SHA-256 and .NET 8+'s `SHA3_256` (or `python3`/`openssl`) for
-SHA3-256. Each prints OK/FAIL per file and exits non-zero on any mismatch.
+`Get-FileHash` for SHA-384 and .NET 8+'s `SHA3_384` (or `python3`/`openssl`) for
+SHA3-384. Each prints OK/FAIL per file and exits non-zero on any mismatch.
 
 **By hand**, if you prefer the stock tools:
 
 ```sh
-shasum -a 256 -c SHA256SUMS        # macOS / BSD          (SHA-256)
-sha256sum  -c SHA256SUMS           # Linux                (SHA-256)
-openssl dgst -sha3-256 <file>      # compare to SHA3-256SUMS (any OpenSSL 3.x)
+shasum -a 384 -c SHA384SUMS        # macOS / BSD          (SHA-384)
+sha384sum  -c SHA384SUMS           # Linux                (SHA-384)
+openssl dgst -sha3-384 <file>      # compare to SHA3-384SUMS (any OpenSSL 3.x)
 ```
 
 ### PQ release signature (SECURITY-AUDIT F-8)
@@ -159,11 +159,23 @@ The dual checksums bind each artifact to a hash, but a mirror could serve a
 tampered artifact **and** a matching checksum file. To add a signing authority the
 project controls — without depending on Apple notarization or a Debian archive key
 (neither of which an opsec-clean, CA-free project uses) — the release **checksum
-manifest is signed with talkrypt's own ML-DSA-87 release key** (dogfooding the
-post-quantum signature). Integrity then chains:
+manifest is PQ-co-signed** with a **selectable set** of post-quantum signatures,
+and the verifier requires **every signature present** to pass (defense-in-depth,
+like the dual hashes). The set spans the three standards bodies' preferences:
+
+- **ML-DSA-87** (FIPS 204) — `SHA384SUMS.sig` — the general PQ signature (dogfoods
+  talkrypt's own primitive).
+- **SLH-DSA-SHA2-256s** (FIPS 205, stateless hash-based) — `SHA384SUMS.slh.sig` —
+  the NIST stateless software-signing standard.
+- **LMS** (SP 800-208, the **CNSA-designated** *stateful* software signer) —
+  `SHA384SUMS.lms.sig` — an **offline-only** follow-up (a stateful one-time key
+  must never run in CI; see `docs/plans/0003-release-cosigning.md`).
+
+Each signature is produced only when its signing secret (`TALKRYPT_RELEASE_SK*`)
+is provided, so the set is operator-selectable. Integrity then chains:
 
 ```
-artifact  ->  SHA-256 (in SHA256SUMS)  ->  ML-DSA-87 signature (SHA256SUMS.sig)  ->  published release public key
+artifact  ->  SHA-384 + SHA3-384 (SHA384SUMS)  ->  { ML-DSA-87, SLH-DSA[, LMS] } co-signatures  ->  published release public keys
 ```
 
 **Anyone can sign — there is no central signing authority.** The project signs its
@@ -174,19 +186,21 @@ identical; the only difference is *which* public key a verifier trusts.
 - **Generate your keypair (once):** `cargo run -p talkrypt-relsign -- keygen` prints a
   `SEED` (secret) and a `PUBKEY`. Keep the SEED offline or in a CI secret; publish the
   PUBKEY to whoever verifies your copies. The project keeps its SEED in
-  `TALKRYPT_RELEASE_SK` and publishes its PUBKEY as `docs/RELEASE_PUBKEY.hex` (its
-  trust anchor); a downstream packager or an individual user uses their own key
-  identically.
-- **Sign:** `talkrypt-relsign sign SHA256SUMS <seed>` writes `SHA256SUMS.sig`. At an
+  `TALKRYPT_RELEASE_SK` and **publishes its PUBKEY *with each release*** — `hash-dist.sh`
+  derives it from the secret (`talkrypt-relsign pubkey`) and writes `dist/RELEASE_PUBKEY.hex`
+  next to the artifacts, and the binaries bake it in at build time from
+  `TALKRYPT_RELEASE_PUBKEY`. **The git repository holds no key material of any kind;**
+  a downstream packager or individual user uses their own key identically.
+- **Sign:** `talkrypt-relsign sign SHA384SUMS <seed>` writes `SHA384SUMS.sig`. At an
   official release `hash-dist.sh` does this automatically when `TALKRYPT_RELEASE_SK`
   is set; a user re-signing their own copy just runs the tool directly. `<seed>` and
   `<pubkey>` may be the hex or a path to a (optionally `#`-commented) file.
 - **Verify:** `verify.sh` checks the dual checksums always, and — if `talkrypt-relsign`
   is on PATH and a signer public key is provided (`TALKRYPT_RELEASE_PUBKEY` or a
   pinned `RELEASE_PUBKEY.hex`) — also verifies the signature; a bad signature fails
-  the whole verification. **Pin the public key you obtained out of band** (the repo's
-  for an official build, or the person's who gave you their copy) — never a key
-  bundled by an untrusted mirror, which could swap both file and key. An ML-DSA
+  the whole verification. **Pin the public key you obtained out of band** (the release
+  page / signed notes for an official build, or the person's who gave you their copy) —
+  never a key bundled by an untrusted mirror, which could swap both file and key. An ML-DSA
   signature cannot be checked in pure shell, so this step needs the tool; it is
   advisory (skipped, reported) when the tool or a real key is absent.
 
@@ -194,7 +208,8 @@ identical; the only difference is *which* public key a verifier trusts.
 
 Separate from the *manifest* signature above, each shipped **executable** can carry
 a detached `<binary>.sig` (ML-DSA-87) that the binary verifies against its
-compiled-in release key (`docs/RELEASE_PUBKEY.hex`) **at startup** when run with
+compiled-in release key (injected at build time from `TALKRYPT_RELEASE_PUBKEY`,
+never a repo file) **at startup** when run with
 `TALKRYPT_HARDEN=1` — an in-process, post-quantum integrity check independent of
 the OS code-signature stack (for hosts with SIP/AMFI relaxed; see
 `docs/custody-options.md`).
@@ -207,8 +222,8 @@ the OS code-signature stack (for hosts with SIP/AMFI relaxed; see
 - **Verify (at runtime):** set `TALKRYPT_HARDEN=1`; the binary resolves the key
   from `TALKRYPT_ATTEST_PUBKEY` (else the embedded release key) and the signature
   from `TALKRYPT_ATTEST_SIG` (else the `<binary>.sig` sidecar), and **refuses to
-  start** on a mismatch. Inactive-by-default until `docs/RELEASE_PUBKEY.hex` holds
-  a real key and a sidecar is shipped.
+  start** on a mismatch. Inactive-by-default until an official build injects a release
+  key (`TALKRYPT_RELEASE_PUBKEY`) and a sidecar is shipped — the repo holds no key.
 
 **Still no OS code-signing authority:** macOS bundles remain ad-hoc (`codesign -s -`)
 and un-notarized and the `.deb`s remain unsigned — those need an Apple Developer ID /

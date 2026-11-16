@@ -15,6 +15,7 @@
 # the `cross` tool):
 #   x86_64-unknown-linux-musl     fully static Linux x86_64
 #   aarch64-unknown-linux-musl    fully static Linux arm64
+#   armv7-unknown-linux-musleabihf fully static Linux armv7 (32-bit, e.g. Pi)
 #   x86_64-apple-darwin           macOS Intel
 #   aarch64-apple-darwin          macOS Apple Silicon
 #   x86_64-pc-windows-gnu         Windows x86_64 (.exe)
@@ -28,6 +29,7 @@ cd "$ROOT"
 TARGETS=(
   x86_64-unknown-linux-musl
   aarch64-unknown-linux-musl
+  armv7-unknown-linux-musleabihf
   x86_64-apple-darwin
   aarch64-apple-darwin
   x86_64-pc-windows-gnu
