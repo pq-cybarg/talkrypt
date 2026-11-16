@@ -173,14 +173,9 @@ impl Transport for MultiTransport {
             endpoints.push(inner.endpoint());
             let tx = tx.clone();
             tokio::spawn(async move {
-                loop {
-                    match inner.accept().await {
-                        Ok(s) => {
-                            if tx.send(s).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                while let Ok(s) = inner.accept().await {
+                    if tx.send(s).await.is_err() {
+                        break;
                     }
                 }
             });

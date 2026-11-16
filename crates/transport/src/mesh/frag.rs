@@ -194,9 +194,10 @@ impl Reassembler {
     /// [`KIND_FRAME`]) — so a beacon carry and a messaging carry can share one mesh
     /// channel and each ignore the other's fragments.
     pub fn for_kind(kind: u8) -> Self {
-        let mut r = Self::default();
-        r.only_kind = Some(kind);
-        r
+        Self {
+            only_kind: Some(kind),
+            ..Self::default()
+        }
     }
 
     /// Feed one raw mesh packet from `source`. Returns `Some(reassembled)` when a

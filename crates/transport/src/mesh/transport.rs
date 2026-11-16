@@ -496,10 +496,14 @@ impl FrameWriter for MeshWriter {
     }
 }
 
+/// Partial reassembly state for one message: its segment slots (each `None` until
+/// its fragment arrives) and how many have arrived so far.
+type ReasmState = (Vec<Option<Vec<u8>>>, usize);
+
 struct MeshReader {
     data_rx: mpsc::UnboundedReceiver<InPkt>,
-    /// Partial reassembly per message: msg_seq -> (segments, have_count).
-    reasm: HashMap<u16, (Vec<Option<Vec<u8>>>, usize)>,
+    /// Partial reassembly per message: msg_seq -> reassembly state.
+    reasm: HashMap<u16, ReasmState>,
 }
 
 impl MeshReader {

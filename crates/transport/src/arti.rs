@@ -319,8 +319,15 @@ impl Transport for ArtiTransport {
         let n = self.svc_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nick = if n == 0 { self.nickname.clone() } else { format!("{}_{n}", self.nickname) };
         let nickname = HsNickname::new(nick).map_err(|e| io(format!("nickname: {e}")))?;
+        // Establishment speed: the service must build a circuit to each intro
+        // point and publish before it's reachable, so fewer intro points =
+        // faster first reachability. talkrypt onions are low-volume chat
+        // rendezvous, so 2 (vs Arti's default 3) is ample redundancy while
+        // trimming establishment latency. (Arti 0.42 onion establishment is the
+        // dominant join latency; see the dial retry/backoff above.)
         let svc_config = OnionServiceConfigBuilder::default()
             .nickname(nickname)
+            .num_intro_points(2)
             .build()
             .map_err(io)?;
 
