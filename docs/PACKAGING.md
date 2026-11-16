@@ -8,11 +8,11 @@ libraries** — they build as single, dependency-free executables on every
 desktop OS. (`--features tor` pulls Arti and is a separate, heavier build.)
 
 There is also a **native desktop GUI** — `crates/desktop` (`talkrypt-desktop`,
-egui/eframe, links the core directly) — CI-built but **not yet folded into the
-packaging scripts below** (`package.sh` currently stages CLI/TUI/helper/relsign
-only). Adding it to the release artifacts is tracked in
-[`RELEASE-READINESS.md`](RELEASE-READINESS.md) (punch-list item 3). All clients
-share the same audited core the Android app consumes through `crates/ffi`.
+egui/eframe, links the core directly) — which **`package.sh` now ships in the
+host-OS package** (its windowing/GL libs don't cross-compile like the headless
+CLI, so it rides only in the host's `.tar.gz`/`.dmg`/`.zip`; `TALKRYPT_DESKTOP=off`
+to skip). All clients share the same audited core the Android app consumes through
+`crates/ffi`.
 
 ## Scripts
 
@@ -33,7 +33,8 @@ bash scripts/package.sh            # desktop only
 bash scripts/package-mobile.sh     # mobile only (folds into the same checksums)
 ```
 
-`package.sh` builds the CLI, TUI and helper for each available target, then:
+`package.sh` builds the CLI, TUI and helper for each available target (plus the
+`talkrypt-desktop` egui GUI natively for the host OS), then:
 
 - **macOS** — `lipo`s the two arches into a universal binary, assembles
   `talkrypt.app` (a Terminal launcher over the CLI), ad-hoc-codesigns it, and
@@ -66,8 +67,10 @@ and the Linux/Windows cross-builds also need the matching linker, easiest via
 | `x86_64-apple-darwin` | macOS Intel | universal `.dmg`, `.tar.gz` |
 | `x86_64-unknown-linux-gnu` | Linux x86_64 (glibc) | `.tar.gz`, `.deb (amd64)` |
 | `aarch64-unknown-linux-gnu` | Linux arm64 (glibc) | `.tar.gz`, `.deb (arm64)` |
+| `armv7-unknown-linux-gnueabihf` | Linux armv7 32-bit (glibc) | `.tar.gz`, `.deb (armhf)` |
 | `x86_64-unknown-linux-musl` | Linux x86_64 (static) | `.tar.gz`, `talkrypt-static .deb (amd64)` |
 | `aarch64-unknown-linux-musl` | Linux arm64 (static) | `.tar.gz`, `talkrypt-static .deb (arm64)` |
+| `armv7-unknown-linux-musleabihf` | Linux armv7 32-bit (static) | `.tar.gz`, `talkrypt-static .deb (armhf)` |
 | `x86_64-pc-windows-gnu` | Windows x86_64 | `.zip` |
 
 A build host only produces what its toolchain supports; run `package.sh` on (or
