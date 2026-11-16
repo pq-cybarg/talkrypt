@@ -9,10 +9,13 @@ One audited Rust **core**, many thin clients. Deep spec: `docs/PLATFORMS.md`,
 | --- | --- | --- |
 | **CLI** `talkrypt` | `crates/cli` | The primary product — host/join/link/registry + an in-chat REPL. See [CLI Reference](CLI-Reference.md). |
 | **TUI** `talkrypt-tui` | `crates/tui` | A [ratatui](https://github.com/ratatui-org/ratatui) terminal UI (channel list, messages, input, status). |
+| **Desktop GUI** `talkrypt-desktop` | `crates/desktop` | A native [egui/eframe](https://github.com/emilk/egui) GUI that links the core directly (no FFI); host shows a big QR to onboard a phone. CI-built; not yet in the packaging pipeline (`docs/RELEASE-READINESS.md`). |
 | **Helper** `talkrypt-helper` | `crates/helper` | A key-custody sidecar over an owner-only IPC channel. See [Key Custody](Key-Custody.md). |
 
-The CLI/TUI **are** the desktop clients — there is no separate desktop GUI; a
-Tauri shell over the FFI is possible later but unbuilt.
+The CLI/TUI are the terminal desktop clients; there is **also** a native
+**desktop GUI** (`talkrypt-desktop`, egui/eframe, links the core directly),
+CI-built but not yet in the packaging pipeline (see `docs/RELEASE-READINESS.md`).
+An earlier Tauri/webview shell idea was superseded by this egui app.
 
 ## The FFI (one core, every app)
 
