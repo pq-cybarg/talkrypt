@@ -16,7 +16,7 @@
 //! the `#[ignore]` integration test at the bottom.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arti_client::config::pt::TransportConfigBuilder;
@@ -117,7 +117,9 @@ pub struct AntiCensorship {
 /// and can run several onion services), so callers should `Arc` it once and
 /// reuse it rather than bootstrapping per chat.
 pub struct ArtiTransport {
-    client: TorClient<PreferredRuntime>,
+    // Arti 0.48: `create_unbootstrapped()` yields an `Arc<TorClient>` (was a bare
+    // `TorClient` in 0.42). All `self.client.*` calls deref through the `Arc`.
+    client: Arc<TorClient<PreferredRuntime>>,
     nickname: String,
     onion_addr: Mutex<Option<String>>,
     // Distinguishes onion services when one shared client hosts several chats:
