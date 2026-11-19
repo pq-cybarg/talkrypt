@@ -50,6 +50,10 @@ ignore = [
   "RUSTSEC-2026-0371", # zbus_names — unmaintained (zbus stack)
   "RUSTSEC-2026-0372", # zvariant_derive — unmaintained (zbus stack)
   "RUSTSEC-2026-0374", # basic-toml — unmaintained (transitive)
+  # Surfaced by the Arti 0.42 -> 0.48 bump's refreshed dep graph (PR #123). Both are
+  # unmaintained notices, not vulnerabilities, with no fix available upstream yet.
+  "RUSTSEC-2026-0543", # chrono — unmaintained (transitive; time formatting in the tor stack)
+  "RUSTSEC-2026-0542", # humantime — unmaintained (wraps chrono; transitive)
 ]
 
 [licenses]
