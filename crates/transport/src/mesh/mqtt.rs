@@ -131,6 +131,15 @@ pub fn mqtt_topic(root: &str, channel: &str, node: &str) -> String {
 // Pluggable MQTT client seam (so the node logic is testable without a broker).
 // ---------------------------------------------------------------------------
 
+/// The inbound stream an [`MqttClient`] hands to `subscribe`: `(topic, payload)`
+/// pairs as they arrive from the broker.
+type InboundRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+/// The sender half of [`InboundRx`] — a broker-side handle used to deliver
+/// `(topic, payload)` pairs to a subscribed client. Only the in-memory test broker
+/// holds these (the real `rumqttc` client owns its own event loop).
+#[cfg(test)]
+type InboundTx = mpsc::UnboundedSender<(String, Vec<u8>)>;
+
 /// The minimal MQTT surface [`MqttMeshNode`] needs. Implement over `rumqttc`
 /// (see [`connect`]) or any client; the in-memory [`LoopbackBroker`] backs tests.
 #[async_trait]
@@ -138,7 +147,29 @@ pub trait MqttClient: Send + Sync + 'static {
     /// Publish `payload` to `topic`.
     async fn publish(&self, topic: String, payload: Vec<u8>) -> Result<()>;
     /// Take the inbound `(topic, payload)` stream. Called once by `subscribe`.
-    fn inbound(&self) -> mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+    fn inbound(&self) -> InboundRx;
+}
+
+/// How talkrypt frames are CARRIED over MQTT. talkrypt's PQ seal is the real
+/// envelope either way; this selects only the OUTER MQTT carriage. Two methods are
+/// intended (only the first is implemented today):
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MqttMethod {
+    /// **Encapsulated Meshtastic** (default, implemented): each talkrypt fragment
+    /// rides inside a Meshtastic `ServiceEnvelope` on `PRIVATE_APP`, using the same
+    /// topics/format as a real Meshtastic MQTT gateway — so it **interoperates with
+    /// the Meshtastic mesh ecosystem** and an RF-hop-sized MTU (~200 B). This is the
+    /// "encapsulated / adjusted" route, matching how the LoRa radio meshnets carry
+    /// talkrypt. Latency is stop-and-wait-ARQ × fragment-count × broker RTT.
+    #[default]
+    EncapsulatedMeshtastic,
+    /// **PQ-MQTT (RESERVED — not implemented).** A direct, internet-tuned, PQ-secured
+    /// MQTT transport (Robobus-style "PQ-MQTT"): native MQTT carriage with no
+    /// Meshtastic framing, a large MTU, and a windowed/batched send path, for much
+    /// lower latency when Meshtastic interop is not needed. The seam is reserved here
+    /// so it can slot in without reworking the node; selecting it today is an explicit
+    /// error. See `docs/mesh-lora-backend.md`.
+    PqMqttReserved,
 }
 
 /// Configuration for an [`MqttMeshNode`].
@@ -152,6 +183,9 @@ pub struct MqttConfig {
     pub gateway_id: String,
     /// Fragment byte budget per packet (sized for an RF hop if the gateway relays).
     pub mtu: usize,
+    /// Which MQTT carriage method to use. Only [`MqttMethod::EncapsulatedMeshtastic`]
+    /// is implemented; [`MqttMethod::PqMqttReserved`] is a reserved future slot.
+    pub method: MqttMethod,
 }
 
 impl Default for MqttConfig {
@@ -161,6 +195,7 @@ impl Default for MqttConfig {
             channel_name: "talkrypt".into(),
             gateway_id: "!talkrypt".into(),
             mtu: 200,
+            method: MqttMethod::EncapsulatedMeshtastic,
         }
     }
 }
@@ -230,7 +265,7 @@ mod rumqtt {
     /// pumps inbound publishes to the node.
     pub struct RumqttClient {
         client: AsyncClient,
-        inbound: std::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, Vec<u8>)>>>,
+        inbound: std::sync::Mutex<Option<InboundRx>>,
     }
 
     #[async_trait]
@@ -241,7 +276,7 @@ mod rumqtt {
                 .await
                 .map_err(|e| TransportError::Io(e.to_string()))
         }
-        fn inbound(&self) -> mpsc::UnboundedReceiver<(String, Vec<u8>)> {
+        fn inbound(&self) -> InboundRx {
             self.inbound
                 .lock()
                 .unwrap()
@@ -258,6 +293,13 @@ mod rumqtt {
         client_id: &str,
         cfg: MqttConfig,
     ) -> Result<Arc<MqttMeshNode<RumqttClient>>> {
+        if cfg.method == super::MqttMethod::PqMqttReserved {
+            return Err(TransportError::Io(
+                "MqttMethod::PqMqttReserved is a reserved future slot (Robobus-style PQ-MQTT), \
+                 not yet implemented — use EncapsulatedMeshtastic"
+                    .into(),
+            ));
+        }
         let mut opts = MqttOptions::new(client_id, broker_host, broker_port);
         opts.set_keep_alive(std::time::Duration::from_secs(30));
         let (client, mut eventloop) = AsyncClient::new(opts, 32);
@@ -304,7 +346,7 @@ mod tests {
     /// (a client does not receive its own publish — mirrors the mesh loopback).
     #[derive(Default)]
     struct LoopbackBroker {
-        subs: Mutex<Vec<(usize, mpsc::UnboundedSender<(String, Vec<u8>)>)>>,
+        subs: Mutex<Vec<(usize, InboundTx)>>,
         next_id: std::sync::atomic::AtomicUsize,
     }
 
@@ -331,7 +373,7 @@ mod tests {
     struct LoopbackClient {
         broker: Arc<LoopbackBroker>,
         id: usize,
-        inbound: Mutex<Option<mpsc::UnboundedReceiver<(String, Vec<u8>)>>>,
+        inbound: Mutex<Option<InboundRx>>,
     }
 
     #[async_trait]
@@ -340,7 +382,7 @@ mod tests {
             self.broker.fan(self.id, &topic, &payload);
             Ok(())
         }
-        fn inbound(&self) -> mpsc::UnboundedReceiver<(String, Vec<u8>)> {
+        fn inbound(&self) -> InboundRx {
             self.inbound.lock().unwrap().take().unwrap()
         }
     }
@@ -387,5 +429,76 @@ mod tests {
             .unwrap();
         assert_eq!(got.channel, 3);
         assert_eq!(got.payload, b"opaque sealed fragment");
+    }
+
+    #[test]
+    fn default_method_is_encapsulated_meshtastic() {
+        assert_eq!(MqttConfig::default().method, MqttMethod::EncapsulatedMeshtastic);
+        assert_eq!(MqttMethod::default(), MqttMethod::EncapsulatedMeshtastic);
+    }
+
+    /// The reserved PQ-MQTT slot must refuse to connect (it is not implemented) and
+    /// must do so BEFORE touching the network, so no broker is required for this test.
+    #[cfg(feature = "mesh-mqtt")]
+    #[tokio::test]
+    async fn pq_mqtt_reserved_method_is_rejected() {
+        use crate::TransportError;
+        let cfg = MqttConfig { method: MqttMethod::PqMqttReserved, ..Default::default() };
+        // 203.0.113.0/24 is TEST-NET-3 (RFC 5737): unroutable, so if the guard were
+        // missing this would hang/fail on connect instead of returning promptly.
+        // (Ok carries an Arc<MqttMeshNode<_>> which isn't Debug, so match rather than
+        // unwrap_err.)
+        match connect("203.0.113.1", 1883, "talkrypt-test", cfg).await {
+            Err(TransportError::Io(m)) => assert!(m.contains("reserved"), "unexpected: {m}"),
+            other => panic!("expected the reserved-slot error, got Ok/other variant: {}", other.is_ok()),
+        }
+    }
+
+    /// Measure end-to-end fragment round-trip latency over a REAL MQTT broker (the
+    /// encapsulated-Meshtastic carriage). Ignored by default — it needs a running
+    /// broker. Point it at one with `TALKRYPT_MQTT_BROKER=host:port` (default
+    /// `127.0.0.1:1883`) and run:
+    ///   `cargo test -p talkrypt-transport --features mesh-mqtt -- --ignored --nocapture mqtt_latency`
+    /// The printed per-fragment median is the broker round-trip; a whole chat message
+    /// is 1-2 fragments, a handshake ~25 (each a stop-and-wait ARQ segment).
+    #[cfg(feature = "mesh-mqtt")]
+    #[tokio::test]
+    #[ignore = "needs a live MQTT broker; set TALKRYPT_MQTT_BROKER"]
+    async fn mqtt_latency_over_a_real_broker() {
+        let (host, port) = match std::env::var("TALKRYPT_MQTT_BROKER") {
+            Ok(s) => {
+                let (h, p) = s.rsplit_once(':').expect("TALKRYPT_MQTT_BROKER must be host:port");
+                (h.to_string(), p.parse().expect("port"))
+            }
+            Err(_) => ("127.0.0.1".to_string(), 1883u16),
+        };
+        let cfg = MqttConfig::default();
+        let rx_node = connect(&host, port, "talkrypt-rx", cfg.clone()).await.expect("rx connect");
+        let tx_node = connect(&host, port, "talkrypt-tx", cfg).await.expect("tx connect");
+        let mut inbox = rx_node.subscribe().await.expect("subscribe");
+        // Let both subscriptions settle on the broker before timing.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let frag = vec![0xABu8; 200]; // one full MTU-sized sealed fragment
+        let iters = 30u32;
+        let mut samples = Vec::with_capacity(iters as usize);
+        for _ in 0..iters {
+            let t0 = tokio::time::Instant::now();
+            tx_node.send(3, &frag).await.expect("send");
+            let got = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.next())
+                .await
+                .expect("round-trip timed out")
+                .expect("inbox closed");
+            samples.push(t0.elapsed());
+            assert_eq!(got.payload, frag);
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        let min = samples[0];
+        let max = samples[samples.len() - 1];
+        println!(
+            "mqtt encapsulated-Meshtastic fragment round-trip over {host}:{port} \
+             (n={iters}, 200B): min={min:?} median={median:?} max={max:?}"
+        );
     }
 }
