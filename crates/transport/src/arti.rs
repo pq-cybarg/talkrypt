@@ -208,10 +208,23 @@ fn build_config(
     let tempdir = match p {
         OnionPersistence::Ephemeral => {
             let td = tempfile::tempdir().map_err(io)?;
+            // The onion-service KEY (identity) stays in the per-run temp `state` dir,
+            // so it is fresh every process (unlinkable). But the Tor DIRECTORY cache
+            // (consensus + microdescriptors) is PUBLIC network data — identical for
+            // every Tor user and carrying no activity — so we persist it in a stable
+            // shared location. A warm directory cache cuts Arti bootstrap from ~10s
+            // (cold: re-download the whole consensus) to ~2-3s, without weakening the
+            // ephemeral-identity property. (Set TALKRYPT_TOR_NO_CACHE=1 for a fully
+            // trace-free run at the cost of a cold bootstrap each time.)
+            let cache_dir = if std::env::var_os("TALKRYPT_TOR_NO_CACHE").is_some() {
+                td.path().join("cache")
+            } else {
+                std::env::temp_dir().join("talkrypt-tor-dircache")
+            };
             builder
                 .storage()
                 .state_dir(CfgPath::new_literal(td.path().join("state")))
-                .cache_dir(CfgPath::new_literal(td.path().join("cache")));
+                .cache_dir(CfgPath::new_literal(cache_dir));
             Some(td)
         }
         OnionPersistence::Persistent { state_dir } => {
