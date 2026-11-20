@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# talkrypt pre-commit SECRET GUARD. Refuses a commit that stages anything that
+# looks like key material — a release signing seed, a private key, or the keys
+# dir — so "the repo holds NO keys" can't be broken by an accidental `git add`.
+# Complements .gitignore (which stops tracking) with an active block at commit.
+#
+# Install:  bash scripts/install-hooks.sh   (symlinks this into .git/hooks)
+# Override once (you had better be sure):  ALLOW_SECRET_COMMIT=1 git commit ...
+set -euo pipefail
+
+[[ "${ALLOW_SECRET_COMMIT:-}" == "1" ]] && exit 0
+
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+[[ -z "$staged" ]] && exit 0
+
+fail() { echo "" >&2; echo "  ✗ pre-commit: $1" >&2
+  echo "    talkrypt commits NO key material. Unstage it (git restore --staged <f>)." >&2
+  echo "    Release seeds belong in .release-keys/ (gitignored), backed up offline." >&2
+  echo "    To override (dangerous):  ALLOW_SECRET_COMMIT=1 git commit ..." >&2
+  echo "" >&2; exit 1; }
+
+# 1) Secret-ish PATHS.
+echo "$staged" | grep -qiE '(^|/)\.release-keys/|\.seed$|\.secret$|(^|/)ml-dsa\.|(^|/)slh-dsa\.|(^|/)keys/|(^|/)secrets/|id_ed25519$|id_rsa$|\.pem$|\.p8$|\.pfx$|_sk\.|private.*key' \
+  && fail "a staged path looks like a secret:
+$(echo "$staged" | grep -iE '(^|/)\.release-keys/|\.seed$|\.secret$|ml-dsa\.|slh-dsa\.|keys/|secrets/|\.pem$|\.p8$|\.pfx$|private.*key' | sed 's/^/      /')"
+
+# 2) Secret-ish CONTENT in staged text (the relsign keygen format + PEM private keys).
+#    A 64-hex line right after a SEED label, or a PEM "PRIVATE KEY" header.
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  # skip obvious binaries
+  git show ":$f" 2>/dev/null | LC_ALL=C grep -qI . || continue
+  if git show ":$f" 2>/dev/null | grep -qE 'SEED[[:space:]]+[0-9a-fA-F]{64}' ; then
+    fail "staged file '$f' contains a 64-hex SEED (a release signing secret)."
+  fi
+  if git show ":$f" 2>/dev/null | grep -qE 'BEGIN( [A-Z0-9]+)? PRIVATE KEY' ; then
+    fail "staged file '$f' contains a PEM PRIVATE KEY block."
+  fi
+done <<< "$staged"
+
+exit 0
