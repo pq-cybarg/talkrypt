@@ -34,6 +34,7 @@ RELEASE_PUBKEY*.hex
 *.pubkey
 /keys/
 /secrets/
+/.release-keys/
 # Session transcripts / exports — NEVER commit (local paths, OS account, full session).
 *conversation*.txt
 do-not-commit-*
