@@ -367,4 +367,61 @@ mod tests {
         assert_eq!(cs.recv_frame().await.unwrap(), b"pong");
         assert_eq!(accept.await.unwrap(), b"ping");
     }
+
+    /// Measure per-message mixnet round-trip latency over an ESTABLISHED stream,
+    /// isolating the 5-hop mix-path delay from the one-time gateway handshake (which
+    /// is timed separately and reported). Requires a live Nym mixnet. Run:
+    ///   cargo test -p talkrypt-transport --features nym -- --ignored --nocapture mixnet_latency
+    /// Expect mix-path latency in the hundreds of ms to low seconds — HIGHER than Tor
+    /// by design: the mixnet trades latency for timing-correlation resistance.
+    #[tokio::test]
+    #[ignore = "requires live Nym mixnet"]
+    async fn mixnet_latency_over_an_established_stream() {
+        use std::time::Instant;
+
+        // Time the two gateway handshakes (the slow, one-time bootstrap).
+        let t_hs = Instant::now();
+        let server = NymTransport::connect().await.expect("connect server");
+        let client = NymTransport::connect().await.expect("connect client");
+        let handshake = t_hs.elapsed();
+
+        let server_addr = server.endpoint();
+        let mut listener = server.listen().await.expect("listen");
+        // Server echoes each frame back, forever, over one accepted stream.
+        tokio::spawn(async move {
+            let mut s = listener.accept().await.unwrap();
+            while let Ok(frame) = s.recv_frame().await {
+                if s.send_frame(&frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut cs = client.dial(&server_addr).await.expect("dial");
+        // One warm-up round-trip (opens the pseudo-stream end to end) before timing.
+        cs.send_frame(b"warmup").await.unwrap();
+        assert_eq!(cs.recv_frame().await.unwrap(), b"warmup");
+
+        let payload = vec![0x5Au8; 256];
+        let iters = 10u32;
+        let mut samples = Vec::with_capacity(iters as usize);
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            cs.send_frame(&payload).await.unwrap();
+            let got = cs.recv_frame().await.unwrap();
+            samples.push(t0.elapsed());
+            assert_eq!(got, payload);
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        println!(
+            "nym mixnet: gateway-handshake(x2)={:?} | per-message round-trip over 5-hop mix \
+             (n={}, 256B): min={:?} median={:?} max={:?}",
+            handshake,
+            iters,
+            samples[0],
+            median,
+            samples[samples.len() - 1]
+        );
+    }
 }
