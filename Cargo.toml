@@ -56,6 +56,22 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Build the crypto-heavy dependencies with optimizations even in dev/test builds, so
+# unit tests aren't dominated by unoptimized SLH-DSA (fips205), Argon2id, PBKDF2, and
+# Keccak/SHA-2 in debug. This changes NOTHING about behavior (identical outputs) — it
+# only speeds the inner math; release is unaffected. Preserves the SLH-DSA approach:
+# we optimize the dependency, not the algorithm or its parameters.
+[profile.dev.package.fips205]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+
 # Source-patched `rsa` (RUSTSEC-2023-0071 / Marvin): a locally vendored, hardened
 # copy that makes every RSA private-key operation blinded. `rsa` is pulled in only
 # transitively under the `tor` feature (Arti's SSH-key parsing); default builds
