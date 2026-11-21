@@ -37,8 +37,11 @@ use talkrypt_replcmd::{present, run_command, ReplState};
 use talkrypt_topology::for_kind;
 use talkrypt_transport::{LoopbackFabric, TcpTransport};
 
-const BANNER: &str = "\
-talkrypt 0.1.0 — PQ end-to-end encrypted chat over Tor (Arti)
+const BANNER: &str = concat!(
+    "talkrypt ",
+    env!("CARGO_PKG_VERSION"),
+    " — PQ end-to-end encrypted chat over Tor (Arti)
+
 Crypto: ML-KEM-1024 (PQ) KEM, ML-DSA-87 auth, AES-256-GCM, KMAC256/SHA3.
         Double Ratchet (forward secrecy + post-compromise).
         Default posture is PQ-pure (zero elliptic curve), padded to be
@@ -52,7 +55,8 @@ HONESTY: PQ algorithms aligned with CNSA 2.0 (hash defaults to SHA3/FIPS-202;
          NOT authorized for any classification level, and NOT independently
          audited or cryptographically reviewed. Alignment means it uses these
          algorithms — not that it is certified or fit for real classified or
-         high-stakes data. Experimental, pre-release software.";
+         high-stakes data. Experimental, pre-release software."
+);
 
 #[derive(Parser)]
 #[command(
