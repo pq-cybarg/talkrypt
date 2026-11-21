@@ -27,10 +27,30 @@
 //! `<seed>` may be: raw hex, a path to a hex file, or a path to a `.seed.enc`
 //! sealed blob (needs `$TALKRYPT_KEY_PASSWORD`). `<pubkey>` may be hex or a file.
 
+use std::io::IsTerminal;
 use std::process::exit;
 
-use talkrypt_relsign::{hex, seal, sign, verify, Algo};
+use talkrypt_relsign::{hex, seal, seed, sign, verify, Algo};
 use zeroize::Zeroizing;
+
+/// Refuse to emit SECRET material (a raw seed, a mnemonic) unless stdout is a real
+/// terminal — i.e. a human's screen. A captured/piped stdout (an automation agent, a
+/// `script(1)` log, a redirect) would expose the secret, so we fail closed there and
+/// point at the sealed path / the isolated keyvault. Override only for a deliberate,
+/// understood pipe: `TALKRYPT_ALLOW_SECRET_STDOUT=1`.
+fn require_terminal_for_secret() {
+    if std::env::var_os("TALKRYPT_ALLOW_SECRET_STDOUT").is_some() {
+        return;
+    }
+    if !std::io::stdout().is_terminal() {
+        die(
+            "refusing to print secret key material to a non-terminal (it would be \
+             captured). Run this in a real terminal to record it, use `keygen --encrypt` \
+             (writes a sealed .seed.enc, safe to pipe), or use talkrypt-keyvault. To \
+             override deliberately: TALKRYPT_ALLOW_SECRET_STDOUT=1",
+        );
+    }
+}
 
 /// Extract an optional `--algo <name>` flag (default ML-DSA), removing it so the
 /// positional args that follow are unaffected.
@@ -93,8 +113,10 @@ fn sealed_passphrase() -> Zeroizing<String> {
     }
 }
 
-/// Load a 32-byte signing seed for SIGNING. Accepts: a sealed `.seed.enc` file
-/// (decrypted with `$TALKRYPT_KEY_PASSWORD`), a plaintext hex file, or raw hex.
+/// Load a 32-byte signing seed. Accepts, in order: a sealed `.seed.enc` file
+/// (decrypted with `$TALKRYPT_KEY_PASSWORD`), a QRL 24-word mnemonic, a 35-byte
+/// hexseed (descriptor+entropy), or a bare 32-byte hex seed — as a literal arg or a
+/// file holding one (comment `#` lines ignored).
 fn load_signing_seed(arg: &str) -> Zeroizing<[u8; 32]> {
     if std::path::Path::new(arg).is_file() {
         if let Ok(text) = std::fs::read_to_string(arg) {
@@ -102,13 +124,42 @@ fn load_signing_seed(arg: &str) -> Zeroizing<[u8; 32]> {
                 let pw = sealed_passphrase();
                 return seal::unseal(pw.as_bytes(), &text).unwrap_or_else(|e| die(&e.to_string()));
             }
+            return parse_seed_text(&strip_comments(&text));
         }
     }
-    let bytes = load_hex(arg).unwrap_or_else(|e| die(&e));
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .unwrap_or_else(|_| die("seed must be exactly 32 bytes (64 hex chars)"));
-    Zeroizing::new(arr)
+    parse_seed_text(arg)
+}
+
+/// Drop `#` comment lines; join the rest (so a mnemonic/hexseed backup file works).
+fn strip_comments(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parse a seed from an unsealed string: mnemonic (≥2 words), hexseed (35 B), or raw
+/// seed (32 B). The entropy is extracted (any descriptor is validated but dropped —
+/// the signing seed is the 32-byte entropy).
+fn parse_seed_text(s: &str) -> Zeroizing<[u8; 32]> {
+    let t = s.trim();
+    if t.split_whitespace().count() >= 2 {
+        let (_d, e) = seed::parse_mnemonic(t).unwrap_or_else(|e| die(&e.to_string()));
+        return Zeroizing::new(e);
+    }
+    let bytes = hex::decode(t).unwrap_or_else(|e| die(&e));
+    match bytes.len() {
+        35 => {
+            let (_d, e) = seed::parse_hexseed(t).unwrap_or_else(|e| die(&e.to_string()));
+            Zeroizing::new(e)
+        }
+        32 => {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&bytes);
+            Zeroizing::new(a)
+        }
+        _ => die("seed must be a 24-word mnemonic, a 70-hex hexseed, or a 64-hex raw seed"),
+    }
 }
 
 /// Load a 32-byte seed for KEY DERIVATION where a sealed file's cleartext pubkey is
@@ -135,28 +186,41 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("keygen") => {
             let encrypt = take_flag(&mut args, "--encrypt");
-            // The seed is the SECRET; the pubkey is PUBLIC. 32 bytes for both schemes.
+            // The seed is the SECRET; the pubkey + address are PUBLIC. 32 bytes both schemes.
             let seed = Zeroizing::new(talkrypt_crypto::IdentityKeyPair::generate().export_secret());
             let pubkey = talkrypt_relsign::pubkey_of(algo, *seed);
+            let desc = seed::Descriptor::for_algo(algo);
+            let address = seed::address(desc, &pubkey);
             if encrypt {
+                // Sealed: the .seed.enc blob and the pubkey/address are all PUBLIC, so
+                // this path is safe to pipe. No secret reaches stdout.
                 let pw = sealed_passphrase();
                 let blob = seal::seal(pw.as_bytes(), algo, &seed, &pubkey)
                     .unwrap_or_else(|e| die(&e.to_string()));
+                // STDOUT carries ONLY the sealed blob, so it can be redirected straight
+                // to a .seed.enc. Everything else (public) goes to stderr.
                 print!("{blob}");
                 eprintln!(
-                    "\nSealed {} seed (Argon2id + AES-256-GCM). Store this .seed.enc; the \n\
-                     passphrase was taken from $TALKRYPT_KEY_PASSWORD. PUBKEY below is public.",
-                    algo.label()
-                );
-                println!("PUBKEY {}", hex::encode(&pubkey));
-            } else {
-                println!("SEED   {}", hex::encode(&*seed));
-                println!("PUBKEY {}", hex::encode(&pubkey));
-                eprintln!(
-                    "\nThis is YOUR {} keypair. Keep SEED secret (prefer `keygen --encrypt`, or\n\
-                     talkrypt-keyvault). `sign <file> <seed>` then `verify <file> <file>.{} <pubkey>`.",
+                    "\nSealed {} seed (passphrase from $TALKRYPT_KEY_PASSWORD). Redirect \n\
+                     stdout to a .seed.enc. PUBLIC key id (pin out of band): {address}\n\
+                     PUBKEY {}",
                     algo.label(),
-                    algo.sig_suffix()
+                    hex::encode(&pubkey),
+                );
+            } else {
+                // Unsealed: the mnemonic + hexseed ARE the secret — show them ONLY to a
+                // human terminal so an operator can transcribe them for offline backup.
+                require_terminal_for_secret();
+                let mnemonic = Zeroizing::new(seed::mnemonic(desc, &seed));
+                let hexseed = Zeroizing::new(seed::hexseed(desc, &seed));
+                println!("# talkrypt {} signing key — WRITE THE MNEMONIC DOWN, OFFLINE.", algo.label());
+                println!("address:  {address}   (public — pin this out of band)");
+                println!("pubkey:   {}", hex::encode(&pubkey));
+                println!("mnemonic: {}", &*mnemonic);
+                println!("hexseed:  {}", &*hexseed);
+                eprintln!(
+                    "\nThe mnemonic/hexseed are SECRET. Prefer `keygen --encrypt` (sealed at \n\
+                     rest) or talkrypt-keyvault. Restore with `sign <file> <mnemonic-or-hexseed>`."
                 );
             }
         }
