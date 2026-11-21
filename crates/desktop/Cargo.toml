@@ -1,6 +1,6 @@
 [package]
 name = "talkrypt-desktop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 # Not published (internal app, path deps); Apache-2.0 like the rest of the
 # workspace. Without these, cargo-deny treats it as a public crate — flagging it

@@ -10930,7 +10930,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "talkrypt-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "qrcode",
@@ -10944,7 +10944,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -10962,7 +10962,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-crypto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "aws-lc-rs",
@@ -10985,7 +10985,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eframe",
  "egui",
@@ -10999,7 +10999,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "jni",
@@ -11016,7 +11016,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-helper"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "core-foundation 0.9.4",
  "core-foundation-sys",
@@ -11036,7 +11036,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-relsign"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fips205",
  "rand 0.8.8",
@@ -11045,7 +11045,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-replcmd"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "talkrypt-core",
  "talkrypt-crypto",
@@ -11055,7 +11055,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -11066,7 +11066,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-topology"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "talkrypt-core",
@@ -11077,7 +11077,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-transport"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arti-client",
  "async-trait",
@@ -11102,7 +11102,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-tui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "qrcode",
@@ -11117,7 +11117,7 @@ dependencies = [
 
 [[package]]
 name = "talkrypt-wire"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
