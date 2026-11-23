@@ -17,11 +17,26 @@ zeroize.workspace = true
 # SHA-256 for the gossip dedup key (a content fingerprint of forwarded group
 # ciphertext — see the seen-set in the engine).
 sha2.workspace = true
-# Argon2id for password-gated channels (mixes a channel password into the root).
+# Argon2id for password-gated channels (mixes a channel password into the root) and
+# the default at-rest seal KDF.
 argon2 = "0.5"
+# PBKDF2-HMAC-SHA384 — the FIPS-approved (NIST SP 800-132) at-rest seal KDF, and the
+# memory-light choice for iOS/embedded where a large Argon2id arena can OOM. Selected
+# per-seal (self-describing header) and by build policy (see `[features]`).
+pbkdf2 = "0.12"
 # NFKC + case-fold for the name confusable-fold (homoglyph collision detection in
 # the self-declared-name trust display). Pure-Rust, no C deps.
 unicode-normalization = "0.1"
+
+[features]
+# At-rest seal KDF build policy. Default = Argon2id (memory-hard, strongest), with
+# the historic mobile-safe 19 MiB work factor so existing sealed blobs stay
+# byte-compatible. `kdf-pbkdf2` makes PBKDF2-HMAC-SHA384 the DEFAULT for new seals
+# (FIPS / standards builds). Either way BOTH KDFs are always compiled, so a blob
+# sealed under one unseals under the other — the choice only sets the default for
+# NEW seals. Callers may also pass an explicit platform preset per seal.
+default = []
+kdf-pbkdf2 = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

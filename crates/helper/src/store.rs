@@ -83,6 +83,7 @@ impl KeyStore {
                     passphrase: None,
                     wrapper: Some(hw.as_ref()),
                     allow_weak_hardware_only: weak,
+                    ..Default::default()
                 },
             )
             .map_err(HelperError::from)
