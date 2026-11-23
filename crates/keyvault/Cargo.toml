@@ -1,0 +1,27 @@
+[package]
+name = "talkrypt-keyvault"
+publish.workspace = true
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+
+# Agent-isolated signing microapp (docs/plans/0004-keyvault.md). Owns the entire
+# secret lifecycle — passphrase input, Argon2id/PBKDF2 unseal, ML-DSA/SLH-DSA
+# signing — inside one hardened process, reading the passphrase from the CONTROLLING
+# TERMINAL (/dev/tty), never a stdin an automation agent can pipe. Only PUBLIC data
+# (sealed blobs, pubkeys, addresses, signatures) crosses its boundary.
+[[bin]]
+name = "talkrypt-keyvault"
+path = "src/main.rs"
+
+[dependencies]
+# The reusable release-signing crypto: seal (Argon2id/PBKDF2), QRL-2.0 seeds, sign.
+talkrypt-relsign = { path = "../relsign" }
+# Process hardening (mlock / no-core-dump / anti-ptrace) + the secure RNG.
+talkrypt-crypto.workspace = true
+# /dev/tty termios (echo-off passphrase entry).
+libc.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

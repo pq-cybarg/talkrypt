@@ -95,15 +95,21 @@ reuse `crypto::mem::{harden_process, deny_debugger, LockedBox}`.
 
 ## Deliverables / sequencing
 
-- **A.** `relsign` → lib+bin; add sealed-seed `seal/unseal` + `sign/pubkey/verify`
-  to the lib; unit tests (round-trip, fail-closed, no-plaintext-in-blob,
-  zeroization). *(this PR)*
-- **B.** `talkrypt-keyvault` crate: hardened core + **TUI** `/dev/tty` front-end
-  (keygen + sign); the max-isolation path. *(this PR)*
-- **C.** **GUI** eframe popup front-end over the same engine. *(follow-up PR)*
-- **D.** Kani/Verus harnesses for the FV obligations; `formal.yml` wiring.
-  *(follow-up PR)*
+- **A.** ✅ **DONE (#129).** `relsign` → lib+bin; sealed-seed `seal/unseal` +
+  `sign/pubkey/verify` + the KDF seam (Argon2id/PBKDF2) + QRL-2.0 seeds; unit tests
+  (round-trip, fail-closed, no-plaintext-in-blob, the KDF×algo matrix).
+- **D.** ✅ **DONE (#128).** FV: formal spec (`docs/FORMAL-SEAL.md`) + Kani proofs
+  (`read_kdf`/`header_parse_model` totality + KDF-codec roundtrip) + type-enforced
+  `Zeroizing` (P7) + the core at-rest KDF seam; `formal.yml` wired. (FV before the
+  front-ends, per the sequencing decision.)
+- **B.** ✅ **DONE.** `talkrypt-keyvault` crate: hardened core (`crypto::mem`
+  no-core-dump / non-dumpable / anti-ptrace, `Zeroizing` secrets) + **TUI** `/dev/tty`
+  front-end (keygen + sign) — the max-isolation path. Verified: an agent with no
+  controlling terminal is refused (no leak); a human at a real terminal gets the full
+  keygen→sign→verify, the mnemonic shown only on screen (pty-driven test).
+- **C.** **GUI** eframe popup front-end over the same engine. *(follow-up PR — this
+  is the convenience path; the TUI is the security foundation.)*
 - **E.** Release scripts call the vault for signing; `.seed.enc` replaces plaintext
-  seeds; `docs/RELEASE.md` operator instructions. *(follow-up PR)*
+  seeds; operator instructions. *(follow-up PR)*
 
 NOT FIPS-validated · NOT CSfC-accredited · NOT NSA-approved · NOT audited.
