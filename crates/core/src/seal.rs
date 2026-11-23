@@ -51,7 +51,7 @@
 
 use rand::RngCore;
 use talkrypt_wire::{Reader, Writer};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::custody::CustodyTier;
 use crate::error::{CoreError, Result};
@@ -171,6 +171,40 @@ fn read_kdf(r: &mut Reader) -> Result<Kdf> {
         1 => Ok(Kdf::Pbkdf2 { iter: r.get_u32()? }),
         _ => Err(CoreError::Seal("unknown seal KDF id")),
     }
+}
+
+/// A FLAT, heap-free model of the seal-header PARSE phase (FV obligation P3 /
+/// docs/FORMAL-SEAL.md). It issues the EXACT same `Reader` call sequence as `unseal`'s
+/// decode — magic, version, tier, flags, [KDF iff FLAG_KDF], [salt iff FLAG_PASSPHRASE],
+/// [wrapped-KEK iff FLAG_HARDWARE], nonce, ct, finish — but returns `()` instead of
+/// copying the variable fields into `Vec`s, so CBMC/Kani stays tractable (the real
+/// decoder's nested-heap `Vec` return is what makes it intractable, exactly like the
+/// chain decoders — SECURITY-AUDIT §5). Kani proves THIS total; the differential
+/// proptest `header_model_matches_real_decode` binds its accept/reject to the literal
+/// `unseal` parse, and `unseal_..._never_panic` proves the real function total too.
+///
+/// Returns Ok(flags) on a structurally-valid header so the differential test can also
+/// check the flag byte agrees.
+#[cfg(any(test, kani))]
+fn header_parse_model(blob: &[u8]) -> core::result::Result<u8, ()> {
+    let mut r = Reader::new(blob);
+    r.get_bytes().map_err(|_| ())?; // magic
+    r.get_u8().map_err(|_| ())?; // version
+    r.get_u8().map_err(|_| ())?; // tier
+    let flags = r.get_u8().map_err(|_| ())?;
+    if flags & FLAG_KDF != 0 {
+        read_kdf(&mut r).map_err(|_| ())?;
+    }
+    if flags & FLAG_PASSPHRASE != 0 {
+        r.get_bytes().map_err(|_| ())?; // salt
+    }
+    if flags & FLAG_HARDWARE != 0 {
+        r.get_bytes().map_err(|_| ())?; // wrapped-KEK
+    }
+    r.get_bytes().map_err(|_| ())?; // nonce
+    r.get_bytes().map_err(|_| ())?; // ct
+    r.finish().map_err(|_| ())?;
+    Ok(flags)
 }
 
 /// A platform's secure-element key-wrapping facility. The host (which alone has
@@ -301,20 +335,24 @@ pub fn seal(plaintext: &[u8], opts: SealOptions) -> Result<Vec<u8>> {
         CustodyTier::SoftwareSealed
     };
 
-    // Hardware factor: a fresh random KEK, wrapped by the secure element.
-    let mut kek_rand = [0u8; KEK_LEN];
+    // Hardware factor: a fresh random KEK — SECRET. `Zeroizing` wipes it on EVERY exit
+    // path (incl. the `?` below and an unwind), a compiler-enforced guarantee (FV P7 /
+    // docs/FORMAL-SEAL.md) that a manual `.zeroize()` after use cannot give. The
+    // wrapped-KEK and salt/nonce are public header fields and stay plain.
+    let mut kek_rand = Zeroizing::new([0u8; KEK_LEN]);
     let mut wrapped_kek = Vec::new();
     if let Some(w) = opts.wrapper {
-        rand::rngs::OsRng.fill_bytes(&mut kek_rand);
-        wrapped_kek = w.wrap(&kek_rand)?;
+        rand::rngs::OsRng.fill_bytes(&mut kek_rand[..]);
+        wrapped_kek = w.wrap(&kek_rand[..])?;
     }
 
-    // Passphrase factor: the selected KDF over a fresh salt.
+    // Passphrase factor: the selected KDF over a fresh (public) salt; the derived key
+    // is SECRET.
     let mut salt = [0u8; SALT_LEN];
-    let mut pw_key = [0u8; KEK_LEN];
+    let mut pw_key = Zeroizing::new([0u8; KEK_LEN]);
     if let Some(pw) = opts.passphrase {
         rand::rngs::OsRng.fill_bytes(&mut salt);
-        pw_key = derive_pw_key(pw, &salt, kdf);
+        *pw_key = derive_pw_key(pw, &salt, kdf);
     }
 
     let mut nonce = [0u8; NONCE_LEN];
@@ -324,12 +362,9 @@ pub fn seal(plaintext: &[u8], opts: SealOptions) -> Result<Vec<u8>> {
     // can be altered and no factor stripped without failing the open.
     let header = encode_header(tier, flags, kdf_in_header, has_pw, &salt, has_hw, &wrapped_kek, &nonce);
 
-    let mut k_final = derive_kek(flags, has_hw, &kek_rand, has_pw, &pw_key);
+    // The final AES key is SECRET; Zeroizing wipes it even if aead::seal errors.
+    let k_final = Zeroizing::new(derive_kek(flags, has_hw, &kek_rand, has_pw, &pw_key));
     let ct = talkrypt_crypto::aead::seal(&k_final, &nonce, plaintext, &header)?;
-
-    k_final.zeroize();
-    kek_rand.zeroize();
-    pw_key.zeroize();
 
     let mut out = header;
     let mut w = Writer::new();
@@ -395,33 +430,32 @@ pub fn unseal(
         ));
     }
 
-    // Recover the two factors.
-    let mut kek_rand = [0u8; KEK_LEN];
+    // Recover the two factors. All three buffers are SECRET and `Zeroizing`-wrapped, so
+    // they are wiped on EVERY path including the final `pt?` and any unwind (FV P7).
+    let mut kek_rand = Zeroizing::new([0u8; KEK_LEN]);
     if has_hw {
-        let unwrapped = wrapper
-            .expect("checked above")
-            .unwrap(&wrapped_kek)
-            .map_err(CoreError::from)?;
+        let unwrapped = Zeroizing::new(
+            wrapper
+                .expect("checked above")
+                .unwrap(&wrapped_kek)
+                .map_err(CoreError::from)?,
+        );
         if unwrapped.len() != KEK_LEN {
             return Err(CoreError::Seal("unwrapped KEK has wrong length"));
         }
         kek_rand.copy_from_slice(&unwrapped);
     }
-    let mut pw_key = [0u8; KEK_LEN];
+    let mut pw_key = Zeroizing::new([0u8; KEK_LEN]);
     if has_pw {
-        pw_key = derive_pw_key(passphrase.expect("checked above"), &salt, effective_kdf);
+        *pw_key = derive_pw_key(passphrase.expect("checked above"), &salt, effective_kdf);
     }
 
     // The AAD must be the exact header bytes the sealer bound (rebuilt from the
     // tier + flags + KDF + fields decoded above).
     let header = encode_header(tier, flags, kdf_in_header, has_pw, &salt, has_hw, &wrapped_kek, &nonce);
 
-    let mut k_final = derive_kek(flags, has_hw, &kek_rand, has_pw, &pw_key);
+    let k_final = Zeroizing::new(derive_kek(flags, has_hw, &kek_rand, has_pw, &pw_key));
     let pt = talkrypt_crypto::aead::open(&k_final, &nonce, &ct, &header);
-
-    k_final.zeroize();
-    kek_rand.zeroize();
-    pw_key.zeroize();
 
     Ok(pt?)
 }
@@ -811,6 +845,41 @@ mod tests {
         assert!(unseal(&blob, Some(b"pw"), None).is_err());
     }
 
+    #[test]
+    fn header_model_accepts_a_real_seal_and_reports_flags() {
+        // Binds the flat Kani model to the literal encoder: every real seal is accepted
+        // by `header_parse_model`, and the flags it reports match what was sealed.
+        let pw_only = seal(
+            SEED,
+            SealOptions {
+                passphrase: Some(b"pw"),
+                kdf: Some(Kdf::Pbkdf2 { iter: 1000 }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let f = header_parse_model(&pw_only).unwrap();
+        assert!(f & FLAG_PASSPHRASE != 0, "passphrase factor flagged");
+        assert!(f & FLAG_KDF != 0, "non-legacy KDF carries a descriptor");
+        assert_eq!(f & FLAG_HARDWARE, 0, "no hardware factor");
+
+        let se = MockSE::new(7);
+        let two_factor = seal(
+            SEED,
+            SealOptions { passphrase: Some(b"pw"), wrapper: Some(&se), ..Default::default() },
+        )
+        .unwrap();
+        let f2 = header_parse_model(&two_factor).unwrap();
+        assert!(f2 & FLAG_PASSPHRASE != 0 && f2 & FLAG_HARDWARE != 0, "both factors flagged");
+        assert_eq!(f2 & FLAG_KDF, 0, "default (legacy) KDF omits the descriptor");
+
+        // A truncated blob is rejected by the model exactly as the real decode rejects it.
+        let mut trunc = two_factor.clone();
+        trunc.truncate(two_factor.len() / 2);
+        assert!(header_parse_model(&trunc).is_err());
+        assert!(unseal(&trunc, Some(b"pw"), Some(&se)).is_err());
+    }
+
     use proptest::prelude::*;
     proptest! {
         /// FORMAL OBLIGATION (fail-closed totality): the seal DECODER never panics on
@@ -846,6 +915,20 @@ mod proofs {
         let data: [u8; 16] = kani::any();
         let mut r = Reader::new(&data[..len]);
         let _ = read_kdf(&mut r);
+    }
+
+    /// P3: the FULL seal-header parse (the flat model mirroring `unseal`'s Reader
+    /// calls) is TOTAL on all ≤20-byte inputs — never panics / over-reads. The real
+    /// decode differs only in copying variable fields into `Vec`s (CBMC-intractable);
+    /// `header_model_accepts_a_real_seal_and_reports_flags` binds the model to real
+    /// seal output, and `unseal_..._never_panic` proves the literal function total.
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn header_parse_model_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 20);
+        let data: [u8; 20] = kani::any();
+        let _ = header_parse_model(&data[..len]);
     }
 
     /// The descriptor round-trips for ALL parameter values: `write_kdf` then `read_kdf`

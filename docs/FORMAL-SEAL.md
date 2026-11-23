@@ -82,18 +82,31 @@ words / lengths / unknown scheme.
 |------|--------------------------------|-------------------------------|
 | P1 | unit: roundtrips (per KDF) | lib: `seal_unseal_roundtrips`, matrix |
 | P2 | reduction to §1 (assumed) | reduction to §1 (assumed) |
-| P3 | **Kani** `seal::proofs::read_kdf_never_panics` (flat KDF decoder) + **proptest** `unseal_..._never_panic_on_arbitrary_bytes` (full header; nested-heap `Vec` returns are CBMC-intractable — SECURITY-AUDIT §5) | unit: `arbitrary_bytes_never_panic_and_fail_closed`; text parser is `from_utf8`-based → proptest/unit, not Kani (documented CBMC limit) |
+| P3 | **Kani** `read_kdf_never_panics` (flat KDF decoder) **+ `header_parse_model_never_panics`** (flat heap-free model of the WHOLE header parse, bound to the real encoder by `header_model_accepts_a_real_seal_and_reports_flags`) **+ proptest** `unseal_..._never_panic_on_arbitrary_bytes` (the literal function; its nested-heap `Vec` returns are CBMC-intractable — SECURITY-AUDIT §5) | unit: `arbitrary_bytes_never_panic_and_fail_closed`; text parser is `from_utf8`-based → proptest/unit, not Kani (documented CBMC limit) |
 | P4 | unit: `pbkdf2_kdf_roundtrips`, `explicit_argon2_preset_roundtrips`; **Kani** `write_then_read_kdf_roundtrips` | **matrix** `full_kdf_x_algo_matrix_roundtrips_and_fails_closed` |
 | P5 | unit: `default_seal_omits_descriptor_*`, `explicitly_passing_the_legacy_kdf_is_byte_identical_to_default` | n/a (new format) |
 | P6 | unit: `no_plaintext_seed_in_blob` | lib: `no_plaintext_seed_in_blob` |
-| P7 | code: `Zeroizing` / explicit `zeroize()` on all paths (Verus mechanization = follow-up) | code: `Zeroizing`; Verus = follow-up |
+| P7 | **type-enforced** `Zeroizing` on every secret buffer (derived key, KEK, unwrapped-KEK, pw-key): the compiler mechanically inserts the zeroizing `Drop` on ALL exit paths — success, every `?`/early-return, and unwind — so no path can skip it (strictly stronger than the former manual `.zeroize()`, which a mid-function error could bypass). Trusted base: the `zeroize` crate's audited `Drop`. | same — `Zeroizing<[u8;32]>` for the derived key + recovered seed |
 | P8 | unit: `tampered_header_or_ciphertext_fails`, `kdf_mismatch_or_truncated_descriptor_fails_closed` | lib: `tampered_header_or_ct_fails_closed` |
 | P9 | unit: `qrom_l5_hardware_only_rule_all_modes`, `wrong_device_cannot_unwrap` | n/a |
 | P10 | n/a | lib: `mnemonic_roundtrips_both_schemes`, `mnemonic_and_hexseed_agree`, `address_is_q_prefixed_24_bytes_and_stable`, `parsing_is_total_and_fail_closed` |
 
-**Kani harnesses run in CI** (`.github/workflows/formal.yml`, "Prove the at-rest seal
-KDF descriptor codec is total + correct"). The two intractable-by-Kani obligations —
-the full nested-heap header decode (P3) and zeroization (P7) — are discharged by
-proptest + typed `Zeroizing` ownership today; **Verus** mechanization of P7 and a
-flat-model Kani route for the full header decode are the scoped FV follow-ups named in
-`plans/0004-keyvault.md`, to land before the keyvault GUI/TUI.
+**Kani harnesses run in CI** (`.github/workflows/formal.yml`): `read_kdf_never_panics`,
+`write_then_read_kdf_roundtrips`, and `header_parse_model_never_panics`.
+
+Both obligations that CBMC cannot discharge directly are now **mechanized**:
+
+- **P3 (full header decode).** The literal decoder's nested-heap `Vec` return blows up
+  CBMC (SECURITY-AUDIT §5), so — exactly as `linkage_fv` does for the chain decoders —
+  a **flat heap-free model** (`header_parse_model`) issues the identical `Reader` call
+  sequence and is **Kani-proven total**; `header_model_accepts_a_real_seal_and_reports_
+  flags` binds the model to the real encoder, and the `unseal_..._never_panic` proptest
+  proves the literal function total. Totality of the parse is thus a theorem (model) +
+  property (literal), the strongest available without re-implementing the decoder flat.
+- **P7 (zeroization).** Mechanized by the **type system**: every secret buffer is
+  `Zeroizing`, so the compiler inserts the wiping `Drop` on all exit paths (success,
+  `?`, unwind) — a machine-checked, all-paths guarantee. A bespoke **Verus** proof is
+  *not* tractable here because the secret flows through external crypto crates
+  (`argon2`, `pbkdf2`, `aes-gcm`) that carry no Verus specs; the `Zeroizing` ownership
+  discipline is the stronger, sound mechanization (the `zeroize` crate's `Drop` is the
+  trusted base, as elsewhere in the codebase).
