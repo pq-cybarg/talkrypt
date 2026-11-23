@@ -273,9 +273,35 @@ fn main() {
             print!("{blob}");
             eprintln!("\nsealed {} seed (store as .seed.enc; delete the plaintext).", algo.label());
         }
+        Some("selftest-kdf") => {
+            // Seal + unseal a fixed seed with a platform KDF preset at its REAL work
+            // factor, and exit 0 on round-trip. Used to validate that a seal with a
+            // given KDF actually RUNS (and fits in memory) on a target / emulator — e.g.
+            // the mobile preset succeeds under a tight RAM cap where `desktop` (256 MiB
+            // Argon2id) is OOM-killed. See docs/FORMAL-SEAL.md / the mobile-KDF test.
+            let preset = args.get(1).map(String::as_str).unwrap_or("mobile");
+            let kdf = match preset {
+                "desktop" => seal::Kdf::desktop(),
+                "mobile" => seal::Kdf::mobile(),
+                "embedded" => seal::Kdf::embedded(),
+                "fips" => seal::Kdf::fips(),
+                _ => die("usage: selftest-kdf desktop|mobile|embedded|fips"),
+            };
+            let seed = [7u8; 32];
+            let pubkey = talkrypt_relsign::pubkey_of(algo, seed);
+            let blob = seal::seal_with_kdf(b"selftest", algo, &seed, &pubkey, kdf)
+                .unwrap_or_else(|e| die(&e.to_string()));
+            let got = seal::unseal(b"selftest", &blob).unwrap_or_else(|e| die(&e.to_string()));
+            if *got == seed {
+                println!("OK selftest-kdf {preset} ({})", algo.label());
+            } else {
+                die("selftest-kdf: round-trip mismatch");
+            }
+        }
         _ => die(
             "usage: [--algo ml-dsa|slh-dsa] keygen [--encrypt] | pubkey <seed> | \
-             sign <file> <seed> | verify <file> <sig> <pubkey> | seal <seed>",
+             sign <file> <seed> | verify <file> <sig> <pubkey> | seal <seed> | \
+             selftest-kdf <preset>",
         ),
     }
 }

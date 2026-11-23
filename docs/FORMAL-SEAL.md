@@ -12,6 +12,29 @@ tested, or **assumed** of an upstream-proven primitive. "NOT FIPS-validated / au
 throughout — "FIPS-approved KDF" names the algorithm (PBKDF2, SP 800-132), not a
 validated module.
 
+## 0. KDF selection by platform (the mobile memory constraint)
+
+Argon2id is memory-hard by design, so its work factor IS a RAM requirement. iOS
+terminates an app (and, hard, an app extension) that exceeds its memory budget, so the
+KDF preset must fit the target. Measured peak RSS of a seal+unseal (arm64, the mobile
+ABI; `talkrypt-relsign selftest-kdf <preset>`):
+
+| preset   | KDF                      | peak RSS | target                         |
+|----------|--------------------------|----------|--------------------------------|
+| fips     | PBKDF2-HMAC-SHA384 600k  | ~2 MB    | anywhere incl. iOS extensions  |
+| embedded | Argon2id 16 MiB / 2      | ~18 MB   | constrained / embedded         |
+| mobile   | Argon2id 64 MiB / 3      | ~66 MB   | an iOS/Android app             |
+| desktop  | Argon2id 256 MiB / 3     | ~258 MB  | desktop / release keys ONLY    |
+
+So the app's at-rest seal defaults to the **legacy Argon2id 19 MiB** (mobile-safe), a
+mobile build may pass `Kdf::mobile()`/`Kdf::embedded()`, a FIPS/standards build selects
+PBKDF2 (`kdf-pbkdf2` feature, ~2 MB — also the memory-light mobile option), and the
+256 MiB `desktop` preset is reserved for the offline **release** key in the keyvault.
+Because the sealed header self-describes the KDF (P4), a blob sealed with a mobile KDF
+unseals on desktop and vice-versa. (`selftest-kdf <preset>` is the harness that produced
+these figures; run it on any target/emulator — the heavy `desktop` preset is OOM-killed
+under a tight RAM cap where the others fit.)
+
 ## 1. Primitives (assumed, not re-proven here)
 
 - **AEAD** `aead::seal/open` = AES-256-GCM (FIPS 197 + SP 800-38D). Assumed IND-CCA2
