@@ -11046,6 +11046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "talkrypt-keyvault"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "talkrypt-crypto",
+ "talkrypt-relsign",
+ "zeroize",
+]
+
+[[package]]
 name = "talkrypt-relsign"
 version = "1.0.0"
 dependencies = [
