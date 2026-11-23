@@ -29,6 +29,7 @@ Cargo.lock.bak
 hs_ed25519_secret_key
 *identity*.bin
 *.seed
+*.seed.enc
 RELEASE_PUBKEY*.hex
 *release*pubkey*.hex
 *.pubkey
