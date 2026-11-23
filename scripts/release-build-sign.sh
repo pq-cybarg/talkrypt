@@ -37,12 +37,20 @@ done
 [[ "${TALKRYPT_SKIP_BUILD:-}" == "1" ]] && SKIP_BUILD=1
 
 KEYS_DIR="${TALKRYPT_KEYS_DIR:-$ROOT/.release-keys}"
-ML_SEED="$KEYS_DIR/ml-dsa.seed"
-SLH_SEED="$KEYS_DIR/slh-dsa.seed"
-if [[ ! -f "$ML_SEED" || ! -f "$SLH_SEED" ]]; then
+# Prefer SEALED keys (.seed.enc) — co-signed via `talkrypt-keyvault`, whose passphrase
+# is read from the operator's terminal (/dev/tty): the plaintext seed never leaves the
+# vault and no secret is exported to the environment. Fall back to legacy plaintext
+# seeds (.seed), co-signed by hash-dist.sh via env vars.
+ML_ENC="$KEYS_DIR/ml-dsa.seed.enc"; SLH_ENC="$KEYS_DIR/slh-dsa.seed.enc"
+ML_SEED="$KEYS_DIR/ml-dsa.seed";    SLH_SEED="$KEYS_DIR/slh-dsa.seed"
+if [[ -f "$ML_ENC" || -f "$SLH_ENC" ]]; then
+  SEALED=1
+elif [[ -f "$ML_SEED" && -f "$SLH_SEED" ]]; then
+  SEALED=0
+else
   echo "release-build-sign: no release keys in $KEYS_DIR" >&2
   echo "  generate them first:  bash scripts/release-keygen-build-sign.sh" >&2
-  echo "  (or point TALKRYPT_KEYS_DIR at a dir holding ml-dsa.seed + slh-dsa.seed)" >&2
+  echo "  (sealed *.seed.enc via talkrypt-keyvault, or legacy ml-dsa.seed + slh-dsa.seed)" >&2
   exit 1
 fi
 
@@ -54,11 +62,14 @@ if [[ -x "$HOME/.cargo/bin/cargo" ]]; then
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# Export the signing secrets to the child packagers EXACTLY like a CI secret would.
-# They are read by hash-dist.sh / sign-binaries.sh and never touch disk here.
-TALKRYPT_RELEASE_SK="$(grep -vE '^[[:space:]]*#' "$ML_SEED"  | tr -d '[:space:]')"
-TALKRYPT_RELEASE_SK_SLH="$(grep -vE '^[[:space:]]*#' "$SLH_SEED" | tr -d '[:space:]')"
-export TALKRYPT_RELEASE_SK TALKRYPT_RELEASE_SK_SLH
+# LEGACY plaintext keys only: export the secrets to hash-dist.sh EXACTLY like a CI
+# secret. SEALED keys export NOTHING — the keyvault holds the passphrase + seed
+# in-process and signs below.
+if [[ "$SEALED" -eq 0 ]]; then
+  TALKRYPT_RELEASE_SK="$(grep -vE '^[[:space:]]*#' "$ML_SEED"  | tr -d '[:space:]')"
+  TALKRYPT_RELEASE_SK_SLH="$(grep -vE '^[[:space:]]*#' "$SLH_SEED" | tr -d '[:space:]')"
+  export TALKRYPT_RELEASE_SK TALKRYPT_RELEASE_SK_SLH
+fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "### build (desktop) ###"
@@ -72,10 +83,39 @@ else
   [[ -d "$ROOT/dist" ]] || { echo "no dist/ to sign — drop --skip-build to build first" >&2; exit 1; }
 fi
 
-# Re-hash + co-sign the current dist/ (idempotent). hash-dist.sh signs SHA384SUMS
-# with each scheme whose secret is in the env and PUBLISHES the derived pubkeys.
-echo "### hash + co-sign (ML-DSA-87 + SLH-DSA) + publish pubkeys ###"
+# Re-hash the current dist/ (idempotent). With LEGACY plaintext keys, hash-dist.sh
+# ALSO co-signs SHA384SUMS from the env secrets and publishes the pubkeys. With SEALED
+# keys the env is empty, so hash-dist.sh only hashes and the keyvault co-signs next.
+echo "### hash (SHA-384 + SHA3-384)${SEALED:+ }$([[ $SEALED -eq 0 ]] && echo '+ co-sign (legacy seeds)') ###"
 bash "$ROOT/scripts/hash-dist.sh"
+
+if [[ "$SEALED" -eq 1 ]]; then
+  echo "### co-sign SHA384SUMS via talkrypt-keyvault (enter the key passphrase at the prompt) ###"
+  VAULT="$ROOT/target/release/talkrypt-keyvault"
+  [[ -x "$VAULT" ]] || VAULT="$ROOT/target/debug/talkrypt-keyvault"
+  if [[ ! -x "$VAULT" ]]; then
+    ( cd "$ROOT" && cargo build -q --release -p talkrypt-keyvault ) && VAULT="$ROOT/target/release/talkrypt-keyvault"
+  fi
+  RS="$ROOT/target/release/talkrypt-relsign"; [[ -x "$RS" ]] || RS="$ROOT/target/debug/talkrypt-relsign"
+  [[ -x "$RS" ]] || { ( cd "$ROOT" && cargo build -q -p talkrypt-relsign ); RS="$ROOT/target/debug/talkrypt-relsign"; }
+
+  # Co-sign SHA384SUMS with each sealed key present (the vault reads the passphrase from
+  # your terminal), and PUBLISH the public key (derived from the sealed header — needs
+  # NO passphrase). Writes dist/SHA384SUMS[.slh].sig + dist/RELEASE_PUBKEY*.hex.
+  sign_sealed() {
+    local algo="$1" enc="$2" pub="$3" label="$4"
+    [[ -f "$enc" ]] || return 0
+    "$VAULT" --algo "$algo" sign "$ROOT/dist/SHA384SUMS" "$enc"
+    {
+      echo "# talkrypt release public key ($label) — PUBLISHED WITH THIS RELEASE."
+      echo "# Pin the copy you obtained OUT OF BAND; a mirror could swap both file + key."
+      "$RS" --algo "$algo" pubkey "$enc"
+    } > "$ROOT/dist/$pub"
+    echo "==> keyvault-signed SHA384SUMS ($label); published dist/$pub"
+  }
+  sign_sealed ml-dsa  "$ML_ENC"  RELEASE_PUBKEY.hex     "ML-DSA-87"
+  sign_sealed slh-dsa "$SLH_ENC" RELEASE_PUBKEY_SLH.hex "SLH-DSA-SHA2-256s"
+fi
 
 if [[ "$DO_ATTEST" -eq 1 ]]; then
   echo "### per-binary launch-attestation sidecars (ML-DSA-87) ###"

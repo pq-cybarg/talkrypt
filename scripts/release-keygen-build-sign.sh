@@ -31,12 +31,12 @@ for a in "$@"; do
 done
 
 KEYS_DIR="${TALKRYPT_KEYS_DIR:-$ROOT/.release-keys}"
-ML_SEED="$KEYS_DIR/ml-dsa.seed"
-SLH_SEED="$KEYS_DIR/slh-dsa.seed"
+ML_ENC="$KEYS_DIR/ml-dsa.seed.enc"
+SLH_ENC="$KEYS_DIR/slh-dsa.seed.enc"
 
 mkdir -p "$KEYS_DIR"; chmod 700 "$KEYS_DIR"
 
-if [[ ( -f "$ML_SEED" || -f "$SLH_SEED" ) && "$FORCE" -ne 1 ]]; then
+if [[ ( -f "$ML_ENC" || -f "$SLH_ENC" ) && "$FORCE" -ne 1 ]]; then
   echo "release-keygen: keys already exist in $KEYS_DIR" >&2
   echo "  refusing to overwrite a release identity. To sign with them:" >&2
   echo "      bash scripts/release-build-sign.sh ${PASS[*]:-}" >&2
@@ -44,31 +44,26 @@ if [[ ( -f "$ML_SEED" || -f "$SLH_SEED" ) && "$FORCE" -ne 1 ]]; then
   echo "      bash scripts/release-keygen-build-sign.sh --force ${PASS[*]:-}" >&2
   exit 1
 fi
+# `--force`: drop the old sealed keys so the vault (which refuses to clobber --out) can mint anew.
+[[ "$FORCE" -eq 1 ]] && rm -f "$ML_ENC" "$SLH_ENC"
 
-# Build the signer if needed (rustup toolchain so it builds anywhere).
+# Build the vault if needed (rustup toolchain so it builds anywhere).
 [[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
-RELSIGN="$ROOT/target/release/talkrypt-relsign"
-[[ -x "$RELSIGN" ]] || { cargo build -q --release -p talkrypt-relsign; RELSIGN="$ROOT/target/release/talkrypt-relsign"; }
+VAULT="$ROOT/target/release/talkrypt-keyvault"
+[[ -x "$VAULT" ]] || { cargo build -q --release -p talkrypt-keyvault; VAULT="$ROOT/target/release/talkrypt-keyvault"; }
 
-# keygen prints "SEED <hex>" / "PUBKEY <hex>" on stdout. Capture the SEED into a
-# 0600 file; show only the PUBKEY (public) to the operator.
-mint() {  # <algo> <seed-file> <label>
-  local algo="$1" out="$2" label="$3" line seed pub
-  line="$("$RELSIGN" --algo "$algo" keygen 2>/dev/null)"
-  seed="$(printf '%s\n' "$line" | awk '/^SEED/   {print $2}')"
-  pub="$( printf '%s\n' "$line" | awk '/^PUBKEY/ {print $2}')"
-  [[ -n "$seed" && -n "$pub" ]] || { echo "keygen ($label) produced no key" >&2; exit 1; }
-  ( umask 077; printf '# %s release signing SEED (SECRET — back up OFFLINE, never commit)\n%s\n' "$label" "$seed" > "$out" )
-  chmod 600 "$out"
-  echo "  $label  pubkey: $pub"
-  echo "           seed  : $out  (chmod 600, gitignored)"
-}
-
-echo "### minting release keys in $KEYS_DIR ###"
-mint ml-dsa  "$ML_SEED"  "ML-DSA-87"
-mint slh-dsa "$SLH_SEED" "SLH-DSA-SHA2-256s"
+# The keyvault mints each key IN-PROCESS: it reads a NEW passphrase from YOUR terminal
+# (/dev/tty, not this script's stdin), seals the seed with Argon2id + AES-256-GCM to the
+# .seed.enc, prints the public address + pubkey, and shows the 24-word QRL mnemonic ON
+# SCREEN for your offline backup. The plaintext seed never leaves the vault, never
+# touches this script, and never hits the environment.
+echo "### minting SEALED release keys in $KEYS_DIR (choose a passphrase when prompted) ###"
+"$VAULT" --algo ml-dsa  keygen --out "$ML_ENC"  || { echo "ml-dsa keygen failed" >&2; exit 1; }
+"$VAULT" --algo slh-dsa keygen --out "$SLH_ENC" || { echo "slh-dsa keygen failed" >&2; exit 1; }
 echo
-echo ">>> BACK UP $KEYS_DIR OFFLINE NOW. These seeds are the release identity. <<<"
+echo ">>> BACK UP the 24-word mnemonics shown above (on screen only) AND remember the"
+echo "    passphrase. The sealed $KEYS_DIR/*.seed.enc + passphrase sign releases; the"
+echo "    mnemonic is your offline recovery if the sealed file is lost. <<<"
 echo
 
 exec bash "$ROOT/scripts/release-build-sign.sh" "${PASS[@]:-}"

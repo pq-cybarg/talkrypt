@@ -20,9 +20,9 @@ fail() { echo "" >&2; echo "  ✗ pre-commit: $1" >&2
   echo "" >&2; exit 1; }
 
 # 1) Secret-ish PATHS.
-echo "$staged" | grep -qiE '(^|/)\.release-keys/|\.seed$|\.secret$|(^|/)ml-dsa\.|(^|/)slh-dsa\.|(^|/)keys/|(^|/)secrets/|id_ed25519$|id_rsa$|\.pem$|\.p8$|\.pfx$|_sk\.|private.*key' \
+echo "$staged" | grep -qiE '(^|/)\.release-keys/|\.seed(\.enc)?$|\.secret$|(^|/)ml-dsa\.|(^|/)slh-dsa\.|(^|/)keys/|(^|/)secrets/|id_ed25519$|id_rsa$|\.pem$|\.p8$|\.pfx$|_sk\.|private.*key' \
   && fail "a staged path looks like a secret:
-$(echo "$staged" | grep -iE '(^|/)\.release-keys/|\.seed$|\.secret$|ml-dsa\.|slh-dsa\.|keys/|secrets/|\.pem$|\.p8$|\.pfx$|private.*key' | sed 's/^/      /')"
+$(echo "$staged" | grep -iE '(^|/)\.release-keys/|\.seed(\.enc)?$|\.secret$|ml-dsa\.|slh-dsa\.|keys/|secrets/|\.pem$|\.p8$|\.pfx$|private.*key' | sed 's/^/      /')"
 
 # 2) Secret-ish CONTENT in staged text (the relsign keygen format + PEM private keys).
 #    A 64-hex line right after a SEED label, or a PEM "PRIVATE KEY" header.
