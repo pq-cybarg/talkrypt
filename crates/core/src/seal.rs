@@ -810,4 +810,63 @@ mod tests {
         blob[i] ^= 0xff;
         assert!(unseal(&blob, Some(b"pw"), None).is_err());
     }
+
+    use proptest::prelude::*;
+    proptest! {
+        /// FORMAL OBLIGATION (fail-closed totality): the seal DECODER never panics on
+        /// arbitrary bytes and fails closed. Run with no custody factors so the
+        /// decoder path executes WITHOUT the (Kani-intractable) Argon2id/PBKDF2 — an
+        /// arbitrary blob that declares a passphrase/hardware factor is rejected at the
+        /// factor-required check before any KDF runs. Complements the flat `read_kdf`
+        /// Kani proof below, covering the whole header decode (whose nested-heap `Vec`
+        /// returns are CBMC-intractable, like the chain decoders — SECURITY-AUDIT §5).
+        #[test]
+        fn unseal_and_tier_of_never_panic_on_arbitrary_bytes(data in proptest::collection::vec(any::<u8>(), 0..300)) {
+            let _ = unseal(&data, None, None);
+            let _ = tier_of(&data);
+        }
+    }
+}
+
+/// Machine-checked (Kani) totality + correctness of the KDF descriptor codec — the
+/// flat, heap-free part of the seal header a non-legacy blob carries. The full header
+/// decode is covered by the `unseal_..._never_panic` proptest (its nested-heap `Vec`
+/// returns are CBMC-intractable). See `docs/plans/0004-keyvault.md` + SECURITY-AUDIT §5.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `read_kdf` never panics on ANY ≤16-byte input (it runs on attacker-controlled
+    /// bytes after `FLAG_KDF`), and either errors or yields a `Kdf`.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn read_kdf_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let data: [u8; 16] = kani::any();
+        let mut r = Reader::new(&data[..len]);
+        let _ = read_kdf(&mut r);
+    }
+
+    /// The descriptor round-trips for ALL parameter values: `write_kdf` then `read_kdf`
+    /// recovers exactly the same `Kdf` (no truncation / misparse of any field), for both
+    /// the Argon2id and PBKDF2 variants.
+    #[kani::proof]
+    fn write_then_read_kdf_roundtrips() {
+        let (m, t, p): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
+        let a = Kdf::Argon2id { m, t, p };
+        let mut wa = Writer::new();
+        write_kdf(&mut wa, a);
+        let ba = wa.into_vec();
+        let mut ra = Reader::new(&ba);
+        assert!(matches!(read_kdf(&mut ra), Ok(k) if k == a));
+
+        let iter: u32 = kani::any();
+        let b = Kdf::Pbkdf2 { iter };
+        let mut wb = Writer::new();
+        write_kdf(&mut wb, b);
+        let bb = wb.into_vec();
+        let mut rb = Reader::new(&bb);
+        assert!(matches!(read_kdf(&mut rb), Ok(k) if k == b));
+    }
 }

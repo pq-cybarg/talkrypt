@@ -75,6 +75,15 @@ jobs:
           cargo kani -p talkrypt-core --harness vouch::proofs::vouch_target_decode_never_panics
           cargo kani -p talkrypt-core --harness vouch::proofs::vouch_policy_decode_never_panics
           cargo kani -p talkrypt-core --harness vouch::proofs::vouch_decode_never_panics
+      - name: Prove the at-rest seal KDF descriptor codec is total + correct (core)
+        # The flat, heap-free KDF descriptor carried by a non-legacy sealed blob
+        # (FLAG_KDF). read_kdf is proven TOTAL on arbitrary bytes and the write/read
+        # pair is proven to round-trip for all params. The full seal-header decode
+        # (nested-heap Vec returns) is covered by the `unseal_..._never_panic` proptest,
+        # not Kani (CBMC-intractable, like the chain decoders — see docs/plans/0004).
+        run: |
+          cargo kani -p talkrypt-core --harness seal::proofs::read_kdf_never_panics
+          cargo kani -p talkrypt-core --harness seal::proofs::write_then_read_kdf_roundtrips
       - name: Prove the Sub-spec C antibody invariant + decay bounds (extracted kernels)
         # Invariant 1 ("never Vouched below neutral") + age_decay bounds, proven on the
         # PURE heap-free kernels — the CBMC-intractable HashMap grouping in `evaluate` is
