@@ -30,6 +30,7 @@ for a in "$@"; do
     --mobile)     DO_MOBILE=1 ;;
     --attest)     DO_ATTEST=1 ;;
     -h|--help)    sed -n '2,20p' "$0"; exit 0 ;;
+    "")           ;; # tolerate an empty arg (e.g. an over-quoted caller) — ignore
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done

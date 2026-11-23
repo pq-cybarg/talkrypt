@@ -66,4 +66,12 @@ echo "    passphrase. The sealed $KEYS_DIR/*.seed.enc + passphrase sign releases
 echo "    mnemonic is your offline recovery if the sealed file is lost. <<<"
 echo
 
-exec bash "$ROOT/scripts/release-build-sign.sh" "${PASS[@]:-}"
+# Hand off to build+sign. Pass PASS ONLY if non-empty: `"${PASS[@]:-}"` on an empty
+# array expands to a single empty-string arg, which the child's strict arg loop
+# rejected as `unknown arg:`. Guarding on length avoids that AND the set -u unbound
+# error on old bash.
+if [[ ${#PASS[@]} -gt 0 ]]; then
+  exec bash "$ROOT/scripts/release-build-sign.sh" "${PASS[@]}"
+else
+  exec bash "$ROOT/scripts/release-build-sign.sh"
+fi
