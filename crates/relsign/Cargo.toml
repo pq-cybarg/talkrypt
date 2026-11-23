@@ -9,6 +9,10 @@ license.workspace = true
 # a build/release utility that PQ-signs the release checksum manifest with the
 # project's ML-DSA-87 release key, so integrity rests on a signing authority the
 # project controls — not only bare checksums. Dogfoods talkrypt's own signature.
+[lib]
+name = "talkrypt_relsign"
+path = "src/lib.rs"
+
 [[bin]]
 name = "talkrypt-relsign"
 path = "src/main.rs"
@@ -16,4 +20,9 @@ path = "src/main.rs"
 [dependencies]
 fips205 = "0.5"
 rand = "0.8"
+argon2 = "0.5"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 talkrypt-crypto.workspace = true

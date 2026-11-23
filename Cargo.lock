@@ -11049,9 +11049,14 @@ dependencies = [
 name = "talkrypt-relsign"
 version = "1.0.0"
 dependencies = [
+ "argon2",
  "fips205",
+ "pbkdf2 0.12.2",
  "rand 0.8.8",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
  "talkrypt-crypto",
+ "zeroize",
 ]
 
 [[package]]
