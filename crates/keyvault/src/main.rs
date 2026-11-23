@@ -25,6 +25,8 @@ use talkrypt_relsign::{hex, seal, seed, sign, Algo};
 use zeroize::Zeroizing;
 
 mod tty;
+#[cfg(feature = "gui")]
+mod gui;
 
 fn die(msg: &str) -> ! {
     eprintln!("talkrypt-keyvault: {msg}");
@@ -119,8 +121,8 @@ fn main() {
             let hexseed = Zeroizing::new(seed::hexseed(desc, &gen_seed));
             tty::eprintln_tty("");
             tty::eprintln_tty(">>> WRITE THIS DOWN OFFLINE (shown only on this screen) <<<");
-            tty::eprintln_tty(&format!("mnemonic: {}", &*mnemonic));
-            tty::eprintln_tty(&format!("hexseed:  {}", &*hexseed));
+            tty::eprintln_tty(&format!("mnemonic: {}", mnemonic.as_str()));
+            tty::eprintln_tty(&format!("hexseed:  {}", hexseed.as_str()));
             tty::eprintln_tty("Keep the .seed.enc + this passphrase to sign; the mnemonic is an offline recovery backup.");
         }
 
@@ -152,9 +154,18 @@ fn main() {
             println!("signed {manifest} -> {sig_path} ({})", sealed_algo.label());
         }
 
+        Some("gui") => {
+            // Launch the window popup. The passphrase is typed into the window (not
+            // stdin), so the isolation boundary is the window the agent can't observe.
+            #[cfg(feature = "gui")]
+            gui::run().unwrap_or_else(|e| die(&e));
+            #[cfg(not(feature = "gui"))]
+            die("this keyvault was built without the GUI — rebuild with --features gui, or use the TUI (keygen/sign)");
+        }
+
         _ => die(
             "usage: [--algo ml-dsa|slh-dsa] keygen --out <file.seed.enc> [--kdf desktop|mobile|embedded|fips] | \
-             sign <manifest> <file.seed.enc>",
+             sign <manifest> <file.seed.enc> | gui",
         ),
     }
 }

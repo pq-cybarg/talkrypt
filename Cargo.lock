@@ -11049,6 +11049,8 @@ dependencies = [
 name = "talkrypt-keyvault"
 version = "1.0.0"
 dependencies = [
+ "eframe",
+ "egui",
  "libc",
  "talkrypt-crypto",
  "talkrypt-relsign",

@@ -107,9 +107,13 @@ reuse `crypto::mem::{harden_process, deny_debugger, LockedBox}`.
   front-end (keygen + sign) — the max-isolation path. Verified: an agent with no
   controlling terminal is refused (no leak); a human at a real terminal gets the full
   keygen→sign→verify, the mnemonic shown only on screen (pty-driven test).
-- **C.** **GUI** eframe popup front-end over the same engine. *(follow-up PR — this
-  is the convenience path; the TUI is the security foundation.)*
-- **E.** Release scripts call the vault for signing; `.seed.enc` replaces plaintext
-  seeds; operator instructions. *(follow-up PR)*
+- **C.** ✅ **DONE.** **GUI** eframe popup front-end (feature `gui`, default) over the
+  same engine — keygen + sign; the passphrase is typed into the window and the
+  mnemonic shown in the window, so a terminal-scraping agent sees nothing. Builds with
+  `--no-default-features` as a lean TUI-only signer (no windowing deps) for headless
+  release hosts.
+- **E.** ✅ **DONE (#131).** `release-keygen-build-sign.sh` mints SEALED keys via the
+  vault; `release-build-sign.sh` co-signs `SHA384SUMS` through the vault (terminal
+  passphrase, no env secret); legacy plaintext seeds still work. Verified end-to-end.
 
 NOT FIPS-validated · NOT CSfC-accredited · NOT NSA-approved · NOT audited.
