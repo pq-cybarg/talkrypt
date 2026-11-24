@@ -886,10 +886,12 @@ struct Inner {
     root0: [u8; 32],
     peers: Mutex<Vec<Peer>>,
     events_tx: tokio::sync::mpsc::UnboundedSender<Event>,
-    /// Optional LoRa-mesh message carry (set by `start_mesh_messaging`). When
-    /// present, `Route::Broadcast` group messages are ALSO fragmented and
-    /// transmitted over the mesh, in addition to the peer fan-out.
-    mesh_tx: Mutex<Option<MeshTx>>,
+    /// Active mesh message carries (each set by a `start_mesh_messaging` call). When
+    /// non-empty, `Route::Broadcast` group messages are ALSO fragmented and transmitted
+    /// over EVERY carry, in addition to the peer fan-out. A node may hold several at
+    /// once — e.g. a LoRa radio AND an MQTT gateway, or Meshtastic AND Meshcore — so one
+    /// node can bridge any pair of mesh modalities (see [`Core::start_mesh_messaging`]).
+    mesh_tx: Mutex<Vec<MeshTx>>,
     // --- TreeKEM group state (GroupRole::None for plain pairwise chats) ---
     role: GroupRole,
     group: AsyncMutex<Option<TreeKemGroup>>,
@@ -1251,7 +1253,7 @@ impl Core {
             root0,
             peers: Mutex::new(Vec::new()),
             events_tx,
-            mesh_tx: Mutex::new(None),
+            mesh_tx: Mutex::new(Vec::new()),
             role,
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
@@ -2285,26 +2287,37 @@ impl Core {
     ///   `gossip_id`/`SeenSet` dedup as a peer frame, which is essential because a
     ///   broadcast mesh redelivers every frame many times.
     ///
-    /// A node on both mesh and a peer transport bridges the two: a mesh-received
-    /// frame is re-forwarded to connected peers by `handle_group_msg`'s gossip
-    /// loop, and vice versa, with `SeenSet` preventing loops. This slice carries
-    /// chat CONTENT only; group membership/commits ride the primary transport.
+    /// **Bridging (any-to-any).** A gossip-enabled node forwards every received
+    /// `GroupMsg` onto all of its OTHER bearers via `handle_group_msg`: to its peer
+    /// links (LAN/Tor/Nym, unified under `MultiTransport`) AND, via `mesh_tee`, onto
+    /// every mesh carry except the one it arrived on. So a node holding any two
+    /// modalities — peer↔mesh, or mesh↔mesh (e.g. LoRa↔MQTT, Meshtastic↔Meshcore,
+    /// since several carries may be active at once) — bridges them in BOTH directions,
+    /// and the whole group is connected as long as the bridge graph is. `SeenSet`
+    /// (ciphertext `gossip_id`) collapses the re-floods a broadcast mesh produces and
+    /// prevents loops. This slice carries chat CONTENT only; group membership/commits
+    /// ride the primary transport.
     pub async fn start_mesh_messaging(
         &self,
         node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
         policy: talkrypt_transport::mesh::MeshPolicy,
     ) {
-        // Outbound: register the carry so `route` tees broadcasts to the mesh.
+        // Outbound: append the carry so `route`/`mesh_tee` tee broadcasts to it (in
+        // addition to any carries already active — a node may hold several).
+        let carry_id = MESH_CARRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut g = self.inner.mesh_tx.lock().unwrap();
-            *g = Some(MeshTx {
+            g.push(MeshTx {
+                id: carry_id,
                 node: node.clone(),
                 channel: policy.channel,
                 msg_id: std::sync::atomic::AtomicU16::new(0),
             });
         }
         // Inbound: reassemble Frame-kind fragments and process each recovered
-        // GroupMsg through the self-authenticating group path.
+        // GroupMsg through the self-authenticating group path. The carry id lets
+        // `handle_group_msg` bridge the frame onto every OTHER mesh carry while
+        // skipping this one (no echo).
         let inner = self.inner.clone();
         let channel = policy.channel;
         tokio::spawn(async move {
@@ -2324,7 +2337,7 @@ impl Core {
                     .unwrap_or_else(|| "mesh".to_string());
                 if let Some(bytes) = reasm.accept(&src, &pkt.payload) {
                     if let Some(Frame::GroupMsg(ct)) = Frame::decode(&bytes) {
-                        handle_group_msg(&inner, MESH_SOURCE_FP, ct).await;
+                        handle_group_msg(&inner, MESH_SOURCE_FP, ct, Some(carry_id)).await;
                     }
                 }
             }
@@ -3145,10 +3158,17 @@ async fn send_payload(
     Ok(())
 }
 
-/// Outbound LoRa-mesh message carry, set by [`Core::start_mesh_messaging`]. Holds
-/// the node handle, the transmit channel, and a rolling per-message id so each
-/// mesh transmission's fragments group correctly.
+/// Process-wide sequence handing each mesh carry a unique id, so the inbound task of
+/// one carry can tell [`mesh_tee`] to skip re-transmitting on the carry a frame just
+/// arrived on (the echo), while still bridging it onto every OTHER carry.
+static MESH_CARRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Outbound mesh message carry, appended by [`Core::start_mesh_messaging`]. Holds a
+/// unique carry `id`, the node handle, the transmit channel, and a rolling per-message
+/// id so each mesh transmission's fragments group correctly. A node may hold several
+/// (LoRa + MQTT, Meshtastic + Meshcore, …) to bridge mesh modalities.
 struct MeshTx {
+    id: u64,
     node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
     channel: u8,
     msg_id: std::sync::atomic::AtomicU16,
@@ -3169,29 +3189,42 @@ const MESH_SOURCE_FP: [u8; 48] = [0xED; 48];
 /// stay on the primary transport to conserve scarce LoRa airtime). The frame is
 /// already the opaque, self-authenticating group ciphertext, so the mesh moves
 /// only sealed bytes.
-async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame) {
+async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame, skip: Option<u64>) {
     if !matches!(frame, Frame::GroupMsg(_)) {
         return;
     }
-    let (node, channel, id) = {
+    // Snapshot every active carry (except the one a frame just arrived on, to skip the
+    // echo) under the lock; the node handles are cheap `Arc`s. Each carry gets its own
+    // rolling message id so its fragments group independently.
+    let carries: Vec<(std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>, u8, u16)> = {
         let guard = inner.mesh_tx.lock().unwrap();
-        let Some(tx) = guard.as_ref() else { return };
-        (
-            tx.node.clone(),
-            tx.channel,
-            tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
+        guard
+            .iter()
+            .filter(|tx| Some(tx.id) != skip)
+            .map(|tx| {
+                (
+                    tx.node.clone(),
+                    tx.channel,
+                    tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect()
     };
+    if carries.is_empty() {
+        return;
+    }
     let bytes = frame.encode();
-    let mtu = node.mtu();
-    if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
-        talkrypt_transport::mesh::frag::KIND_FRAME,
-        id,
-        &bytes,
-        mtu,
-    ) {
-        for f in frags {
-            let _ = node.send(channel, &f).await;
+    for (node, channel, id) in carries {
+        let mtu = node.mtu();
+        if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
+            talkrypt_transport::mesh::frag::KIND_FRAME,
+            id,
+            &bytes,
+            mtu,
+        ) {
+            for f in frags {
+                let _ = node.send(channel, &f).await;
+            }
         }
     }
 }
@@ -3216,7 +3249,7 @@ async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
     // Tee broadcast chat content onto the mesh (if active), in addition to the
     // normal peer fan-out below. Works in both relayed and host-coordinated modes.
     if matches!(to, Route::Broadcast) {
-        mesh_tee(inner, &frame).await;
+        mesh_tee(inner, &frame, None).await;
     }
     if inner.relayed {
         let routed = Routed {
@@ -3550,7 +3583,7 @@ async fn reader_loop(
                 }
             }
             Some(Frame::GroupMsg(b)) => {
-                handle_group_msg(&inner, from, b).await;
+                handle_group_msg(&inner, from, b, None).await;
             }
             Some(Frame::Promote(payload)) if inner.role != GroupRole::None => {
                 // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
@@ -4684,7 +4717,7 @@ async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
     }
 }
 
-async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
+async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>, src_mesh: Option<u64>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
     // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
     // forward — so no double-render and no forwarding loop. Two encryptions of the
@@ -4776,6 +4809,12 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
                 let _ = send_payload(&s, &w, &frame_bytes).await;
             }
         }
+        // Bridge the content onto the mesh island(s) too: re-tee onto every active
+        // mesh carry EXCEPT the one it arrived on (`src_mesh`). This completes the
+        // any-to-any bridge — peer→mesh and mesh→other-mesh — that the peer fan-out
+        // above handles for peer→peer. `SeenSet` already blocked a repeat, so this
+        // runs once per distinct ciphertext; teeing is a no-op when we hold no mesh.
+        mesh_tee(inner, &Frame::GroupMsg(gct.clone()), src_mesh).await;
     }
     // D1 Layer-A/C keeper: ANY keeper-enabled node (not just the relaying host) buffers
     // the opaque frame for roster members that are NOT currently connected, so an
@@ -5566,6 +5605,191 @@ mod tests {
             "the mesh-delivered frame is attributed to the sender's verified leaf, \
              not the mesh source sentinel"
         );
+    }
+
+    /// Await a specific message text on a receiver, returning the attributed sender.
+    #[cfg(test)]
+    async fn await_message_text(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &str,
+    ) -> Option<[u8; 48]> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Some(Event::Message { text, from, .. }) if text == want => break Some(from),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// peer→mesh bridging (the direction that needs `handle_group_msg` to re-tee onto
+    /// the mesh): a peer-island sender reaches a MESH-ONLY member through a bridge node
+    /// that received the frame over a peer link. Group forms over loopback (to share
+    /// keys); then X is cut to mesh-only, B keeps only its peer link to the host H, and
+    /// H keeps only its peer link to B — so H→X is possible ONLY if B bridges its
+    /// peer-received frame onto the mesh.
+    #[tokio::test]
+    async fn peer_to_mesh_bridge_reaches_a_mesh_only_member() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#p2m",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        b.enable_gossip(); // B is the bridge
+        b.connect("h").await.unwrap();
+        x.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // B and X share a mesh; H is NOT on it. So H's content reaches X only if B
+        // re-tees the peer-received frame onto the mesh.
+        let mesh = MockMeshFabric::new(200);
+        b.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(mesh.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // X is mesh-only; B keeps only its peer link to H; and crucially H keeps only
+        // its peer link to B (so H cannot reach X directly — only B's mesh re-tee can).
+        x.inner.peers.lock().unwrap().clear();
+        let h_fp = h.fingerprint();
+        let b_fp = b.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp);
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint == b_fp);
+
+        h.send("peer island to mesh island").await.unwrap();
+        let from = await_message_text(&mut x_rx, "peer island to mesh island").await;
+        assert_eq!(
+            from,
+            Some(h.fingerprint()),
+            "a mesh-only member must receive the peer sender's frame, bridged onto the mesh by B, \
+             attributed to H's verified leaf"
+        );
+    }
+
+    /// mesh↔mesh bridging via a single multi-homed node (needs multiple mesh carries):
+    /// X lives on mesh M1, Z on a DISJOINT mesh M2, and B carries BOTH. With every
+    /// loopback link severed, X↔Z is possible ONLY because B re-tees a frame received
+    /// on one mesh onto the other (skipping the arrival carry, so no echo).
+    #[tokio::test]
+    async fn two_mesh_modalities_bridge_through_one_node() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["b".into()],
+            "#m2m",
+        );
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, true);
+        b.enable_gossip();
+        b.host().await.unwrap();
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        let (z, mut z_rx) = group_core(&fabric, "z", &desc, false);
+        x.connect("b").await.unwrap();
+        z.connect("b").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let m1 = MockMeshFabric::new(200); // X's modality (e.g. LoRa / Meshtastic)
+        let m2 = MockMeshFabric::new(200); // Z's modality (e.g. MQTT / Meshcore)
+        b.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Sever ALL loopback: the two meshes, bridged by B, are the only paths.
+        x.inner.peers.lock().unwrap().clear();
+        z.inner.peers.lock().unwrap().clear();
+        b.inner.peers.lock().unwrap().clear();
+
+        // X (mesh M1) -> Z (mesh M2), bridged by B.
+        x.send("across the modalities").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut z_rx, "across the modalities").await,
+            Some(x.fingerprint()),
+            "Z on mesh M2 must receive X's M1 frame, bridged by the multi-homed B"
+        );
+        // and the reverse Z -> X.
+        z.send("and back again").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut x_rx, "and back again").await,
+            Some(z.fingerprint()),
+            "X on mesh M1 must receive Z's M2 frame through the same bridge"
+        );
+    }
+
+    /// FULL any-to-any matrix through one bridge: a peer island (Y), a mesh island (X
+    /// on M1), and a second mesh island (Z on M2), all stitched by B which spans the
+    /// peer transport AND both meshes. Every island both reaches and is reached by every
+    /// other — peer↔mesh and mesh↔mesh — with `SeenSet` keeping each delivery singular.
+    #[tokio::test]
+    async fn full_any_to_any_matrix_through_one_bridge() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["b".into()],
+            "#matrix",
+        );
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, true);
+        b.enable_gossip();
+        b.host().await.unwrap();
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        let (y, mut y_rx) = group_core(&fabric, "y", &desc, false);
+        let (z, mut z_rx) = group_core(&fabric, "z", &desc, false);
+        x.connect("b").await.unwrap();
+        y.connect("b").await.unwrap();
+        z.connect("b").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let m1 = MockMeshFabric::new(200);
+        let m2 = MockMeshFabric::new(200);
+        b.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Islands: X mesh-M1-only, Z mesh-M2-only, Y peer-only; B keeps ONLY its peer
+        // link to Y (X/Z reachable through the meshes it also carries).
+        x.inner.peers.lock().unwrap().clear();
+        z.inner.peers.lock().unwrap().clear();
+        let y_fp = y.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == y_fp);
+
+        // peer -> both meshes.
+        y.send("y says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut x_rx, "y says hi").await, Some(y.fingerprint()), "peer->mesh(X)");
+        assert_eq!(await_message_text(&mut z_rx, "y says hi").await, Some(y.fingerprint()), "peer->mesh(Z)");
+
+        // mesh(M1) -> peer AND -> the other mesh.
+        x.send("x says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut y_rx, "x says hi").await, Some(x.fingerprint()), "mesh->peer(Y)");
+        assert_eq!(await_message_text(&mut z_rx, "x says hi").await, Some(x.fingerprint()), "mesh->mesh(X->Z)");
+
+        // mesh(M2) -> peer AND -> the other mesh.
+        z.send("z says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut y_rx, "z says hi").await, Some(z.fingerprint()), "mesh->peer(Y)");
+        assert_eq!(await_message_text(&mut x_rx, "z says hi").await, Some(z.fingerprint()), "mesh->mesh(Z->X)");
     }
 
     /// Mesh messaging robustness: foreign / junk traffic on the mesh channel is

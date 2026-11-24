@@ -1406,15 +1406,17 @@ impl TalkryptClient {
         bridge
     }
 
-    /// Carry this group's chat messages over the INTERNET via a Meshtastic MQTT
-    /// gateway: connect to `broker_host:broker_port` and publish/subscribe talkrypt
-    /// fragments as `PRIVATE_APP` packets on mesh `channel_name`, encapsulated in the
-    /// same `ServiceEnvelope` format real Meshtastic MQTT gateways use (so it
-    /// interoperates with the Meshtastic ecosystem). `channel` is the mesh channel
-    /// index. The Rust side OWNS the MQTT connection — no host backend needed, unlike
-    /// the BLE/serial `start_mesh_messaging`. talkrypt's PQ seal is the real envelope;
-    /// the broker sees only ciphertext. Call once per chat. Needs the `mesh` feature
-    /// in the built `.so` (else this errors) — build with `TALKRYPT_MESH=1`.
+    /// Carry this group's chat messages over the INTERNET via an MQTT broker: connect
+    /// to `broker_host:broker_port` and publish/subscribe talkrypt fragments on
+    /// `channel_name`. `channel` is the mesh channel index. `meshcore` selects the
+    /// carriage: `false` → **Meshtastic** `ServiceEnvelope`/`PRIVATE_APP` packets on the
+    /// `…/2/e/…` topic (interoperates with the real Meshtastic MQTT ecosystem);
+    /// `true` → **Meshcore** companion channel-text frames on a distinct `…/mc/…` topic
+    /// (a talkrypt↔talkrypt bridge — Meshcore has no standard MQTT-gateway envelope).
+    /// Either way the Rust side OWNS the MQTT connection — no host backend needed,
+    /// unlike the BLE/serial `start_mesh_messaging` — and talkrypt's PQ seal is the real
+    /// envelope; the broker sees only ciphertext. Call once per chat. Needs the `mesh`
+    /// feature in the built `.so` (else this errors) — build with `TALKRYPT_MESH=1`.
     /// Always exported (stable uniffi interface); the body is feature-split like
     /// `host_nym` — real on a `mesh`-built `.so`, an error otherwise.
     pub fn start_mesh_mqtt(
@@ -1423,19 +1425,29 @@ impl TalkryptClient {
         broker_port: u16,
         channel_name: String,
         channel: u8,
+        meshcore: bool,
     ) -> Result<(), FfiError> {
         #[cfg(feature = "mesh")]
         {
-            use talkrypt_transport::mesh::mqtt::{connect, MqttConfig};
+            use talkrypt_transport::mesh::mqtt::{connect, MqttConfig, MqttMethod};
             // Unique-ish per connect so two nodes on one broker don't collide on MQTT id.
             let uniq = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
+            // `meshcore = true` carries fragments as Meshcore companion channel-text
+            // frames on a distinct `…/mc/…` topic; otherwise Meshtastic ServiceEnvelope
+            // (interoperates with the real Meshtastic MQTT ecosystem).
+            let method = if meshcore {
+                MqttMethod::EncapsulatedMeshcore
+            } else {
+                MqttMethod::EncapsulatedMeshtastic
+            };
             let cfg = MqttConfig {
                 root: "msh/US".into(),
                 channel_name,
                 gateway_id: format!("!{uniq:08x}"),
+                method,
                 ..Default::default()
             };
             let client_id = format!("talkrypt-{uniq:x}");
@@ -1453,7 +1465,7 @@ impl TalkryptClient {
         }
         #[cfg(not(feature = "mesh"))]
         {
-            let _ = (&broker_host, broker_port, &channel_name, channel);
+            let _ = (&broker_host, broker_port, &channel_name, channel, meshcore);
             Err(FfiError::Failed(
                 "this build lacks mesh-over-internet support — rebuild the .so with TALKRYPT_MESH=1 (--features mesh)".into(),
             ))

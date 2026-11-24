@@ -115,6 +115,26 @@ pub fn parse_channel_recv_b64(payload: &[u8]) -> Option<(u8, Vec<u8>)> {
     Some((rx.channel, frag))
 }
 
+/// Build a minimal `PACKET_CHANNEL_MSG_RECV` (0x08) frame carrying a base64-wrapped
+/// talkrypt fragment — the exact inverse of [`parse_channel_recv_b64`]. Needed by the
+/// **mesh-over-internet** Meshcore carriage, where two talkrypt apps meet at an MQTT
+/// broker with no physical node to emit a real recv frame: the sender synthesises the
+/// recv-shaped frame the peer's companion parser already understands. `path_len`,
+/// `text_type` and `timestamp` are zeroed (unused by talkrypt — the seal is the real
+/// envelope). The serial/BLE *send* path still uses [`encode_channel_text_b64`] (the
+/// 0x03 command a real node expects); this is only for the broker bridge.
+pub fn encode_channel_recv_b64(channel: u8, payload: &[u8]) -> Vec<u8> {
+    let text = b64().encode(payload);
+    let mut p = Vec::with_capacity(8 + text.len());
+    p.push(PACKET_CHANNEL_MSG_RECV); // 0x08
+    p.push(channel);
+    p.push(0); // path_len
+    p.push(0); // text_type
+    p.extend_from_slice(&0u32.to_le_bytes()); // timestamp (unused)
+    p.extend_from_slice(text.as_bytes());
+    p
+}
+
 // ---------------------------------------------------------------------------
 // Companion serial outer framing + serial adapter (serial only; BLE uses raw
 // frames per notification). Firmware-dependent — see module docs.
@@ -312,6 +332,18 @@ mod tests {
         let rx3 = parse_channel_recv(&v3).unwrap();
         assert_eq!(rx3.channel, 5);
         assert_eq!(rx3.text, b"d29ybGQ=");
+    }
+
+    #[test]
+    fn encode_recv_b64_roundtrips_through_parse() {
+        // The broker-bridge inverse: encode_channel_recv_b64 -> parse_channel_recv_b64.
+        let frag: Vec<u8> = [0xA7u8, 0x6D, 0x02, 0x03].iter().copied().chain(0..200u8).collect();
+        let frame = encode_channel_recv_b64(9, &frag);
+        assert_eq!(frame[0], PACKET_CHANNEL_MSG_RECV);
+        assert_eq!(frame[1], 9); // channel
+        let (ch, got) = parse_channel_recv_b64(&frame).unwrap();
+        assert_eq!(ch, 9);
+        assert_eq!(got, frag);
     }
 
     #[test]

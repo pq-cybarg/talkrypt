@@ -508,7 +508,10 @@ class MainActivity : Activity() {
                 add("Mesh over LoRa (Meshtastic BLE)")
                 add("Mesh over LoRa (Meshcore BLE)")
             }
-            if (!meshMqttOn) add("Mesh over internet (MQTT gateway)")
+            if (!meshMqttOn) {
+                add("Mesh over internet (Meshtastic MQTT)")
+                add("Mesh over internet (Meshcore MQTT)")
+            }
             add("Re-share invite")
             if (lc.meta.inviteUri != null) add("Show invite QR")
             add("Safety number (verify)")
@@ -527,7 +530,8 @@ class MainActivity : Activity() {
                     "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id, MeshKind.MESHTASTIC)
                     "Mesh over LoRa (Meshcore BLE)" -> startMesh(id, MeshKind.MESHCORE)
                     "Stop mesh (LoRa)" -> stopMesh(id)
-                    "Mesh over internet (MQTT gateway)" -> promptMeshMqtt(id)
+                    "Mesh over internet (Meshtastic MQTT)" -> promptMeshMqtt(id, meshcore = false)
+                    "Mesh over internet (Meshcore MQTT)" -> promptMeshMqtt(id, meshcore = true)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast(Loc.s(R.string.m1_no_invite))
                     "Show invite QR" -> lc.meta.inviteUri?.let { showInviteQr(it) }
                     "Safety number (verify)" -> {
@@ -662,8 +666,9 @@ class MainActivity : Activity() {
      *  Needs a `.so` built with TALKRYPT_MESH=1; otherwise the FFI returns a clear
      *  "rebuild with TALKRYPT_MESH=1" error, surfaced here. The connect() call blocks,
      *  so it runs off the UI thread. */
-    private fun promptMeshMqtt(id: String) {
+    private fun promptMeshMqtt(id: String, meshcore: Boolean) {
         val c = sessions.get(id)?.client ?: run { toast(Loc.s(R.string.m2_connect_first)); return }
+        val carriage = if (meshcore) "Meshcore" else "Meshtastic"
         val pad = (12 * resources.displayMetrics.density).toInt()
         val host = android.widget.EditText(this).apply {
             hint = "broker host (e.g. mqtt.meshtastic.org)"
@@ -686,20 +691,20 @@ class MainActivity : Activity() {
             addView(host); addView(port); addView(chan)
         }
         android.app.AlertDialog.Builder(this)
-            .setTitle("Mesh over internet (MQTT)")
-            .setMessage("Bridge this chat across a Meshtastic MQTT gateway. Your messages stay PQ-sealed end to end; the broker sees only ciphertext.")
+            .setTitle("Mesh over internet ($carriage MQTT)")
+            .setMessage("Bridge this chat across an MQTT broker using the $carriage carriage. Your messages stay PQ-sealed end to end; the broker sees only ciphertext.")
             .setView(col)
             .setPositiveButton("Connect") { _, _ ->
                 val h = host.text.toString().trim()
                 val p = port.text.toString().trim().toUShortOrNull()
                 val ch = chan.text.toString().trim().ifEmpty { "LongFast" }
                 if (h.isEmpty() || p == null) { toast("Enter a broker host and a valid port"); return@setPositiveButton }
-                sysLine(id, "mesh-over-internet: connecting to $h:$p …")
+                sysLine(id, "mesh-over-internet ($carriage): connecting to $h:$p …")
                 Thread {
-                    val res = runCatching { c.startMeshMqtt(h, p, ch, 0.toUByte()) }
+                    val res = runCatching { c.startMeshMqtt(h, p, ch, 0.toUByte(), meshcore) }
                     ui.post {
                         res.fold(
-                            onSuccess = { meshMqttOn = true; sysLine(id, "mesh-over-internet linked ($h:$p, #$ch)") },
+                            onSuccess = { meshMqttOn = true; sysLine(id, "mesh-over-internet linked via $carriage ($h:$p, #$ch)") },
                             onFailure = { e -> sysLine(id, "mesh-over-internet failed: ${e.message}") },
                         )
                     }
