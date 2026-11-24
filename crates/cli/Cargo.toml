@@ -31,6 +31,9 @@ tor = ["talkrypt-transport/tor"]
 # (`--mesh-serial`). Pulls tokio-serial; off by default so the plain CLI has no
 # serial/udev dependency.
 mesh-radio = ["talkrypt-transport/mesh-radio"]
+# Carry/bridge messages over the INTERNET via a Meshtastic/Meshcore MQTT broker
+# (`relay --mqtt-broker`, `--mqtt-broker` on host/join). Pulls rumqttc; off by default.
+mesh-mqtt = ["talkrypt-transport/mesh-mqtt"]
 # Enable classification handling-markings (off in consumer builds; on in builds
 # intended for that audience). Receiving/displaying a marking always works; this
 # gates *originating* a channel classification.

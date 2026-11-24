@@ -5792,6 +5792,216 @@ mod tests {
         assert_eq!(await_message_text(&mut x_rx, "z says hi").await, Some(z.fingerprint()), "mesh->mesh(Z->X)");
     }
 
+    /// MULTI-HOP (mixed): a message crosses TWO bridge hops over three modalities when
+    /// no single node spans the endpoints' bearers. Chain A(mesh M1) — B(M1+M2) —
+    /// C(M2+peer) — D(peer): A reaches D only if B relays M1→M2 and then C relays
+    /// M2→peer (and vice versa). Each intermediate must be a gossip bridge; `SeenSet`
+    /// keeps every delivery singular across the hops.
+    #[tokio::test]
+    async fn multi_hop_bridge_chain_mixed_modalities() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["c".into()],
+            "#hop2",
+        );
+        // C is host + the peer-side bridge; B is the mesh-side bridge.
+        let (c, _c_rx) = group_core(&fabric, "c", &desc, true);
+        c.enable_gossip();
+        c.host().await.unwrap();
+        let (a, mut a_rx) = group_core(&fabric, "a", &desc, false);
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (d, mut d_rx) = group_core(&fabric, "d", &desc, false);
+        b.enable_gossip();
+        a.connect("c").await.unwrap();
+        b.connect("c").await.unwrap();
+        d.connect("c").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let m1 = MockMeshFabric::new(200); // A <-> B
+        let m2 = MockMeshFabric::new(200); // B <-> C
+        a.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Carve the chain: A mesh-only (M1), B mesh-only bridge (M1+M2, no peers),
+        // C keeps only its peer link to D (plus mesh M2), D peer-only to C.
+        a.inner.peers.lock().unwrap().clear();
+        b.inner.peers.lock().unwrap().clear();
+        let d_fp = d.fingerprint();
+        c.inner.peers.lock().unwrap().retain(|p| p.fingerprint == d_fp);
+
+        a.send("two hops downstream").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut d_rx, "two hops downstream").await,
+            Some(a.fingerprint()),
+            "D (peer) must receive A's (mesh M1) message across the B then C bridges"
+        );
+        d.send("two hops upstream").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut a_rx, "two hops upstream").await,
+            Some(d.fingerprint()),
+            "A (mesh M1) must receive D's (peer) message back across C then B"
+        );
+    }
+
+    /// MULTI-HOP (pure mesh, 3 bridges): a 5-node chain over four disjoint meshes,
+    /// A(M1) — B(M1+M2) — C(M2+M3) — D(M3+M4) — E(M4). A↔E traverses THREE multi-homed
+    /// bridges, each re-teeing onto its other mesh carry (skipping the arrival carry).
+    /// Proves transitive relaying holds for an arbitrary chain length.
+    #[tokio::test]
+    async fn multi_hop_three_bridge_mesh_chain() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["c".into()],
+            "#hop3",
+        );
+        let (c, _c_rx) = group_core(&fabric, "c", &desc, true);
+        c.enable_gossip();
+        c.host().await.unwrap();
+        let (a, mut a_rx) = group_core(&fabric, "a", &desc, false);
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (d, _d_rx) = group_core(&fabric, "d", &desc, false);
+        let (e, mut e_rx) = group_core(&fabric, "e", &desc, false);
+        b.enable_gossip();
+        d.enable_gossip();
+        for n in [&a, &b, &d, &e] {
+            n.connect("c").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let (m1, m2, m3, m4) = (
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+        );
+        a.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m3.node(1)), MeshPolicy::default()).await;
+        d.start_mesh_messaging(Arc::new(m3.node(2)), MeshPolicy::default()).await;
+        d.start_mesh_messaging(Arc::new(m4.node(1)), MeshPolicy::default()).await;
+        e.start_mesh_messaging(Arc::new(m4.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Pure-mesh chain: sever ALL loopback peers — only the four meshes, stitched by
+        // the three multi-homed bridges B, C, D, remain.
+        for n in [&a, &b, &c, &d, &e] {
+            n.inner.peers.lock().unwrap().clear();
+        }
+
+        a.send("the whole way down").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut e_rx, "the whole way down").await,
+            Some(a.fingerprint()),
+            "E on M4 must receive A's M1 message across three mesh bridges"
+        );
+        e.send("the whole way up").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut a_rx, "the whole way up").await,
+            Some(e.fingerprint()),
+            "A on M1 must receive E's M4 message back across the same three bridges"
+        );
+    }
+
+    /// MULTI-TYPE 5-STEP CHAIN between two users with NO other connection. The only
+    /// path from U1 to U2 is through four relaying bridges over five links of mixed
+    /// bearer types:
+    ///
+    /// ```text
+    ///   U1 --peer-- H --peer-- X --meshM1-- Y --meshM2-- Z --meshM3-- U2
+    /// ```
+    ///
+    /// H is the host hub for the two peer links (U1 and X both peer it — peer links are
+    /// host↔member in a Hub group); X bridges peer→mesh, and Y, Z bridge mesh→mesh over
+    /// three disjoint mesh fabrics. So the path crosses bearer types peer, peer, M1, M2,
+    /// M3 — and no single node spans U1's bearer and U2's. U1 holds ONLY its peer link to
+    /// H; U2 holds ONLY mesh M3. A message survives only if all four interior nodes relay
+    /// (H by host role, X/Y/Z as gossip bridges); `SeenSet` keeps each delivery singular.
+    #[tokio::test]
+    async fn five_step_multi_type_bridge_chain_between_two_users() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#chain5",
+        );
+        // Form the whole group over one loopback so every node gets keys/roster
+        // (membership rides the primary transport; the mesh carries content only).
+        // H hosts; everyone joins over loopback, then we carve the chain.
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (u1, mut u1_rx) = group_core(&fabric, "u1", &desc, false);
+        let (x, _x_rx) = group_core(&fabric, "x", &desc, false);
+        let (y, _y_rx) = group_core(&fabric, "y", &desc, false);
+        let (z, _z_rx) = group_core(&fabric, "z", &desc, false);
+        let (u2, mut u2_rx) = group_core(&fabric, "u2", &desc, false);
+        for n in [&x, &y, &z] {
+            n.enable_gossip(); // the interior mesh bridges must forward
+        }
+        for n in [&u1, &x, &y, &z, &u2] {
+            n.connect("h").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Attach the three mesh links: X–Y (M1), Y–Z (M2), Z–U2 (M3).
+        let (m1, m2, m3) = (
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+        );
+        x.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        y.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        y.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m3.node(1)), MeshPolicy::default()).await;
+        u2.start_mesh_messaging(Arc::new(m3.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Carve the EXACT chain. The two peer links are host↔member: H keeps ONLY U1 and
+        // X; U1 and X keep ONLY H. Y, Z, U2 are mesh-only (drop every loopback peer).
+        let (u1_fp, x_fp, h_fp) = (u1.fingerprint(), x.fingerprint(), h.fingerprint());
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint == u1_fp || p.fingerprint == x_fp);
+        u1.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp);
+        x.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp); // X — H (+mesh M1)
+        y.inner.peers.lock().unwrap().clear(); // mesh only (M1+M2)
+        z.inner.peers.lock().unwrap().clear(); // mesh only (M2+M3)
+        u2.inner.peers.lock().unwrap().clear(); // mesh only (M3)
+
+        // U1 -> U2 across all five steps (peer, peer, M1, M2, M3).
+        u1.send("five steps to you").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut u2_rx, "five steps to you").await,
+            Some(u1.fingerprint()),
+            "U2 must receive U1's message across peer→peer→M1→M2→M3, attributed to U1"
+        );
+        // U2 -> U1 back across all five steps.
+        u2.send("five steps back").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut u1_rx, "five steps back").await,
+            Some(u2.fingerprint()),
+            "U1 must receive U2's reply back across the full five-step chain"
+        );
+    }
+
     /// Mesh messaging robustness: foreign / junk traffic on the mesh channel is
     /// ignored — no `Event::Message`, no panic. A non-talkrypt node blasts random
     /// bytes; the receiver's mesh task must drop them at `parse_fragment` and never
