@@ -6109,6 +6109,100 @@ mod tests {
         );
     }
 
+    /// INCREMENT 2 (plan 0005): hub-dropout-peer-peer. Members that interconnect directly
+    /// (resilient hybrid) keep delivering content to each other after the hub goes offline
+    /// — the hub is not on the critical path. (Membership changes pause until a committer
+    /// returns, per I1; already-keyed content continues over the surviving peer graph.)
+    #[tokio::test]
+    async fn hub_dropout_peers_keep_delivering() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#dropout",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.enable_gossip();
+        m1.connect("h").await.unwrap();
+        m1.host().await.unwrap(); // m1 listens so m2 can form a direct peer link
+        let (m2, mut m2_rx) = group_core(&fabric, "m2", &desc, false);
+        m2.enable_gossip();
+        m2.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Resilient interconnect: a DIRECT m1—m2 link that does not pass through the hub.
+        m2.connect("m1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // THE HUB DROPS OUT: sever every link to/from H.
+        let h_fp = h.fingerprint();
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        m2.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        h.inner.peers.lock().unwrap().clear();
+
+        // Content still flows over the surviving m1<->m2 link, both directions.
+        m1.send("hub is gone, we carry on").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m2_rx, "hub is gone, we carry on").await,
+            Some(m1.fingerprint()),
+            "m2 must still receive m1's message after the hub dropped"
+        );
+        m2.send("still here").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m1_rx, "still here").await,
+            Some(m2.fingerprint()),
+            "m1 must still receive m2's reply after the hub dropped"
+        );
+    }
+
+    /// INCREMENT 2 (plan 0005): multi-hub redundancy (active-active, single committer). A
+    /// member reached through TWO hubs keeps receiving the committer's traffic when its
+    /// direct path to the committer degrades — the second hub (a gossip relay of the one
+    /// committer's frames) shuttles it. No second committer (I1); dedup keeps it singular.
+    #[tokio::test]
+    async fn multi_hub_second_hub_shuttles_when_primary_path_drops() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#multihub",
+        );
+        // H is the single committer; R is a redundant relay hub (gossip member).
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (r, _r_rx) = group_core(&fabric, "r", &desc, false);
+        r.enable_gossip();
+        r.connect("h").await.unwrap();
+        r.host().await.unwrap(); // R listens so members can use it as a second hub
+        let (m, mut m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap(); // joins via the committer
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        m.connect("r").await.unwrap(); // ALSO homes to the second hub R
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The member's DIRECT path to the committer degrades (drop H<->M only).
+        let h_fp = h.fingerprint();
+        let m_fp = m.fingerprint();
+        m.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m_fp);
+
+        // The committer speaks; it reaches M only via H -> R -> M (the second hub shuttles).
+        h.send("reaching you via the second hub").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m_rx, "reaching you via the second hub").await,
+            Some(h.fingerprint()),
+            "M must receive the committer's message shuttled by the redundant hub R"
+        );
+    }
+
     /// Mesh messaging robustness: foreign / junk traffic on the mesh channel is
     /// ignored — no `Event::Message`, no panic. A non-talkrypt node blasts random
     /// bytes; the receiver's mesh task must drop them at `parse_fragment` and never
