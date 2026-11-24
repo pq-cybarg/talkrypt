@@ -117,7 +117,10 @@ pub fn tor_bootstrap_percent() -> u8 {
 /// (the singleton client), so a paid mnemonic must be supplied on the first
 /// Nym host/join of the process.
 #[cfg(feature = "nym")]
-fn shared_nym(state_dir: &str, mnemonic: &str) -> Result<Arc<talkrypt_transport::NymTransport>, FfiError> {
+fn shared_nym(
+    state_dir: &str,
+    mnemonic: &str,
+) -> Result<Arc<talkrypt_transport::NymTransport>, FfiError> {
     static NYM: OnceLock<Arc<talkrypt_transport::NymTransport>> = OnceLock::new();
     if let Some(n) = NYM.get() {
         return Ok(n.clone());
@@ -125,19 +128,20 @@ fn shared_nym(state_dir: &str, mnemonic: &str) -> Result<Arc<talkrypt_transport:
     let nym_dir = std::path::Path::new(state_dir).join("nym");
     let built = Arc::new(if !mnemonic.is_empty() {
         // Explicit mnemonic → acquire bandwidth on-chain (advanced path).
-        rt()
-            .block_on(talkrypt_transport::NymTransport::connect_paid(&nym_dir, mnemonic))
-            .map_err(|e| FfiError::Failed(format!("nym paid connect failed: {e}")))?
+        rt().block_on(talkrypt_transport::NymTransport::connect_paid(
+            &nym_dir, mnemonic,
+        ))
+        .map_err(|e| FfiError::Failed(format!("nym paid connect failed: {e}")))?
     } else if nym_dir.exists() {
         // A ticketbook was imported (no mnemonic) → connect on the stored
         // credential. This is the preferred paid path.
-        rt()
-            .block_on(talkrypt_transport::NymTransport::connect_credentials(&nym_dir))
-            .map_err(|e| FfiError::Failed(format!("nym credential connect failed: {e}")))?
+        rt().block_on(talkrypt_transport::NymTransport::connect_credentials(
+            &nym_dir,
+        ))
+        .map_err(|e| FfiError::Failed(format!("nym credential connect failed: {e}")))?
     } else {
         // Nothing supplied → free ephemeral mixnet.
-        rt()
-            .block_on(talkrypt_transport::NymTransport::connect())
+        rt().block_on(talkrypt_transport::NymTransport::connect())
             .map_err(|e| FfiError::Failed(format!("nym connect failed: {e}")))?
     });
     Ok(NYM.get_or_init(|| built).clone())
@@ -161,12 +165,11 @@ pub fn nym_import_ticketbook(state_dir: String, ticketbook: Vec<u8>) -> Result<(
     #[cfg(feature = "nym")]
     {
         let nym_dir = std::path::Path::new(&state_dir).join("nym");
-        rt()
-            .block_on(talkrypt_transport::NymTransport::import_ticketbook(
-                &nym_dir,
-                &ticketbook,
-            ))
-            .map_err(|e| FfiError::Failed(format!("nym ticketbook import failed: {e}")))
+        rt().block_on(talkrypt_transport::NymTransport::import_ticketbook(
+            &nym_dir,
+            &ticketbook,
+        ))
+        .map_err(|e| FfiError::Failed(format!("nym ticketbook import failed: {e}")))
     }
 }
 
@@ -603,14 +606,27 @@ fn map_event(e: Event) -> FfiEvent {
             caveat: caveat.unwrap_or_default(),
             safety_number,
         },
-        Event::Linkage { subject, grouping_pub, verdict } => FfiEvent::Linkage {
+        Event::Linkage {
+            subject,
+            grouping_pub,
+            verdict,
+        } => FfiEvent::Linkage {
             subject: hex_fp(&subject),
             // A short, stable id for the grouping (the full per-chat grouping pub is
             // large); clients aggregate subjects sharing this id.
-            grouping: grouping_pub.iter().take(8).map(|b| format!("{b:02x}")).collect(),
+            grouping: grouping_pub
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect(),
             verdict,
         },
-        Event::Vouch { subject, weighted_score, vouched, inflation_rejected } => FfiEvent::Vouch {
+        Event::Vouch {
+            subject,
+            weighted_score,
+            vouched,
+            inflation_rejected,
+        } => FfiEvent::Vouch {
             subject: hex_fp(&subject),
             weighted_score,
             vouched,
@@ -619,16 +635,22 @@ fn map_event(e: Event) -> FfiEvent {
         Event::Delivered { gossip_id } => FfiEvent::Delivered {
             gossip_id: gossip_id.iter().map(|b| format!("{b:02x}")).collect(),
         },
-        Event::OutboxDropped { count } => FfiEvent::OutboxDropped { count: count as u32 },
-        Event::PromoteProposed { by, promote_id, target_tier, retention_mode, picked } => {
-            FfiEvent::PromoteProposed {
-                by: hex_fp(&by),
-                promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
-                target_tier,
-                retention_mode,
-                picked: picked.iter().map(|fp| hex_fp(fp)).collect(),
-            }
-        }
+        Event::OutboxDropped { count } => FfiEvent::OutboxDropped {
+            count: count as u32,
+        },
+        Event::PromoteProposed {
+            by,
+            promote_id,
+            target_tier,
+            retention_mode,
+            picked,
+        } => FfiEvent::PromoteProposed {
+            by: hex_fp(&by),
+            promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
+            target_tier,
+            retention_mode,
+            picked: picked.iter().map(|fp| hex_fp(fp)).collect(),
+        },
         Event::Promoted { promote_id } => FfiEvent::Promoted {
             promote_id: promote_id.iter().map(|b| format!("{b:02x}")).collect(),
         },
@@ -928,8 +950,13 @@ impl TalkryptClient {
             desc.name_trust_policy = name_policy_from(name_policy.as_deref());
             // F-25: a Nym/Tor-bridged chat requires an anonymizing transport.
             desc.require_anon = true;
-            let (core, rx) =
-                Core::new_group(IdentityKeyPair::generate(), suite, Arc::new(multi), desc, true);
+            let (core, rx) = Core::new_group(
+                IdentityKeyPair::generate(),
+                suite,
+                Arc::new(multi),
+                desc,
+                true,
+            );
             core.enable_gossip();
             // `host()` returns the multi-homed listener endpoint (onion + nym
             // joined); expand it into the invite so a joiner can pick by preference.
@@ -951,7 +978,11 @@ impl TalkryptClient {
     /// bootstraps Tor), then dials the single best endpoint by preference
     /// (Nym → Tor → LAN). Requires the FFI built with `--features nym`.
     #[uniffi::constructor]
-    pub fn join_nym(uri: String, state_dir: String, mnemonic: String) -> Result<Arc<Self>, FfiError> {
+    pub fn join_nym(
+        uri: String,
+        state_dir: String,
+        mnemonic: String,
+    ) -> Result<Arc<Self>, FfiError> {
         #[cfg(not(feature = "nym"))]
         {
             let _ = (uri, state_dir, mnemonic);
@@ -1233,7 +1264,14 @@ impl TalkryptClient {
     ) -> Option<String> {
         let picked_fps: Vec<[u8; 48]> = picked.iter().filter_map(|s| parse_fp_hex(s)).collect();
         self.rt
-            .block_on(self.core.propose_promote(target_tier, retention_mode, consent_rule, picked_fps, onion, carry_from_secs))
+            .block_on(self.core.propose_promote(
+                target_tier,
+                retention_mode,
+                consent_rule,
+                picked_fps,
+                onion,
+                carry_from_secs,
+            ))
             .ok()
             .map(|id| id.iter().map(|b| format!("{b:02x}")).collect())
     }
@@ -1368,6 +1406,60 @@ impl TalkryptClient {
         bridge
     }
 
+    /// Carry this group's chat messages over the INTERNET via a Meshtastic MQTT
+    /// gateway: connect to `broker_host:broker_port` and publish/subscribe talkrypt
+    /// fragments as `PRIVATE_APP` packets on mesh `channel_name`, encapsulated in the
+    /// same `ServiceEnvelope` format real Meshtastic MQTT gateways use (so it
+    /// interoperates with the Meshtastic ecosystem). `channel` is the mesh channel
+    /// index. The Rust side OWNS the MQTT connection — no host backend needed, unlike
+    /// the BLE/serial `start_mesh_messaging`. talkrypt's PQ seal is the real envelope;
+    /// the broker sees only ciphertext. Call once per chat. Needs the `mesh` feature
+    /// in the built `.so` (else this errors) — build with `TALKRYPT_MESH=1`.
+    /// Always exported (stable uniffi interface); the body is feature-split like
+    /// `host_nym` — real on a `mesh`-built `.so`, an error otherwise.
+    pub fn start_mesh_mqtt(
+        &self,
+        broker_host: String,
+        broker_port: u16,
+        channel_name: String,
+        channel: u8,
+    ) -> Result<(), FfiError> {
+        #[cfg(feature = "mesh")]
+        {
+            use talkrypt_transport::mesh::mqtt::{connect, MqttConfig};
+            // Unique-ish per connect so two nodes on one broker don't collide on MQTT id.
+            let uniq = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let cfg = MqttConfig {
+                root: "msh/US".into(),
+                channel_name,
+                gateway_id: format!("!{uniq:08x}"),
+                ..Default::default()
+            };
+            let client_id = format!("talkrypt-{uniq:x}");
+            let node = self
+                .rt
+                .block_on(connect(&broker_host, broker_port, &client_id, cfg))
+                .map_err(|e| FfiError::Failed(format!("mesh-over-MQTT connect failed: {e}")))?;
+            let policy = talkrypt_transport::mesh::MeshPolicy {
+                channel,
+                ..Default::default()
+            };
+            self.rt
+                .block_on(self.core.start_mesh_messaging(node, policy));
+            Ok(())
+        }
+        #[cfg(not(feature = "mesh"))]
+        {
+            let _ = (&broker_host, broker_port, &channel_name, channel);
+            Err(FfiError::Failed(
+                "this build lacks mesh-over-internet support — rebuild the .so with TALKRYPT_MESH=1 (--features mesh)".into(),
+            ))
+        }
+    }
+
     /// D1: opt in as a group keeper — buffer opaque (encrypted) frames for offline
     /// peers and replay them on reconnect. Holds ciphertext only, never a group key.
     pub fn keeper_mode(&self, on: bool) {
@@ -1401,7 +1493,9 @@ impl TalkryptClient {
     /// A-1). Returns the fingerprint (hex) reconnected to, or `None` if still
     /// connected or no route worked. Safe to call on every disconnect / on a timer.
     pub fn reconnect(&self) -> Option<String> {
-        self.rt.block_on(self.core.reconnect()).map(|fp| hex_fp(&fp))
+        self.rt
+            .block_on(self.core.reconnect())
+            .map(|fp| hex_fp(&fp))
     }
 
     /// Set (or clear) this node's leading self-declared **name** for the chat
@@ -1466,7 +1560,8 @@ impl TalkryptClient {
     /// Switch the leading name to a saved book entry (by id) and announce it. Returns
     /// false if no entry with that id exists.
     pub fn use_name(&self, id: String) -> bool {
-        self.rt.block_on(async { self.core.use_name(&id).await.is_ok() })
+        self.rt
+            .block_on(async { self.core.use_name(&id).await.is_ok() })
     }
 
     /// Remove a saved name from the book. If it was the active leading name, the
@@ -1489,7 +1584,10 @@ impl TalkryptClient {
             .map(|e| FfiNameEntry {
                 id: e.id,
                 label: e.label,
-                linked: matches!(e.backing, talkrypt_core::presence::NameBacking::Account { .. }),
+                linked: matches!(
+                    e.backing,
+                    talkrypt_core::presence::NameBacking::Account { .. }
+                ),
             })
             .collect()
     }
@@ -1587,7 +1685,8 @@ impl TalkryptClient {
 
     /// Disclose a grouping to the chat now (account-hidden). No-op under opsec Clean.
     pub fn present_grouping(&self, id: String) {
-        self.rt.block_on(async { self.core.present_grouping(&id).await });
+        self.rt
+            .block_on(async { self.core.present_grouping(&id).await });
     }
 
     /// Auto-disclose the grouping on join (vs just the leading name).
@@ -1601,7 +1700,9 @@ impl TalkryptClient {
     pub fn vouch_for_account(&self, fp_hex: String) {
         if let Some(fp) = parse_hex48(&fp_hex) {
             self.rt.block_on(async {
-                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+                self.core
+                    .vouch_for(talkrypt_core::vouch::VouchTarget::Account(fp))
+                    .await
             });
         }
     }
@@ -1610,7 +1711,9 @@ impl TalkryptClient {
     pub fn vouch_for_leaf(&self, fp_hex: String) {
         if let Some(fp) = parse_hex48(&fp_hex) {
             self.rt.block_on(async {
-                self.core.vouch_for(talkrypt_core::vouch::VouchTarget::Leaf(fp)).await
+                self.core
+                    .vouch_for(talkrypt_core::vouch::VouchTarget::Leaf(fp))
+                    .await
             });
         }
     }
@@ -1619,20 +1722,25 @@ impl TalkryptClient {
     pub fn revoke_vouch_account(&self, fp_hex: String) {
         if let Some(fp) = parse_hex48(&fp_hex) {
             self.rt.block_on(async {
-                self.core.revoke_vouch(talkrypt_core::vouch::VouchTarget::Account(fp)).await
+                self.core
+                    .revoke_vouch(talkrypt_core::vouch::VouchTarget::Account(fp))
+                    .await
             });
         }
     }
 
     /// User-scope vouch threshold (viewer's own bar, stricter-only vs the chat).
     pub fn set_vouch_threshold_count(&self, count: u32) {
-        self.core.set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(count));
+        self.core
+            .set_vouch_threshold(talkrypt_core::vouch::Threshold::Count(count));
     }
 
     /// The current weighted vouch score for a subject (may be negative when the
     /// antibody rejected inflation; display snaps to neutral).
     pub fn vouch_score(&self, fp_hex: String) -> i64 {
-        parse_hex48(&fp_hex).map(|fp| self.core.vouch_decision(fp).weighted_score).unwrap_or(0)
+        parse_hex48(&fp_hex)
+            .map(|fp| self.core.vouch_decision(fp).weighted_score)
+            .unwrap_or(0)
     }
 
     /// The honest distinct-people estimate for the chat (SUB-SPEC B sybil-count).
@@ -1654,7 +1762,10 @@ impl TalkryptClient {
         self.core
             .known_routes()
             .into_iter()
-            .map(|(fp, endpoints)| FfiRoute { fingerprint: hex_fp(&fp), endpoints })
+            .map(|(fp, endpoints)| FfiRoute {
+                fingerprint: hex_fp(&fp),
+                endpoints,
+            })
             .collect()
     }
 
@@ -1695,7 +1806,8 @@ impl TalkryptClient {
     /// Add a contact from a hex-encoded account public key (persistence-friendly).
     pub fn add_contact_hex(&self, account_pubkey_hex: String, name: Option<String>, friend: bool) {
         if let Some(pk) = parse_hex_bytes(&account_pubkey_hex) {
-            self.core.add_contact(IdentityPublic { sig_vk: pk }, name, friend);
+            self.core
+                .add_contact(IdentityPublic { sig_vk: pk }, name, friend);
         }
     }
 
@@ -1816,8 +1928,10 @@ impl TalkryptClient {
         self.rt.block_on(async {
             let (mut client, _desc) = anchor_client(&anchor_uri).await?;
             let claims = client.list().await.map_err(FfiError::from)?;
-            let allowed: std::collections::HashSet<[u8; 48]> =
-                claims.iter().map(|c| c.claim.account.fingerprint()).collect();
+            let allowed: std::collections::HashSet<[u8; 48]> = claims
+                .iter()
+                .map(|c| c.claim.account.fingerprint())
+                .collect();
             let n = allowed.len() as u32;
             self.core.restrict_to_accounts(allowed);
             Ok(n)
@@ -2127,7 +2241,9 @@ pub fn unseal_secret(
 /// (so a UI can show "hardware-backed" vs "software-sealed").
 #[uniffi::export]
 pub fn sealed_tier(blob: Vec<u8>) -> Result<CustodyTier, FfiError> {
-    Ok(talkrypt_core::tier_of(&blob).map_err(FfiError::from)?.into())
+    Ok(talkrypt_core::tier_of(&blob)
+        .map_err(FfiError::from)?
+        .into())
 }
 
 /// Seal `secret` with the given factors (shared by the free fn and key methods).
@@ -2139,9 +2255,7 @@ fn seal_bytes(
     let bridge = wrapper.map(WrapperBridge);
     let opts = talkrypt_core::SealOptions {
         passphrase: passphrase.map(|p| p.as_bytes()),
-        wrapper: bridge
-            .as_ref()
-            .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+        wrapper: bridge.as_ref().map(|b| b as &dyn talkrypt_core::KeyWrapper),
         // Baseline QROM-safe: no weak opt-out here. A host whose secure element does a
         // symmetric (QROM-safe) wrap attests it via HardwareKeyWrapper::qrom_safe, which
         // lets hardware-only sealing through; otherwise a passphrase is required.
@@ -2160,9 +2274,7 @@ fn unseal_bytes(
     talkrypt_core::unseal(
         blob,
         passphrase.map(|p| p.as_bytes()),
-        bridge
-            .as_ref()
-            .map(|b| b as &dyn talkrypt_core::KeyWrapper),
+        bridge.as_ref().map(|b| b as &dyn talkrypt_core::KeyWrapper),
     )
     .map_err(FfiError::from)
 }
@@ -2525,7 +2637,13 @@ pub fn account_segment_chain(
     let now = now_secs();
     let expiry = now.saturating_add(SELF_PRESENT_CERT_TTL);
     let chain = IdentityChain::device(&account.kp, device.kp.public(), "device:app", now, expiry)
-        .extend(&device.kp, segment.kp.public(), format!("segment:{label}"), now, expiry);
+        .extend(
+            &device.kp,
+            segment.kp.public(),
+            format!("segment:{label}"),
+            now,
+            expiry,
+        );
     hex_bytes(&chain.encode())
 }
 
@@ -2670,7 +2788,11 @@ pub fn invite_requires_anon(uri: String) -> bool {
 /// account key). The binding is self-signed by the account, so the anchor can't
 /// forge it. Blocking (runs its own runtime).
 #[uniffi::export]
-pub fn anchor_register(uri: String, account: Arc<Account>, username: String) -> Result<(), FfiError> {
+pub fn anchor_register(
+    uri: String,
+    account: Arc<Account>,
+    username: String,
+) -> Result<(), FfiError> {
     let rt = Runtime::new().map_err(FfiError::from)?;
     rt.block_on(async move {
         let (mut client, _desc) = anchor_client(&uri).await?;
@@ -2741,7 +2863,9 @@ mod tests {
             feed: std::sync::Mutex::new(None),
         };
         // advertise + stop forward to the host backend.
-        LocalBeacon::advertise(&bridge, b"blob".to_vec()).await.unwrap();
+        LocalBeacon::advertise(&bridge, b"blob".to_vec())
+            .await
+            .unwrap();
         LocalBeacon::stop(&bridge).await.unwrap();
         assert_eq!(state.lock().unwrap().0, vec![b"blob".to_vec()]);
         assert!(state.lock().unwrap().1);
@@ -2775,7 +2899,9 @@ mod tests {
         };
         // mtu + send forward to the host backend.
         assert_eq!(MeshNode::mtu(&bridge), 233);
-        MeshNode::send(&bridge, 2, b"frag".to_vec().as_slice()).await.unwrap();
+        MeshNode::send(&bridge, 2, b"frag".to_vec().as_slice())
+            .await
+            .unwrap();
         assert_eq!(sent.lock().unwrap().as_slice(), &[(2u8, b"frag".to_vec())]);
         // subscribe opens the inbox; deliver_packet (host radio callback) feeds it.
         let mut inbox = MeshNode::subscribe(&bridge).await.unwrap();
@@ -2801,22 +2927,23 @@ mod tests {
         assert_ne!(work.fingerprint_hex(), play.fingerprint_hex());
         assert_ne!(work.safety_number(), play.safety_number());
 
-        let work_chain = account_segment_chain(
-            account.clone(),
-            device.clone(),
-            work.clone(),
-            "work".into(),
-        );
+        let work_chain =
+            account_segment_chain(account.clone(), device.clone(), work.clone(), "work".into());
         assert!(!work_chain.is_empty());
 
         // A host pins the account; the "work" segment joins and resolves AS the
         // account (contact = true), proving the segment belongs to the account.
-        let host =
-            TalkryptClient::host("127.0.0.1:19957".into(), "#seg".into(), "pq-pure".into(), None, None)
-                .expect("host");
+        let host = TalkryptClient::host(
+            "127.0.0.1:19957".into(),
+            "#seg".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
-        let joiner =
-            TalkryptClient::join_segment(host.invite_uri(), work, work_chain, None).expect("join seg");
+        let joiner = TalkryptClient::join_segment(host.invite_uri(), work, work_chain, None)
+            .expect("join seg");
 
         let mut resolved_as_account = false;
         for _ in 0..50 {
@@ -2840,7 +2967,8 @@ mod tests {
 
         // The linked-device path (no account key): obtain a real account→device
         // chain via linking, then mint a segment under the device key alone.
-        let offer = LinkOffer::host(account.clone(), "127.0.0.1:19958".into(), None).expect("offer");
+        let offer =
+            LinkOffer::host(account.clone(), "127.0.0.1:19958".into(), None).expect("offer");
         let res = link_accept(device.clone(), offer.uri(), "phone".into()).expect("link");
         let seg_chain =
             linked_segment_chain(device, res.chain_hex, play, "play".into()).expect("seg chain");
@@ -2869,7 +2997,10 @@ mod tests {
         let sn = anchor_resolve(uri.clone(), "alice".into()).expect("resolve call");
         assert_eq!(sn, Some(account.safety_number()));
         // Unknown name resolves to None.
-        assert_eq!(anchor_resolve(uri, "nobody".into()).expect("resolve call"), None);
+        assert_eq!(
+            anchor_resolve(uri, "nobody".into()).expect("resolve call"),
+            None
+        );
 
         // Seed round-trips so the app can persist + reload the account.
         let reloaded = Account::from_seed_hex(account.seed_hex()).expect("reload");
@@ -2883,8 +3014,12 @@ mod tests {
     fn link_then_chat_as_linked_device() {
         // Primary holds the account and offers linking.
         let account = Account::generate();
-        let offer = LinkOffer::host(account.clone(), "127.0.0.1:19955".into(), Some("alice".into()))
-            .expect("offer");
+        let offer = LinkOffer::host(
+            account.clone(),
+            "127.0.0.1:19955".into(),
+            Some("alice".into()),
+        )
+        .expect("offer");
         assert_eq!(offer.account_safety_number(), account.safety_number());
 
         // A new device gets certified under the account.
@@ -2900,9 +3035,14 @@ mod tests {
         // host also presents ITS OWN account *before* the joiner connects, so the
         // host→joiner identity travels the reactive responder path (the exact
         // on-device scenario that surfaced "identity chain did not bind").
-        let host =
-            TalkryptClient::host("127.0.0.1:19956".into(), "#linked".into(), "pq-pure".into(), None, None)
-                .expect("host");
+        let host = TalkryptClient::host(
+            "127.0.0.1:19956".into(),
+            "#linked".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         let host_account = Account::generate();
         host.present_account(host_account.clone(), Some("bob".into()));
         host.add_contact_hex(account.public_hex(), Some("alice".into()), false);
@@ -2968,7 +3108,8 @@ mod tests {
     #[test]
     fn ffi_host_join_send_receive() {
         let addr = "127.0.0.1:19922".to_string();
-        let host = TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None, None).expect("host");
+        let host =
+            TalkryptClient::host(addr, "#ffi".into(), "pq-pure".into(), None, None).expect("host");
         let uri = host.invite_uri();
         assert!(uri.starts_with("talkrypt://"));
         assert!(!host.safety_number().is_empty());
@@ -2997,8 +3138,14 @@ mod tests {
     /// round-trip through the FFI, as an Android/iOS picker would drive it.
     #[test]
     fn ffi_name_book_add_list_select_and_persist() {
-        let c = TalkryptClient::host("127.0.0.1:19940".into(), "#nb".into(), "pq-pure".into(), None, None)
-            .expect("host");
+        let c = TalkryptClient::host(
+            "127.0.0.1:19940".into(),
+            "#nb".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         c.add_bare_name("home".into(), "Tango".into());
         c.add_bare_name("work".into(), "Foxtrot".into());
         let names = c.list_names();
@@ -3013,9 +3160,14 @@ mod tests {
 
         // Persist and restore into a fresh client.
         let blob = c.name_book_blob();
-        let c2 =
-            TalkryptClient::host("127.0.0.1:19941".into(), "#nb2".into(), "pq-pure".into(), None, None)
-                .expect("host2");
+        let c2 = TalkryptClient::host(
+            "127.0.0.1:19941".into(),
+            "#nb2".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host2");
         assert!(c2.list_names().is_empty());
         c2.load_name_book(blob);
         assert_eq!(c2.list_names().len(), 2);
@@ -3032,9 +3184,14 @@ mod tests {
     /// at the verified Linked tier on the peer, and is saved to the name book.
     #[test]
     fn ffi_linked_leading_name_resolves_at_linked_tier() {
-        let host =
-            TalkryptClient::host("127.0.0.1:19942".into(), "#lname".into(), "pq-pure".into(), None, None)
-                .expect("host");
+        let host = TalkryptClient::host(
+            "127.0.0.1:19942".into(),
+            "#lname".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         let joiner = TalkryptClient::join(host.invite_uri()).expect("join");
         let account = Account::generate();
         joiner.set_linked_leading_name(account, "Victor".into());
@@ -3070,8 +3227,14 @@ mod tests {
     /// clobbering the other (round-trips through set_presence_cadence).
     #[test]
     fn ffi_presence_cadence_getters_roundtrip() {
-        let c = TalkryptClient::host("127.0.0.1:19943".into(), "#cad".into(), "pq-pure".into(), None, None)
-            .expect("host");
+        let c = TalkryptClient::host(
+            "127.0.0.1:19943".into(),
+            "#cad".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         assert_eq!(c.presence_cadence_secs(), 0);
         assert!(!c.presence_cadence_on_message_id());
         // Turn on the on-message id while leaving periodic off.
@@ -3090,14 +3253,24 @@ mod tests {
     fn ffi_host_baseline_name_policy_travels_in_invite() {
         use talkrypt_core::nametrust::NameTrustPolicy;
         let warn = TalkryptClient::host(
-            "127.0.0.1:19945".into(), "#pol".into(), "pq-pure".into(), None, Some("warn".into()),
-        ).expect("host");
+            "127.0.0.1:19945".into(),
+            "#pol".into(),
+            "pq-pure".into(),
+            None,
+            Some("warn".into()),
+        )
+        .expect("host");
         let d = ChatDescriptor::from_uri(&warn.invite_uri()).expect("decode invite");
         assert_eq!(d.name_trust_policy, NameTrustPolicy::WarnOnCollision);
         // Default (None) stays SignalStyle.
         let dflt = TalkryptClient::host(
-            "127.0.0.1:19946".into(), "#pol2".into(), "pq-pure".into(), None, None,
-        ).expect("host");
+            "127.0.0.1:19946".into(),
+            "#pol2".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host");
         let d2 = ChatDescriptor::from_uri(&dflt.invite_uri()).expect("decode invite");
         assert_eq!(d2.name_trust_policy, NameTrustPolicy::SignalStyle);
     }
@@ -3106,8 +3279,22 @@ mod tests {
     /// cross-talk — the assumption the Android session manager relies on.
     #[test]
     fn two_concurrent_chats_are_independent() {
-        let a = TalkryptClient::host("127.0.0.1:19931".into(), "#a".into(), "pq-pure".into(), None, None).expect("host a");
-        let b = TalkryptClient::host("127.0.0.1:19932".into(), "#b".into(), "pq-pure".into(), None, None).expect("host b");
+        let a = TalkryptClient::host(
+            "127.0.0.1:19931".into(),
+            "#a".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host a");
+        let b = TalkryptClient::host(
+            "127.0.0.1:19932".into(),
+            "#b".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("host b");
         let ja = TalkryptClient::join(a.invite_uri()).expect("join a");
         let jb = TalkryptClient::join(b.invite_uri()).expect("join b");
         ja.send("alpha".into()).expect("send a");
@@ -3117,12 +3304,18 @@ mod tests {
         let mut on_b: Vec<String> = Vec::new();
         for _ in 0..50 {
             while let Some(ev) = a.poll_event() {
-                if let FfiEvent::Message { text, .. } = ev { on_a.push(text); }
+                if let FfiEvent::Message { text, .. } = ev {
+                    on_a.push(text);
+                }
             }
             while let Some(ev) = b.poll_event() {
-                if let FfiEvent::Message { text, .. } = ev { on_b.push(text); }
+                if let FfiEvent::Message { text, .. } = ev {
+                    on_b.push(text);
+                }
             }
-            if !on_a.is_empty() && !on_b.is_empty() { break; }
+            if !on_a.is_empty() && !on_b.is_empty() {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(on_a.contains(&"alpha".to_string()), "chat A got: {on_a:?}");
@@ -3178,9 +3371,18 @@ mod tests {
     /// never in the URI text, so a substring check on the URI always fails).
     #[test]
     fn invite_is_onion_detects_endpoint_kind() {
-        let lan = TalkryptClient::host("127.0.0.1:19934".into(), "#x".into(), "pq-pure".into(), None, None)
-            .expect("lan host");
-        assert!(!invite_is_onion(lan.invite_uri()), "LAN invite is not onion");
+        let lan = TalkryptClient::host(
+            "127.0.0.1:19934".into(),
+            "#x".into(),
+            "pq-pure".into(),
+            None,
+            None,
+        )
+        .expect("lan host");
+        assert!(
+            !invite_is_onion(lan.invite_uri()),
+            "LAN invite is not onion"
+        );
         // A naive substring check on the URI text wrongly reports false even for onions.
         assert!(!lan.invite_uri().contains(".onion"));
 
@@ -3192,7 +3394,10 @@ mod tests {
             None,
         )
         .expect("onion-advertised host");
-        assert!(invite_is_onion(onionish.invite_uri()), "onion endpoint detected");
+        assert!(
+            invite_is_onion(onionish.invite_uri()),
+            "onion endpoint detected"
+        );
         assert!(!onionish.invite_uri().contains(".onion")); // proves the substring check is insufficient
 
         assert!(!invite_is_onion("talkrypt://not-base32!!!".into()));
@@ -3227,15 +3432,23 @@ mod tests {
         // QROM/L5: a classical secure element alone is quantum-breakable at rest, so a
         // hardware-wrapper-ONLY seal is refused — a passphrase is required alongside it.
         assert!(
-            account.seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A }))).is_err(),
+            account
+                .seal(None, Some(Box::new(FakeSecureElement { pad: 0x5A })))
+                .is_err(),
             "hardware-only account seal must be refused (QROM/L5)"
         );
 
         // Two-factor (passphrase + device wrapper) is HardwareBacked and round-trips.
         let blob = account
-            .seal(Some("pass".into()), Some(Box::new(FakeSecureElement { pad: 0x5A })))
+            .seal(
+                Some("pass".into()),
+                Some(Box::new(FakeSecureElement { pad: 0x5A })),
+            )
             .expect("seal");
-        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::HardwareBacked);
+        assert_eq!(
+            sealed_tier(blob.clone()).unwrap(),
+            CustodyTier::HardwareBacked
+        );
 
         // Reload on the same "device" with the passphrase → same seed, same identity.
         let reloaded = Account::from_sealed(
@@ -3266,7 +3479,10 @@ mod tests {
                 Some(Box::new(FakeSecureElement { pad: 0x42 })),
             )
             .expect("seal");
-        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::HardwareBacked);
+        assert_eq!(
+            sealed_tier(blob.clone()).unwrap(),
+            CustodyTier::HardwareBacked
+        );
 
         // Both factors → ok.
         let ok = Account::from_sealed(
@@ -3278,8 +3494,18 @@ mod tests {
         assert_eq!(ok.seed_hex(), seed);
 
         // Missing passphrase, wrong passphrase, or missing device → all fail.
-        assert!(Account::from_sealed(blob.clone(), None, Some(Box::new(FakeSecureElement { pad: 0x42 }))).is_err());
-        assert!(Account::from_sealed(blob.clone(), Some("WRONG".into()), Some(Box::new(FakeSecureElement { pad: 0x42 }))).is_err());
+        assert!(Account::from_sealed(
+            blob.clone(),
+            None,
+            Some(Box::new(FakeSecureElement { pad: 0x42 }))
+        )
+        .is_err());
+        assert!(Account::from_sealed(
+            blob.clone(),
+            Some("WRONG".into()),
+            Some(Box::new(FakeSecureElement { pad: 0x42 }))
+        )
+        .is_err());
         assert!(Account::from_sealed(blob, Some("pass".into()), None).is_err());
     }
 
@@ -3287,7 +3513,13 @@ mod tests {
     fn software_only_seal_secret_free_fns() {
         let secret = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f".to_vec();
         let blob = seal_secret(secret.clone(), Some("pw".into()), None).expect("seal");
-        assert_eq!(sealed_tier(blob.clone()).unwrap(), CustodyTier::SoftwareSealed);
-        assert_eq!(unseal_secret(blob, Some("pw".into()), None).unwrap(), secret);
+        assert_eq!(
+            sealed_tier(blob.clone()).unwrap(),
+            CustodyTier::SoftwareSealed
+        );
+        assert_eq!(
+            unseal_secret(blob, Some("pw".into()), None).unwrap(),
+            secret
+        );
     }
 }

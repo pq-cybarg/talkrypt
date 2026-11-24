@@ -6,7 +6,8 @@
 #   bash android/build-apk.sh                       # LAN-only build
 #   TALKRYPT_TOR=1 bash android/build-apk.sh         # + Tor (.onion) transport
 #   TALKRYPT_NYM=1 bash android/build-apk.sh         # + Nym mixnet (multi-homed)
-#   TALKRYPT_TOR=1 TALKRYPT_NYM=1 bash android/build-apk.sh  # both
+#   TALKRYPT_MESH=1 bash android/build-apk.sh        # + mesh over internet (MQTT)
+#   TALKRYPT_TOR=1 TALKRYPT_NYM=1 TALKRYPT_MESH=1 bash android/build-apk.sh  # all
 #   adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 #   adb shell am start -n com.talkrypt.app/.MainActivity
 #   adb logcat -s talkrypt
@@ -42,6 +43,14 @@ fi
 if [ "${TALKRYPT_NYM:-0}" = "1" ]; then
   echo "building FFI with Nym (mixnet) — heavier cross-compile…"
   FEATURES+=("nym")
+fi
+if [ "${TALKRYPT_MESH:-0}" = "1" ]; then
+  # Mesh over the INTERNET: a Meshtastic MQTT-gateway node (start_mesh_mqtt).
+  # On android, rumqttc's native-TLS resolves to openssl-sys → the transport
+  # crate vendors OpenSSL (built from source by the NDK clang), so this adds a
+  # one-time OpenSSL source build to the cross-compile.
+  echo "building FFI with mesh-over-internet (MQTT; vendors OpenSSL for the NDK)…"
+  FEATURES+=("mesh")
 fi
 FEATURE_FLAG=""
 if [ ${#FEATURES[@]} -gt 0 ]; then
