@@ -964,6 +964,12 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// Dedup for GOSSIP-RELAYED control-plane frames (Welcome/Commit/Roster/KeyPackage):
+    /// a gossip bridge re-floods each distinct control frame at most once, so key
+    /// material and commits reach peers not directly connected to the committer
+    /// (relay chains / multi-hub) without looping. Kept separate from `seen` (group
+    /// content) so the two domains can't evict each other. See plan 0005 I5.
+    ctl_seen: Mutex<SeenSet>,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1272,6 +1278,7 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            ctl_seen: Mutex::new(SeenSet::new()),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -3242,6 +3249,32 @@ async fn signed_roster_frame(inner: &Arc<Inner>, entries: Vec<(u32, [u8; 48])>) 
     Some(Frame::Roster { epoch, entries, sig })
 }
 
+/// INCREMENT 1 (plan 0005, invariant I5): as a GOSSIP bridge, re-flood an opaque,
+/// endpoint-authenticated control-plane frame (Welcome / Commit / Roster / KeyPackage)
+/// to every peer except the one it came from, at most once per distinct frame
+/// (`ctl_seen` dedup). This carries key material and commits to peers NOT directly
+/// connected to the committer — relay chains (hub-peer-peer-peer) and multi-hub — while
+/// the relay only forwards bytes it cannot interpret or alter: the recipient decrypts
+/// the Welcome, the key schedule validates the Commit, the host signature authenticates
+/// the Roster (F-17), and the committer validates the KeyPackage on add. A relay
+/// therefore gains no forgery power (I5). No-op unless gossip is on and we are not in
+/// single-relay mode. The `ctl_seen` dedup alone gives loop-freedom (each node forwards
+/// a given frame once); invite-token admission + rate-limiting (I4) land in a later
+/// increment.
+async fn relay_control(inner: &Arc<Inner>, raw: &[u8], from: [u8; 48]) {
+    if inner.relayed || !inner.gossip.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if !inner.ctl_seen.lock().unwrap().insert(gossip_id(raw)) {
+        return; // already relayed this exact control frame — stop the flood
+    }
+    for (s, w, fp) in collect_peers(inner) {
+        if fp != from {
+            let _ = send_payload(&s, &w, raw).await;
+        }
+    }
+}
+
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
 /// in a [`Routed`] envelope and sent to the single relay peer, which fans it
 /// out. In host-coordinated mode it is sent directly to the resolved peers.
@@ -3516,6 +3549,22 @@ async fn reader_loop(
         if inner.role == GroupRole::None && !approved && !matches!(decoded, Some(Frame::Identity(_)))
         {
             continue;
+        }
+        // INCREMENT 1 (plan 0005 I5): a gossip bridge re-floods the host-authenticated,
+        // attribution-independent control frames — Commit (validated by the key schedule)
+        // and Roster (host-signed, F-17) — so already-admitted members sync across relay
+        // chains (hub-peer-peer-peer), survive hub dropout, and get commits from any hub
+        // (multi-hub). Done BEFORE local handling and regardless of whether WE can apply
+        // it yet (a commit ahead of our epoch must still be forwarded). `relay_control`
+        // dedups and is a no-op unless gossip is on; the relay never interprets/alters the
+        // bytes. Welcome/KeyPackage (key material + new-member attribution) are NOT relayed
+        // here — relay-JOIN needs the authenticated-joiner mechanism + I4 admission, which
+        // land in a later increment (plan 0005 §increments 3). I2 holds: no key relayed.
+        if matches!(
+            decoded,
+            Some(Frame::Commit { .. }) | Some(Frame::Roster { .. })
+        ) {
+            relay_control(&inner, &frame_bytes, from).await;
         }
         match decoded {
             // Pairwise chat only. A group node (Host/Member) never legitimately
@@ -4344,28 +4393,35 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
 async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
-    let keypair = inner.leaf_keypair.lock().unwrap().take();
-    if let Some(kp) = keypair {
-        // Decode the Welcome with the leaf key's KEM profile — both were fixed
-        // by the chat's suite, so they agree.
-        let welcome = match Welcome::decode(kp.profile(), &welcome_bytes) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-        match TreeKemGroup::join_with_welcome(kp, &welcome) {
-            Ok(mut grp) => {
-                // F-16: match the chat's padding so our outgoing messages are bucketed
-                // like everyone else's (all members share this from the descriptor).
-                if let Some(step) = inner.descriptor.message_padding {
-                    grp.set_pad_bucket(step as usize);
-                }
-                *inner.group.lock().await = Some(grp);
+    // Take our pending leaf key out to ATTEMPT the join. `join_with_welcome` only
+    // borrows it, so if this Welcome is not ours — which is now normal, since gossip
+    // relays forward every Welcome through intermediate members (increment 1) — we put
+    // the key right back and stay a pending joiner. An already-joined relay has no
+    // pending key (None), so it no-ops here and just relays. This upholds I2 (no key
+    // except from our own committer-issued Welcome) and never burns our join material.
+    let kp = inner.leaf_keypair.lock().unwrap().take();
+    let Some(kp) = kp else { return };
+    let welcome = match Welcome::decode(kp.profile(), &welcome_bytes) {
+        Ok(w) => w,
+        Err(_) => {
+            *inner.leaf_keypair.lock().unwrap() = Some(kp); // keep key for the real Welcome
+            return;
+        }
+    };
+    match TreeKemGroup::join_with_welcome(&kp, &welcome) {
+        Ok(mut grp) => {
+            // F-16: match the chat's padding so our outgoing messages are bucketed
+            // like everyone else's (all members share this from the descriptor).
+            if let Some(step) = inner.descriptor.message_padding {
+                grp.set_pad_bucket(step as usize);
             }
-            Err(e) => {
-                let _ = inner
-                    .events_tx
-                    .send(Event::Error(format!("welcome failed: {e}")));
-            }
+            *inner.group.lock().await = Some(grp);
+            // kp drops here (zeroized); the slot stays empty — we have joined.
+        }
+        Err(_) => {
+            // Not addressed to us (a relayed Welcome for another joiner) or not yet
+            // applicable: restore our pending key silently and wait for ours.
+            *inner.leaf_keypair.lock().unwrap() = Some(kp);
         }
     }
 }
@@ -5999,6 +6055,57 @@ mod tests {
             await_message_text(&mut u1_rx, "five steps back").await,
             Some(u2.fingerprint()),
             "U1 must receive U2's reply back across the full five-step chain"
+        );
+    }
+
+    /// INCREMENT 1 (plan 0005): hub-peer-peer control-plane relay. A member that sits at
+    /// the END of a peer chain (H — A — B, B connected ONLY to A, not the hub H) must
+    /// stay in sync when the group's membership changes: the host's Commit + Roster are
+    /// gossip-relayed along the chain (H→A→B). Proof: after a 4th member D joins via H
+    /// (advancing the epoch), A sends a message at the NEW epoch; B can only decrypt it
+    /// if the relayed Commit reached and was applied by B. Without the relay, B is stuck
+    /// at the old epoch and never receives it.
+    #[tokio::test]
+    async fn hub_peer_peer_chain_relays_commits_to_a_chain_only_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#hppp",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (a, _a_rx) = group_core(&fabric, "a", &desc, false);
+        a.enable_gossip();
+        a.connect("h").await.unwrap();
+        a.host().await.unwrap(); // A also listens so B can dial it (member-to-member link)
+        let (b, mut b_rx) = group_core(&fabric, "b", &desc, false);
+        b.enable_gossip();
+        b.connect("h").await.unwrap(); // B first JOINS via the hub (gets keys), then re-homes
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Re-home B onto A: dial A, then sever B↔H so the only path left is H — A — B.
+        let a_fp = b.connect("a").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let b_fp = b.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == a_fp); // B keeps only A
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp); // H drops B
+
+        // A 4th member joins via H → the host commits (epoch advances) and broadcasts
+        // Commit + Roster. For B (chain-only) to stay current, A must relay them onward.
+        let (d, _d_rx) = group_core(&fabric, "d", &desc, false);
+        d.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        a.send("after D joined").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut b_rx, "after D joined").await,
+            Some(a.fingerprint()),
+            "B (chain-only, reachable only via A) must decrypt A's post-commit message — \
+             proving the host Commit+Roster relayed along the H→A→B peer chain"
         );
     }
 

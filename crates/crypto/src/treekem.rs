@@ -1386,10 +1386,13 @@ impl TreeKemGroup {
     }
 
     /// Join a group from a Welcome message using the matching leaf key.
-    pub fn join_with_welcome(keypair: LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
-        // `LeafKeyPair` is a Drop type (zeroizes its secret), so we cannot move its
-        // fields out. Copy the KEM leaf secret and rebuild the leaf signing key
-        // from its seed; `keypair` then drops normally, zeroizing its copy.
+    pub fn join_with_welcome(keypair: &LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
+        // Borrow (not consume) the keypair: `LeafKeyPair` is a Drop type (zeroizes its
+        // secret), and a failed join (e.g. a Welcome meant for another joiner, which a
+        // gossip relay may forward through us) MUST NOT burn our pending leaf key — the
+        // caller keeps `keypair` and retries/relays. We copy the Copy `secret` and
+        // rebuild the leaf signing key from its exported seed; the caller's `keypair`
+        // drops normally later, zeroizing it.
         let profile = keypair.profile;
         let secret = keypair.secret;
         let sig = IdentityKeyPair::from_secret_bytes(keypair.sig.export_secret());
@@ -1846,7 +1849,7 @@ mod tests {
         for f in followers.iter_mut() {
             f.apply_commit(&commit).unwrap();
         }
-        TreeKemGroup::join_with_welcome(kp, &welcome).unwrap()
+        TreeKemGroup::join_with_welcome(&kp, &welcome).unwrap()
     }
 
     /// Every KEM profile — hybrid, padded PQ-pure, compact PQ-pure — must form a
@@ -2072,7 +2075,7 @@ mod tests {
         assert_eq!(kp2.leaf_public, kp.key_package().leaf_public);
 
         // A joiner can actually use the serialized-then-deserialized Welcome.
-        let b = TreeKemGroup::join_with_welcome(kp, &welcome2).unwrap();
+        let b = TreeKemGroup::join_with_welcome(&kp, &welcome2).unwrap();
         assert_eq!(a.group_secret(), b.group_secret());
     }
 
