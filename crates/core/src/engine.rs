@@ -166,6 +166,20 @@ enum Frame {
         marking: Option<Marking>,
     },
     KeyPackage(Vec<u8>),
+    /// INCREMENT 3b (plan 0005): a SELF-AUTHENTICATING join request, so a joiner can
+    /// join THROUGH a relaying peer (hub-peer-peer-peer) without the committer having to
+    /// infer its identity from the connection (which, relayed, would be the relay — the
+    /// G2 attribution gap). Carries the joiner's device public key, its KeyPackage, a
+    /// device signature binding the two to the chat root, and an invite-bound MAC proving
+    /// invite possession (a cheap admission pre-filter a relay checks before forwarding —
+    /// I4). The committer attributes the new leaf to the VERIFIED device identity here,
+    /// never to the relay hop. Relay-safe: a relay cannot forge the device signature.
+    JoinRequest {
+        device_pub: Vec<u8>,
+        kp: Vec<u8>,
+        sig: Vec<u8>,
+        mac: Vec<u8>,
+    },
     Welcome(Vec<u8>),
     /// A membership commit tagged with the epoch it applies to (for ordering).
     Commit {
@@ -357,6 +371,18 @@ impl Frame {
                     w.put_bytes(fp);
                 }
             }
+            Frame::JoinRequest {
+                device_pub,
+                kp,
+                sig,
+                mac,
+            } => {
+                w.put_u8(20);
+                w.put_bytes(device_pub);
+                w.put_bytes(kp);
+                w.put_bytes(sig);
+                w.put_bytes(mac);
+            }
         }
         w.into_vec()
     }
@@ -406,6 +432,16 @@ impl Frame {
             13 => Frame::Promote(r.get_vec().ok()?),
             14 => Frame::Consent(r.get_vec().ok()?),
             19 => Frame::PromoteCommit(r.get_vec().ok()?),
+            // INCREMENT 3b: self-authenticating join request. Flat + total — four
+            // length-delimited byte vecs, no nesting, no panic on hostile input; the
+            // device signature + invite-MAC are verified later in `handle_join_request`,
+            // never here (decode is pre-auth).
+            20 => Frame::JoinRequest {
+                device_pub: r.get_vec().ok()?,
+                kp: r.get_vec().ok()?,
+                sig: r.get_vec().ok()?,
+                mac: r.get_vec().ok()?,
+            },
             // D1 store-and-forward decoders are chunked into standalone, flat functions
             // (below) so each is independently CBMC-provable in isolation — routing an
             // arbitrary tag through this whole match would drag in the Marking-bearing
@@ -977,6 +1013,11 @@ struct Inner {
     /// before the hub confirms without blocking delivery on hub latency; bounded so a
     /// stuck join cannot grow it without limit.
     pending_outbound: Mutex<Vec<(String, Option<Marking>)>>,
+    /// INCREMENT 3b (plan 0005 I4): token-bucket bounding join-related work (committing
+    /// AND relaying self-authenticating JoinRequests), so even a flood of valid-invite
+    /// joins cannot force unbounded ML-DSA verifies / TreeKEM commits or relay
+    /// amplification. The invite-MAC pre-filter drops non-invite-holders before this.
+    join_rate: Mutex<TokenBucket>,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1287,6 +1328,9 @@ impl Core {
             seen: Mutex::new(SeenSet::new()),
             ctl_seen: Mutex::new(SeenSet::new()),
             pending_outbound: Mutex::new(Vec::new()),
+            // Capacity 32 joins, refilling 8/sec: a brief burst is absorbed, a sustained
+            // flood is throttled to a bounded steady rate (tunable).
+            join_rate: Mutex::new(TokenBucket::new(32.0, 8.0)),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -1917,7 +1961,31 @@ impl Core {
                 .map(|k| k.key_package().encode());
             let sent_keypackage = kp_bytes.is_some();
             if let Some(kpb) = kp_bytes {
-                route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+                // INCREMENT 3b: in a gossip/relay topology, join with a SELF-AUTHENTICATING
+                // JoinRequest so we can join THROUGH a relaying peer (hub-peer-peer-peer):
+                // the committer attributes our leaf to our device signature + invite-MAC,
+                // not the relay hop. In a plain direct-hub topology (no gossip), the lighter
+                // KeyPackage suffices (the host authenticates us by the direct handshake).
+                if self.inner.gossip.load(std::sync::atomic::Ordering::Relaxed)
+                    && !self.inner.relayed
+                {
+                    let device_pub = self.inner.identity.public().sig_vk.clone();
+                    let sig = self
+                        .inner
+                        .identity
+                        .sign(&join_sig_transcript(&self.inner.root0, &device_pub, &kpb));
+                    let mac =
+                        join_invite_mac(&self.inner.descriptor.invite_token, &device_pub, &kpb)
+                            .to_vec();
+                    route(
+                        &self.inner,
+                        Frame::JoinRequest { device_pub, kp: kpb, sig, mac },
+                        Route::Committer,
+                    )
+                    .await;
+                } else {
+                    route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+                }
             }
             // D1 restart survival: on a RECONNECT the leaf key was already consumed at the
             // first Welcome, so we send NO KeyPackage — which would leave the host's Double
@@ -3309,6 +3377,48 @@ async fn relay_control(inner: &Arc<Inner>, raw: &[u8], from: [u8; 48]) {
     }
 }
 
+/// INCREMENT 3b (plan 0005 I4): forward a self-authenticating `JoinRequest` toward the
+/// committer, defending the join path from DoS/DDoS at the cheapest possible stage:
+///   1. verify the invite-MAC (one KMAC) — a request from a non-invite-holder is dropped
+///      HERE and never propagated, so a flood of junk joins cannot amplify through relays;
+///   2. spend a relay token (shared `join_rate` bucket) — bounds amplification even from
+///      invite-holders; a drained bucket drops the forward;
+///   3. dedup (`ctl_seen`) so one request is forwarded at most once (loop-free).
+/// No-op unless gossip is on and we are not in single-relay mode. The relay never
+/// interprets the KeyPackage or the device signature — the committer verifies those.
+async fn relay_join_request(
+    inner: &Arc<Inner>,
+    raw: &[u8],
+    from: [u8; 48],
+    device_pub: &[u8],
+    kp: &[u8],
+    mac: &[u8],
+) {
+    if inner.relayed || !inner.gossip.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // (1) Cheap invite-MAC pre-filter — drop unbound junk before anything else.
+    let expect = join_invite_mac(&inner.descriptor.invite_token, device_pub, kp);
+    if mac.len() != expect.len()
+        || !bool::from(subtle::ConstantTimeEq::ct_eq(mac, &expect[..]))
+    {
+        return;
+    }
+    // (2) Rate-limit the forward (shared with committing).
+    if !inner.join_rate.lock().unwrap().try_take() {
+        return;
+    }
+    // (3) Dedup so we forward a given request at most once.
+    if !inner.ctl_seen.lock().unwrap().insert(gossip_id(raw)) {
+        return;
+    }
+    for (s, w, fp) in collect_peers(inner) {
+        if fp != from {
+            let _ = send_payload(&s, &w, raw).await;
+        }
+    }
+}
+
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
 /// in a [`Routed`] envelope and sent to the single relay peer, which fans it
 /// out. In host-coordinated mode it is sent directly to the resolved peers.
@@ -3584,21 +3694,26 @@ async fn reader_loop(
         {
             continue;
         }
-        // INCREMENT 1 (plan 0005 I5): a gossip bridge re-floods the host-authenticated,
-        // attribution-independent control frames — Commit (validated by the key schedule)
-        // and Roster (host-signed, F-17) — so already-admitted members sync across relay
-        // chains (hub-peer-peer-peer), survive hub dropout, and get commits from any hub
-        // (multi-hub). Done BEFORE local handling and regardless of whether WE can apply
-        // it yet (a commit ahead of our epoch must still be forwarded). `relay_control`
-        // dedups and is a no-op unless gossip is on; the relay never interprets/alters the
-        // bytes. Welcome/KeyPackage (key material + new-member attribution) are NOT relayed
-        // here — relay-JOIN needs the authenticated-joiner mechanism + I4 admission, which
-        // land in a later increment (plan 0005 §increments 3). I2 holds: no key relayed.
+        // A gossip bridge re-floods opaque, endpoint-authenticated control frames so key
+        // material + commits reach peers not directly connected to the committer (relay
+        // chains / multi-hub). Done BEFORE local handling and regardless of whether WE can
+        // apply it yet. `relay_control` dedups + is a no-op unless gossip is on.
+        //  - Commit (key-schedule-validated) + Roster (host-signed, F-17): increment 1.
+        //  - Welcome (increment 3b): key material, but encrypted to the joiner's KEM key —
+        //    a relay (and every other member) cannot decrypt it, so flooding it to reach a
+        //    relay-joined joiner leaks nothing (I2 still holds: no key to a non-recipient).
         if matches!(
             decoded,
-            Some(Frame::Commit { .. }) | Some(Frame::Roster { .. })
+            Some(Frame::Commit { .. }) | Some(Frame::Roster { .. }) | Some(Frame::Welcome(_))
         ) {
             relay_control(&inner, &frame_bytes, from).await;
+        }
+        // INCREMENT 3b: a self-authenticating JoinRequest is relayed toward the committer,
+        // but ONLY after its invite-MAC verifies (I4 cheap pre-filter: a non-invite-holder's
+        // join is dropped here, never propagated) and a relay token is available (bounds
+        // amplification). `relay_join_request` dedups and no-ops unless gossip is on.
+        if let Some(Frame::JoinRequest { device_pub, kp, mac, .. }) = &decoded {
+            relay_join_request(&inner, &frame_bytes, from, device_pub, kp, mac).await;
         }
         match decoded {
             // Pairwise chat only. A group node (Host/Member) never legitimately
@@ -3623,6 +3738,15 @@ async fn reader_loop(
             }
             Some(Frame::KeyPackage(b)) if inner.role == GroupRole::Host => {
                 handle_keypackage(&inner, from, b).await;
+            }
+            // INCREMENT 3b: self-authenticating relay-join. The committer verifies the
+            // invite-MAC + device signature and attributes the leaf to the signed device
+            // (never the relay hop). A non-host member ignores it here but has already
+            // relayed it toward the committer above (MAC-gated).
+            Some(Frame::JoinRequest { device_pub, kp, sig, mac })
+                if inner.role == GroupRole::Host =>
+            {
+                handle_join_request(&inner, device_pub, kp, sig, mac).await;
             }
             Some(Frame::Welcome(b)) if inner.role == GroupRole::Member => {
                 handle_welcome(&inner, b).await;
@@ -4361,24 +4485,81 @@ fn handle_group_member_identity(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u
 /// Host: admit a new member, send them a Welcome, and broadcast the Commit to
 /// existing members. (Sequential joins only; concurrent joins need a delivery
 /// service to order commits — see docs/plans/0002-mls-pq.md.)
-async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
-    // Access gate: under a restrictive policy, only admit a member whose account
-    // we already admitted (recorded when it presented its identity, which the
-    // joiner sends in-order before its KeyPackage). Open policy admits anyone.
-    let admit = inner.access.lock().unwrap().is_open()
-        || inner.admitted_peers.lock().unwrap().contains(&from);
-    if !admit {
-        let _ = inner.events_tx.send(Event::Error(format!(
-            "refused group join from non-member {}",
-            short_hex6(&from)
-        )));
-        return;
+// ---------------------------------------------------------------------------
+// INCREMENT 3b: self-authenticating relay-JOIN + DoS defenses (plan 0005 I4).
+// ---------------------------------------------------------------------------
+
+/// Binds the joiner's device signature to this chat + its KeyPackage, so the committer
+/// attributes the leaf to the signing device regardless of which peer relayed it (closes
+/// the G2 relay-attribution gap). The device signs `CTX ‖ root0 ‖ device_pub ‖ kp`.
+const JOIN_SIG_CONTEXT: &[u8] = b"talkrypt-join-request-v1";
+/// Customization label for the invite-bound admission MAC.
+const JOIN_MAC_LABEL: &[u8] = b"talkrypt-join-invite-mac-v1";
+
+fn join_sig_transcript(root0: &[u8; 32], device_pub: &[u8], kp: &[u8]) -> Vec<u8> {
+    let mut t = Vec::with_capacity(JOIN_SIG_CONTEXT.len() + 32 + device_pub.len() + kp.len());
+    t.extend_from_slice(JOIN_SIG_CONTEXT);
+    t.extend_from_slice(root0);
+    t.extend_from_slice(device_pub);
+    t.extend_from_slice(kp);
+    t
+}
+
+/// Invite-bound admission MAC: KMAC256(key = invite_token, msg = device_pub ‖ kp). Proves
+/// the sender holds the chat invite WITHOUT revealing it. A committer AND every relay
+/// verify this FIRST — one symmetric KMAC — before any ML-DSA verify, TreeKEM commit, or
+/// forward, so a non-invite-holder's join is rejected at ~zero cost and never propagates
+/// (the primary join DoS/DDoS gate, plan 0005 I4).
+fn join_invite_mac(invite_token: &[u8], device_pub: &[u8], kp: &[u8]) -> [u8; 32] {
+    let mut msg = Vec::with_capacity(device_pub.len() + kp.len());
+    msg.extend_from_slice(device_pub);
+    msg.extend_from_slice(kp);
+    let mut out = [0u8; 32];
+    talkrypt_crypto::kdf::mac_kdf(invite_token, &msg, JOIN_MAC_LABEL, &mut out);
+    out
+}
+
+/// A tiny token-bucket rate limiter (plan 0005 I4). Bounds how much join-related work a
+/// node will do — committing or relaying — per unit time, so even a flood of
+/// VALID-invite joins cannot force unbounded ML-DSA verifies / TreeKEM commits or relay
+/// amplification. Monotonic-clock based; refills continuously.
+struct TokenBucket {
+    tokens: f64,
+    capacity: f64,
+    refill_per_sec: f64,
+    last: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self { tokens: capacity, capacity, refill_per_sec, last: std::time::Instant::now() }
     }
-    // Hold the group lock across decode + add + leaf assignment so concurrent
-    // joins get distinct, ordered epochs. The KeyPackage is decoded with the
-    // group's KEM profile (posture + wire padding). The commit is tagged with
-    // the epoch it applies to, so members apply commits in order even if
-    // delivery reorders them.
+    /// Take one token if available; returns false (drop) when the bucket is empty.
+    fn try_take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Shared admit path: add `kp_bytes` as a new member attributed to `attributed_fp`, then
+/// broadcast the Commit + host-signed Roster and route the Welcome. Idempotent — a device
+/// already seated is not re-added (dedups replays / repeated joins). The Welcome goes
+/// directly to the joiner if it is a connected peer, else is broadcast so it reaches a
+/// relay-joined joiner via the gossip Welcome relay (it is encrypted to the joiner's KEM
+/// key, so flooding it leaks nothing). Used by both the direct KeyPackage path and the
+/// self-authenticating JoinRequest path, so attribution is the ONLY thing that differs.
+async fn add_member_and_broadcast(inner: &Arc<Inner>, attributed_fp: [u8; 48], kp_bytes: Vec<u8>) {
+    if inner.roster.lock().unwrap().values().any(|fp| *fp == attributed_fp) {
+        return; // already a member — idempotent, no duplicate leaf, no re-commit
+    }
     let result = {
         let mut g = inner.group.lock().await;
         match g.as_mut() {
@@ -4399,30 +4580,95 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     };
     let roster_snapshot = {
         let mut roster = inner.roster.lock().unwrap();
-        roster.insert(leaf, from);
+        roster.insert(leaf, attributed_fp);
         roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
     };
-
-    // Welcome to the joiner; Commit to everyone (the joiner drops it as stale,
-    // since it starts at the post-commit epoch); roster to everyone.
-    route(inner, Frame::Welcome(welcome_bytes), Route::Peer(from)).await;
-    route(
-        inner,
-        Frame::Commit {
-            from_epoch,
-            bytes: commit_bytes,
-        },
-        Route::Broadcast,
-    )
-    .await;
+    let connected = collect_peers(inner).iter().any(|(_, _, fp)| *fp == attributed_fp);
+    let welcome_route = if connected {
+        Route::Peer(attributed_fp)
+    } else {
+        Route::Broadcast // relay-joined: flood (encrypted to joiner) so it reaches them
+    };
+    route(inner, Frame::Welcome(welcome_bytes), welcome_route).await;
+    route(inner, Frame::Commit { from_epoch, bytes: commit_bytes }, Route::Broadcast).await;
     if let Some(frame) = signed_roster_frame(inner, roster_snapshot).await {
         route(inner, frame, Route::Broadcast).await;
     }
-
-    // The roster just grew (a member joined) — re-announce our leading name so the
-    // new member resolves us without us acting (SUB-SPEC A CQ beacon), debounced so a
-    // join burst coalesces into one CQ.
     schedule_grow_reannounce(inner);
+}
+
+/// COMMITTER: handle a self-authenticating [`Frame::JoinRequest`] (relay-join). DoS-ordered
+/// (plan 0005 I4): (1) verify the invite-MAC — one KMAC — and drop silently if it fails
+/// (a non-invite-holder, rejected before any expensive work); (2) dedup replays; (3) spend
+/// a join rate-limit token, dropping if exhausted (bounds valid-invite floods); (4) ONLY
+/// then verify the device's ML-DSA signature over the chat-bound transcript; (5) attribute
+/// the new leaf to the VERIFIED device fingerprint (never the relay hop) and add via the
+/// shared path, subject to the access policy.
+async fn handle_join_request(
+    inner: &Arc<Inner>,
+    device_pub: Vec<u8>,
+    kp: Vec<u8>,
+    sig: Vec<u8>,
+    mac: Vec<u8>,
+) {
+    // (1) Cheapest gate first: invite-bound MAC. Constant-work KMAC; wrong/absent invite
+    // → drop before ML-DSA verify or TreeKEM commit, and (at a relay) before forwarding.
+    let expect = join_invite_mac(&inner.descriptor.invite_token, &device_pub, &kp);
+    // Vetted constant-time comparison (subtle) — a forged-MAC flood cannot time its way
+    // to a valid tag, and this is the cheap pre-filter that runs before any ML-DSA verify.
+    if mac.len() != expect.len()
+        || !bool::from(subtle::ConstantTimeEq::ct_eq(&mac[..], &expect[..]))
+    {
+        return;
+    }
+    // (2) Dedup an exact replay of this request.
+    {
+        let mut seen = inner.ctl_seen.lock().unwrap();
+        let mut id_src = Vec::with_capacity(device_pub.len() + kp.len());
+        id_src.extend_from_slice(&device_pub);
+        id_src.extend_from_slice(&kp);
+        if !seen.insert(gossip_id(&id_src)) {
+            return;
+        }
+    }
+    // (3) Rate-limit: bound expensive work even from invite-holders.
+    if !inner.join_rate.lock().unwrap().try_take() {
+        let _ = inner.events_tx.send(Event::Error("join rate limit — request dropped".into()));
+        return;
+    }
+    // (4) Now the expensive check: the device signature over CTX ‖ root0 ‖ device_pub ‖ kp.
+    let device = talkrypt_crypto::IdentityPublic { sig_vk: device_pub.clone() };
+    let transcript = join_sig_transcript(&inner.root0, &device_pub, &kp);
+    if device.verify(&transcript, &sig).is_err() {
+        return;
+    }
+    let attributed_fp = device.fingerprint();
+    // (5) Access policy: open admits any invite-holder; restrictive admits only an account
+    // we already admitted (recorded from its presented identity).
+    let admit = inner.access.lock().unwrap().is_open()
+        || inner.admitted_peers.lock().unwrap().contains(&attributed_fp);
+    if !admit {
+        return;
+    }
+    add_member_and_broadcast(inner, attributed_fp, kp).await;
+}
+
+async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
+    // Access gate: under a restrictive policy, only admit a member whose account
+    // we already admitted (recorded when it presented its identity, which the
+    // joiner sends in-order before its KeyPackage). Open policy admits anyone.
+    let admit = inner.access.lock().unwrap().is_open()
+        || inner.admitted_peers.lock().unwrap().contains(&from);
+    if !admit {
+        let _ = inner.events_tx.send(Event::Error(format!(
+            "refused group join from non-member {}",
+            short_hex6(&from)
+        )));
+        return;
+    }
+    // Direct-join attribution is the authenticated connection peer `from`; the shared
+    // path handles decode + add + Commit/Roster/Welcome (idempotent).
+    add_member_and_broadcast(inner, from, kp_bytes).await;
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
@@ -6283,6 +6529,81 @@ mod tests {
         assert!(
             m.inner.pending_outbound.lock().unwrap().is_empty(),
             "the queue must be drained after the flush"
+        );
+    }
+
+    /// INCREMENT 3b (plan 0005): relay-JOIN with correct attribution. A joiner J connects
+    /// ONLY to a relay member M (never to the host H) and joins via a self-authenticating
+    /// JoinRequest: M MAC-gates + forwards it to H, H attributes the new leaf to J's
+    /// VERIFIED device identity (not M), the Welcome relays back to J, and J then speaks —
+    /// the host must attribute J's message to J, proving relay-join does not mis-attribute.
+    #[tokio::test]
+    async fn relay_join_attributes_to_the_joiner_not_the_relay() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#relayjoin",
+        );
+        let (h, mut h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        // M joins via H directly, then listens so J can relay-join through it.
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        m.host().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // J connects ONLY to M (not H) and joins through the relay.
+        let (j, _j_rx) = group_core(&fabric, "j", &desc, false);
+        j.enable_gossip();
+        j.connect("m").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        // J is now a member (its Welcome relayed back through M) and speaks.
+        j.send("relay-joined, and here i am").await.unwrap();
+        let from = await_message_text(&mut h_rx, "relay-joined, and here i am").await;
+        assert_eq!(
+            from,
+            Some(j.fingerprint()),
+            "the host must attribute the message to J (its verified device identity), \
+             NOT to the relay M that forwarded J's join"
+        );
+    }
+
+    /// INCREMENT 3b (plan 0005 I4): join DoS pre-filter. A JoinRequest whose invite-MAC is
+    /// wrong (a non-invite-holder, or forged) is dropped by the committer before any
+    /// ML-DSA verify or TreeKEM commit — no leaf is added, the roster does not grow.
+    #[tokio::test]
+    async fn join_request_with_bad_invite_mac_is_rejected() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#badmac",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.host().await.unwrap();
+        let roster_before = h.inner.roster.lock().unwrap().len();
+
+        // Forge a structurally-valid JoinRequest with a WRONG mac.
+        let attacker = IdentityKeyPair::generate();
+        let leaf = talkrypt_crypto::LeafKeyPair::generate();
+        let kp = leaf.key_package().encode();
+        let device_pub = attacker.public().sig_vk.clone();
+        let sig = attacker.sign(&join_sig_transcript(&h.inner.root0, &device_pub, &kp));
+        let bad_mac = vec![0u8; 32]; // not the invite-bound MAC
+        handle_join_request(&h.inner, device_pub, kp, sig, bad_mac).await;
+
+        assert_eq!(
+            h.inner.roster.lock().unwrap().len(),
+            roster_before,
+            "a JoinRequest with a bad invite-MAC must be dropped before any add — roster unchanged"
         );
     }
 

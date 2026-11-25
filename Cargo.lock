@@ -10972,6 +10972,7 @@ dependencies = [
  "proptest",
  "rand 0.8.8",
  "sha2 0.10.9",
+ "subtle",
  "talkrypt-crypto",
  "talkrypt-transport",
  "talkrypt-wire",
