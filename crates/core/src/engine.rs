@@ -970,6 +970,13 @@ struct Inner {
     /// (relay chains / multi-hub) without looping. Kept separate from `seen` (group
     /// content) so the two domains can't evict each other. See plan 0005 I5.
     ctl_seen: Mutex<SeenSet>,
+    /// INCREMENT 3 (plan 0005, presumptive queue-only): plaintext messages a JOINING
+    /// member composed before its Welcome arrived. Held LOCALLY only — never sent on the
+    /// wire and never encrypted (we have no group key yet, upholding I2 "no premature
+    /// key") — and flushed in composition order the instant we join. Lets a user type
+    /// before the hub confirms without blocking delivery on hub latency; bounded so a
+    /// stuck join cannot grow it without limit.
+    pending_outbound: Mutex<Vec<(String, Option<Marking>)>>,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1279,6 +1286,7 @@ impl Core {
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
             ctl_seen: Mutex::new(SeenSet::new()),
+            pending_outbound: Mutex::new(Vec::new()),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -2020,70 +2028,26 @@ impl Core {
                 gossip_id(&payload)
             }
             GroupRole::Host | GroupRole::Member => {
-                // SUB-SPEC A §4 mode 3: when the on-message-id cadence is on and we
-                // have a leading name, stamp a stable name-id (label ‖ context) so a
-                // viewer can confirm our name is current or detect a rename it missed.
-                let name_tag = {
-                    let on = self.inner.cadence.lock().unwrap().on_message_id;
-                    if on {
-                        self.inner.leading_name.lock().unwrap().as_ref().map(|e| {
-                            let ctx = crate::presence::chat_context(
-                                &self.inner.descriptor.invite_token,
-                                &self.inner.descriptor.channel,
-                            );
-                            crate::presence::name_id_tag(&e.label, &ctx)
-                        })
-                    } else {
-                        None
+                match group_send(&self.inner, text, marking.clone()).await {
+                    Ok(gid) => gid,
+                    // INCREMENT 3 (plan 0005 I2): a MEMBER that has initiated its join but
+                    // not yet received its Welcome has no group key. Rather than failing,
+                    // buffer the plaintext LOCALLY (presumptive queue-only — never on the
+                    // wire, never encrypted early) and flush it the instant we join. The
+                    // host, which always holds the group, never takes this path.
+                    Err(crate::error::CoreError::GroupNotReady)
+                        if self.inner.role == GroupRole::Member =>
+                    {
+                        const MAX_PENDING: usize = 256; // bound a stuck join (I4 spirit)
+                        let mut q = self.inner.pending_outbound.lock().unwrap();
+                        if q.len() < MAX_PENDING {
+                            q.push((text.to_string(), marking));
+                        }
+                        // Provisional id; the real ciphertext gossip-id is emitted on flush.
+                        gossip_id(text.as_bytes())
                     }
-                };
-                let payload = marking::encode_payload_tagged(&marking, text, name_tag);
-                let ct = {
-                    let mut g = self.inner.group.lock().await;
-                    match g.as_mut() {
-                        // Sign every group message with our per-membership leaf
-                        // signature key so receivers can bind it to our leaf and
-                        // reject impersonation or relay restamping, without exposing
-                        // a long-term identity (SECURITY-AUDIT G1/G2).
-                        Some(grp) => grp.encrypt_signed(&payload)?,
-                        None => return Err(crate::error::CoreError::GroupNotReady),
-                    }
-                };
-                // D3: record our OWN outgoing message in the ephemeral backlog so a later
-                // Carry/CarryFromPoint promotion can seal what we already hold. Local only.
-                {
-                    let me = self.inner.identity.public().fingerprint();
-                    let ts = now_secs();
-                    let rec = crate::history::HistoryRecord {
-                        from: me,
-                        ts,
-                        text: text.to_string(),
-                        marking: marking.clone(),
-                    };
-                    record_backlog(&self.inner, gossip_id(&ct), rec.encode(), ts);
+                    Err(e) => return Err(e),
                 }
-                // The ciphertext gossip-id is this message's stable id: the receiver
-                // dedups + acks on it, and `Event::Delivered { gossip_id }` carries it
-                // back — so it's also what `send` returns for delivery tracking.
-                let gid = gossip_id(&ct);
-                // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
-                // outbox (keyed by that gossip-id) so an offline member catches up on
-                // reconnect. Re-encrypting later would advance the ratchet, so we store
-                // these exact bytes.
-                let frame = Frame::GroupMsg(ct.clone());
-                if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
-                    let dropped = self.inner.outbox.enqueue(
-                        &self.inner.descriptor.channel,
-                        gid,
-                        &frame.encode(),
-                        now_secs(),
-                    );
-                    if dropped > 0 {
-                        let _ = self.inner.events_tx.send(Event::OutboxDropped { count: dropped });
-                    }
-                }
-                route(&self.inner, frame, Route::Broadcast).await;
-                gid
             }
         };
         Ok(gid)
@@ -3247,6 +3211,76 @@ async fn signed_roster_frame(inner: &Arc<Inner>, entries: Vec<(u32, [u8; 48])>) 
     let epoch = grp.epoch();
     let sig = grp.sign_as_host(&roster_transcript(epoch, &entries))?;
     Some(Frame::Roster { epoch, entries, sig })
+}
+
+/// Seal + route one group chat message — the Host/Member send path, factored so both
+/// `send_marked` and the presumptive-queue flush use identical logic (same signing,
+/// backlog, outbox, routing). Returns the ciphertext gossip-id, or `GroupNotReady` when
+/// we hold no group key yet.
+async fn group_send(inner: &Arc<Inner>, text: &str, marking: Option<Marking>) -> Result<[u8; 32]> {
+    // SUB-SPEC A §4 mode 3: stamp a stable name-id when the on-message-id cadence is on.
+    let name_tag = {
+        let on = inner.cadence.lock().unwrap().on_message_id;
+        if on {
+            inner.leading_name.lock().unwrap().as_ref().map(|e| {
+                let ctx = crate::presence::chat_context(
+                    &inner.descriptor.invite_token,
+                    &inner.descriptor.channel,
+                );
+                crate::presence::name_id_tag(&e.label, &ctx)
+            })
+        } else {
+            None
+        }
+    };
+    let payload = marking::encode_payload_tagged(&marking, text, name_tag);
+    let ct = {
+        let mut g = inner.group.lock().await;
+        match g.as_mut() {
+            // G1/G2: sign with our per-membership leaf key so receivers bind it to our
+            // leaf and reject impersonation / relay restamping.
+            Some(grp) => grp.encrypt_signed(&payload)?,
+            None => return Err(crate::error::CoreError::GroupNotReady),
+        }
+    };
+    // D3: record our OWN outgoing message in the ephemeral backlog. Local only.
+    {
+        let me = inner.identity.public().fingerprint();
+        let ts = now_secs();
+        let rec = crate::history::HistoryRecord {
+            from: me,
+            ts,
+            text: text.to_string(),
+            marking: marking.clone(),
+        };
+        record_backlog(inner, gossip_id(&ct), rec.encode(), ts);
+    }
+    let gid = gossip_id(&ct);
+    // D1: persistent chats queue the ALREADY-ENCRYPTED frame for offline catch-up.
+    let frame = Frame::GroupMsg(ct.clone());
+    if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+        let dropped =
+            inner
+                .outbox
+                .enqueue(&inner.descriptor.channel, gid, &frame.encode(), now_secs());
+        if dropped > 0 {
+            let _ = inner.events_tx.send(Event::OutboxDropped { count: dropped });
+        }
+    }
+    route(inner, frame, Route::Broadcast).await;
+    Ok(gid)
+}
+
+/// INCREMENT 3 (plan 0005, presumptive queue-only): flush the presumptive outbound queue
+/// right after a join. Each plaintext composed while we were still joining is now sealed
+/// + routed exactly as a live send would be, in composition order. No message was ever
+/// on the wire or encrypted before this point (I2). Called from `handle_welcome`.
+async fn flush_pending_outbound(inner: &Arc<Inner>) {
+    let queued: Vec<(String, Option<Marking>)> =
+        std::mem::take(&mut *inner.pending_outbound.lock().unwrap());
+    for (text, marking) in queued {
+        let _ = group_send(inner, &text, marking).await;
+    }
 }
 
 /// INCREMENT 1 (plan 0005, invariant I5): as a GOSSIP bridge, re-flood an opaque,
@@ -4417,6 +4451,9 @@ async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
             }
             *inner.group.lock().await = Some(grp);
             // kp drops here (zeroized); the slot stays empty — we have joined.
+            // INCREMENT 3: now that we hold the group key, deliver anything the user
+            // composed while we were still joining (presumptive queue-only).
+            flush_pending_outbound(inner).await;
         }
         Err(_) => {
             // Not addressed to us (a relayed Welcome for another joiner) or not yet
@@ -6200,6 +6237,52 @@ mod tests {
             await_message_text(&mut m_rx, "reaching you via the second hub").await,
             Some(h.fingerprint()),
             "M must receive the committer's message shuttled by the redundant hub R"
+        );
+    }
+
+    /// INCREMENT 3 (plan 0005): presumptive queue-only. A member that composes a message
+    /// BEFORE it has joined (no group key) must have it buffered locally — not dropped,
+    /// not errored, and never encrypted early (I2) — and delivered the instant it joins.
+    #[tokio::test]
+    async fn presumptive_queue_delivers_messages_composed_before_join() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#presume",
+        );
+        let (h, mut h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+
+        // M has NOT joined yet (no connection, no group key). Composing now must queue
+        // locally and return Ok (a provisional id), NOT error with GroupNotReady.
+        m.send("composed before my welcome").await.unwrap();
+        assert!(
+            m.inner.group.lock().await.is_none(),
+            "precondition: M holds no group key when it composes"
+        );
+        assert_eq!(
+            m.inner.pending_outbound.lock().unwrap().len(),
+            1,
+            "the pre-join message must be buffered locally, not dropped or sent"
+        );
+
+        // Now join; the Welcome triggers the flush.
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            await_message_text(&mut h_rx, "composed before my welcome").await,
+            Some(m.fingerprint()),
+            "the message composed before join must flush to the group on join, attributed to M"
+        );
+        assert!(
+            m.inner.pending_outbound.lock().unwrap().is_empty(),
+            "the queue must be drained after the flush"
         );
     }
 

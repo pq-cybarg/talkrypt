@@ -64,9 +64,33 @@ Decouple message delivery from any single hub, and make the group connectivity r
    downstream, gossip); multi-hub active-active (connect all hubs, dedup) + signed standby
    failover as a policy; resilient hybrid (members interconnect + gossip) for I-presumptive
    + hub-dropout. Room policy selects.
-3. **Presumptive queue-only peering** (engine) — pairwise link + neighbor-side bounded
-   provisional queue; flush to the group the instant the committer's Welcome/roster
-   confirms; invite-token admission + rate-limit (I4). No key before confirm (I2).
+3. **Presumptive queue-only peering** (engine). Split:
+   - **3a (DONE)** — JOINING-member LOCAL outbound queue: a member may `send()` before its
+     Welcome; the plaintext is buffered locally (`pending_outbound`, bounded 256), never on
+     the wire and never encrypted early (I2), and flushed in order the instant we join
+     (`flush_pending_outbound` from `handle_welcome`). Zero new wire/trust surface; DoS is
+     local-only. Factored the Host/Member send path into `group_send` (shared by live send
+     + flush). Test `presumptive_queue_delivers_messages_composed_before_join` (fails
+     without the queue).
+   - **3b (NEXT)** — relay-JOIN with correct attribution: let a joiner JOIN through a peer
+     (not only the committer directly) for true hub-peer-peer-peer JOIN. This is the
+     security-critical part and reuses the existing T-3 primitive (`LeafSigCert`: a device
+     certifies its TreeKEM leaf sig key). Design:
+       * The joiner sends a self-authenticating join: its `LeafSigCert` (device-signed leaf
+         binding) travels WITH the KeyPackage, plus an invite-bound MAC (KDF of
+         `invite_token` over the KeyPackage) proving invite possession.
+       * A gossip relay forwards KeyPackage + LeafSigCert ONLY if the invite-MAC verifies
+         (I4 cheap pre-filter: unbound junk is dropped, not propagated), under a per-neighbor
+         token bucket + TTL.
+       * The committer attributes the new leaf to the DEVICE identity in the verified
+         `LeafSigCert` (not the connection `from`), closing the G2 relay-attribution gap;
+         it also validates the invite-MAC before `add`.
+       * Welcome is then gossip-relayed back to the joiner (safe — encrypted to the joiner's
+         KEM key; only the joiner decrypts), so it reaches a non-adjacent joiner.
+     Obligation: prove (EngineAuth) that a relay cannot cause acceptance of a leaf attributed
+     to an identity it does not control, and (GossipLiveness) the invite-MAC pre-filter + TTL
+     keep a join flood bounded. Implement as its own increment with full reverification; do
+     NOT weaken the G1/G2/F-17 posture.
 4. **Room-configurable multi-hub committer + consensus hook** — descriptor setting; signed
    epoch-fenced handoff for standby promotion (I1); consensus-selection seam.
 5. **Tests** — hub-peer-peer-peer (join+deliver along chain), hub-dropout content
