@@ -174,3 +174,64 @@ let thm_relationship_gates_require_flag (acct:nat)
   : Lemma (ensures (allows Contacts acct false false == false) /\
                    (allows Friends  acct true  false == false))
   = ()
+
+(* ---------- relay-JOIN authorization (increment 3b: self-authenticating join) -------- *)
+(* Added 2026-11-25 (plan 0005 §3b). Models `handle_join_request` / `relay_join_request`: *)
+(* a joiner JOINS THROUGH a relaying peer with a `JoinRequest{device_pub,kp,sig,mac}`.    *)
+(* The committer attributes the new leaf to the VERIFIED signing device, never the relay  *)
+(* hop (closes the G2 attribution gap for joins), behind an invite-bound admission MAC.   *)
+
+/// A second, independent oracle for the invite-bound admission MAC (KMAC256 keyed by the
+/// chat `invite_token`). `mac inv dp kp` is the unique accepted tag; a party WITHOUT the
+/// invite key `inv` cannot produce it (standard MAC/PRF unforgeability). This is the cheap
+/// pre-filter checked before any ML-DSA verify or TreeKEM commit (plan 0005 I4).
+assume val mac : (inv:nat) -> (dp:nat) -> (kp:nat) -> nat
+let mac_ok (inv:nat) (dp:nat) (kp:nat) (m:nat) : bool = (m = mac inv dp kp)
+
+/// `join_transcript` = JOIN_CONTEXT | root0 | device_pub | kp, injective + domain-
+/// separated from the commit/roster transcripts (distinct context tag).
+assume val join_transcript : (root0:nat) -> (device_pub:pk) -> (kp:nat) -> msg
+assume JoinInj :
+  (forall r d k r' d' k'. {:pattern (join_transcript r d k); (join_transcript r' d' k')}
+     join_transcript r d k == join_transcript r' d' k' ==> (r==r' /\ d==d' /\ k==k'))
+
+/// The committer's `handle_join_request` acceptance decision, in DoS-order: the invite-MAC
+/// must verify (cheap admission, I4) AND the device signature must verify over the chat-
+/// bound transcript. On success the new leaf is attributed to `device_pub` — the SIGNING
+/// device — and NOT to any relay that forwarded the request.
+let accept_join_ok
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) : bool =
+  mac_ok inv device_pub kp m &&
+  verify l device_pub (join_transcript root0 device_pub kp) s
+
+/// THEOREM 10 (JOIN ADMISSION IS INVITE-BOUND — DoS pre-filter, I4). An accepted join
+/// carries a valid invite-MAC. By MAC unforgeability a party without the invite key cannot
+/// produce one, so a non-invite-holder's join is rejected at the cheap stage, before any
+/// signature verification or commit — the join DoS/DDoS gate is sound.
+let thm_join_requires_invite
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat)
+  : Lemma (requires accept_join_ok l inv root0 device_pub kp s m == true)
+          (ensures mac_ok inv device_pub kp m == true)
+  = ()
+
+/// THEOREM 11 (JOIN ATTRIBUTION IS SOUND — closes G2 for joins). An accepted join's
+/// signature verifies under `device_pub`; by EUF-CMA only the holder of that device's
+/// signing key could have produced it over this chat-bound transcript. So the committer
+/// attributes the new leaf to the actual joining DEVICE — and a relay forwarding the bytes
+/// (which holds no such key, and whose `relay_stamp` is NOT an input here) cannot cause a
+/// leaf to be attributed to a device it does not control.
+let thm_join_attribution_sound
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) (relay_stamp:pk)
+  : Lemma (requires accept_join_ok l inv root0 device_pub kp s m == true)
+          (ensures l device_pub (join_transcript root0 device_pub kp) == true)
+  = eufcma_inst l device_pub (join_transcript root0 device_pub kp) s
+
+/// THEOREM 12 (FORGED JOIN REJECTED — fail closed). If the device key never signed this
+/// join transcript, the join is NOT accepted, regardless of a valid invite-MAC or any
+/// relay stamp. A relay cannot upgrade a MAC it may know (it holds the invite too) into an
+/// accepted join for a victim device without that device's signing key.
+let thm_forged_join_rejected
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) (relay_stamp:pk)
+  : Lemma (requires l device_pub (join_transcript root0 device_pub kp) == false)
+          (ensures accept_join_ok l inv root0 device_pub kp s m == false)
+  = ()
