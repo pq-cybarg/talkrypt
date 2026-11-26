@@ -180,6 +180,17 @@ enum Frame {
         sig: Vec<u8>,
         mac: Vec<u8>,
     },
+    /// INCREMENT 4 (plan 0005, graceful committer handoff): the current committer (host,
+    /// leaf 0) delegates ROSTER (F-17) signing authority to `successor_leaf`, effective for
+    /// roster epochs >= `from_epoch`, signed with the host leaf key. Members verify `sig`
+    /// against leaf 0 and then accept the successor's rosters for those epochs INSTEAD of
+    /// the host's — exactly one authority per epoch (I1). Only the current host can issue
+    /// one (sig is host-authenticated), so a member cannot promote itself.
+    CommitterHandoff {
+        successor_leaf: u32,
+        from_epoch: u32,
+        sig: Vec<u8>,
+    },
     Welcome(Vec<u8>),
     /// A membership commit tagged with the epoch it applies to (for ordering).
     Commit {
@@ -383,6 +394,16 @@ impl Frame {
                 w.put_bytes(sig);
                 w.put_bytes(mac);
             }
+            Frame::CommitterHandoff {
+                successor_leaf,
+                from_epoch,
+                sig,
+            } => {
+                w.put_u8(21);
+                w.put_u32(*successor_leaf);
+                w.put_u32(*from_epoch);
+                w.put_bytes(sig);
+            }
         }
         w.into_vec()
     }
@@ -441,6 +462,13 @@ impl Frame {
                 kp: r.get_vec().ok()?,
                 sig: r.get_vec().ok()?,
                 mac: r.get_vec().ok()?,
+            },
+            // INCREMENT 4: committer handoff. Flat + total (two u32 + one length-delimited
+            // sig); the host signature is verified later, never here.
+            21 => Frame::CommitterHandoff {
+                successor_leaf: r.get_u32().ok()?,
+                from_epoch: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
             },
             // D1 store-and-forward decoders are chunked into standalone, flat functions
             // (below) so each is independently CBMC-provable in isolation — routing an
@@ -1018,6 +1046,12 @@ struct Inner {
     /// joins cannot force unbounded ML-DSA verifies / TreeKEM commits or relay
     /// amplification. The invite-MAC pre-filter drops non-invite-holders before this.
     join_rate: Mutex<TokenBucket>,
+    /// INCREMENT 4 (plan 0005, graceful committer handoff): an epoch-fenced delegation of
+    /// the ROSTER (F-17) signing authority, `(successor_leaf, from_epoch)`, recorded from a
+    /// host-signed `CommitterHandoff`. For roster epochs >= `from_epoch` the authority is
+    /// the successor leaf (not leaf 0), so there is EXACTLY ONE authority per epoch (I1): a
+    /// revived old committer is fenced out, no split-brain. `None` = normal leaf-0 authority.
+    committer_delegate: Mutex<Option<(u32, u32)>>,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1331,6 +1365,7 @@ impl Core {
             // Capacity 32 joins, refilling 8/sec: a brief burst is absorbed, a sustained
             // flood is throttled to a bounded steady rate (tunable).
             join_rate: Mutex::new(TokenBucket::new(32.0, 8.0)),
+            committer_delegate: Mutex::new(None),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -2387,6 +2422,57 @@ impl Core {
     #[doc(hidden)]
     pub fn backlog_len(&self) -> usize {
         self.inner.backlog.lock().unwrap().len()
+    }
+
+    /// INCREMENT 4 (graceful committer handoff): our own leaf index in the group, if we
+    /// hold one (used to name a successor in a handoff).
+    pub async fn my_leaf(&self) -> Option<u32> {
+        self.inner.group.lock().await.as_ref().map(|grp| grp.my_leaf())
+    }
+
+    /// INCREMENT 4 (graceful committer handoff, plan 0005 I1): as the CURRENT host,
+    /// delegate ROSTER (F-17) signing authority to `successor_leaf` for epochs >=
+    /// `from_epoch`, by signing a `CommitterHandoff` with the host leaf key and
+    /// broadcasting it. Records it locally and relies on the successor to issue rosters
+    /// thereafter; the host should stop (graceful — exactly one authority per epoch, no
+    /// split-brain). Returns false if we are not the host / hold no signing key.
+    pub async fn handoff_committer(&self, successor_leaf: u32, from_epoch: u32) -> bool {
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_host(&handoff_transcript(successor_leaf, from_epoch)))
+        };
+        let Some(sig) = sig else { return false };
+        *self.inner.committer_delegate.lock().unwrap() = Some((successor_leaf, from_epoch));
+        route(
+            &self.inner,
+            Frame::CommitterHandoff { successor_leaf, from_epoch, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
+    }
+
+    /// INCREMENT 4: as a DELEGATED successor committer, (re)issue the current roster signed
+    /// with OUR leaf key at `epoch`. Members who recorded the host's handoff accept it under
+    /// the delegation (verified against our leaf, not leaf 0). No-op without a signing key.
+    pub async fn issue_delegate_roster(&self, epoch: u32) {
+        let entries: Vec<(u32, [u8; 48])> = self
+            .inner
+            .roster
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(l, f)| (*l, *f))
+            .collect();
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_leaf(&roster_transcript(epoch, &entries)))
+        };
+        if let Some(sig) = sig {
+            route(&self.inner, Frame::Roster { epoch, entries, sig }, Route::Broadcast).await;
+        }
     }
 
     /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
@@ -3704,8 +3790,13 @@ async fn reader_loop(
         //    relay-joined joiner leaks nothing (I2 still holds: no key to a non-recipient).
         if matches!(
             decoded,
-            Some(Frame::Commit { .. }) | Some(Frame::Roster { .. }) | Some(Frame::Welcome(_))
+            Some(Frame::Commit { .. })
+                | Some(Frame::Roster { .. })
+                | Some(Frame::Welcome(_))
+                | Some(Frame::CommitterHandoff { .. })
         ) {
+            // CommitterHandoff (increment 4) is host-signed + attribution-independent like
+            // Roster, so it rides the same relay to reach chain / multi-hop members.
             relay_control(&inner, &frame_bytes, from).await;
         }
         // INCREMENT 3b: a self-authenticating JoinRequest is relayed toward the committer,
@@ -3754,6 +3845,12 @@ async fn reader_loop(
             Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
                 handle_commit(&inner, from_epoch, bytes).await;
             }
+            // INCREMENT 4: a member records a host-signed, epoch-fenced committer handoff.
+            Some(Frame::CommitterHandoff { successor_leaf, from_epoch, sig })
+                if inner.role == GroupRole::Member =>
+            {
+                handle_committer_handoff(&inner, successor_leaf, from_epoch, sig).await;
+            }
             Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
                 handle_update_proposal(&inner, from, b).await;
             }
@@ -3765,10 +3862,23 @@ async fn reader_loop(
                 // `epoch` (monotonic anti-replay of an older host-signed roster). A
                 // forged or stale roster is dropped; T-3 attribution stays
                 // authoritative regardless.
+                // INCREMENT 4 (graceful committer handoff, I1): the roster authority for
+                // this epoch is EXACTLY ONE leaf. If a host-signed, epoch-fenced delegation
+                // exists and this roster's epoch is at/after the handoff point, the sole
+                // authority is the SUCCESSOR leaf (the old committer is fenced out — a
+                // revived host cannot re-assert authority for these epochs). Otherwise the
+                // normal leaf-0 host authority (F-17) applies, untouched.
                 let verified = {
                     let g = inner.group.lock().await;
+                    let transcript = roster_transcript(epoch, &entries);
+                    let delegate = *inner.committer_delegate.lock().unwrap();
                     g.as_ref()
-                        .map(|grp| grp.verify_host_sig(&roster_transcript(epoch, &entries), &sig))
+                        .map(|grp| match delegate {
+                            Some((succ, fe)) if epoch >= fe => {
+                                grp.verify_leaf_sig(succ, &transcript, &sig)
+                            }
+                            _ => grp.verify_host_sig(&transcript, &sig),
+                        })
                         .unwrap_or(false)
                 };
                 use std::sync::atomic::Ordering;
@@ -4651,6 +4761,48 @@ async fn handle_join_request(
         return;
     }
     add_member_and_broadcast(inner, attributed_fp, kp).await;
+}
+
+// ---------------------------------------------------------------------------
+// INCREMENT 4: graceful, epoch-fenced committer handoff (plan 0005 I1).
+// ---------------------------------------------------------------------------
+
+/// Transcript the host signs to delegate roster authority: CTX | successor_leaf |
+/// from_epoch. Injective (fixed context + fixed-width fields).
+const HANDOFF_CONTEXT: &[u8] = b"talkrypt-committer-handoff-v1";
+fn handoff_transcript(successor_leaf: u32, from_epoch: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(HANDOFF_CONTEXT.len() + 8);
+    t.extend_from_slice(HANDOFF_CONTEXT);
+    t.extend_from_slice(&successor_leaf.to_le_bytes());
+    t.extend_from_slice(&from_epoch.to_le_bytes());
+    t
+}
+
+/// MEMBER: record a committer handoff ONLY if it is signed by the current host (leaf 0) —
+/// so a member cannot promote itself or anyone else (the host signature is the authority).
+/// Monotonic in `from_epoch`: a newer delegation supersedes, a stale one is ignored. After
+/// recording, rosters at epoch >= `from_epoch` are authenticated against the successor leaf,
+/// fencing out the old committer (exactly one authority per epoch, I1).
+async fn handle_committer_handoff(
+    inner: &Arc<Inner>,
+    successor_leaf: u32,
+    from_epoch: u32,
+    sig: Vec<u8>,
+) {
+    let ok = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_host_sig(&handoff_transcript(successor_leaf, from_epoch), &sig))
+            .unwrap_or(false)
+    };
+    if !ok {
+        return; // not host-signed — reject (no self-promotion / hijack)
+    }
+    let mut d = inner.committer_delegate.lock().unwrap();
+    match *d {
+        Some((_, prev_fe)) if from_epoch <= prev_fe => {} // stale — keep the newer delegation
+        _ => *d = Some((successor_leaf, from_epoch)),
+    }
 }
 
 async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
@@ -6604,6 +6756,101 @@ mod tests {
             h.inner.roster.lock().unwrap().len(),
             roster_before,
             "a JoinRequest with a bad invite-MAC must be dropped before any add — roster unchanged"
+        );
+    }
+
+    /// INCREMENT 4 (plan 0005 I1): graceful committer handoff. The host delegates roster
+    /// authority to successor S (epoch-fenced from E); members then accept S's rosters for
+    /// epochs >= E, and FENCE OUT the old host (a leaf-0 roster at epoch >= E is rejected —
+    /// exactly one authority per epoch, no split-brain).
+    #[tokio::test]
+    async fn committer_handoff_delegates_roster_authority_and_fences_old_host() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#handoff",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        const E: u32 = 1000; // a high epoch, comfortably fresh vs the join epochs
+
+        // Host delegates roster authority to S from epoch E, and steps down.
+        assert!(h.handoff_committer(s_leaf, E).await, "host must be able to sign a handoff");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // S, the delegated successor, issues the roster at E signed with ITS leaf key.
+        s.issue_delegate_roster(E).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            E,
+            "M must accept the successor S's roster under the host's delegation"
+        );
+
+        // The OLD host now tries to re-assert authority at a later epoch (leaf-0 signed) —
+        // it is fenced out, so M does NOT advance.
+        h.issue_delegate_roster(E + 1).await; // h's leaf is 0 → signs with leaf-0 key
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            E,
+            "a revived old committer (leaf 0) must be fenced out for epochs >= E (I1)"
+        );
+    }
+
+    /// INCREMENT 4 (plan 0005 I1): after a handoff to S, a roster signed by a NON-delegated
+    /// member (not S, not the host) is rejected — only the single delegated authority is
+    /// accepted for the fenced epochs.
+    #[tokio::test]
+    async fn non_delegated_member_roster_is_rejected_after_handoff() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#handoff2",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        let (x, _x_rx) = group_core(&fabric, "x", &desc, false);
+        x.enable_gossip();
+        x.connect("h").await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        const E: u32 = 2000;
+        assert!(h.handoff_committer(s_leaf, E).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed);
+
+        // X (not the delegate) tries to issue a roster at E, signed with X's own leaf.
+        x.issue_delegate_roster(E).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "a roster from a non-delegated member must be rejected — only S's is accepted"
         );
     }
 

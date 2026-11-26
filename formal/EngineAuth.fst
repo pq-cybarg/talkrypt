@@ -235,3 +235,54 @@ let thm_forged_join_rejected
   : Lemma (requires l device_pub (join_transcript root0 device_pub kp) == false)
           (ensures accept_join_ok l inv root0 device_pub kp s m == false)
   = ()
+
+(* ---------- graceful committer handoff (increment 4: single authority, I1) ---------- *)
+(* Added 2026-11-25 (plan 0005 I1). Models `handle_committer_handoff` + the epoch-fenced  *)
+(* roster-authority gate. A host-signed delegation makes a SUCCESSOR leaf the sole roster  *)
+(* authority for epochs >= from_epoch, fencing out the old committer — exactly one         *)
+(* authority per epoch, so no split-brain from the graceful handoff.                        *)
+
+/// `handoff_transcript` = HANDOFF_CONTEXT | successor_leaf | from_epoch, injective.
+assume val handoff_transcript : (succ:nat) -> (fe:nat) -> msg
+assume HandoffInj :
+  (forall s f s' f'. {:pattern (handoff_transcript s f); (handoff_transcript s' f')}
+     handoff_transcript s f == handoff_transcript s' f' ==> (s==s' /\ f==f'))
+
+/// A committer handoff is HONORED only if signed by the current host (leaf 0) over the
+/// handoff transcript — `handle_committer_handoff` verifies it with `verify_host_sig`.
+let handoff_ok (l:log) (host_key:pk) (succ fe:nat) (s:sig) : bool =
+  verify l host_key (handoff_transcript succ fe) s
+
+/// THEOREM 13 (HANDOFF REQUIRES THE HOST — no self-promotion). An honored delegation is
+/// host-signed; by EUF-CMA a non-host cannot forge one, so a member cannot promote itself
+/// (or anyone else) to committer. Only the current authority may name its successor.
+let thm_handoff_requires_host (l:log) (host_key:pk) (succ fe:nat) (s:sig)
+  : Lemma (requires handoff_ok l host_key succ fe s == true)
+          (ensures l host_key (handoff_transcript succ fe) == true)
+  = eufcma_inst l host_key (handoff_transcript succ fe) s
+
+/// The roster authority leaf for `epoch`, given an optional epoch-fenced delegation to
+/// `succ` from `fe`: for epoch >= fe the SOLE authority is `succ`, else leaf 0 (host).
+let roster_authority (deleg:option (nat & nat)) (epoch:nat) : nat =
+  match deleg with
+  | Some (succ, fe) -> if epoch >= fe then succ else host_leaf
+  | None            -> host_leaf
+
+/// Accept a roster at `epoch` iff the authority-for-this-epoch's key signed it (`key_of`
+/// maps a leaf to its tree-bound sig key). This is the `verified` gate in engine.rs.
+let accept_roster_fenced
+      (l:log) (key_of:nat -> pk) (deleg:option (nat & nat)) (epoch entries:nat) (s:sig) : bool =
+  verify l (key_of (roster_authority deleg epoch)) (roster_transcript epoch entries) s
+
+/// THEOREM 14 (SINGLE AUTHORITY PER EPOCH / OLD HOST FENCED — I1). Under a delegation to
+/// `succ` from `fe`, for every epoch >= fe the roster authority is EXACTLY `succ`, and a
+/// roster is accepted at that epoch iff `succ`'s key signed it. So a roster from any other
+/// leaf — the fenced-out old host (leaf 0) included — is NOT accepted: there are never two
+/// concurrent committers, and a revived old host cannot re-assert authority. No split-brain.
+let thm_single_authority_fences_old_host
+      (l:log) (key_of:nat -> pk) (succ fe epoch entries:nat) (s:sig)
+  : Lemma (requires epoch >= fe)
+          (ensures roster_authority (Some (succ, fe)) epoch == succ /\
+                   accept_roster_fenced l key_of (Some (succ, fe)) epoch entries s ==
+                     verify l (key_of succ) (roster_transcript epoch entries) s)
+  = ()

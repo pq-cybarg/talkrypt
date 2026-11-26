@@ -91,8 +91,23 @@ Decouple message delivery from any single hub, and make the group connectivity r
      to an identity it does not control, and (GossipLiveness) the invite-MAC pre-filter + TTL
      keep a join flood bounded. Implement as its own increment with full reverification; do
      NOT weaken the G1/G2/F-17 posture.
-4. **Room-configurable multi-hub committer + consensus hook** — descriptor setting; signed
-   epoch-fenced handoff for standby promotion (I1); consensus-selection seam.
+4. **Multi-hub committer + failover.** Split:
+   - **4a (DONE)** — GRACEFUL, signed, epoch-fenced committer handoff: the host signs a
+     `CommitterHandoff{successor_leaf, from_epoch, sig}` (host leaf key) delegating ROSTER
+     (F-17) signing authority; members verify it against leaf 0 and thereafter accept the
+     successor's rosters for epochs >= from_epoch, FENCING OUT the old committer (exactly
+     one authority per epoch — I1, no split-brain; a revived old host is rejected). Low
+     blast radius: new read-only `verify_leaf_sig` + `sign_as_leaf` in crypto, the normal
+     leaf-0 F-17 path untouched. Tests: successor roster accepted under delegation; old
+     host (leaf 0) fenced at epoch >= from_epoch; non-delegated member rejected; a handoff
+     not host-signed is not honored (no self-promotion). F* EngineAuth THEOREM 13 (handoff
+     requires host) + 14 (single authority per epoch / old host fenced) discharged.
+   - **4b (NEXT)** — UNGRACEFUL failover (primary crashes) via consensus/quorum promotion,
+     and the full committing takeover (successor processes joins + produces commits, not
+     just rosters). This is the split-brain-sensitive part: promotion must require a quorum
+     of members to attest the primary is gone, epoch-fenced so a revived primary cannot
+     double-commit. Needs a quorum-threshold decision; its own increment + FV (no two live
+     committers under concurrent promotion attempts).
 5. **Tests** — hub-peer-peer-peer (join+deliver along chain), hub-dropout content
    continuity, presumptive queue-then-confirm, multi-hub active-active dedup + failover,
    no-hub P2P; plus DoS-bound tests (flood of unconfirmed → bounded) and I3 (vouch for

@@ -951,6 +951,29 @@ impl TreeKemGroup {
             .map(|k| k.verify(msg, sig).is_ok())
             .unwrap_or(false)
     }
+
+    /// Verify a signature against an ARBITRARY occupied leaf's tree-bound signing key
+    /// (read-only; the key was learned + PoP-checked from the Welcome and kept current via
+    /// `sig_update`). Used by the committer-handoff path (plan 0005 increment 4): after the
+    /// host signs an epoch-fenced delegation, members authenticate the delegated
+    /// successor's Roster/Commit against ITS leaf key. Returns false for an empty/unknown
+    /// leaf — it NEVER grants authority on its own; the engine gates it behind the
+    /// host-signed, epoch-fenced delegation (so this cannot be used to forge host
+    /// authority).
+    pub fn verify_leaf_sig(&self, leaf: u32, msg: &[u8], sig: &[u8]) -> bool {
+        self.leaf_sig_keys
+            .get(&leaf)
+            .map(|k| k.verify(msg, sig).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Sign `msg` with our own leaf signing key, regardless of whether we are the host
+    /// (unlike [`sign_as_host`], which requires leaf 0). Used by a delegated successor
+    /// committer to sign a Roster the host authorized it to issue. Returns `None` if we
+    /// hold no signing key.
+    pub fn sign_as_leaf(&self, msg: &[u8]) -> Option<Vec<u8>> {
+        self.my_sig.as_ref().map(|s| s.sign(msg))
+    }
     pub fn member_count(&self) -> usize {
         self.occupied.iter().filter(|o| **o).count()
     }
