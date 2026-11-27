@@ -336,3 +336,33 @@ let thm_minority_cannot_promote (designated:option nat) (leaf votes n:nat)
   : Lemma (requires op_Multiply 3 votes <= n)
           (ensures activate_ok designated leaf votes n == false)
   = ()
+
+(* ---------- committing takeover (increment 4c): commit authority under a handoff ------- *)
+(* Added 2026-11-27 (plan 0005 §4c). Models `apply_commit_with`: the committer authority  *)
+(* for an epoch is EXACTLY ONE leaf — the delegated successor when the handoff is in force, *)
+(* else the host — so a non-host successor's commit is accepted ONLY under the delegation,  *)
+(* and the old host is fenced out (the commit analogue of roster THEOREM 14, upholding I1). *)
+
+let commit_authority (deleg:option (nat & nat)) (epoch:nat) : nat =
+  match deleg with
+  | Some (succ, fe) -> if epoch >= fe then succ else host_leaf
+  | None            -> host_leaf
+
+/// Accept a commit at `epoch` from `committer` iff it is the sole authority for this epoch
+/// AND its key signed the epoch-bound commit. (`apply_commit_with` in treekem.rs.)
+let accept_commit_fenced
+      (l:log) (key_of:nat -> pk) (deleg:option (nat & nat)) (committer epoch body:nat) (s:sig) : bool =
+  committer = commit_authority deleg epoch &&
+  verify l (key_of committer) (commit_transcript epoch committer body) s
+
+/// THEOREM 18 (COMMIT AUTHORITY UNDER A HANDOFF — single committer, I1). Under a delegation
+/// to `succ` from `fe`, for epoch >= fe the commit authority is EXACTLY `succ`, and a commit
+/// from ANY other leaf — the fenced-out old host (leaf 0) included — is rejected. So the
+/// takeover transfers commit authority to exactly the host-authorized successor, never two
+/// committers at one epoch.
+let thm_commit_authority_single
+      (l:log) (key_of:nat -> pk) (succ fe epoch body:nat) (s:sig) (bad:nat)
+  : Lemma (requires epoch >= fe /\ bad <> succ)
+          (ensures commit_authority (Some (succ, fe)) epoch == succ /\
+                   accept_commit_fenced l key_of (Some (succ, fe)) bad epoch body s == false)
+  = ()

@@ -1111,6 +1111,10 @@ struct Inner {
     /// standby's epoch, the standby is activated (its delegation recorded in
     /// `committer_delegate`), epoch-fenced like a graceful handoff.
     promotion_votes: Mutex<std::collections::HashMap<u32, std::collections::HashSet<u32>>>,
+    /// INCREMENT 4c (committing takeover): set once a delegation/promotion makes US the
+    /// active committer (the delegated successor leaf is our own). While set, we process
+    /// joins and sign rosters with our leaf key — the committing role, not just the host's.
+    is_active_committer: std::sync::atomic::AtomicBool,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1427,6 +1431,8 @@ impl Core {
             committer_delegate: Mutex::new(None),
             authorized_standby: Mutex::new(None),
             promotion_votes: Mutex::new(std::collections::HashMap::new()),
+            // The founding host is the initial committer; a delegation transfers this.
+            is_active_committer: std::sync::atomic::AtomicBool::new(role == GroupRole::Host),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -2491,6 +2497,12 @@ impl Core {
         self.inner.group.lock().await.as_ref().map(|grp| grp.my_leaf())
     }
 
+    /// INCREMENT 4: the group's current epoch, if we are in a group (used to fence a
+    /// handoff/promotion at the live epoch).
+    pub async fn epoch(&self) -> Option<u32> {
+        self.inner.group.lock().await.as_ref().map(|grp| grp.epoch())
+    }
+
     /// INCREMENT 4 (graceful committer handoff, plan 0005 I1): as the CURRENT host,
     /// delegate ROSTER (F-17) signing authority to `successor_leaf` for epochs >=
     /// `from_epoch`, by signing a `CommitterHandoff` with the host leaf key and
@@ -2504,7 +2516,9 @@ impl Core {
                 .and_then(|grp| grp.sign_as_host(&handoff_transcript(successor_leaf, from_epoch)))
         };
         let Some(sig) = sig else { return false };
-        *self.inner.committer_delegate.lock().unwrap() = Some((successor_leaf, from_epoch));
+        // Record via the shared path so OUR committer flag clears (we stepped down) —
+        // otherwise the old host keeps processing joins alongside the successor.
+        record_delegation(&self.inner, successor_leaf, from_epoch).await;
         route(
             &self.inner,
             Frame::CommitterHandoff { successor_leaf, from_epoch, sig },
@@ -3469,7 +3483,15 @@ async fn signed_roster_frame(inner: &Arc<Inner>, entries: Vec<(u32, [u8; 48])>) 
     let g = inner.group.lock().await;
     let grp = g.as_ref()?;
     let epoch = grp.epoch();
-    let sig = grp.sign_as_host(&roster_transcript(epoch, &entries))?;
+    let transcript = roster_transcript(epoch, &entries);
+    // INCREMENT 4c: sign with whichever committer authority we hold — the host leaf
+    // (sign_as_host) normally, or OUR leaf key (sign_as_leaf) once we are the active
+    // delegated committer. Members authenticate it via the same epoch-fenced gate.
+    let sig = if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) {
+        grp.sign_as_leaf(&transcript)?
+    } else {
+        grp.sign_as_host(&transcript)?
+    };
     Some(Frame::Roster { epoch, entries, sig })
 }
 
@@ -3937,7 +3959,9 @@ async fn reader_loop(
                     marking,
                 });
             }
-            Some(Frame::KeyPackage(b)) if inner.role == GroupRole::Host => {
+            Some(Frame::KeyPackage(b))
+                if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
                 handle_keypackage(&inner, from, b).await;
             }
             // INCREMENT 3b: self-authenticating relay-join. The committer verifies the
@@ -3945,7 +3969,7 @@ async fn reader_loop(
             // (never the relay hop). A non-host member ignores it here but has already
             // relayed it toward the committer above (MAC-gated).
             Some(Frame::JoinRequest { device_pub, kp, sig, mac })
-                if inner.role == GroupRole::Host =>
+                if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) =>
             {
                 handle_join_request(&inner, device_pub, kp, sig, mac).await;
             }
@@ -4919,11 +4943,29 @@ async fn handle_committer_handoff(
     if !ok {
         return; // not host-signed — reject (no self-promotion / hijack)
     }
-    let mut d = inner.committer_delegate.lock().unwrap();
-    match *d {
-        Some((_, prev_fe)) if from_epoch <= prev_fe => {} // stale — keep the newer delegation
-        _ => *d = Some((successor_leaf, from_epoch)),
+    record_delegation(inner, successor_leaf, from_epoch).await;
+}
+
+/// Record an epoch-fenced committer delegation `(succ, fe)` (monotonic in `fe`), and — if
+/// WE are the designated successor — assume the active committing role so we start
+/// processing joins + signing rosters with our leaf key (increment 4c). Shared by the
+/// graceful handoff and the quorum promotion.
+async fn record_delegation(inner: &Arc<Inner>, succ: u32, fe: u32) {
+    {
+        let mut d = inner.committer_delegate.lock().unwrap();
+        match *d {
+            Some((_, prev_fe)) if fe <= prev_fe => return, // stale — keep the newer one
+            _ => *d = Some((succ, fe)),
+        }
     }
+    // Transfer the committer role: it is now EXACTLY the delegated successor. We become
+    // the active committer iff that successor is us; the old host (and everyone else)
+    // ceases to be the committer, so only one node processes joins / signs rosters (no
+    // double-commit).
+    let my_leaf = inner.group.lock().await.as_ref().map(|grp| grp.my_leaf());
+    inner
+        .is_active_committer
+        .store(my_leaf == Some(succ), std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---- INCREMENT 4b: ungraceful failover — pre-authorized standby + BFT quorum promotion ----
@@ -5005,11 +5047,7 @@ async fn handle_promotion_vote(inner: &Arc<Inner>, for_epoch: u32, voter_leaf: u
     let standby = *inner.authorized_standby.lock().unwrap();
     if let Some((sb_leaf, sb_fe)) = standby {
         if for_epoch == sb_fe && count * 3 > roster_n * 2 {
-            let mut d = inner.committer_delegate.lock().unwrap();
-            match *d {
-                Some((_, prev_fe)) if sb_fe <= prev_fe => {}
-                _ => *d = Some((sb_leaf, sb_fe)),
-            }
+            record_delegation(inner, sb_leaf, sb_fe).await;
         }
     }
 }
@@ -5093,7 +5131,11 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
         match next {
             Some(bytes) => match Commit::decode(grp.profile(), &bytes) {
                 Ok(commit) => {
-                    if grp.apply_commit(&commit).is_err() {
+                    // INCREMENT 4c (committing takeover): authorize the commit against the
+                    // SOLE committer for this epoch — the host, or the epoch-fenced
+                    // delegated successor after a handoff / quorum promotion.
+                    let delegate = *inner.committer_delegate.lock().unwrap();
+                    if grp.apply_commit_with(&commit, delegate).is_err() {
                         return;
                     }
                 }
@@ -7149,6 +7191,67 @@ mod tests {
             *h.inner.committer_delegate.lock().unwrap(),
             None,
             "a member quorum without the host's standby designation must promote no one"
+        );
+    }
+
+    /// INCREMENT 4c (plan 0005): committing takeover. After a committer handoff, the
+    /// delegated successor S — not the old host — processes a NEW join: S verifies the
+    /// joiner, produces the add-COMMIT (signed with S's leaf key) and the roster, and every
+    /// member applies S's commit (authorized via the epoch-fenced delegate). Proof: a new
+    /// member J joins THROUGH S, then speaks, and an existing member M (which applied S's
+    /// commit) receives J's message.
+    #[tokio::test]
+    async fn delegated_successor_processes_a_new_join() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#takeover",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        s.host().await.unwrap(); // S listens so the new joiner can reach it
+        let (m, mut m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        let e = s.epoch().await.unwrap();
+        // Graceful handoff makes S the active committer from the live epoch; H steps down.
+        assert!(h.handoff_committer(s_leaf, e).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // A brand-new member joins THROUGH S (the new committer), not H.
+        let (j, _j_rx) = group_core(&fabric, "j", &desc, false);
+        j.enable_gossip();
+        j.connect("s").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let _ = &mut m_rx;
+
+        // The committing takeover: S (the delegated successor, NOT the old host) processed
+        // J's join and produced the add-COMMIT signed with S's leaf key; M APPLIED that
+        // commit under the epoch-fenced delegate authority (apply_commit_with). So M's
+        // epoch advanced past the handoff epoch and stays in lock-step with the new
+        // committer S, and both now seat 4 members. A member applying a NON-host committer's
+        // commit is exactly what the takeover adds — and what apply_commit rejected before.
+        let s_epoch = s.epoch().await.unwrap();
+        let m_epoch = m.epoch().await.unwrap();
+        assert!(s_epoch > e, "S advanced the epoch by committing J's add as the new committer");
+        assert_eq!(
+            m_epoch, s_epoch,
+            "M must apply S's add-commit (epoch in lock-step with the new committer S)"
+        );
+        assert_eq!(
+            m.inner.roster.lock().unwrap().len(),
+            4,
+            "M's roster seats all four members after the successor's commit"
         );
     }
 

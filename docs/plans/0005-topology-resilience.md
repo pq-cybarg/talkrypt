@@ -113,9 +113,20 @@ Decouple message delivery from any single hub, and make the group connectivity r
      activates, sub-quorum (3/5) does not; a full quorum WITHOUT a host designation promotes
      no one. F* EngineAuth THEOREM 15 (standby requires host) + 16 (activation needs
      designation + quorum) + 17 (a minority cannot promote), all discharged.
-     Still open: the full committing TAKEOVER (the activated successor processing joins +
-     producing commits, not just rosters) — a mechanical engine extension on top of this
-     authority transfer, left for a follow-on.
+   - **4c (DONE)** — committing TAKEOVER: the activated successor processes joins and
+     produces COMMITS, not just rosters. `TreeKemGroup::apply_commit_with(commit, delegate)`
+     authorizes a commit against the SOLE committer for the epoch (host, or the epoch-fenced
+     delegate), verifying the committer's own leaf key — the commit analogue of the roster
+     gate (NOT mechanical: it touches the F-17 commit authority, the crown jewel; `apply_commit`
+     stays a `…_with(_, None)` wrapper so all existing callers are untouched). Engine: a single
+     `is_active_committer` flag (host holds it at creation; `record_delegation` TRANSFERS it so
+     exactly one node processes joins / signs rosters — the old host steps down, no
+     double-commit); join gates + `signed_roster_frame` key off it. Tests: crypto
+     `apply_commit_with_gates_the_delegated_committer` (non-authorized committer rejected,
+     delegate accepted); engine `delegated_successor_processes_a_new_join` (a new member joins
+     THROUGH the successor and every member applies the successor's add-commit, epoch in
+     lock-step). F* EngineAuth THEOREM 18 (commit authority is a single leaf per epoch; old
+     host fenced) discharged. **Increment 4 is now fully complete.**
 5. **Tests** — hub-peer-peer-peer (join+deliver along chain), hub-dropout content
    continuity, presumptive queue-then-confirm, multi-hub active-active dedup + failover,
    no-hub P2P; plus DoS-bound tests (flood of unconfirmed → bounded) and I3 (vouch for
