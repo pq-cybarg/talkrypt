@@ -191,6 +191,25 @@ enum Frame {
         from_epoch: u32,
         sig: Vec<u8>,
     },
+    /// INCREMENT 4b (plan 0005): the host PRE-AUTHORIZES a standby committer (leaf) that a
+    /// member quorum may later ACTIVATE if the primary fails. Host-signed, so a quorum can
+    /// only ever activate the ONE standby the host designated — never an arbitrary member
+    /// (prevents a malicious quorum from installing a hostile committer).
+    StandbyDesignation {
+        standby_leaf: u32,
+        from_epoch: u32,
+        sig: Vec<u8>,
+    },
+    /// INCREMENT 4b: a member's vote to ACTIVATE the pre-authorized standby for `for_epoch`
+    /// (because it believes the primary is gone). Signed with the voter's own leaf key;
+    /// counted once per voter. Activation needs a strict BFT quorum (> 2/3 of the roster),
+    /// so a malicious minority cannot promote prematurely; epoch-fencing (increment 4a)
+    /// then keeps exactly one authority per epoch.
+    PromotionVote {
+        for_epoch: u32,
+        voter_leaf: u32,
+        sig: Vec<u8>,
+    },
     Welcome(Vec<u8>),
     /// A membership commit tagged with the epoch it applies to (for ordering).
     Commit {
@@ -404,6 +423,26 @@ impl Frame {
                 w.put_u32(*from_epoch);
                 w.put_bytes(sig);
             }
+            Frame::StandbyDesignation {
+                standby_leaf,
+                from_epoch,
+                sig,
+            } => {
+                w.put_u8(22);
+                w.put_u32(*standby_leaf);
+                w.put_u32(*from_epoch);
+                w.put_bytes(sig);
+            }
+            Frame::PromotionVote {
+                for_epoch,
+                voter_leaf,
+                sig,
+            } => {
+                w.put_u8(23);
+                w.put_u32(*for_epoch);
+                w.put_u32(*voter_leaf);
+                w.put_bytes(sig);
+            }
         }
         w.into_vec()
     }
@@ -468,6 +507,17 @@ impl Frame {
             21 => Frame::CommitterHandoff {
                 successor_leaf: r.get_u32().ok()?,
                 from_epoch: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
+            },
+            // INCREMENT 4b: standby designation + promotion vote. Flat + total.
+            22 => Frame::StandbyDesignation {
+                standby_leaf: r.get_u32().ok()?,
+                from_epoch: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
+            },
+            23 => Frame::PromotionVote {
+                for_epoch: r.get_u32().ok()?,
+                voter_leaf: r.get_u32().ok()?,
                 sig: r.get_vec().ok()?,
             },
             // D1 store-and-forward decoders are chunked into standalone, flat functions
@@ -1052,6 +1102,15 @@ struct Inner {
     /// the successor leaf (not leaf 0), so there is EXACTLY ONE authority per epoch (I1): a
     /// revived old committer is fenced out, no split-brain. `None` = normal leaf-0 authority.
     committer_delegate: Mutex<Option<(u32, u32)>>,
+    /// INCREMENT 4b: the host-pre-authorized standby committer `(standby_leaf, from_epoch)`
+    /// recorded from a host-signed `StandbyDesignation`. A member quorum may ACTIVATE only
+    /// this designated standby (never an arbitrary member).
+    authorized_standby: Mutex<Option<(u32, u32)>>,
+    /// INCREMENT 4b: collected promotion votes, `for_epoch -> set of distinct voter leaves`.
+    /// When the set reaches a strict BFT quorum (> 2/3 of the roster) for the authorized
+    /// standby's epoch, the standby is activated (its delegation recorded in
+    /// `committer_delegate`), epoch-fenced like a graceful handoff.
+    promotion_votes: Mutex<std::collections::HashMap<u32, std::collections::HashSet<u32>>>,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1366,6 +1425,8 @@ impl Core {
             // flood is throttled to a bounded steady rate (tunable).
             join_rate: Mutex::new(TokenBucket::new(32.0, 8.0)),
             committer_delegate: Mutex::new(None),
+            authorized_standby: Mutex::new(None),
+            promotion_votes: Mutex::new(std::collections::HashMap::new()),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -2473,6 +2534,51 @@ impl Core {
         if let Some(sig) = sig {
             route(&self.inner, Frame::Roster { epoch, entries, sig }, Route::Broadcast).await;
         }
+    }
+
+    /// INCREMENT 4b: as the host, PRE-AUTHORIZE `standby_leaf` as the committer a member
+    /// quorum may activate (for epochs >= `from_epoch`) if the primary fails. Host-signed,
+    /// so the standby is the host's choice — a quorum can only ever activate THIS leaf.
+    pub async fn designate_standby(&self, standby_leaf: u32, from_epoch: u32) -> bool {
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_host(&standby_transcript(standby_leaf, from_epoch)))
+        };
+        let Some(sig) = sig else { return false };
+        *self.inner.authorized_standby.lock().unwrap() = Some((standby_leaf, from_epoch));
+        route(
+            &self.inner,
+            Frame::StandbyDesignation { standby_leaf, from_epoch, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
+    }
+
+    /// INCREMENT 4b: as a member, VOTE to activate the pre-authorized standby for
+    /// `for_epoch` (because we believe the primary is gone). Signed with our leaf key and
+    /// counted once; when a strict BFT quorum (> 2/3 of the roster) has voted, every member
+    /// activates the standby. Returns false if we hold no signing key.
+    pub async fn vote_promote(&self, for_epoch: u32) -> bool {
+        let my_leaf = match self.my_leaf().await {
+            Some(l) => l,
+            None => return false,
+        };
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_leaf(&vote_transcript(for_epoch, my_leaf)))
+        };
+        let Some(sig) = sig else { return false };
+        handle_promotion_vote(&self.inner, for_epoch, my_leaf, sig.clone()).await; // count our own
+        route(
+            &self.inner,
+            Frame::PromotionVote { for_epoch, voter_leaf: my_leaf, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
     }
 
     /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
@@ -3794,9 +3900,13 @@ async fn reader_loop(
                 | Some(Frame::Roster { .. })
                 | Some(Frame::Welcome(_))
                 | Some(Frame::CommitterHandoff { .. })
+                | Some(Frame::StandbyDesignation { .. })
+                | Some(Frame::PromotionVote { .. })
         ) {
-            // CommitterHandoff (increment 4) is host-signed + attribution-independent like
-            // Roster, so it rides the same relay to reach chain / multi-hop members.
+            // CommitterHandoff / StandbyDesignation (host-signed) and PromotionVote (leaf-
+            // signed) are attribution-independent like Roster — each recipient verifies the
+            // signature — so they ride the same gossip relay to reach every member (needed
+            // for quorum convergence across chains / multi-hop).
             relay_control(&inner, &frame_bytes, from).await;
         }
         // INCREMENT 3b: a self-authenticating JoinRequest is relayed toward the committer,
@@ -3850,6 +3960,17 @@ async fn reader_loop(
                 if inner.role == GroupRole::Member =>
             {
                 handle_committer_handoff(&inner, successor_leaf, from_epoch, sig).await;
+            }
+            // INCREMENT 4b: record the host's standby pre-authorization / tally a vote.
+            Some(Frame::StandbyDesignation { standby_leaf, from_epoch, sig })
+                if inner.role == GroupRole::Member =>
+            {
+                handle_standby_designation(&inner, standby_leaf, from_epoch, sig).await;
+            }
+            Some(Frame::PromotionVote { for_epoch, voter_leaf, sig })
+                if inner.role != GroupRole::None =>
+            {
+                handle_promotion_vote(&inner, for_epoch, voter_leaf, sig).await;
             }
             Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
                 handle_update_proposal(&inner, from, b).await;
@@ -4802,6 +4923,94 @@ async fn handle_committer_handoff(
     match *d {
         Some((_, prev_fe)) if from_epoch <= prev_fe => {} // stale — keep the newer delegation
         _ => *d = Some((successor_leaf, from_epoch)),
+    }
+}
+
+// ---- INCREMENT 4b: ungraceful failover — pre-authorized standby + BFT quorum promotion ----
+
+const STANDBY_CONTEXT: &[u8] = b"talkrypt-standby-designation-v1";
+const VOTE_CONTEXT: &[u8] = b"talkrypt-promotion-vote-v1";
+
+fn standby_transcript(standby_leaf: u32, from_epoch: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(STANDBY_CONTEXT.len() + 8);
+    t.extend_from_slice(STANDBY_CONTEXT);
+    t.extend_from_slice(&standby_leaf.to_le_bytes());
+    t.extend_from_slice(&from_epoch.to_le_bytes());
+    t
+}
+
+/// A promotion vote binds the VOTER leaf (so a vote cannot be replayed as another voter's)
+/// and the target epoch.
+fn vote_transcript(for_epoch: u32, voter_leaf: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(VOTE_CONTEXT.len() + 8);
+    t.extend_from_slice(VOTE_CONTEXT);
+    t.extend_from_slice(&for_epoch.to_le_bytes());
+    t.extend_from_slice(&voter_leaf.to_le_bytes());
+    t
+}
+
+/// MEMBER: record the host's PRE-AUTHORIZATION of a standby committer — ONLY if host-signed
+/// (so the standby is always the host's choice, never an arbitrary member a quorum picks).
+/// Monotonic in `from_epoch`. This does NOT activate the standby; a quorum does.
+async fn handle_standby_designation(
+    inner: &Arc<Inner>,
+    standby_leaf: u32,
+    from_epoch: u32,
+    sig: Vec<u8>,
+) {
+    let ok = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_host_sig(&standby_transcript(standby_leaf, from_epoch), &sig))
+            .unwrap_or(false)
+    };
+    if !ok {
+        return;
+    }
+    let mut sb = inner.authorized_standby.lock().unwrap();
+    match *sb {
+        Some((_, prev_fe)) if from_epoch <= prev_fe => {}
+        _ => *sb = Some((standby_leaf, from_epoch)),
+    }
+}
+
+/// ANY member: tally a promotion vote. A vote counts only if (a) the voter is a current
+/// roster member and (b) it is signed by that voter's leaf key. When DISTINCT votes for the
+/// pre-authorized standby's epoch reach a strict BFT quorum (> 2/3 of the roster), activate
+/// the standby by recording its epoch-fenced delegation (same gate as a graceful handoff,
+/// so increment-4a's single-authority/I1 guarantee carries over). A malicious minority
+/// (< 1/3) can neither reach the quorum nor change WHICH leaf is activated (that is fixed by
+/// the host's designation).
+async fn handle_promotion_vote(inner: &Arc<Inner>, for_epoch: u32, voter_leaf: u32, sig: Vec<u8>) {
+    if !inner.roster.lock().unwrap().contains_key(&voter_leaf) {
+        return; // not a member — ignore
+    }
+    let valid = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_leaf_sig(voter_leaf, &vote_transcript(for_epoch, voter_leaf), &sig))
+            .unwrap_or(false)
+    };
+    if !valid {
+        return;
+    }
+    let roster_n = inner.roster.lock().unwrap().len();
+    let count = {
+        let mut votes = inner.promotion_votes.lock().unwrap();
+        let set = votes.entry(for_epoch).or_default();
+        set.insert(voter_leaf);
+        set.len()
+    };
+    // Activate the PRE-AUTHORIZED standby iff a strict BFT quorum voted for its epoch.
+    let standby = *inner.authorized_standby.lock().unwrap();
+    if let Some((sb_leaf, sb_fe)) = standby {
+        if for_epoch == sb_fe && count * 3 > roster_n * 2 {
+            let mut d = inner.committer_delegate.lock().unwrap();
+            match *d {
+                Some((_, prev_fe)) if sb_fe <= prev_fe => {}
+                _ => *d = Some((sb_leaf, sb_fe)),
+            }
+        }
     }
 }
 
@@ -6851,6 +7060,95 @@ mod tests {
             m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
             before,
             "a roster from a non-delegated member must be rejected — only S's is accepted"
+        );
+    }
+
+    /// INCREMENT 4b (plan 0005): ungraceful failover. A strict BFT quorum (> 2/3 of the
+    /// roster) of member votes ACTIVATES the host-pre-authorized standby; a sub-quorum does
+    /// NOT. (Roster = 5 → quorum needs 4 votes.)
+    #[tokio::test]
+    async fn bft_quorum_activates_the_pre_authorized_standby() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#quorum",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let mut members = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            let (n, rx) = group_core(&fabric, name, &desc, false);
+            n.enable_gossip();
+            n.connect("h").await.unwrap();
+            members.push((n, rx));
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let (a, _) = &members[0];
+        let a_leaf = a.my_leaf().await.unwrap();
+        const E: u32 = 3000;
+        assert!(h.designate_standby(a_leaf, E).await, "host designates the standby");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 3 of 5 vote — below the > 2/3 BFT quorum, so NOT activated.
+        for i in 0..3 {
+            members[i].0.vote_promote(E).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            None,
+            "3/5 votes is below the strict > 2/3 BFT quorum — standby not activated"
+        );
+
+        // 4th vote reaches the quorum → the host-designated standby A is activated.
+        members[3].0.vote_promote(E).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            Some((a_leaf, E)),
+            "a BFT quorum (4/5) activates the host-designated standby A (and only A)"
+        );
+    }
+
+    /// INCREMENT 4b: a member quorum CANNOT promote anyone the host did not pre-authorize —
+    /// without a `StandbyDesignation`, even a full quorum of votes activates no committer.
+    /// This is what stops a malicious quorum from installing a hostile committer.
+    #[tokio::test]
+    async fn quorum_without_host_designation_promotes_no_one() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#noquorum",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let mut members = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            let (n, rx) = group_core(&fabric, name, &desc, false);
+            n.enable_gossip();
+            n.connect("h").await.unwrap();
+            members.push((n, rx));
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // NO designate_standby. A full quorum of votes still promotes no one.
+        const E: u32 = 4000;
+        for (n, _) in &members {
+            n.vote_promote(E).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            None,
+            "a member quorum without the host's standby designation must promote no one"
         );
     }
 

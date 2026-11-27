@@ -102,12 +102,20 @@ Decouple message delivery from any single hub, and make the group connectivity r
      host (leaf 0) fenced at epoch >= from_epoch; non-delegated member rejected; a handoff
      not host-signed is not honored (no self-promotion). F* EngineAuth THEOREM 13 (handoff
      requires host) + 14 (single authority per epoch / old host fenced) discharged.
-   - **4b (NEXT)** — UNGRACEFUL failover (primary crashes) via consensus/quorum promotion,
-     and the full committing takeover (successor processes joins + produces commits, not
-     just rosters). This is the split-brain-sensitive part: promotion must require a quorum
-     of members to attest the primary is gone, epoch-fenced so a revived primary cannot
-     double-commit. Needs a quorum-threshold decision; its own increment + FV (no two live
-     committers under concurrent promotion attempts).
+   - **4b (DONE)** — UNGRACEFUL failover via a host-PRE-AUTHORIZED standby + a strict BFT
+     quorum. Chosen model (2026-11-26, default on the maintainer's "continue"): the host
+     signs a `StandbyDesignation{standby_leaf, from_epoch}` (so a quorum can only ever
+     activate the ONE host-chosen leaf — never an arbitrary/malicious member); members then
+     cast `PromotionVote{for_epoch, voter_leaf}` (leaf-signed, counted once), and when
+     distinct votes exceed **> 2/3 of the roster** the standby is activated via the same
+     epoch-fenced delegation as 4a (so 4a's single-authority/I1 carries over). A minority
+     (< 1/3) can neither reach the quorum nor pick the leaf. Tests: BFT quorum (4/5)
+     activates, sub-quorum (3/5) does not; a full quorum WITHOUT a host designation promotes
+     no one. F* EngineAuth THEOREM 15 (standby requires host) + 16 (activation needs
+     designation + quorum) + 17 (a minority cannot promote), all discharged.
+     Still open: the full committing TAKEOVER (the activated successor processing joins +
+     producing commits, not just rosters) — a mechanical engine extension on top of this
+     authority transfer, left for a follow-on.
 5. **Tests** — hub-peer-peer-peer (join+deliver along chain), hub-dropout content
    continuity, presumptive queue-then-confirm, multi-hub active-active dedup + failover,
    no-hub P2P; plus DoS-bound tests (flood of unconfirmed → bounded) and I3 (vouch for

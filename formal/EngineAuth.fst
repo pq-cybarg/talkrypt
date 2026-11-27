@@ -286,3 +286,53 @@ let thm_single_authority_fences_old_host
                    accept_roster_fenced l key_of (Some (succ, fe)) epoch entries s ==
                      verify l (key_of succ) (roster_transcript epoch entries) s)
   = ()
+
+(* ---------- ungraceful quorum failover (increment 4b) ---------- *)
+(* Added 2026-11-26 (plan 0005 §4b). Models `handle_standby_designation` +                 *)
+(* `handle_promotion_vote`: the host PRE-AUTHORIZES a standby (host-signed), and a strict   *)
+(* BFT quorum (> 2/3 of the roster) of member votes ACTIVATES only that standby. A          *)
+(* malicious minority can neither pick the leaf (it is the host's) nor reach the quorum.    *)
+
+assume val standby_transcript : (standby:nat) -> (fe:nat) -> msg
+assume StandbyInj :
+  (forall s f s' f'. {:pattern (standby_transcript s f); (standby_transcript s' f')}
+     standby_transcript s f == standby_transcript s' f' ==> (s==s' /\ f==f'))
+
+/// A standby designation is honored only if signed by the host over its transcript.
+let standby_ok (l:log) (host_key:pk) (standby fe:nat) (s:sig) : bool =
+  verify l host_key (standby_transcript standby fe) s
+
+/// THEOREM 15 (STANDBY DESIGNATION REQUIRES THE HOST). The activatable standby is the
+/// host's choice; a member cannot designate one (EUF-CMA). So a quorum can only ever
+/// activate the host-authorized leaf — never a member of its own choosing.
+let thm_standby_requires_host (l:log) (host_key:pk) (standby fe:nat) (s:sig)
+  : Lemma (requires standby_ok l host_key standby fe s == true)
+          (ensures l host_key (standby_transcript standby fe) == true)
+  = eufcma_inst l host_key (standby_transcript standby fe) s
+
+/// The activation decision (`handle_promotion_vote`): the committer activates to `leaf` iff
+/// `leaf` is the host-designated standby AND the distinct member votes `votes` form a
+/// strict BFT quorum of roster size `n` (3*votes > 2*n).
+let has_designation (designated:option nat) (leaf:nat) : bool =
+  match designated with
+  | Some d -> d = leaf
+  | None   -> false
+let is_bft_quorum (votes n:nat) : bool = op_Multiply 3 votes > op_Multiply 2 n
+let activate_ok (designated:option nat) (leaf votes n:nat) : bool =
+  has_designation designated leaf && is_bft_quorum votes n
+
+/// THEOREM 16 (ACTIVATION NEEDS HOST DESIGNATION + BFT QUORUM). Any activation implies both
+/// a host-designated standby equal to the activated leaf AND a strict > 2/3 quorum — so a
+/// quorum without a designation promotes no one, and no promotion happens below 2/3.
+let thm_activation_needs_designation_and_quorum (designated:option nat) (leaf votes n:nat)
+  : Lemma (requires activate_ok designated leaf votes n == true)
+          (ensures (designated == Some leaf) /\ is_bft_quorum votes n == true)
+  = ()
+
+/// THEOREM 17 (A MINORITY CANNOT PROMOTE). If at most a third of the roster votes
+/// (3*votes <= n), activation is impossible regardless of designation — a malicious
+/// minority (< 1/3) can never force a committer promotion.
+let thm_minority_cannot_promote (designated:option nat) (leaf votes n:nat)
+  : Lemma (requires op_Multiply 3 votes <= n)
+          (ensures activate_ok designated leaf votes n == false)
+  = ()
