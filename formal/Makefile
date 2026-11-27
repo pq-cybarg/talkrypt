@@ -6,7 +6,8 @@
 #                 authentication + session-key secrecy (Handshake.fst), TreeKEM group
 #                 key-schedule PCS/FS (TreeKemKS.fst), control-plane authorization /
 #                 F-17 commit+roster gating (EngineAuth.fst), gossip dedup soundness +
-#                 eventual-delivery-under-connectivity (GossipLiveness.fst), nested
+#                 eventual-delivery-under-connectivity (GossipLiveness.fst), presumptive
+#                 queue-only / no-premature-key (PresumptiveKey.fst), nested
 #                 decoder totality (DecodeTotality.fst)
 #   * EasyCrypt — computational, QROM-sound reductions:
 #                   GroupAuthQROM.ec      (auth => EUF-CMA, all acceptance routes)
@@ -28,6 +29,7 @@ fstar:
 	$(FSTAR) TreeKemKS.fst
 	$(FSTAR) EngineAuth.fst
 	$(FSTAR) GossipLiveness.fst
+	$(FSTAR) PresumptiveKey.fst
 	$(FSTAR) DecodeTotality.fst
 
 easycrypt:

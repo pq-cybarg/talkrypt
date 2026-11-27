@@ -137,8 +137,12 @@ Decouple message delivery from any single hub, and make the group connectivity r
 - `EngineAuth.fst` — add: single-committer-per-epoch (I1); control-plane relay preserves
   authorization (a relay cannot cause acceptance of an unauthorized membership change, I5);
   provisional-member state transitions (confirm/reject) with no trust accrual (I3).
-- `TreeKemKS.fst` — add: no key release before committer Welcome (I2); standby-failover
-  handoff preserves the key-schedule (no epoch fork) (I1).
+- `PresumptiveKey.fst` (NEW, DISCHARGED) — the no-premature-key / presumptive-queue engine
+  state machine (I2): THM 1 no premature ciphertext, 2 key only via a valid Welcome, 3 flush
+  in order, 4 no encryption until keyed over any run, 5 sends never key. All VCs discharged.
+- `TreeKemKS.fst` — the cryptographic key-schedule side of I2 (Welcome confidentiality) +
+  standby-failover handoff preserves the key-schedule (no epoch fork) (I1) — the engine-state
+  half of I2 is now in PresumptiveKey.fst above.
 - `GossipLiveness.fst` — add: control-plane relay + dedup terminates (no infinite flood,
   TTL/SeenSet) and delivers to a connected peer graph even with the hub absent (hub-dropout
   content liveness); rate-limited relay stays bounded under a flood (I4).
