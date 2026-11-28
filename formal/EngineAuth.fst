@@ -317,7 +317,7 @@ let has_designation (designated:option nat) (leaf:nat) : bool =
   match designated with
   | Some d -> d = leaf
   | None   -> false
-let is_bft_quorum (votes n:nat) : bool = op_Multiply 3 votes > op_Multiply 2 n
+let is_bft_quorum (votes n:nat) : bool = 3 * votes > 2 * n
 let activate_ok (designated:option nat) (leaf votes n:nat) : bool =
   has_designation designated leaf && is_bft_quorum votes n
 
@@ -333,7 +333,7 @@ let thm_activation_needs_designation_and_quorum (designated:option nat) (leaf vo
 /// (3*votes <= n), activation is impossible regardless of designation — a malicious
 /// minority (< 1/3) can never force a committer promotion.
 let thm_minority_cannot_promote (designated:option nat) (leaf votes n:nat)
-  : Lemma (requires op_Multiply 3 votes <= n)
+  : Lemma (requires 3 * votes <= n)
           (ensures activate_ok designated leaf votes n == false)
   = ()
 
