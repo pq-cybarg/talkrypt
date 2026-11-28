@@ -83,7 +83,18 @@ nym = ["dep:nym-sdk", "dep:nym-credentials-interface", "dep:nym-credentials"]
 # Real LoRa-mesh serial adapters (Meshtastic / Meshcore over USB-serial).
 mesh-radio = ["dep:tokio-serial"]
 # Meshtastic MQTT-gateway ingest (bridge talkrypt-over-mesh via an MQTT broker).
-mesh-mqtt = ["dep:rumqttc"]
+# On Android, rumqttc's native-TLS resolves to openssl-sys, which has no system
+# OpenSSL for the NDK target — so the android build VENDORS OpenSSL (built from
+# source by the NDK clang, like nym's bundled sqlite). `dep:openssl` is a no-op on
+# non-android targets (it's only declared under the android target table below), so
+# desktop keeps using the platform TLS (SecureTransport/SChannel/system OpenSSL).
+mesh-mqtt = ["dep:rumqttc", "dep:openssl"]
+
+# Android-only: vendor OpenSSL (built from source by the NDK) so rumqttc's native-TLS
+# (openssl-sys) links on `aarch64-linux-android`, where there is no system libssl.
+# Optional + pulled only by `mesh-mqtt`, so a non-mesh android build doesn't build it.
+[target.'cfg(target_os = "android")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

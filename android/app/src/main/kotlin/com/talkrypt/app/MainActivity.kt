@@ -81,6 +81,10 @@ class MainActivity : Activity() {
     private var meshBackend: MeshRadioBackend? = null
     private var meshNode: uniffi.talkrypt_ffi.FfiMeshNode? = null
     private var meshScan: android.bluetooth.le.ScanCallback? = null
+    // Mesh over the INTERNET (Meshtastic MQTT gateway). The Rust side owns the MQTT
+    // connection (no host handle), so we only track that a bridge was started for
+    // this chat — it runs until the chat is disconnected. Needs a TALKRYPT_MESH=1 .so.
+    private var meshMqttOn = false
 
     /** Currently rendered chat id, or null on the list/other screens. */
     private val activeId: String? get() = sessions.active
@@ -504,6 +508,10 @@ class MainActivity : Activity() {
                 add("Mesh over LoRa (Meshtastic BLE)")
                 add("Mesh over LoRa (Meshcore BLE)")
             }
+            if (!meshMqttOn) {
+                add("Mesh over internet (Meshtastic MQTT)")
+                add("Mesh over internet (Meshcore MQTT)")
+            }
             add("Re-share invite")
             if (lc.meta.inviteUri != null) add("Show invite QR")
             add("Safety number (verify)")
@@ -522,6 +530,8 @@ class MainActivity : Activity() {
                     "Mesh over LoRa (Meshtastic BLE)" -> startMesh(id, MeshKind.MESHTASTIC)
                     "Mesh over LoRa (Meshcore BLE)" -> startMesh(id, MeshKind.MESHCORE)
                     "Stop mesh (LoRa)" -> stopMesh(id)
+                    "Mesh over internet (Meshtastic MQTT)" -> promptMeshMqtt(id, meshcore = false)
+                    "Mesh over internet (Meshcore MQTT)" -> promptMeshMqtt(id, meshcore = true)
                     "Re-share invite" -> lc.meta.inviteUri?.let { shareText(it) } ?: toast(Loc.s(R.string.m1_no_invite))
                     "Show invite QR" -> lc.meta.inviteUri?.let { showInviteQr(it) }
                     "Safety number (verify)" -> {
@@ -537,9 +547,9 @@ class MainActivity : Activity() {
                             .show()
                     }
                     "Reconnect" -> reconnect(id)
-                    "Leave (disconnect, keep history)" -> { sessions.disconnect(id); setContentView(chatListScreen()) }
+                    "Leave (disconnect, keep history)" -> { meshMqttOn = false; sessions.disconnect(id); setContentView(chatListScreen()) }
                     "Delete (erase)" -> confirm(Loc.s(R.string.m2_delete_chat_title, lc.meta.title), Loc.s(R.string.m2_delete_chat_body), Loc.s(R.string.m2_delete)) {
-                        sessions.disconnect(id); sessions.remove(id); drafts.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen())
+                        meshMqttOn = false; sessions.disconnect(id); sessions.remove(id); drafts.remove(id); runCatching { store.delete(id) }; setContentView(chatListScreen())
                     }
                 }
             }.show()
@@ -647,6 +657,61 @@ class MainActivity : Activity() {
         meshScan = null
         meshNode = null
         meshBackend = null
+    }
+
+    /** Mesh over the INTERNET: bridge this chat across a Meshtastic MQTT gateway.
+     *  Collect broker host/port/channel, then call the FFI `startMeshMqtt` — the Rust
+     *  side owns the MQTT connection and encapsulates talkrypt fragments as the same
+     *  `ServiceEnvelope` real Meshtastic gateways use (broker sees ciphertext only).
+     *  Needs a `.so` built with TALKRYPT_MESH=1; otherwise the FFI returns a clear
+     *  "rebuild with TALKRYPT_MESH=1" error, surfaced here. The connect() call blocks,
+     *  so it runs off the UI thread. */
+    private fun promptMeshMqtt(id: String, meshcore: Boolean) {
+        val c = sessions.get(id)?.client ?: run { toast(Loc.s(R.string.m2_connect_first)); return }
+        val carriage = if (meshcore) "Meshcore" else "Meshtastic"
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        val host = android.widget.EditText(this).apply {
+            hint = "broker host (e.g. mqtt.meshtastic.org)"
+            setText("mqtt.meshtastic.org")
+            inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val port = android.widget.EditText(this).apply {
+            hint = "port (8883 TLS / 1883 plain)"
+            setText("8883")
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val chan = android.widget.EditText(this).apply {
+            hint = "channel name (e.g. LongFast)"
+            setText("LongFast")
+            inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+        }
+        val col = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad * 2, pad, pad * 2, 0)
+            addView(host); addView(port); addView(chan)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Mesh over internet ($carriage MQTT)")
+            .setMessage("Bridge this chat across an MQTT broker using the $carriage carriage. Your messages stay PQ-sealed end to end; the broker sees only ciphertext.")
+            .setView(col)
+            .setPositiveButton("Connect") { _, _ ->
+                val h = host.text.toString().trim()
+                val p = port.text.toString().trim().toUShortOrNull()
+                val ch = chan.text.toString().trim().ifEmpty { "LongFast" }
+                if (h.isEmpty() || p == null) { toast("Enter a broker host and a valid port"); return@setPositiveButton }
+                sysLine(id, "mesh-over-internet ($carriage): connecting to $h:$p …")
+                Thread {
+                    val res = runCatching { c.startMeshMqtt(h, p, ch, 0.toUByte(), meshcore) }
+                    ui.post {
+                        res.fold(
+                            onSuccess = { meshMqttOn = true; sysLine(id, "mesh-over-internet linked via $carriage ($h:$p, #$ch)") },
+                            onFailure = { e -> sysLine(id, "mesh-over-internet failed: ${e.message}") },
+                        )
+                    }
+                }.start()
+            }
+            .setNegativeButton(Loc.s(R.string.m1_close), null)
+            .show()
     }
 
     /** Emulator/QEMU spoof self-test (no real radio): feed the exact opaque blob core

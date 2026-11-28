@@ -17,6 +17,9 @@ zeroize.workspace = true
 # SHA-256 for the gossip dedup key (a content fingerprint of forwarded group
 # ciphertext — see the seen-set in the engine).
 sha2.workspace = true
+# Vetted constant-time equality (hardened against compiler reordering) for the
+# invite-bound join-admission MAC comparison (plan 0005 I4). Never hand-roll this.
+subtle.workspace = true
 # Argon2id for password-gated channels (mixes a channel password into the root) and
 # the default at-rest seal KDF.
 argon2 = "0.5"

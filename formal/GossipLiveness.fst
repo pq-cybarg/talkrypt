@@ -108,3 +108,40 @@ let thm_delivery_monotone (adj:adjacency) (src u v:node)
       (du:delivered adj src u) (e:adj u v)
   : delivered adj src v
   = DHop u v du e
+
+(* ======== PART 3: control-plane relay instance (increments 1 & 3b) ======== *)
+(* Added 2026-11-25 (plan 0005). The topology-resilience work added a CONTROL-PLANE   *)
+(* relay: a gossip bridge re-floods Commit/Roster/Welcome (`relay_control`) and MAC-    *)
+(* gated JoinRequests (`relay_join_request`) to peers other than the source, each       *)
+(* deduped by the `ctl_seen` set. This is the SAME forward rule and the SAME dedup       *)
+(* abstraction as PART 1/2, instantiated on a different frame class and seen set — so    *)
+(* Theorems 1-6 apply to it UNCHANGED. We make that application explicit here.           *)
+
+/// `ctl_seen` is another instance of the `seen` dedup abstraction; `relay_control` /
+/// `relay_join_request` insert the frame's id and forward only on `true`. Thus:
+///   * loop-freedom + termination of the control-plane flood == THEOREM 3, and
+///   * eventual delivery of a control frame to every connected member == THEOREM 5,
+/// re-exported below so the control-plane relay is covered by proof, not assertion.
+
+/// COROLLARY 7 (CONTROL-PLANE RELAY IS LOOP-FREE / TERMINATES). A Commit/Roster/Welcome/
+/// JoinRequest frame is forwarded by a ctl-relay node at most once — the ctl flood cannot
+/// storm. Direct instance of Theorem 3 on the `ctl_seen` set.
+let thm_ctl_relay_loop_free (s:seen) (x:gid)
+  : Lemma (ensures (let (_, s') = insert s x in fst (insert s' x) == false))
+  = thm_forward_once_no_loop s x
+
+/// COROLLARY 8 (CONTROL-PLANE FRAME REACHES EVERY CONNECTED MEMBER). Given connectivity,
+/// a control frame floods to every node reachable from the committer — so a chain-only or
+/// multi-hop member DOES receive the Commit/Roster/Welcome that keeps it in sync (the
+/// liveness core for hub-peer-peer-peer and hub-dropout). Instance of Theorem 5.
+let thm_ctl_frame_reaches_reachable (adj:adjacency) (src v:node) (p:path adj src v)
+  : delivered adj src v
+  = thm_reachable_is_delivered adj src v p
+
+/// HONEST SCOPE — JOIN DoS BOUND (plan 0005 I4). Loop-freedom (above) + the invite-MAC
+/// pre-filter (EngineAuth THEOREM 10: a non-invite-holder's join is rejected before any
+/// relay-forward or commit) bound WHICH join frames propagate. The remaining QUANTITATIVE
+/// bound — that the token-bucket rate limiter caps join work per unit time even from
+/// invite-holders — is a rate property outside F*'s safety/termination scope (like the
+/// temporal-liveness caveat in the module header), and is an explicit assumption, backed
+/// by the `TokenBucket` unit tests rather than this proof.

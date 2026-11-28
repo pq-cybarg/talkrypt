@@ -45,6 +45,10 @@ nym = [
     "dep:rustls-platform-verifier",
     "dep:jni",
 ]
+# Mesh over the INTERNET: a Meshtastic MQTT-gateway node (bridge talkrypt-over-mesh
+# across the internet via an MQTT broker). Enables `start_mesh_mqtt`. On Android the
+# transport crate vendors OpenSSL for rumqttc's native-TLS (see its Cargo.toml).
+mesh = ["talkrypt-transport/mesh-mqtt"]
 
 [[bin]]
 name = "uniffi-bindgen"

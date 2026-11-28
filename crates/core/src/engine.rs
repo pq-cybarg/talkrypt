@@ -166,6 +166,50 @@ enum Frame {
         marking: Option<Marking>,
     },
     KeyPackage(Vec<u8>),
+    /// INCREMENT 3b (plan 0005): a SELF-AUTHENTICATING join request, so a joiner can
+    /// join THROUGH a relaying peer (hub-peer-peer-peer) without the committer having to
+    /// infer its identity from the connection (which, relayed, would be the relay — the
+    /// G2 attribution gap). Carries the joiner's device public key, its KeyPackage, a
+    /// device signature binding the two to the chat root, and an invite-bound MAC proving
+    /// invite possession (a cheap admission pre-filter a relay checks before forwarding —
+    /// I4). The committer attributes the new leaf to the VERIFIED device identity here,
+    /// never to the relay hop. Relay-safe: a relay cannot forge the device signature.
+    JoinRequest {
+        device_pub: Vec<u8>,
+        kp: Vec<u8>,
+        sig: Vec<u8>,
+        mac: Vec<u8>,
+    },
+    /// INCREMENT 4 (plan 0005, graceful committer handoff): the current committer (host,
+    /// leaf 0) delegates ROSTER (F-17) signing authority to `successor_leaf`, effective for
+    /// roster epochs >= `from_epoch`, signed with the host leaf key. Members verify `sig`
+    /// against leaf 0 and then accept the successor's rosters for those epochs INSTEAD of
+    /// the host's — exactly one authority per epoch (I1). Only the current host can issue
+    /// one (sig is host-authenticated), so a member cannot promote itself.
+    CommitterHandoff {
+        successor_leaf: u32,
+        from_epoch: u32,
+        sig: Vec<u8>,
+    },
+    /// INCREMENT 4b (plan 0005): the host PRE-AUTHORIZES a standby committer (leaf) that a
+    /// member quorum may later ACTIVATE if the primary fails. Host-signed, so a quorum can
+    /// only ever activate the ONE standby the host designated — never an arbitrary member
+    /// (prevents a malicious quorum from installing a hostile committer).
+    StandbyDesignation {
+        standby_leaf: u32,
+        from_epoch: u32,
+        sig: Vec<u8>,
+    },
+    /// INCREMENT 4b: a member's vote to ACTIVATE the pre-authorized standby for `for_epoch`
+    /// (because it believes the primary is gone). Signed with the voter's own leaf key;
+    /// counted once per voter. Activation needs a strict BFT quorum (> 2/3 of the roster),
+    /// so a malicious minority cannot promote prematurely; epoch-fencing (increment 4a)
+    /// then keeps exactly one authority per epoch.
+    PromotionVote {
+        for_epoch: u32,
+        voter_leaf: u32,
+        sig: Vec<u8>,
+    },
     Welcome(Vec<u8>),
     /// A membership commit tagged with the epoch it applies to (for ordering).
     Commit {
@@ -357,6 +401,48 @@ impl Frame {
                     w.put_bytes(fp);
                 }
             }
+            Frame::JoinRequest {
+                device_pub,
+                kp,
+                sig,
+                mac,
+            } => {
+                w.put_u8(20);
+                w.put_bytes(device_pub);
+                w.put_bytes(kp);
+                w.put_bytes(sig);
+                w.put_bytes(mac);
+            }
+            Frame::CommitterHandoff {
+                successor_leaf,
+                from_epoch,
+                sig,
+            } => {
+                w.put_u8(21);
+                w.put_u32(*successor_leaf);
+                w.put_u32(*from_epoch);
+                w.put_bytes(sig);
+            }
+            Frame::StandbyDesignation {
+                standby_leaf,
+                from_epoch,
+                sig,
+            } => {
+                w.put_u8(22);
+                w.put_u32(*standby_leaf);
+                w.put_u32(*from_epoch);
+                w.put_bytes(sig);
+            }
+            Frame::PromotionVote {
+                for_epoch,
+                voter_leaf,
+                sig,
+            } => {
+                w.put_u8(23);
+                w.put_u32(*for_epoch);
+                w.put_u32(*voter_leaf);
+                w.put_bytes(sig);
+            }
         }
         w.into_vec()
     }
@@ -406,6 +492,34 @@ impl Frame {
             13 => Frame::Promote(r.get_vec().ok()?),
             14 => Frame::Consent(r.get_vec().ok()?),
             19 => Frame::PromoteCommit(r.get_vec().ok()?),
+            // INCREMENT 3b: self-authenticating join request. Flat + total — four
+            // length-delimited byte vecs, no nesting, no panic on hostile input; the
+            // device signature + invite-MAC are verified later in `handle_join_request`,
+            // never here (decode is pre-auth).
+            20 => Frame::JoinRequest {
+                device_pub: r.get_vec().ok()?,
+                kp: r.get_vec().ok()?,
+                sig: r.get_vec().ok()?,
+                mac: r.get_vec().ok()?,
+            },
+            // INCREMENT 4: committer handoff. Flat + total (two u32 + one length-delimited
+            // sig); the host signature is verified later, never here.
+            21 => Frame::CommitterHandoff {
+                successor_leaf: r.get_u32().ok()?,
+                from_epoch: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
+            },
+            // INCREMENT 4b: standby designation + promotion vote. Flat + total.
+            22 => Frame::StandbyDesignation {
+                standby_leaf: r.get_u32().ok()?,
+                from_epoch: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
+            },
+            23 => Frame::PromotionVote {
+                for_epoch: r.get_u32().ok()?,
+                voter_leaf: r.get_u32().ok()?,
+                sig: r.get_vec().ok()?,
+            },
             // D1 store-and-forward decoders are chunked into standalone, flat functions
             // (below) so each is independently CBMC-provable in isolation — routing an
             // arbitrary tag through this whole match would drag in the Marking-bearing
@@ -886,10 +1000,12 @@ struct Inner {
     root0: [u8; 32],
     peers: Mutex<Vec<Peer>>,
     events_tx: tokio::sync::mpsc::UnboundedSender<Event>,
-    /// Optional LoRa-mesh message carry (set by `start_mesh_messaging`). When
-    /// present, `Route::Broadcast` group messages are ALSO fragmented and
-    /// transmitted over the mesh, in addition to the peer fan-out.
-    mesh_tx: Mutex<Option<MeshTx>>,
+    /// Active mesh message carries (each set by a `start_mesh_messaging` call). When
+    /// non-empty, `Route::Broadcast` group messages are ALSO fragmented and transmitted
+    /// over EVERY carry, in addition to the peer fan-out. A node may hold several at
+    /// once — e.g. a LoRa radio AND an MQTT gateway, or Meshtastic AND Meshcore — so one
+    /// node can bridge any pair of mesh modalities (see [`Core::start_mesh_messaging`]).
+    mesh_tx: Mutex<Vec<MeshTx>>,
     // --- TreeKEM group state (GroupRole::None for plain pairwise chats) ---
     role: GroupRole,
     group: AsyncMutex<Option<TreeKemGroup>>,
@@ -962,6 +1078,43 @@ struct Inner {
     /// plaintext differ (the group ratchet advances a nonce), so this only ever
     /// collapses genuine duplicates, never distinct messages.
     seen: Mutex<SeenSet>,
+    /// Dedup for GOSSIP-RELAYED control-plane frames (Welcome/Commit/Roster/KeyPackage):
+    /// a gossip bridge re-floods each distinct control frame at most once, so key
+    /// material and commits reach peers not directly connected to the committer
+    /// (relay chains / multi-hub) without looping. Kept separate from `seen` (group
+    /// content) so the two domains can't evict each other. See plan 0005 I5.
+    ctl_seen: Mutex<SeenSet>,
+    /// INCREMENT 3 (plan 0005, presumptive queue-only): plaintext messages a JOINING
+    /// member composed before its Welcome arrived. Held LOCALLY only — never sent on the
+    /// wire and never encrypted (we have no group key yet, upholding I2 "no premature
+    /// key") — and flushed in composition order the instant we join. Lets a user type
+    /// before the hub confirms without blocking delivery on hub latency; bounded so a
+    /// stuck join cannot grow it without limit.
+    pending_outbound: Mutex<Vec<(String, Option<Marking>)>>,
+    /// INCREMENT 3b (plan 0005 I4): token-bucket bounding join-related work (committing
+    /// AND relaying self-authenticating JoinRequests), so even a flood of valid-invite
+    /// joins cannot force unbounded ML-DSA verifies / TreeKEM commits or relay
+    /// amplification. The invite-MAC pre-filter drops non-invite-holders before this.
+    join_rate: Mutex<TokenBucket>,
+    /// INCREMENT 4 (plan 0005, graceful committer handoff): an epoch-fenced delegation of
+    /// the ROSTER (F-17) signing authority, `(successor_leaf, from_epoch)`, recorded from a
+    /// host-signed `CommitterHandoff`. For roster epochs >= `from_epoch` the authority is
+    /// the successor leaf (not leaf 0), so there is EXACTLY ONE authority per epoch (I1): a
+    /// revived old committer is fenced out, no split-brain. `None` = normal leaf-0 authority.
+    committer_delegate: Mutex<Option<(u32, u32)>>,
+    /// INCREMENT 4b: the host-pre-authorized standby committer `(standby_leaf, from_epoch)`
+    /// recorded from a host-signed `StandbyDesignation`. A member quorum may ACTIVATE only
+    /// this designated standby (never an arbitrary member).
+    authorized_standby: Mutex<Option<(u32, u32)>>,
+    /// INCREMENT 4b: collected promotion votes, `for_epoch -> set of distinct voter leaves`.
+    /// When the set reaches a strict BFT quorum (> 2/3 of the roster) for the authorized
+    /// standby's epoch, the standby is activated (its delegation recorded in
+    /// `committer_delegate`), epoch-fenced like a graceful handoff.
+    promotion_votes: Mutex<std::collections::HashMap<u32, std::collections::HashSet<u32>>>,
+    /// INCREMENT 4c (committing takeover): set once a delegation/promotion makes US the
+    /// active committer (the delegated successor leaf is our own). While set, we process
+    /// joins and sign rosters with our leaf key — the committing role, not just the host's.
+    is_active_committer: std::sync::atomic::AtomicBool,
     /// D1 store-and-forward: is THIS chat persistent (outbox on)? A persistent chat
     /// queues outgoing group frames until a `DeliveryAck` clears them, and re-sends
     /// on reconnect so an offline member catches up. Default off (ephemeral).
@@ -1251,7 +1404,7 @@ impl Core {
             root0,
             peers: Mutex::new(Vec::new()),
             events_tx,
-            mesh_tx: Mutex::new(None),
+            mesh_tx: Mutex::new(Vec::new()),
             role,
             group: AsyncMutex::new(group),
             leaf_keypair: Mutex::new(leaf_keypair),
@@ -1270,6 +1423,16 @@ impl Core {
             admitted_peers: Mutex::new(std::collections::HashSet::new()),
             gossip: std::sync::atomic::AtomicBool::new(false),
             seen: Mutex::new(SeenSet::new()),
+            ctl_seen: Mutex::new(SeenSet::new()),
+            pending_outbound: Mutex::new(Vec::new()),
+            // Capacity 32 joins, refilling 8/sec: a brief burst is absorbed, a sustained
+            // flood is throttled to a bounded steady rate (tunable).
+            join_rate: Mutex::new(TokenBucket::new(32.0, 8.0)),
+            committer_delegate: Mutex::new(None),
+            authorized_standby: Mutex::new(None),
+            promotion_votes: Mutex::new(std::collections::HashMap::new()),
+            // The founding host is the initial committer; a delegation transfers this.
+            is_active_committer: std::sync::atomic::AtomicBool::new(role == GroupRole::Host),
             // D1 store-and-forward. Default in-memory stores (delivery across
             // reconnects within a run); a host injects a sealed-file `OutboxStore`
             // for restart survival via the same seam. Caps: 4096 frames, 30-day TTL.
@@ -1900,7 +2063,31 @@ impl Core {
                 .map(|k| k.key_package().encode());
             let sent_keypackage = kp_bytes.is_some();
             if let Some(kpb) = kp_bytes {
-                route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+                // INCREMENT 3b: in a gossip/relay topology, join with a SELF-AUTHENTICATING
+                // JoinRequest so we can join THROUGH a relaying peer (hub-peer-peer-peer):
+                // the committer attributes our leaf to our device signature + invite-MAC,
+                // not the relay hop. In a plain direct-hub topology (no gossip), the lighter
+                // KeyPackage suffices (the host authenticates us by the direct handshake).
+                if self.inner.gossip.load(std::sync::atomic::Ordering::Relaxed)
+                    && !self.inner.relayed
+                {
+                    let device_pub = self.inner.identity.public().sig_vk.clone();
+                    let sig = self
+                        .inner
+                        .identity
+                        .sign(&join_sig_transcript(&self.inner.root0, &device_pub, &kpb));
+                    let mac =
+                        join_invite_mac(&self.inner.descriptor.invite_token, &device_pub, &kpb)
+                            .to_vec();
+                    route(
+                        &self.inner,
+                        Frame::JoinRequest { device_pub, kp: kpb, sig, mac },
+                        Route::Committer,
+                    )
+                    .await;
+                } else {
+                    route(&self.inner, Frame::KeyPackage(kpb), Route::Committer).await;
+                }
             }
             // D1 restart survival: on a RECONNECT the leaf key was already consumed at the
             // first Welcome, so we send NO KeyPackage — which would leave the host's Double
@@ -2011,70 +2198,26 @@ impl Core {
                 gossip_id(&payload)
             }
             GroupRole::Host | GroupRole::Member => {
-                // SUB-SPEC A §4 mode 3: when the on-message-id cadence is on and we
-                // have a leading name, stamp a stable name-id (label ‖ context) so a
-                // viewer can confirm our name is current or detect a rename it missed.
-                let name_tag = {
-                    let on = self.inner.cadence.lock().unwrap().on_message_id;
-                    if on {
-                        self.inner.leading_name.lock().unwrap().as_ref().map(|e| {
-                            let ctx = crate::presence::chat_context(
-                                &self.inner.descriptor.invite_token,
-                                &self.inner.descriptor.channel,
-                            );
-                            crate::presence::name_id_tag(&e.label, &ctx)
-                        })
-                    } else {
-                        None
+                match group_send(&self.inner, text, marking.clone()).await {
+                    Ok(gid) => gid,
+                    // INCREMENT 3 (plan 0005 I2): a MEMBER that has initiated its join but
+                    // not yet received its Welcome has no group key. Rather than failing,
+                    // buffer the plaintext LOCALLY (presumptive queue-only — never on the
+                    // wire, never encrypted early) and flush it the instant we join. The
+                    // host, which always holds the group, never takes this path.
+                    Err(crate::error::CoreError::GroupNotReady)
+                        if self.inner.role == GroupRole::Member =>
+                    {
+                        const MAX_PENDING: usize = 256; // bound a stuck join (I4 spirit)
+                        let mut q = self.inner.pending_outbound.lock().unwrap();
+                        if q.len() < MAX_PENDING {
+                            q.push((text.to_string(), marking));
+                        }
+                        // Provisional id; the real ciphertext gossip-id is emitted on flush.
+                        gossip_id(text.as_bytes())
                     }
-                };
-                let payload = marking::encode_payload_tagged(&marking, text, name_tag);
-                let ct = {
-                    let mut g = self.inner.group.lock().await;
-                    match g.as_mut() {
-                        // Sign every group message with our per-membership leaf
-                        // signature key so receivers can bind it to our leaf and
-                        // reject impersonation or relay restamping, without exposing
-                        // a long-term identity (SECURITY-AUDIT G1/G2).
-                        Some(grp) => grp.encrypt_signed(&payload)?,
-                        None => return Err(crate::error::CoreError::GroupNotReady),
-                    }
-                };
-                // D3: record our OWN outgoing message in the ephemeral backlog so a later
-                // Carry/CarryFromPoint promotion can seal what we already hold. Local only.
-                {
-                    let me = self.inner.identity.public().fingerprint();
-                    let ts = now_secs();
-                    let rec = crate::history::HistoryRecord {
-                        from: me,
-                        ts,
-                        text: text.to_string(),
-                        marking: marking.clone(),
-                    };
-                    record_backlog(&self.inner, gossip_id(&ct), rec.encode(), ts);
+                    Err(e) => return Err(e),
                 }
-                // The ciphertext gossip-id is this message's stable id: the receiver
-                // dedups + acks on it, and `Event::Delivered { gossip_id }` carries it
-                // back — so it's also what `send` returns for delivery tracking.
-                let gid = gossip_id(&ct);
-                // D1: in a persistent chat, queue the ALREADY-ENCRYPTED frame in the
-                // outbox (keyed by that gossip-id) so an offline member catches up on
-                // reconnect. Re-encrypting later would advance the ratchet, so we store
-                // these exact bytes.
-                let frame = Frame::GroupMsg(ct.clone());
-                if self.inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
-                    let dropped = self.inner.outbox.enqueue(
-                        &self.inner.descriptor.channel,
-                        gid,
-                        &frame.encode(),
-                        now_secs(),
-                    );
-                    if dropped > 0 {
-                        let _ = self.inner.events_tx.send(Event::OutboxDropped { count: dropped });
-                    }
-                }
-                route(&self.inner, frame, Route::Broadcast).await;
-                gid
             }
         };
         Ok(gid)
@@ -2285,26 +2428,37 @@ impl Core {
     ///   `gossip_id`/`SeenSet` dedup as a peer frame, which is essential because a
     ///   broadcast mesh redelivers every frame many times.
     ///
-    /// A node on both mesh and a peer transport bridges the two: a mesh-received
-    /// frame is re-forwarded to connected peers by `handle_group_msg`'s gossip
-    /// loop, and vice versa, with `SeenSet` preventing loops. This slice carries
-    /// chat CONTENT only; group membership/commits ride the primary transport.
+    /// **Bridging (any-to-any).** A gossip-enabled node forwards every received
+    /// `GroupMsg` onto all of its OTHER bearers via `handle_group_msg`: to its peer
+    /// links (LAN/Tor/Nym, unified under `MultiTransport`) AND, via `mesh_tee`, onto
+    /// every mesh carry except the one it arrived on. So a node holding any two
+    /// modalities — peer↔mesh, or mesh↔mesh (e.g. LoRa↔MQTT, Meshtastic↔Meshcore,
+    /// since several carries may be active at once) — bridges them in BOTH directions,
+    /// and the whole group is connected as long as the bridge graph is. `SeenSet`
+    /// (ciphertext `gossip_id`) collapses the re-floods a broadcast mesh produces and
+    /// prevents loops. This slice carries chat CONTENT only; group membership/commits
+    /// ride the primary transport.
     pub async fn start_mesh_messaging(
         &self,
         node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
         policy: talkrypt_transport::mesh::MeshPolicy,
     ) {
-        // Outbound: register the carry so `route` tees broadcasts to the mesh.
+        // Outbound: append the carry so `route`/`mesh_tee` tee broadcasts to it (in
+        // addition to any carries already active — a node may hold several).
+        let carry_id = MESH_CARRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut g = self.inner.mesh_tx.lock().unwrap();
-            *g = Some(MeshTx {
+            g.push(MeshTx {
+                id: carry_id,
                 node: node.clone(),
                 channel: policy.channel,
                 msg_id: std::sync::atomic::AtomicU16::new(0),
             });
         }
         // Inbound: reassemble Frame-kind fragments and process each recovered
-        // GroupMsg through the self-authenticating group path.
+        // GroupMsg through the self-authenticating group path. The carry id lets
+        // `handle_group_msg` bridge the frame onto every OTHER mesh carry while
+        // skipping this one (no echo).
         let inner = self.inner.clone();
         let channel = policy.channel;
         tokio::spawn(async move {
@@ -2324,7 +2478,7 @@ impl Core {
                     .unwrap_or_else(|| "mesh".to_string());
                 if let Some(bytes) = reasm.accept(&src, &pkt.payload) {
                     if let Some(Frame::GroupMsg(ct)) = Frame::decode(&bytes) {
-                        handle_group_msg(&inner, MESH_SOURCE_FP, ct).await;
+                        handle_group_msg(&inner, MESH_SOURCE_FP, ct, Some(carry_id)).await;
                     }
                 }
             }
@@ -2335,6 +2489,110 @@ impl Core {
     #[doc(hidden)]
     pub fn backlog_len(&self) -> usize {
         self.inner.backlog.lock().unwrap().len()
+    }
+
+    /// INCREMENT 4 (graceful committer handoff): our own leaf index in the group, if we
+    /// hold one (used to name a successor in a handoff).
+    pub async fn my_leaf(&self) -> Option<u32> {
+        self.inner.group.lock().await.as_ref().map(|grp| grp.my_leaf())
+    }
+
+    /// INCREMENT 4: the group's current epoch, if we are in a group (used to fence a
+    /// handoff/promotion at the live epoch).
+    pub async fn epoch(&self) -> Option<u32> {
+        self.inner.group.lock().await.as_ref().map(|grp| grp.epoch())
+    }
+
+    /// INCREMENT 4 (graceful committer handoff, plan 0005 I1): as the CURRENT host,
+    /// delegate ROSTER (F-17) signing authority to `successor_leaf` for epochs >=
+    /// `from_epoch`, by signing a `CommitterHandoff` with the host leaf key and
+    /// broadcasting it. Records it locally and relies on the successor to issue rosters
+    /// thereafter; the host should stop (graceful — exactly one authority per epoch, no
+    /// split-brain). Returns false if we are not the host / hold no signing key.
+    pub async fn handoff_committer(&self, successor_leaf: u32, from_epoch: u32) -> bool {
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_host(&handoff_transcript(successor_leaf, from_epoch)))
+        };
+        let Some(sig) = sig else { return false };
+        // Record via the shared path so OUR committer flag clears (we stepped down) —
+        // otherwise the old host keeps processing joins alongside the successor.
+        record_delegation(&self.inner, successor_leaf, from_epoch).await;
+        route(
+            &self.inner,
+            Frame::CommitterHandoff { successor_leaf, from_epoch, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
+    }
+
+    /// INCREMENT 4: as a DELEGATED successor committer, (re)issue the current roster signed
+    /// with OUR leaf key at `epoch`. Members who recorded the host's handoff accept it under
+    /// the delegation (verified against our leaf, not leaf 0). No-op without a signing key.
+    pub async fn issue_delegate_roster(&self, epoch: u32) {
+        let entries: Vec<(u32, [u8; 48])> = self
+            .inner
+            .roster
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(l, f)| (*l, *f))
+            .collect();
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_leaf(&roster_transcript(epoch, &entries)))
+        };
+        if let Some(sig) = sig {
+            route(&self.inner, Frame::Roster { epoch, entries, sig }, Route::Broadcast).await;
+        }
+    }
+
+    /// INCREMENT 4b: as the host, PRE-AUTHORIZE `standby_leaf` as the committer a member
+    /// quorum may activate (for epochs >= `from_epoch`) if the primary fails. Host-signed,
+    /// so the standby is the host's choice — a quorum can only ever activate THIS leaf.
+    pub async fn designate_standby(&self, standby_leaf: u32, from_epoch: u32) -> bool {
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_host(&standby_transcript(standby_leaf, from_epoch)))
+        };
+        let Some(sig) = sig else { return false };
+        *self.inner.authorized_standby.lock().unwrap() = Some((standby_leaf, from_epoch));
+        route(
+            &self.inner,
+            Frame::StandbyDesignation { standby_leaf, from_epoch, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
+    }
+
+    /// INCREMENT 4b: as a member, VOTE to activate the pre-authorized standby for
+    /// `for_epoch` (because we believe the primary is gone). Signed with our leaf key and
+    /// counted once; when a strict BFT quorum (> 2/3 of the roster) has voted, every member
+    /// activates the standby. Returns false if we hold no signing key.
+    pub async fn vote_promote(&self, for_epoch: u32) -> bool {
+        let my_leaf = match self.my_leaf().await {
+            Some(l) => l,
+            None => return false,
+        };
+        let sig = {
+            let g = self.inner.group.lock().await;
+            g.as_ref()
+                .and_then(|grp| grp.sign_as_leaf(&vote_transcript(for_epoch, my_leaf)))
+        };
+        let Some(sig) = sig else { return false };
+        handle_promotion_vote(&self.inner, for_epoch, my_leaf, sig.clone()).await; // count our own
+        route(
+            &self.inner,
+            Frame::PromotionVote { for_epoch, voter_leaf: my_leaf, sig },
+            Route::Broadcast,
+        )
+        .await;
+        true
     }
 
     /// D1: opt in as a group keeper — buffer opaque frames for offline peers and
@@ -3145,10 +3403,17 @@ async fn send_payload(
     Ok(())
 }
 
-/// Outbound LoRa-mesh message carry, set by [`Core::start_mesh_messaging`]. Holds
-/// the node handle, the transmit channel, and a rolling per-message id so each
-/// mesh transmission's fragments group correctly.
+/// Process-wide sequence handing each mesh carry a unique id, so the inbound task of
+/// one carry can tell [`mesh_tee`] to skip re-transmitting on the carry a frame just
+/// arrived on (the echo), while still bridging it onto every OTHER carry.
+static MESH_CARRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Outbound mesh message carry, appended by [`Core::start_mesh_messaging`]. Holds a
+/// unique carry `id`, the node handle, the transmit channel, and a rolling per-message
+/// id so each mesh transmission's fragments group correctly. A node may hold several
+/// (LoRa + MQTT, Meshtastic + Meshcore, …) to bridge mesh modalities.
 struct MeshTx {
+    id: u64,
     node: std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>,
     channel: u8,
     msg_id: std::sync::atomic::AtomicU16,
@@ -3169,29 +3434,42 @@ const MESH_SOURCE_FP: [u8; 48] = [0xED; 48];
 /// stay on the primary transport to conserve scarce LoRa airtime). The frame is
 /// already the opaque, self-authenticating group ciphertext, so the mesh moves
 /// only sealed bytes.
-async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame) {
+async fn mesh_tee(inner: &Arc<Inner>, frame: &Frame, skip: Option<u64>) {
     if !matches!(frame, Frame::GroupMsg(_)) {
         return;
     }
-    let (node, channel, id) = {
+    // Snapshot every active carry (except the one a frame just arrived on, to skip the
+    // echo) under the lock; the node handles are cheap `Arc`s. Each carry gets its own
+    // rolling message id so its fragments group independently.
+    let carries: Vec<(std::sync::Arc<dyn talkrypt_transport::mesh::MeshNode>, u8, u16)> = {
         let guard = inner.mesh_tx.lock().unwrap();
-        let Some(tx) = guard.as_ref() else { return };
-        (
-            tx.node.clone(),
-            tx.channel,
-            tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
+        guard
+            .iter()
+            .filter(|tx| Some(tx.id) != skip)
+            .map(|tx| {
+                (
+                    tx.node.clone(),
+                    tx.channel,
+                    tx.msg_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect()
     };
+    if carries.is_empty() {
+        return;
+    }
     let bytes = frame.encode();
-    let mtu = node.mtu();
-    if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
-        talkrypt_transport::mesh::frag::KIND_FRAME,
-        id,
-        &bytes,
-        mtu,
-    ) {
-        for f in frags {
-            let _ = node.send(channel, &f).await;
+    for (node, channel, id) in carries {
+        let mtu = node.mtu();
+        if let Some(frags) = talkrypt_transport::mesh::frag::fragment(
+            talkrypt_transport::mesh::frag::KIND_FRAME,
+            id,
+            &bytes,
+            mtu,
+        ) {
+            for f in frags {
+                let _ = node.send(channel, &f).await;
+            }
         }
     }
 }
@@ -3205,8 +3483,154 @@ async fn signed_roster_frame(inner: &Arc<Inner>, entries: Vec<(u32, [u8; 48])>) 
     let g = inner.group.lock().await;
     let grp = g.as_ref()?;
     let epoch = grp.epoch();
-    let sig = grp.sign_as_host(&roster_transcript(epoch, &entries))?;
+    let transcript = roster_transcript(epoch, &entries);
+    // INCREMENT 4c: sign with whichever committer authority we hold — the host leaf
+    // (sign_as_host) normally, or OUR leaf key (sign_as_leaf) once we are the active
+    // delegated committer. Members authenticate it via the same epoch-fenced gate.
+    let sig = if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) {
+        grp.sign_as_leaf(&transcript)?
+    } else {
+        grp.sign_as_host(&transcript)?
+    };
     Some(Frame::Roster { epoch, entries, sig })
+}
+
+/// Seal + route one group chat message — the Host/Member send path, factored so both
+/// `send_marked` and the presumptive-queue flush use identical logic (same signing,
+/// backlog, outbox, routing). Returns the ciphertext gossip-id, or `GroupNotReady` when
+/// we hold no group key yet.
+async fn group_send(inner: &Arc<Inner>, text: &str, marking: Option<Marking>) -> Result<[u8; 32]> {
+    // SUB-SPEC A §4 mode 3: stamp a stable name-id when the on-message-id cadence is on.
+    let name_tag = {
+        let on = inner.cadence.lock().unwrap().on_message_id;
+        if on {
+            inner.leading_name.lock().unwrap().as_ref().map(|e| {
+                let ctx = crate::presence::chat_context(
+                    &inner.descriptor.invite_token,
+                    &inner.descriptor.channel,
+                );
+                crate::presence::name_id_tag(&e.label, &ctx)
+            })
+        } else {
+            None
+        }
+    };
+    let payload = marking::encode_payload_tagged(&marking, text, name_tag);
+    let ct = {
+        let mut g = inner.group.lock().await;
+        match g.as_mut() {
+            // G1/G2: sign with our per-membership leaf key so receivers bind it to our
+            // leaf and reject impersonation / relay restamping.
+            Some(grp) => grp.encrypt_signed(&payload)?,
+            None => return Err(crate::error::CoreError::GroupNotReady),
+        }
+    };
+    // D3: record our OWN outgoing message in the ephemeral backlog. Local only.
+    {
+        let me = inner.identity.public().fingerprint();
+        let ts = now_secs();
+        let rec = crate::history::HistoryRecord {
+            from: me,
+            ts,
+            text: text.to_string(),
+            marking: marking.clone(),
+        };
+        record_backlog(inner, gossip_id(&ct), rec.encode(), ts);
+    }
+    let gid = gossip_id(&ct);
+    // D1: persistent chats queue the ALREADY-ENCRYPTED frame for offline catch-up.
+    let frame = Frame::GroupMsg(ct.clone());
+    if inner.persistent.load(std::sync::atomic::Ordering::Relaxed) {
+        let dropped =
+            inner
+                .outbox
+                .enqueue(&inner.descriptor.channel, gid, &frame.encode(), now_secs());
+        if dropped > 0 {
+            let _ = inner.events_tx.send(Event::OutboxDropped { count: dropped });
+        }
+    }
+    route(inner, frame, Route::Broadcast).await;
+    Ok(gid)
+}
+
+/// INCREMENT 3 (plan 0005, presumptive queue-only): flush the presumptive outbound queue
+/// right after a join. Each plaintext composed while we were still joining is now sealed
+/// + routed exactly as a live send would be, in composition order. No message was ever
+/// on the wire or encrypted before this point (I2). Called from `handle_welcome`.
+async fn flush_pending_outbound(inner: &Arc<Inner>) {
+    let queued: Vec<(String, Option<Marking>)> =
+        std::mem::take(&mut *inner.pending_outbound.lock().unwrap());
+    for (text, marking) in queued {
+        let _ = group_send(inner, &text, marking).await;
+    }
+}
+
+/// INCREMENT 1 (plan 0005, invariant I5): as a GOSSIP bridge, re-flood an opaque,
+/// endpoint-authenticated control-plane frame (Welcome / Commit / Roster / KeyPackage)
+/// to every peer except the one it came from, at most once per distinct frame
+/// (`ctl_seen` dedup). This carries key material and commits to peers NOT directly
+/// connected to the committer — relay chains (hub-peer-peer-peer) and multi-hub — while
+/// the relay only forwards bytes it cannot interpret or alter: the recipient decrypts
+/// the Welcome, the key schedule validates the Commit, the host signature authenticates
+/// the Roster (F-17), and the committer validates the KeyPackage on add. A relay
+/// therefore gains no forgery power (I5). No-op unless gossip is on and we are not in
+/// single-relay mode. The `ctl_seen` dedup alone gives loop-freedom (each node forwards
+/// a given frame once); invite-token admission + rate-limiting (I4) land in a later
+/// increment.
+async fn relay_control(inner: &Arc<Inner>, raw: &[u8], from: [u8; 48]) {
+    if inner.relayed || !inner.gossip.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if !inner.ctl_seen.lock().unwrap().insert(gossip_id(raw)) {
+        return; // already relayed this exact control frame — stop the flood
+    }
+    for (s, w, fp) in collect_peers(inner) {
+        if fp != from {
+            let _ = send_payload(&s, &w, raw).await;
+        }
+    }
+}
+
+/// INCREMENT 3b (plan 0005 I4): forward a self-authenticating `JoinRequest` toward the
+/// committer, defending the join path from DoS/DDoS at the cheapest possible stage:
+///   1. verify the invite-MAC (one KMAC) — a request from a non-invite-holder is dropped
+///      HERE and never propagated, so a flood of junk joins cannot amplify through relays;
+///   2. spend a relay token (shared `join_rate` bucket) — bounds amplification even from
+///      invite-holders; a drained bucket drops the forward;
+///   3. dedup (`ctl_seen`) so one request is forwarded at most once (loop-free).
+/// No-op unless gossip is on and we are not in single-relay mode. The relay never
+/// interprets the KeyPackage or the device signature — the committer verifies those.
+async fn relay_join_request(
+    inner: &Arc<Inner>,
+    raw: &[u8],
+    from: [u8; 48],
+    device_pub: &[u8],
+    kp: &[u8],
+    mac: &[u8],
+) {
+    if inner.relayed || !inner.gossip.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // (1) Cheap invite-MAC pre-filter — drop unbound junk before anything else.
+    let expect = join_invite_mac(&inner.descriptor.invite_token, device_pub, kp);
+    if mac.len() != expect.len()
+        || !bool::from(subtle::ConstantTimeEq::ct_eq(mac, &expect[..]))
+    {
+        return;
+    }
+    // (2) Rate-limit the forward (shared with committing).
+    if !inner.join_rate.lock().unwrap().try_take() {
+        return;
+    }
+    // (3) Dedup so we forward a given request at most once.
+    if !inner.ctl_seen.lock().unwrap().insert(gossip_id(raw)) {
+        return;
+    }
+    for (s, w, fp) in collect_peers(inner) {
+        if fp != from {
+            let _ = send_payload(&s, &w, raw).await;
+        }
+    }
 }
 
 /// Route a frame to its destination. In **relayed** mode the frame is wrapped
@@ -3216,7 +3640,7 @@ async fn route(inner: &Arc<Inner>, frame: Frame, to: Route) {
     // Tee broadcast chat content onto the mesh (if active), in addition to the
     // normal peer fan-out below. Works in both relayed and host-coordinated modes.
     if matches!(to, Route::Broadcast) {
-        mesh_tee(inner, &frame).await;
+        mesh_tee(inner, &frame, None).await;
     }
     if inner.relayed {
         let routed = Routed {
@@ -3484,6 +3908,36 @@ async fn reader_loop(
         {
             continue;
         }
+        // A gossip bridge re-floods opaque, endpoint-authenticated control frames so key
+        // material + commits reach peers not directly connected to the committer (relay
+        // chains / multi-hub). Done BEFORE local handling and regardless of whether WE can
+        // apply it yet. `relay_control` dedups + is a no-op unless gossip is on.
+        //  - Commit (key-schedule-validated) + Roster (host-signed, F-17): increment 1.
+        //  - Welcome (increment 3b): key material, but encrypted to the joiner's KEM key —
+        //    a relay (and every other member) cannot decrypt it, so flooding it to reach a
+        //    relay-joined joiner leaks nothing (I2 still holds: no key to a non-recipient).
+        if matches!(
+            decoded,
+            Some(Frame::Commit { .. })
+                | Some(Frame::Roster { .. })
+                | Some(Frame::Welcome(_))
+                | Some(Frame::CommitterHandoff { .. })
+                | Some(Frame::StandbyDesignation { .. })
+                | Some(Frame::PromotionVote { .. })
+        ) {
+            // CommitterHandoff / StandbyDesignation (host-signed) and PromotionVote (leaf-
+            // signed) are attribution-independent like Roster — each recipient verifies the
+            // signature — so they ride the same gossip relay to reach every member (needed
+            // for quorum convergence across chains / multi-hop).
+            relay_control(&inner, &frame_bytes, from).await;
+        }
+        // INCREMENT 3b: a self-authenticating JoinRequest is relayed toward the committer,
+        // but ONLY after its invite-MAC verifies (I4 cheap pre-filter: a non-invite-holder's
+        // join is dropped here, never propagated) and a relay token is available (bounds
+        // amplification). `relay_join_request` dedups and no-ops unless gossip is on.
+        if let Some(Frame::JoinRequest { device_pub, kp, mac, .. }) = &decoded {
+            relay_join_request(&inner, &frame_bytes, from, device_pub, kp, mac).await;
+        }
         match decoded {
             // Pairwise chat only. A group node (Host/Member) never legitimately
             // receives a `Chat` frame — group content travels as `GroupMsg`
@@ -3505,14 +3959,42 @@ async fn reader_loop(
                     marking,
                 });
             }
-            Some(Frame::KeyPackage(b)) if inner.role == GroupRole::Host => {
+            Some(Frame::KeyPackage(b))
+                if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
                 handle_keypackage(&inner, from, b).await;
+            }
+            // INCREMENT 3b: self-authenticating relay-join. The committer verifies the
+            // invite-MAC + device signature and attributes the leaf to the signed device
+            // (never the relay hop). A non-host member ignores it here but has already
+            // relayed it toward the committer above (MAC-gated).
+            Some(Frame::JoinRequest { device_pub, kp, sig, mac })
+                if inner.is_active_committer.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                handle_join_request(&inner, device_pub, kp, sig, mac).await;
             }
             Some(Frame::Welcome(b)) if inner.role == GroupRole::Member => {
                 handle_welcome(&inner, b).await;
             }
             Some(Frame::Commit { from_epoch, bytes }) if inner.role == GroupRole::Member => {
                 handle_commit(&inner, from_epoch, bytes).await;
+            }
+            // INCREMENT 4: a member records a host-signed, epoch-fenced committer handoff.
+            Some(Frame::CommitterHandoff { successor_leaf, from_epoch, sig })
+                if inner.role == GroupRole::Member =>
+            {
+                handle_committer_handoff(&inner, successor_leaf, from_epoch, sig).await;
+            }
+            // INCREMENT 4b: record the host's standby pre-authorization / tally a vote.
+            Some(Frame::StandbyDesignation { standby_leaf, from_epoch, sig })
+                if inner.role == GroupRole::Member =>
+            {
+                handle_standby_designation(&inner, standby_leaf, from_epoch, sig).await;
+            }
+            Some(Frame::PromotionVote { for_epoch, voter_leaf, sig })
+                if inner.role != GroupRole::None =>
+            {
+                handle_promotion_vote(&inner, for_epoch, voter_leaf, sig).await;
             }
             Some(Frame::UpdateProposal(b)) if inner.role == GroupRole::Host => {
                 handle_update_proposal(&inner, from, b).await;
@@ -3525,10 +4007,23 @@ async fn reader_loop(
                 // `epoch` (monotonic anti-replay of an older host-signed roster). A
                 // forged or stale roster is dropped; T-3 attribution stays
                 // authoritative regardless.
+                // INCREMENT 4 (graceful committer handoff, I1): the roster authority for
+                // this epoch is EXACTLY ONE leaf. If a host-signed, epoch-fenced delegation
+                // exists and this roster's epoch is at/after the handoff point, the sole
+                // authority is the SUCCESSOR leaf (the old committer is fenced out — a
+                // revived host cannot re-assert authority for these epochs). Otherwise the
+                // normal leaf-0 host authority (F-17) applies, untouched.
                 let verified = {
                     let g = inner.group.lock().await;
+                    let transcript = roster_transcript(epoch, &entries);
+                    let delegate = *inner.committer_delegate.lock().unwrap();
                     g.as_ref()
-                        .map(|grp| grp.verify_host_sig(&roster_transcript(epoch, &entries), &sig))
+                        .map(|grp| match delegate {
+                            Some((succ, fe)) if epoch >= fe => {
+                                grp.verify_leaf_sig(succ, &transcript, &sig)
+                            }
+                            _ => grp.verify_host_sig(&transcript, &sig),
+                        })
                         .unwrap_or(false)
                 };
                 use std::sync::atomic::Ordering;
@@ -3550,7 +4045,7 @@ async fn reader_loop(
                 }
             }
             Some(Frame::GroupMsg(b)) => {
-                handle_group_msg(&inner, from, b).await;
+                handle_group_msg(&inner, from, b, None).await;
             }
             Some(Frame::Promote(payload)) if inner.role != GroupRole::None => {
                 // SUB-SPEC D2: a promotion proposal — verify + surface for consent.
@@ -4245,24 +4740,81 @@ fn handle_group_member_identity(inner: &Arc<Inner>, from: [u8; 48], bytes: Vec<u
 /// Host: admit a new member, send them a Welcome, and broadcast the Commit to
 /// existing members. (Sequential joins only; concurrent joins need a delivery
 /// service to order commits — see docs/plans/0002-mls-pq.md.)
-async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
-    // Access gate: under a restrictive policy, only admit a member whose account
-    // we already admitted (recorded when it presented its identity, which the
-    // joiner sends in-order before its KeyPackage). Open policy admits anyone.
-    let admit = inner.access.lock().unwrap().is_open()
-        || inner.admitted_peers.lock().unwrap().contains(&from);
-    if !admit {
-        let _ = inner.events_tx.send(Event::Error(format!(
-            "refused group join from non-member {}",
-            short_hex6(&from)
-        )));
-        return;
+// ---------------------------------------------------------------------------
+// INCREMENT 3b: self-authenticating relay-JOIN + DoS defenses (plan 0005 I4).
+// ---------------------------------------------------------------------------
+
+/// Binds the joiner's device signature to this chat + its KeyPackage, so the committer
+/// attributes the leaf to the signing device regardless of which peer relayed it (closes
+/// the G2 relay-attribution gap). The device signs `CTX ‖ root0 ‖ device_pub ‖ kp`.
+const JOIN_SIG_CONTEXT: &[u8] = b"talkrypt-join-request-v1";
+/// Customization label for the invite-bound admission MAC.
+const JOIN_MAC_LABEL: &[u8] = b"talkrypt-join-invite-mac-v1";
+
+fn join_sig_transcript(root0: &[u8; 32], device_pub: &[u8], kp: &[u8]) -> Vec<u8> {
+    let mut t = Vec::with_capacity(JOIN_SIG_CONTEXT.len() + 32 + device_pub.len() + kp.len());
+    t.extend_from_slice(JOIN_SIG_CONTEXT);
+    t.extend_from_slice(root0);
+    t.extend_from_slice(device_pub);
+    t.extend_from_slice(kp);
+    t
+}
+
+/// Invite-bound admission MAC: KMAC256(key = invite_token, msg = device_pub ‖ kp). Proves
+/// the sender holds the chat invite WITHOUT revealing it. A committer AND every relay
+/// verify this FIRST — one symmetric KMAC — before any ML-DSA verify, TreeKEM commit, or
+/// forward, so a non-invite-holder's join is rejected at ~zero cost and never propagates
+/// (the primary join DoS/DDoS gate, plan 0005 I4).
+fn join_invite_mac(invite_token: &[u8], device_pub: &[u8], kp: &[u8]) -> [u8; 32] {
+    let mut msg = Vec::with_capacity(device_pub.len() + kp.len());
+    msg.extend_from_slice(device_pub);
+    msg.extend_from_slice(kp);
+    let mut out = [0u8; 32];
+    talkrypt_crypto::kdf::mac_kdf(invite_token, &msg, JOIN_MAC_LABEL, &mut out);
+    out
+}
+
+/// A tiny token-bucket rate limiter (plan 0005 I4). Bounds how much join-related work a
+/// node will do — committing or relaying — per unit time, so even a flood of
+/// VALID-invite joins cannot force unbounded ML-DSA verifies / TreeKEM commits or relay
+/// amplification. Monotonic-clock based; refills continuously.
+struct TokenBucket {
+    tokens: f64,
+    capacity: f64,
+    refill_per_sec: f64,
+    last: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self { tokens: capacity, capacity, refill_per_sec, last: std::time::Instant::now() }
     }
-    // Hold the group lock across decode + add + leaf assignment so concurrent
-    // joins get distinct, ordered epochs. The KeyPackage is decoded with the
-    // group's KEM profile (posture + wire padding). The commit is tagged with
-    // the epoch it applies to, so members apply commits in order even if
-    // delivery reorders them.
+    /// Take one token if available; returns false (drop) when the bucket is empty.
+    fn try_take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Shared admit path: add `kp_bytes` as a new member attributed to `attributed_fp`, then
+/// broadcast the Commit + host-signed Roster and route the Welcome. Idempotent — a device
+/// already seated is not re-added (dedups replays / repeated joins). The Welcome goes
+/// directly to the joiner if it is a connected peer, else is broadcast so it reaches a
+/// relay-joined joiner via the gossip Welcome relay (it is encrypted to the joiner's KEM
+/// key, so flooding it leaks nothing). Used by both the direct KeyPackage path and the
+/// self-authenticating JoinRequest path, so attribution is the ONLY thing that differs.
+async fn add_member_and_broadcast(inner: &Arc<Inner>, attributed_fp: [u8; 48], kp_bytes: Vec<u8>) {
+    if inner.roster.lock().unwrap().values().any(|fp| *fp == attributed_fp) {
+        return; // already a member — idempotent, no duplicate leaf, no re-commit
+    }
     let result = {
         let mut g = inner.group.lock().await;
         match g.as_mut() {
@@ -4283,56 +4835,275 @@ async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>
     };
     let roster_snapshot = {
         let mut roster = inner.roster.lock().unwrap();
-        roster.insert(leaf, from);
+        roster.insert(leaf, attributed_fp);
         roster.iter().map(|(l, f)| (*l, *f)).collect::<Vec<_>>()
     };
-
-    // Welcome to the joiner; Commit to everyone (the joiner drops it as stale,
-    // since it starts at the post-commit epoch); roster to everyone.
-    route(inner, Frame::Welcome(welcome_bytes), Route::Peer(from)).await;
-    route(
-        inner,
-        Frame::Commit {
-            from_epoch,
-            bytes: commit_bytes,
-        },
-        Route::Broadcast,
-    )
-    .await;
+    let connected = collect_peers(inner).iter().any(|(_, _, fp)| *fp == attributed_fp);
+    let welcome_route = if connected {
+        Route::Peer(attributed_fp)
+    } else {
+        Route::Broadcast // relay-joined: flood (encrypted to joiner) so it reaches them
+    };
+    route(inner, Frame::Welcome(welcome_bytes), welcome_route).await;
+    route(inner, Frame::Commit { from_epoch, bytes: commit_bytes }, Route::Broadcast).await;
     if let Some(frame) = signed_roster_frame(inner, roster_snapshot).await {
         route(inner, frame, Route::Broadcast).await;
     }
-
-    // The roster just grew (a member joined) — re-announce our leading name so the
-    // new member resolves us without us acting (SUB-SPEC A CQ beacon), debounced so a
-    // join burst coalesces into one CQ.
     schedule_grow_reannounce(inner);
+}
+
+/// COMMITTER: handle a self-authenticating [`Frame::JoinRequest`] (relay-join). DoS-ordered
+/// (plan 0005 I4): (1) verify the invite-MAC — one KMAC — and drop silently if it fails
+/// (a non-invite-holder, rejected before any expensive work); (2) dedup replays; (3) spend
+/// a join rate-limit token, dropping if exhausted (bounds valid-invite floods); (4) ONLY
+/// then verify the device's ML-DSA signature over the chat-bound transcript; (5) attribute
+/// the new leaf to the VERIFIED device fingerprint (never the relay hop) and add via the
+/// shared path, subject to the access policy.
+async fn handle_join_request(
+    inner: &Arc<Inner>,
+    device_pub: Vec<u8>,
+    kp: Vec<u8>,
+    sig: Vec<u8>,
+    mac: Vec<u8>,
+) {
+    // (1) Cheapest gate first: invite-bound MAC. Constant-work KMAC; wrong/absent invite
+    // → drop before ML-DSA verify or TreeKEM commit, and (at a relay) before forwarding.
+    let expect = join_invite_mac(&inner.descriptor.invite_token, &device_pub, &kp);
+    // Vetted constant-time comparison (subtle) — a forged-MAC flood cannot time its way
+    // to a valid tag, and this is the cheap pre-filter that runs before any ML-DSA verify.
+    if mac.len() != expect.len()
+        || !bool::from(subtle::ConstantTimeEq::ct_eq(&mac[..], &expect[..]))
+    {
+        return;
+    }
+    // (2) Dedup an exact replay of this request.
+    {
+        let mut seen = inner.ctl_seen.lock().unwrap();
+        let mut id_src = Vec::with_capacity(device_pub.len() + kp.len());
+        id_src.extend_from_slice(&device_pub);
+        id_src.extend_from_slice(&kp);
+        if !seen.insert(gossip_id(&id_src)) {
+            return;
+        }
+    }
+    // (3) Rate-limit: bound expensive work even from invite-holders.
+    if !inner.join_rate.lock().unwrap().try_take() {
+        let _ = inner.events_tx.send(Event::Error("join rate limit — request dropped".into()));
+        return;
+    }
+    // (4) Now the expensive check: the device signature over CTX ‖ root0 ‖ device_pub ‖ kp.
+    let device = talkrypt_crypto::IdentityPublic { sig_vk: device_pub.clone() };
+    let transcript = join_sig_transcript(&inner.root0, &device_pub, &kp);
+    if device.verify(&transcript, &sig).is_err() {
+        return;
+    }
+    let attributed_fp = device.fingerprint();
+    // (5) Access policy: open admits any invite-holder; restrictive admits only an account
+    // we already admitted (recorded from its presented identity).
+    let admit = inner.access.lock().unwrap().is_open()
+        || inner.admitted_peers.lock().unwrap().contains(&attributed_fp);
+    if !admit {
+        return;
+    }
+    add_member_and_broadcast(inner, attributed_fp, kp).await;
+}
+
+// ---------------------------------------------------------------------------
+// INCREMENT 4: graceful, epoch-fenced committer handoff (plan 0005 I1).
+// ---------------------------------------------------------------------------
+
+/// Transcript the host signs to delegate roster authority: CTX | successor_leaf |
+/// from_epoch. Injective (fixed context + fixed-width fields).
+const HANDOFF_CONTEXT: &[u8] = b"talkrypt-committer-handoff-v1";
+fn handoff_transcript(successor_leaf: u32, from_epoch: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(HANDOFF_CONTEXT.len() + 8);
+    t.extend_from_slice(HANDOFF_CONTEXT);
+    t.extend_from_slice(&successor_leaf.to_le_bytes());
+    t.extend_from_slice(&from_epoch.to_le_bytes());
+    t
+}
+
+/// MEMBER: record a committer handoff ONLY if it is signed by the current host (leaf 0) —
+/// so a member cannot promote itself or anyone else (the host signature is the authority).
+/// Monotonic in `from_epoch`: a newer delegation supersedes, a stale one is ignored. After
+/// recording, rosters at epoch >= `from_epoch` are authenticated against the successor leaf,
+/// fencing out the old committer (exactly one authority per epoch, I1).
+async fn handle_committer_handoff(
+    inner: &Arc<Inner>,
+    successor_leaf: u32,
+    from_epoch: u32,
+    sig: Vec<u8>,
+) {
+    let ok = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_host_sig(&handoff_transcript(successor_leaf, from_epoch), &sig))
+            .unwrap_or(false)
+    };
+    if !ok {
+        return; // not host-signed — reject (no self-promotion / hijack)
+    }
+    record_delegation(inner, successor_leaf, from_epoch).await;
+}
+
+/// Record an epoch-fenced committer delegation `(succ, fe)` (monotonic in `fe`), and — if
+/// WE are the designated successor — assume the active committing role so we start
+/// processing joins + signing rosters with our leaf key (increment 4c). Shared by the
+/// graceful handoff and the quorum promotion.
+async fn record_delegation(inner: &Arc<Inner>, succ: u32, fe: u32) {
+    {
+        let mut d = inner.committer_delegate.lock().unwrap();
+        match *d {
+            Some((_, prev_fe)) if fe <= prev_fe => return, // stale — keep the newer one
+            _ => *d = Some((succ, fe)),
+        }
+    }
+    // Transfer the committer role: it is now EXACTLY the delegated successor. We become
+    // the active committer iff that successor is us; the old host (and everyone else)
+    // ceases to be the committer, so only one node processes joins / signs rosters (no
+    // double-commit).
+    let my_leaf = inner.group.lock().await.as_ref().map(|grp| grp.my_leaf());
+    inner
+        .is_active_committer
+        .store(my_leaf == Some(succ), std::sync::atomic::Ordering::Relaxed);
+}
+
+// ---- INCREMENT 4b: ungraceful failover — pre-authorized standby + BFT quorum promotion ----
+
+const STANDBY_CONTEXT: &[u8] = b"talkrypt-standby-designation-v1";
+const VOTE_CONTEXT: &[u8] = b"talkrypt-promotion-vote-v1";
+
+fn standby_transcript(standby_leaf: u32, from_epoch: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(STANDBY_CONTEXT.len() + 8);
+    t.extend_from_slice(STANDBY_CONTEXT);
+    t.extend_from_slice(&standby_leaf.to_le_bytes());
+    t.extend_from_slice(&from_epoch.to_le_bytes());
+    t
+}
+
+/// A promotion vote binds the VOTER leaf (so a vote cannot be replayed as another voter's)
+/// and the target epoch.
+fn vote_transcript(for_epoch: u32, voter_leaf: u32) -> Vec<u8> {
+    let mut t = Vec::with_capacity(VOTE_CONTEXT.len() + 8);
+    t.extend_from_slice(VOTE_CONTEXT);
+    t.extend_from_slice(&for_epoch.to_le_bytes());
+    t.extend_from_slice(&voter_leaf.to_le_bytes());
+    t
+}
+
+/// MEMBER: record the host's PRE-AUTHORIZATION of a standby committer — ONLY if host-signed
+/// (so the standby is always the host's choice, never an arbitrary member a quorum picks).
+/// Monotonic in `from_epoch`. This does NOT activate the standby; a quorum does.
+async fn handle_standby_designation(
+    inner: &Arc<Inner>,
+    standby_leaf: u32,
+    from_epoch: u32,
+    sig: Vec<u8>,
+) {
+    let ok = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_host_sig(&standby_transcript(standby_leaf, from_epoch), &sig))
+            .unwrap_or(false)
+    };
+    if !ok {
+        return;
+    }
+    let mut sb = inner.authorized_standby.lock().unwrap();
+    match *sb {
+        Some((_, prev_fe)) if from_epoch <= prev_fe => {}
+        _ => *sb = Some((standby_leaf, from_epoch)),
+    }
+}
+
+/// ANY member: tally a promotion vote. A vote counts only if (a) the voter is a current
+/// roster member and (b) it is signed by that voter's leaf key. When DISTINCT votes for the
+/// pre-authorized standby's epoch reach a strict BFT quorum (> 2/3 of the roster), activate
+/// the standby by recording its epoch-fenced delegation (same gate as a graceful handoff,
+/// so increment-4a's single-authority/I1 guarantee carries over). A malicious minority
+/// (< 1/3) can neither reach the quorum nor change WHICH leaf is activated (that is fixed by
+/// the host's designation).
+async fn handle_promotion_vote(inner: &Arc<Inner>, for_epoch: u32, voter_leaf: u32, sig: Vec<u8>) {
+    if !inner.roster.lock().unwrap().contains_key(&voter_leaf) {
+        return; // not a member — ignore
+    }
+    let valid = {
+        let g = inner.group.lock().await;
+        g.as_ref()
+            .map(|grp| grp.verify_leaf_sig(voter_leaf, &vote_transcript(for_epoch, voter_leaf), &sig))
+            .unwrap_or(false)
+    };
+    if !valid {
+        return;
+    }
+    let roster_n = inner.roster.lock().unwrap().len();
+    let count = {
+        let mut votes = inner.promotion_votes.lock().unwrap();
+        let set = votes.entry(for_epoch).or_default();
+        set.insert(voter_leaf);
+        set.len()
+    };
+    // Activate the PRE-AUTHORIZED standby iff a strict BFT quorum voted for its epoch.
+    let standby = *inner.authorized_standby.lock().unwrap();
+    if let Some((sb_leaf, sb_fe)) = standby {
+        if for_epoch == sb_fe && count * 3 > roster_n * 2 {
+            record_delegation(inner, sb_leaf, sb_fe).await;
+        }
+    }
+}
+
+async fn handle_keypackage(inner: &Arc<Inner>, from: [u8; 48], kp_bytes: Vec<u8>) {
+    // Access gate: under a restrictive policy, only admit a member whose account
+    // we already admitted (recorded when it presented its identity, which the
+    // joiner sends in-order before its KeyPackage). Open policy admits anyone.
+    let admit = inner.access.lock().unwrap().is_open()
+        || inner.admitted_peers.lock().unwrap().contains(&from);
+    if !admit {
+        let _ = inner.events_tx.send(Event::Error(format!(
+            "refused group join from non-member {}",
+            short_hex6(&from)
+        )));
+        return;
+    }
+    // Direct-join attribution is the authenticated connection peer `from`; the shared
+    // path handles decode + add + Commit/Roster/Welcome (idempotent).
+    add_member_and_broadcast(inner, from, kp_bytes).await;
 }
 
 /// Member: enter the group from a Welcome using our reserved leaf key.
 async fn handle_welcome(inner: &Arc<Inner>, welcome_bytes: Vec<u8>) {
-    let keypair = inner.leaf_keypair.lock().unwrap().take();
-    if let Some(kp) = keypair {
-        // Decode the Welcome with the leaf key's KEM profile — both were fixed
-        // by the chat's suite, so they agree.
-        let welcome = match Welcome::decode(kp.profile(), &welcome_bytes) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-        match TreeKemGroup::join_with_welcome(kp, &welcome) {
-            Ok(mut grp) => {
-                // F-16: match the chat's padding so our outgoing messages are bucketed
-                // like everyone else's (all members share this from the descriptor).
-                if let Some(step) = inner.descriptor.message_padding {
-                    grp.set_pad_bucket(step as usize);
-                }
-                *inner.group.lock().await = Some(grp);
+    // Take our pending leaf key out to ATTEMPT the join. `join_with_welcome` only
+    // borrows it, so if this Welcome is not ours — which is now normal, since gossip
+    // relays forward every Welcome through intermediate members (increment 1) — we put
+    // the key right back and stay a pending joiner. An already-joined relay has no
+    // pending key (None), so it no-ops here and just relays. This upholds I2 (no key
+    // except from our own committer-issued Welcome) and never burns our join material.
+    let kp = inner.leaf_keypair.lock().unwrap().take();
+    let Some(kp) = kp else { return };
+    let welcome = match Welcome::decode(kp.profile(), &welcome_bytes) {
+        Ok(w) => w,
+        Err(_) => {
+            *inner.leaf_keypair.lock().unwrap() = Some(kp); // keep key for the real Welcome
+            return;
+        }
+    };
+    match TreeKemGroup::join_with_welcome(&kp, &welcome) {
+        Ok(mut grp) => {
+            // F-16: match the chat's padding so our outgoing messages are bucketed
+            // like everyone else's (all members share this from the descriptor).
+            if let Some(step) = inner.descriptor.message_padding {
+                grp.set_pad_bucket(step as usize);
             }
-            Err(e) => {
-                let _ = inner
-                    .events_tx
-                    .send(Event::Error(format!("welcome failed: {e}")));
-            }
+            *inner.group.lock().await = Some(grp);
+            // kp drops here (zeroized); the slot stays empty — we have joined.
+            // INCREMENT 3: now that we hold the group key, deliver anything the user
+            // composed while we were still joining (presumptive queue-only).
+            flush_pending_outbound(inner).await;
+        }
+        Err(_) => {
+            // Not addressed to us (a relayed Welcome for another joiner) or not yet
+            // applicable: restore our pending key silently and wait for ours.
+            *inner.leaf_keypair.lock().unwrap() = Some(kp);
         }
     }
 }
@@ -4360,7 +5131,11 @@ async fn handle_commit(inner: &Arc<Inner>, from_epoch: u32, commit_bytes: Vec<u8
         match next {
             Some(bytes) => match Commit::decode(grp.profile(), &bytes) {
                 Ok(commit) => {
-                    if grp.apply_commit(&commit).is_err() {
+                    // INCREMENT 4c (committing takeover): authorize the commit against the
+                    // SOLE committer for this epoch — the host, or the epoch-fenced
+                    // delegated successor after a handoff / quorum promotion.
+                    let delegate = *inner.committer_delegate.lock().unwrap();
+                    if grp.apply_commit_with(&commit, delegate).is_err() {
                         return;
                     }
                 }
@@ -4684,7 +5459,7 @@ async fn handle_consent(inner: &Arc<Inner>, _from: [u8; 48], payload: Vec<u8>) {
     }
 }
 
-async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
+async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>, src_mesh: Option<u64>) {
     // Dedup FIRST: the same group ciphertext can reach us over several paths in a
     // gossip mesh (or a cycle). Fingerprint it and drop repeats before display or
     // forward — so no double-render and no forwarding loop. Two encryptions of the
@@ -4776,6 +5551,12 @@ async fn handle_group_msg(inner: &Arc<Inner>, from: [u8; 48], gct: Vec<u8>) {
                 let _ = send_payload(&s, &w, &frame_bytes).await;
             }
         }
+        // Bridge the content onto the mesh island(s) too: re-tee onto every active
+        // mesh carry EXCEPT the one it arrived on (`src_mesh`). This completes the
+        // any-to-any bridge — peer→mesh and mesh→other-mesh — that the peer fan-out
+        // above handles for peer→peer. `SeenSet` already blocked a repeat, so this
+        // runs once per distinct ciphertext; teeing is a no-op when we hold no mesh.
+        mesh_tee(inner, &Frame::GroupMsg(gct.clone()), src_mesh).await;
     }
     // D1 Layer-A/C keeper: ANY keeper-enabled node (not just the relaying host) buffers
     // the opaque frame for roster members that are NOT currently connected, so an
@@ -5565,6 +6346,912 @@ mod tests {
             m1.fingerprint(),
             "the mesh-delivered frame is attributed to the sender's verified leaf, \
              not the mesh source sentinel"
+        );
+    }
+
+    /// Await a specific message text on a receiver, returning the attributed sender.
+    #[cfg(test)]
+    async fn await_message_text(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        want: &str,
+    ) -> Option<[u8; 48]> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Some(Event::Message { text, from, .. }) if text == want => break Some(from),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// peer→mesh bridging (the direction that needs `handle_group_msg` to re-tee onto
+    /// the mesh): a peer-island sender reaches a MESH-ONLY member through a bridge node
+    /// that received the frame over a peer link. Group forms over loopback (to share
+    /// keys); then X is cut to mesh-only, B keeps only its peer link to the host H, and
+    /// H keeps only its peer link to B — so H→X is possible ONLY if B bridges its
+    /// peer-received frame onto the mesh.
+    #[tokio::test]
+    async fn peer_to_mesh_bridge_reaches_a_mesh_only_member() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#p2m",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        b.enable_gossip(); // B is the bridge
+        b.connect("h").await.unwrap();
+        x.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // B and X share a mesh; H is NOT on it. So H's content reaches X only if B
+        // re-tees the peer-received frame onto the mesh.
+        let mesh = MockMeshFabric::new(200);
+        b.start_mesh_messaging(Arc::new(mesh.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(mesh.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // X is mesh-only; B keeps only its peer link to H; and crucially H keeps only
+        // its peer link to B (so H cannot reach X directly — only B's mesh re-tee can).
+        x.inner.peers.lock().unwrap().clear();
+        let h_fp = h.fingerprint();
+        let b_fp = b.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp);
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint == b_fp);
+
+        h.send("peer island to mesh island").await.unwrap();
+        let from = await_message_text(&mut x_rx, "peer island to mesh island").await;
+        assert_eq!(
+            from,
+            Some(h.fingerprint()),
+            "a mesh-only member must receive the peer sender's frame, bridged onto the mesh by B, \
+             attributed to H's verified leaf"
+        );
+    }
+
+    /// mesh↔mesh bridging via a single multi-homed node (needs multiple mesh carries):
+    /// X lives on mesh M1, Z on a DISJOINT mesh M2, and B carries BOTH. With every
+    /// loopback link severed, X↔Z is possible ONLY because B re-tees a frame received
+    /// on one mesh onto the other (skipping the arrival carry, so no echo).
+    #[tokio::test]
+    async fn two_mesh_modalities_bridge_through_one_node() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["b".into()],
+            "#m2m",
+        );
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, true);
+        b.enable_gossip();
+        b.host().await.unwrap();
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        let (z, mut z_rx) = group_core(&fabric, "z", &desc, false);
+        x.connect("b").await.unwrap();
+        z.connect("b").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let m1 = MockMeshFabric::new(200); // X's modality (e.g. LoRa / Meshtastic)
+        let m2 = MockMeshFabric::new(200); // Z's modality (e.g. MQTT / Meshcore)
+        b.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Sever ALL loopback: the two meshes, bridged by B, are the only paths.
+        x.inner.peers.lock().unwrap().clear();
+        z.inner.peers.lock().unwrap().clear();
+        b.inner.peers.lock().unwrap().clear();
+
+        // X (mesh M1) -> Z (mesh M2), bridged by B.
+        x.send("across the modalities").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut z_rx, "across the modalities").await,
+            Some(x.fingerprint()),
+            "Z on mesh M2 must receive X's M1 frame, bridged by the multi-homed B"
+        );
+        // and the reverse Z -> X.
+        z.send("and back again").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut x_rx, "and back again").await,
+            Some(z.fingerprint()),
+            "X on mesh M1 must receive Z's M2 frame through the same bridge"
+        );
+    }
+
+    /// FULL any-to-any matrix through one bridge: a peer island (Y), a mesh island (X
+    /// on M1), and a second mesh island (Z on M2), all stitched by B which spans the
+    /// peer transport AND both meshes. Every island both reaches and is reached by every
+    /// other — peer↔mesh and mesh↔mesh — with `SeenSet` keeping each delivery singular.
+    #[tokio::test]
+    async fn full_any_to_any_matrix_through_one_bridge() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["b".into()],
+            "#matrix",
+        );
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, true);
+        b.enable_gossip();
+        b.host().await.unwrap();
+        let (x, mut x_rx) = group_core(&fabric, "x", &desc, false);
+        let (y, mut y_rx) = group_core(&fabric, "y", &desc, false);
+        let (z, mut z_rx) = group_core(&fabric, "z", &desc, false);
+        x.connect("b").await.unwrap();
+        y.connect("b").await.unwrap();
+        z.connect("b").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let m1 = MockMeshFabric::new(200);
+        let m2 = MockMeshFabric::new(200);
+        b.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        x.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Islands: X mesh-M1-only, Z mesh-M2-only, Y peer-only; B keeps ONLY its peer
+        // link to Y (X/Z reachable through the meshes it also carries).
+        x.inner.peers.lock().unwrap().clear();
+        z.inner.peers.lock().unwrap().clear();
+        let y_fp = y.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == y_fp);
+
+        // peer -> both meshes.
+        y.send("y says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut x_rx, "y says hi").await, Some(y.fingerprint()), "peer->mesh(X)");
+        assert_eq!(await_message_text(&mut z_rx, "y says hi").await, Some(y.fingerprint()), "peer->mesh(Z)");
+
+        // mesh(M1) -> peer AND -> the other mesh.
+        x.send("x says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut y_rx, "x says hi").await, Some(x.fingerprint()), "mesh->peer(Y)");
+        assert_eq!(await_message_text(&mut z_rx, "x says hi").await, Some(x.fingerprint()), "mesh->mesh(X->Z)");
+
+        // mesh(M2) -> peer AND -> the other mesh.
+        z.send("z says hi").await.unwrap();
+        assert_eq!(await_message_text(&mut y_rx, "z says hi").await, Some(z.fingerprint()), "mesh->peer(Y)");
+        assert_eq!(await_message_text(&mut x_rx, "z says hi").await, Some(z.fingerprint()), "mesh->mesh(Z->X)");
+    }
+
+    /// MULTI-HOP (mixed): a message crosses TWO bridge hops over three modalities when
+    /// no single node spans the endpoints' bearers. Chain A(mesh M1) — B(M1+M2) —
+    /// C(M2+peer) — D(peer): A reaches D only if B relays M1→M2 and then C relays
+    /// M2→peer (and vice versa). Each intermediate must be a gossip bridge; `SeenSet`
+    /// keeps every delivery singular across the hops.
+    #[tokio::test]
+    async fn multi_hop_bridge_chain_mixed_modalities() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["c".into()],
+            "#hop2",
+        );
+        // C is host + the peer-side bridge; B is the mesh-side bridge.
+        let (c, _c_rx) = group_core(&fabric, "c", &desc, true);
+        c.enable_gossip();
+        c.host().await.unwrap();
+        let (a, mut a_rx) = group_core(&fabric, "a", &desc, false);
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (d, mut d_rx) = group_core(&fabric, "d", &desc, false);
+        b.enable_gossip();
+        a.connect("c").await.unwrap();
+        b.connect("c").await.unwrap();
+        d.connect("c").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let m1 = MockMeshFabric::new(200); // A <-> B
+        let m2 = MockMeshFabric::new(200); // B <-> C
+        a.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Carve the chain: A mesh-only (M1), B mesh-only bridge (M1+M2, no peers),
+        // C keeps only its peer link to D (plus mesh M2), D peer-only to C.
+        a.inner.peers.lock().unwrap().clear();
+        b.inner.peers.lock().unwrap().clear();
+        let d_fp = d.fingerprint();
+        c.inner.peers.lock().unwrap().retain(|p| p.fingerprint == d_fp);
+
+        a.send("two hops downstream").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut d_rx, "two hops downstream").await,
+            Some(a.fingerprint()),
+            "D (peer) must receive A's (mesh M1) message across the B then C bridges"
+        );
+        d.send("two hops upstream").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut a_rx, "two hops upstream").await,
+            Some(d.fingerprint()),
+            "A (mesh M1) must receive D's (peer) message back across C then B"
+        );
+    }
+
+    /// MULTI-HOP (pure mesh, 3 bridges): a 5-node chain over four disjoint meshes,
+    /// A(M1) — B(M1+M2) — C(M2+M3) — D(M3+M4) — E(M4). A↔E traverses THREE multi-homed
+    /// bridges, each re-teeing onto its other mesh carry (skipping the arrival carry).
+    /// Proves transitive relaying holds for an arbitrary chain length.
+    #[tokio::test]
+    async fn multi_hop_three_bridge_mesh_chain() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["c".into()],
+            "#hop3",
+        );
+        let (c, _c_rx) = group_core(&fabric, "c", &desc, true);
+        c.enable_gossip();
+        c.host().await.unwrap();
+        let (a, mut a_rx) = group_core(&fabric, "a", &desc, false);
+        let (b, _b_rx) = group_core(&fabric, "b", &desc, false);
+        let (d, _d_rx) = group_core(&fabric, "d", &desc, false);
+        let (e, mut e_rx) = group_core(&fabric, "e", &desc, false);
+        b.enable_gossip();
+        d.enable_gossip();
+        for n in [&a, &b, &d, &e] {
+            n.connect("c").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let (m1, m2, m3, m4) = (
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+        );
+        a.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        b.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        c.start_mesh_messaging(Arc::new(m3.node(1)), MeshPolicy::default()).await;
+        d.start_mesh_messaging(Arc::new(m3.node(2)), MeshPolicy::default()).await;
+        d.start_mesh_messaging(Arc::new(m4.node(1)), MeshPolicy::default()).await;
+        e.start_mesh_messaging(Arc::new(m4.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Pure-mesh chain: sever ALL loopback peers — only the four meshes, stitched by
+        // the three multi-homed bridges B, C, D, remain.
+        for n in [&a, &b, &c, &d, &e] {
+            n.inner.peers.lock().unwrap().clear();
+        }
+
+        a.send("the whole way down").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut e_rx, "the whole way down").await,
+            Some(a.fingerprint()),
+            "E on M4 must receive A's M1 message across three mesh bridges"
+        );
+        e.send("the whole way up").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut a_rx, "the whole way up").await,
+            Some(e.fingerprint()),
+            "A on M1 must receive E's M4 message back across the same three bridges"
+        );
+    }
+
+    /// MULTI-TYPE 5-STEP CHAIN between two users with NO other connection. The only
+    /// path from U1 to U2 is through four relaying bridges over five links of mixed
+    /// bearer types:
+    ///
+    /// ```text
+    ///   U1 --peer-- H --peer-- X --meshM1-- Y --meshM2-- Z --meshM3-- U2
+    /// ```
+    ///
+    /// H is the host hub for the two peer links (U1 and X both peer it — peer links are
+    /// host↔member in a Hub group); X bridges peer→mesh, and Y, Z bridge mesh→mesh over
+    /// three disjoint mesh fabrics. So the path crosses bearer types peer, peer, M1, M2,
+    /// M3 — and no single node spans U1's bearer and U2's. U1 holds ONLY its peer link to
+    /// H; U2 holds ONLY mesh M3. A message survives only if all four interior nodes relay
+    /// (H by host role, X/Y/Z as gossip bridges); `SeenSet` keeps each delivery singular.
+    #[tokio::test]
+    async fn five_step_multi_type_bridge_chain_between_two_users() {
+        use talkrypt_transport::mesh::{MeshPolicy, MockMeshFabric};
+
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#chain5",
+        );
+        // Form the whole group over one loopback so every node gets keys/roster
+        // (membership rides the primary transport; the mesh carries content only).
+        // H hosts; everyone joins over loopback, then we carve the chain.
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (u1, mut u1_rx) = group_core(&fabric, "u1", &desc, false);
+        let (x, _x_rx) = group_core(&fabric, "x", &desc, false);
+        let (y, _y_rx) = group_core(&fabric, "y", &desc, false);
+        let (z, _z_rx) = group_core(&fabric, "z", &desc, false);
+        let (u2, mut u2_rx) = group_core(&fabric, "u2", &desc, false);
+        for n in [&x, &y, &z] {
+            n.enable_gossip(); // the interior mesh bridges must forward
+        }
+        for n in [&u1, &x, &y, &z, &u2] {
+            n.connect("h").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Attach the three mesh links: X–Y (M1), Y–Z (M2), Z–U2 (M3).
+        let (m1, m2, m3) = (
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+            MockMeshFabric::new(200),
+        );
+        x.start_mesh_messaging(Arc::new(m1.node(1)), MeshPolicy::default()).await;
+        y.start_mesh_messaging(Arc::new(m1.node(2)), MeshPolicy::default()).await;
+        y.start_mesh_messaging(Arc::new(m2.node(1)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m2.node(2)), MeshPolicy::default()).await;
+        z.start_mesh_messaging(Arc::new(m3.node(1)), MeshPolicy::default()).await;
+        u2.start_mesh_messaging(Arc::new(m3.node(2)), MeshPolicy::default()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Carve the EXACT chain. The two peer links are host↔member: H keeps ONLY U1 and
+        // X; U1 and X keep ONLY H. Y, Z, U2 are mesh-only (drop every loopback peer).
+        let (u1_fp, x_fp, h_fp) = (u1.fingerprint(), x.fingerprint(), h.fingerprint());
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint == u1_fp || p.fingerprint == x_fp);
+        u1.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp);
+        x.inner.peers.lock().unwrap().retain(|p| p.fingerprint == h_fp); // X — H (+mesh M1)
+        y.inner.peers.lock().unwrap().clear(); // mesh only (M1+M2)
+        z.inner.peers.lock().unwrap().clear(); // mesh only (M2+M3)
+        u2.inner.peers.lock().unwrap().clear(); // mesh only (M3)
+
+        // U1 -> U2 across all five steps (peer, peer, M1, M2, M3).
+        u1.send("five steps to you").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut u2_rx, "five steps to you").await,
+            Some(u1.fingerprint()),
+            "U2 must receive U1's message across peer→peer→M1→M2→M3, attributed to U1"
+        );
+        // U2 -> U1 back across all five steps.
+        u2.send("five steps back").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut u1_rx, "five steps back").await,
+            Some(u2.fingerprint()),
+            "U1 must receive U2's reply back across the full five-step chain"
+        );
+    }
+
+    /// INCREMENT 1 (plan 0005): hub-peer-peer control-plane relay. A member that sits at
+    /// the END of a peer chain (H — A — B, B connected ONLY to A, not the hub H) must
+    /// stay in sync when the group's membership changes: the host's Commit + Roster are
+    /// gossip-relayed along the chain (H→A→B). Proof: after a 4th member D joins via H
+    /// (advancing the epoch), A sends a message at the NEW epoch; B can only decrypt it
+    /// if the relayed Commit reached and was applied by B. Without the relay, B is stuck
+    /// at the old epoch and never receives it.
+    #[tokio::test]
+    async fn hub_peer_peer_chain_relays_commits_to_a_chain_only_member() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#hppp",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (a, _a_rx) = group_core(&fabric, "a", &desc, false);
+        a.enable_gossip();
+        a.connect("h").await.unwrap();
+        a.host().await.unwrap(); // A also listens so B can dial it (member-to-member link)
+        let (b, mut b_rx) = group_core(&fabric, "b", &desc, false);
+        b.enable_gossip();
+        b.connect("h").await.unwrap(); // B first JOINS via the hub (gets keys), then re-homes
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Re-home B onto A: dial A, then sever B↔H so the only path left is H — A — B.
+        let a_fp = b.connect("a").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let b_fp = b.fingerprint();
+        b.inner.peers.lock().unwrap().retain(|p| p.fingerprint == a_fp); // B keeps only A
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint != b_fp); // H drops B
+
+        // A 4th member joins via H → the host commits (epoch advances) and broadcasts
+        // Commit + Roster. For B (chain-only) to stay current, A must relay them onward.
+        let (d, _d_rx) = group_core(&fabric, "d", &desc, false);
+        d.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        a.send("after D joined").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut b_rx, "after D joined").await,
+            Some(a.fingerprint()),
+            "B (chain-only, reachable only via A) must decrypt A's post-commit message — \
+             proving the host Commit+Roster relayed along the H→A→B peer chain"
+        );
+    }
+
+    /// INCREMENT 2 (plan 0005): hub-dropout-peer-peer. Members that interconnect directly
+    /// (resilient hybrid) keep delivering content to each other after the hub goes offline
+    /// — the hub is not on the critical path. (Membership changes pause until a committer
+    /// returns, per I1; already-keyed content continues over the surviving peer graph.)
+    #[tokio::test]
+    async fn hub_dropout_peers_keep_delivering() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#dropout",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (m1, mut m1_rx) = group_core(&fabric, "m1", &desc, false);
+        m1.enable_gossip();
+        m1.connect("h").await.unwrap();
+        m1.host().await.unwrap(); // m1 listens so m2 can form a direct peer link
+        let (m2, mut m2_rx) = group_core(&fabric, "m2", &desc, false);
+        m2.enable_gossip();
+        m2.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Resilient interconnect: a DIRECT m1—m2 link that does not pass through the hub.
+        m2.connect("m1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // THE HUB DROPS OUT: sever every link to/from H.
+        let h_fp = h.fingerprint();
+        m1.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        m2.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        h.inner.peers.lock().unwrap().clear();
+
+        // Content still flows over the surviving m1<->m2 link, both directions.
+        m1.send("hub is gone, we carry on").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m2_rx, "hub is gone, we carry on").await,
+            Some(m1.fingerprint()),
+            "m2 must still receive m1's message after the hub dropped"
+        );
+        m2.send("still here").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m1_rx, "still here").await,
+            Some(m2.fingerprint()),
+            "m1 must still receive m2's reply after the hub dropped"
+        );
+    }
+
+    /// INCREMENT 2 (plan 0005): multi-hub redundancy (active-active, single committer). A
+    /// member reached through TWO hubs keeps receiving the committer's traffic when its
+    /// direct path to the committer degrades — the second hub (a gossip relay of the one
+    /// committer's frames) shuttles it. No second committer (I1); dedup keeps it singular.
+    #[tokio::test]
+    async fn multi_hub_second_hub_shuttles_when_primary_path_drops() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#multihub",
+        );
+        // H is the single committer; R is a redundant relay hub (gossip member).
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (r, _r_rx) = group_core(&fabric, "r", &desc, false);
+        r.enable_gossip();
+        r.connect("h").await.unwrap();
+        r.host().await.unwrap(); // R listens so members can use it as a second hub
+        let (m, mut m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap(); // joins via the committer
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        m.connect("r").await.unwrap(); // ALSO homes to the second hub R
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The member's DIRECT path to the committer degrades (drop H<->M only).
+        let h_fp = h.fingerprint();
+        let m_fp = m.fingerprint();
+        m.inner.peers.lock().unwrap().retain(|p| p.fingerprint != h_fp);
+        h.inner.peers.lock().unwrap().retain(|p| p.fingerprint != m_fp);
+
+        // The committer speaks; it reaches M only via H -> R -> M (the second hub shuttles).
+        h.send("reaching you via the second hub").await.unwrap();
+        assert_eq!(
+            await_message_text(&mut m_rx, "reaching you via the second hub").await,
+            Some(h.fingerprint()),
+            "M must receive the committer's message shuttled by the redundant hub R"
+        );
+    }
+
+    /// INCREMENT 3 (plan 0005): presumptive queue-only. A member that composes a message
+    /// BEFORE it has joined (no group key) must have it buffered locally — not dropped,
+    /// not errored, and never encrypted early (I2) — and delivered the instant it joins.
+    #[tokio::test]
+    async fn presumptive_queue_delivers_messages_composed_before_join() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#presume",
+        );
+        let (h, mut h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+
+        // M has NOT joined yet (no connection, no group key). Composing now must queue
+        // locally and return Ok (a provisional id), NOT error with GroupNotReady.
+        m.send("composed before my welcome").await.unwrap();
+        assert!(
+            m.inner.group.lock().await.is_none(),
+            "precondition: M holds no group key when it composes"
+        );
+        assert_eq!(
+            m.inner.pending_outbound.lock().unwrap().len(),
+            1,
+            "the pre-join message must be buffered locally, not dropped or sent"
+        );
+
+        // Now join; the Welcome triggers the flush.
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            await_message_text(&mut h_rx, "composed before my welcome").await,
+            Some(m.fingerprint()),
+            "the message composed before join must flush to the group on join, attributed to M"
+        );
+        assert!(
+            m.inner.pending_outbound.lock().unwrap().is_empty(),
+            "the queue must be drained after the flush"
+        );
+    }
+
+    /// INCREMENT 3b (plan 0005): relay-JOIN with correct attribution. A joiner J connects
+    /// ONLY to a relay member M (never to the host H) and joins via a self-authenticating
+    /// JoinRequest: M MAC-gates + forwards it to H, H attributes the new leaf to J's
+    /// VERIFIED device identity (not M), the Welcome relays back to J, and J then speaks —
+    /// the host must attribute J's message to J, proving relay-join does not mis-attribute.
+    #[tokio::test]
+    async fn relay_join_attributes_to_the_joiner_not_the_relay() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#relayjoin",
+        );
+        let (h, mut h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        // M joins via H directly, then listens so J can relay-join through it.
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        m.host().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // J connects ONLY to M (not H) and joins through the relay.
+        let (j, _j_rx) = group_core(&fabric, "j", &desc, false);
+        j.enable_gossip();
+        j.connect("m").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        // J is now a member (its Welcome relayed back through M) and speaks.
+        j.send("relay-joined, and here i am").await.unwrap();
+        let from = await_message_text(&mut h_rx, "relay-joined, and here i am").await;
+        assert_eq!(
+            from,
+            Some(j.fingerprint()),
+            "the host must attribute the message to J (its verified device identity), \
+             NOT to the relay M that forwarded J's join"
+        );
+    }
+
+    /// INCREMENT 3b (plan 0005 I4): join DoS pre-filter. A JoinRequest whose invite-MAC is
+    /// wrong (a non-invite-holder, or forged) is dropped by the committer before any
+    /// ML-DSA verify or TreeKEM commit — no leaf is added, the roster does not grow.
+    #[tokio::test]
+    async fn join_request_with_bad_invite_mac_is_rejected() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#badmac",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.host().await.unwrap();
+        let roster_before = h.inner.roster.lock().unwrap().len();
+
+        // Forge a structurally-valid JoinRequest with a WRONG mac.
+        let attacker = IdentityKeyPair::generate();
+        let leaf = talkrypt_crypto::LeafKeyPair::generate();
+        let kp = leaf.key_package().encode();
+        let device_pub = attacker.public().sig_vk.clone();
+        let sig = attacker.sign(&join_sig_transcript(&h.inner.root0, &device_pub, &kp));
+        let bad_mac = vec![0u8; 32]; // not the invite-bound MAC
+        handle_join_request(&h.inner, device_pub, kp, sig, bad_mac).await;
+
+        assert_eq!(
+            h.inner.roster.lock().unwrap().len(),
+            roster_before,
+            "a JoinRequest with a bad invite-MAC must be dropped before any add — roster unchanged"
+        );
+    }
+
+    /// INCREMENT 4 (plan 0005 I1): graceful committer handoff. The host delegates roster
+    /// authority to successor S (epoch-fenced from E); members then accept S's rosters for
+    /// epochs >= E, and FENCE OUT the old host (a leaf-0 roster at epoch >= E is rejected —
+    /// exactly one authority per epoch, no split-brain).
+    #[tokio::test]
+    async fn committer_handoff_delegates_roster_authority_and_fences_old_host() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#handoff",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        const E: u32 = 1000; // a high epoch, comfortably fresh vs the join epochs
+
+        // Host delegates roster authority to S from epoch E, and steps down.
+        assert!(h.handoff_committer(s_leaf, E).await, "host must be able to sign a handoff");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // S, the delegated successor, issues the roster at E signed with ITS leaf key.
+        s.issue_delegate_roster(E).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            E,
+            "M must accept the successor S's roster under the host's delegation"
+        );
+
+        // The OLD host now tries to re-assert authority at a later epoch (leaf-0 signed) —
+        // it is fenced out, so M does NOT advance.
+        h.issue_delegate_roster(E + 1).await; // h's leaf is 0 → signs with leaf-0 key
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            E,
+            "a revived old committer (leaf 0) must be fenced out for epochs >= E (I1)"
+        );
+    }
+
+    /// INCREMENT 4 (plan 0005 I1): after a handoff to S, a roster signed by a NON-delegated
+    /// member (not S, not the host) is rejected — only the single delegated authority is
+    /// accepted for the fenced epochs.
+    #[tokio::test]
+    async fn non_delegated_member_roster_is_rejected_after_handoff() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#handoff2",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        let (x, _x_rx) = group_core(&fabric, "x", &desc, false);
+        x.enable_gossip();
+        x.connect("h").await.unwrap();
+        let (m, _m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        const E: u32 = 2000;
+        assert!(h.handoff_committer(s_leaf, E).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed);
+
+        // X (not the delegate) tries to issue a roster at E, signed with X's own leaf.
+        x.issue_delegate_roster(E).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            m.inner.last_roster_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "a roster from a non-delegated member must be rejected — only S's is accepted"
+        );
+    }
+
+    /// INCREMENT 4b (plan 0005): ungraceful failover. A strict BFT quorum (> 2/3 of the
+    /// roster) of member votes ACTIVATES the host-pre-authorized standby; a sub-quorum does
+    /// NOT. (Roster = 5 → quorum needs 4 votes.)
+    #[tokio::test]
+    async fn bft_quorum_activates_the_pre_authorized_standby() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#quorum",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let mut members = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            let (n, rx) = group_core(&fabric, name, &desc, false);
+            n.enable_gossip();
+            n.connect("h").await.unwrap();
+            members.push((n, rx));
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let (a, _) = &members[0];
+        let a_leaf = a.my_leaf().await.unwrap();
+        const E: u32 = 3000;
+        assert!(h.designate_standby(a_leaf, E).await, "host designates the standby");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 3 of 5 vote — below the > 2/3 BFT quorum, so NOT activated.
+        for i in 0..3 {
+            members[i].0.vote_promote(E).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            None,
+            "3/5 votes is below the strict > 2/3 BFT quorum — standby not activated"
+        );
+
+        // 4th vote reaches the quorum → the host-designated standby A is activated.
+        members[3].0.vote_promote(E).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            Some((a_leaf, E)),
+            "a BFT quorum (4/5) activates the host-designated standby A (and only A)"
+        );
+    }
+
+    /// INCREMENT 4b: a member quorum CANNOT promote anyone the host did not pre-authorize —
+    /// without a `StandbyDesignation`, even a full quorum of votes activates no committer.
+    /// This is what stops a malicious quorum from installing a hostile committer.
+    #[tokio::test]
+    async fn quorum_without_host_designation_promotes_no_one() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#noquorum",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let mut members = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            let (n, rx) = group_core(&fabric, name, &desc, false);
+            n.enable_gossip();
+            n.connect("h").await.unwrap();
+            members.push((n, rx));
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // NO designate_standby. A full quorum of votes still promotes no one.
+        const E: u32 = 4000;
+        for (n, _) in &members {
+            n.vote_promote(E).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            *h.inner.committer_delegate.lock().unwrap(),
+            None,
+            "a member quorum without the host's standby designation must promote no one"
+        );
+    }
+
+    /// INCREMENT 4c (plan 0005): committing takeover. After a committer handoff, the
+    /// delegated successor S — not the old host — processes a NEW join: S verifies the
+    /// joiner, produces the add-COMMIT (signed with S's leaf key) and the roster, and every
+    /// member applies S's commit (authorized via the epoch-fenced delegate). Proof: a new
+    /// member J joins THROUGH S, then speaks, and an existing member M (which applied S's
+    /// commit) receives J's message.
+    #[tokio::test]
+    async fn delegated_successor_processes_a_new_join() {
+        let fabric = LoopbackFabric::new();
+        let desc = ChatDescriptor::new(
+            TopologyKind::Hub,
+            Persistence::Ephemeral,
+            DEFAULT_SUITE_ID,
+            vec!["h".into()],
+            "#takeover",
+        );
+        let (h, _h_rx) = group_core(&fabric, "h", &desc, true);
+        h.enable_gossip();
+        h.host().await.unwrap();
+        let (s, _s_rx) = group_core(&fabric, "s", &desc, false);
+        s.enable_gossip();
+        s.connect("h").await.unwrap();
+        s.host().await.unwrap(); // S listens so the new joiner can reach it
+        let (m, mut m_rx) = group_core(&fabric, "m", &desc, false);
+        m.enable_gossip();
+        m.connect("h").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let s_leaf = s.my_leaf().await.unwrap();
+        let e = s.epoch().await.unwrap();
+        // Graceful handoff makes S the active committer from the live epoch; H steps down.
+        assert!(h.handoff_committer(s_leaf, e).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // A brand-new member joins THROUGH S (the new committer), not H.
+        let (j, _j_rx) = group_core(&fabric, "j", &desc, false);
+        j.enable_gossip();
+        j.connect("s").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let _ = &mut m_rx;
+
+        // The committing takeover: S (the delegated successor, NOT the old host) processed
+        // J's join and produced the add-COMMIT signed with S's leaf key; M APPLIED that
+        // commit under the epoch-fenced delegate authority (apply_commit_with). So M's
+        // epoch advanced past the handoff epoch and stays in lock-step with the new
+        // committer S, and both now seat 4 members. A member applying a NON-host committer's
+        // commit is exactly what the takeover adds — and what apply_commit rejected before.
+        let s_epoch = s.epoch().await.unwrap();
+        let m_epoch = m.epoch().await.unwrap();
+        assert!(s_epoch > e, "S advanced the epoch by committing J's add as the new committer");
+        assert_eq!(
+            m_epoch, s_epoch,
+            "M must apply S's add-commit (epoch in lock-step with the new committer S)"
+        );
+        assert_eq!(
+            m.inner.roster.lock().unwrap().len(),
+            4,
+            "M's roster seats all four members after the successor's commit"
         );
     }
 

@@ -75,6 +75,50 @@ impl Topology for HybridClient {
     }
 }
 
+/// Relay-chain client (plan 0005, hub-peer-peer-peer): dial the given upstream(s) —
+/// a hub or a prior peer in the chain — AND host for a downstream peer, then enable
+/// gossip so received content and host-signed Commit/Roster are re-flooded along the
+/// chain. A line of these forms `hub — peer — peer — …`; each link may be any bearer.
+/// Content delivery never waits on the hub once a peer can shuttle.
+pub struct RelayChain;
+
+#[async_trait]
+impl Topology for RelayChain {
+    async fn establish(&self, core: &Core, peers: &[String]) -> Result<()> {
+        core.enable_gossip(); // relay = re-flood to other peers (loop-free via dedup)
+        core.host().await?; // accept a downstream peer
+        for upstream in peers {
+            core.connect(upstream).await?;
+        }
+        Ok(())
+    }
+    fn kind(&self) -> TopologyKind {
+        TopologyKind::Hybrid
+    }
+}
+
+/// Resilient-hybrid client (plan 0005, hub-dropout + multi-hub): host for direct
+/// peer-to-peer delivery, dial every given hub (multi-hub active-active — redundant
+/// delivery of the one committer's frames, deduplicated), and enable gossip. Members
+/// also interconnecting this way keep delivering content to each other after any/all
+/// hubs drop; membership changes pause until a committer returns (invariant I1).
+pub struct ResilientHybrid;
+
+#[async_trait]
+impl Topology for ResilientHybrid {
+    async fn establish(&self, core: &Core, peers: &[String]) -> Result<()> {
+        core.enable_gossip();
+        core.host().await?; // reachable for direct peer links (survives hub loss)
+        for hub in peers {
+            core.connect(hub).await?; // connect to EVERY hub (multi-hub redundancy)
+        }
+        Ok(())
+    }
+    fn kind(&self) -> TopologyKind {
+        TopologyKind::Hybrid
+    }
+}
+
 /// Select a topology strategy for a descriptor's [`TopologyKind`].
 pub fn for_kind(kind: TopologyKind) -> Box<dyn Topology> {
     match kind {

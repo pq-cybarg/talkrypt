@@ -951,6 +951,29 @@ impl TreeKemGroup {
             .map(|k| k.verify(msg, sig).is_ok())
             .unwrap_or(false)
     }
+
+    /// Verify a signature against an ARBITRARY occupied leaf's tree-bound signing key
+    /// (read-only; the key was learned + PoP-checked from the Welcome and kept current via
+    /// `sig_update`). Used by the committer-handoff path (plan 0005 increment 4): after the
+    /// host signs an epoch-fenced delegation, members authenticate the delegated
+    /// successor's Roster/Commit against ITS leaf key. Returns false for an empty/unknown
+    /// leaf — it NEVER grants authority on its own; the engine gates it behind the
+    /// host-signed, epoch-fenced delegation (so this cannot be used to forge host
+    /// authority).
+    pub fn verify_leaf_sig(&self, leaf: u32, msg: &[u8], sig: &[u8]) -> bool {
+        self.leaf_sig_keys
+            .get(&leaf)
+            .map(|k| k.verify(msg, sig).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Sign `msg` with our own leaf signing key, regardless of whether we are the host
+    /// (unlike [`sign_as_host`], which requires leaf 0). Used by a delegated successor
+    /// committer to sign a Roster the host authorized it to issue. Returns `None` if we
+    /// hold no signing key.
+    pub fn sign_as_leaf(&self, msg: &[u8]) -> Option<Vec<u8>> {
+        self.my_sig.as_ref().map(|s| s.sign(msg))
+    }
     pub fn member_count(&self) -> usize {
         self.occupied.iter().filter(|o| **o).count()
     }
@@ -1321,31 +1344,47 @@ impl TreeKemGroup {
 
     /// Apply a commit produced by another member; advances to its epoch.
     pub fn apply_commit(&mut self, commit: &Commit) -> Result<()> {
+        self.apply_commit_with(commit, None)
+    }
+
+    /// As [`apply_commit`], but authorizing a committer handoff (plan 0005 §4, I1). The
+    /// AUTHORIZED committer leaf for this epoch is EXACTLY ONE: the host (leaf 0) normally,
+    /// or — when `delegate = Some((succ, from_epoch))` and `self.epoch >= from_epoch` — the
+    /// delegated successor `succ` instead, FENCING OUT the old host for those epochs. The
+    /// commit signature is verified against THAT authorized leaf's tree-bound key. The
+    /// engine only ever passes a `delegate` it recorded from a host-signed handoff / a
+    /// BFT-quorum promotion of a host-pre-authorized standby, so no unauthorized leaf can
+    /// commit, and never two in the same epoch (same single-authority guarantee as the
+    /// roster gate, F* EngineAuth THEOREM 14).
+    pub fn apply_commit_with(
+        &mut self,
+        commit: &Commit,
+        delegate: Option<(u32, u32)>,
+    ) -> Result<()> {
         // --- Committer authentication + authorization (SECURITY-AUDIT F-17) ---
-        // BEFORE touching any state: (1) identify the committing leaf from the
-        // commit's own path (it re-keys the committer's leaf→root path, so
-        // path[0] is that leaf); (2) require it to be the group host — a member
-        // self-rekeys by PROPOSING to the host, never by broadcasting its own
-        // commit (T-4), so a non-host commit is always forged/unauthorized; and
-        // (3) verify the committer's ML-DSA-87 signature over the whole commit,
-        // bound to this epoch, against the host leaf's tree-bound signing key.
-        // This closes the forged-`Commit` injection (a `Remove`/phantom-`Add` from
-        // any member or a `from`-restamping relay) that the broadcast-commit path
-        // otherwise applied with no sender authentication.
+        // (1) identify the committing leaf from the commit's own path (path[0]); (2) require
+        // it to be the SOLE authorized committer for this epoch (host, or the epoch-fenced
+        // delegate); (3) verify the committer's ML-DSA-87 signature over the epoch-bound
+        // commit against THAT leaf's tree-bound key. Closes forged-`Commit` injection; the
+        // delegate branch preserves it (the delegate is itself host-authorized).
         let committer_leaf = match commit.path.first() {
             Some(n) if n.span == 1 => n.lo,
             _ => return Err(CryptoError::Malformed("commit path does not start at a leaf")),
         };
-        if committer_leaf != HOST_LEAF {
+        let authorized_leaf = match delegate {
+            Some((succ, from_epoch)) if self.epoch >= from_epoch => succ,
+            _ => HOST_LEAF,
+        };
+        if committer_leaf != authorized_leaf {
             return Err(CryptoError::Malformed(
-                "only the host leaf may broadcast a commit",
+                "commit from a leaf that is not the authorized committer for this epoch",
             ));
         }
-        let host_key = self
+        let committer_key = self
             .leaf_sig_keys
-            .get(&HOST_LEAF)
-            .ok_or(CryptoError::Malformed("no host signing key bound"))?;
-        host_key
+            .get(&authorized_leaf)
+            .ok_or(CryptoError::Malformed("no committer signing key bound"))?;
+        committer_key
             .verify(
                 &commit_auth_transcript(self.epoch, committer_leaf, &commit.encode_body()),
                 &commit.commit_sig,
@@ -1386,10 +1425,13 @@ impl TreeKemGroup {
     }
 
     /// Join a group from a Welcome message using the matching leaf key.
-    pub fn join_with_welcome(keypair: LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
-        // `LeafKeyPair` is a Drop type (zeroizes its secret), so we cannot move its
-        // fields out. Copy the KEM leaf secret and rebuild the leaf signing key
-        // from its seed; `keypair` then drops normally, zeroizing its copy.
+    pub fn join_with_welcome(keypair: &LeafKeyPair, welcome: &Welcome) -> Result<TreeKemGroup> {
+        // Borrow (not consume) the keypair: `LeafKeyPair` is a Drop type (zeroizes its
+        // secret), and a failed join (e.g. a Welcome meant for another joiner, which a
+        // gossip relay may forward through us) MUST NOT burn our pending leaf key — the
+        // caller keeps `keypair` and retries/relays. We copy the Copy `secret` and
+        // rebuild the leaf signing key from its exported seed; the caller's `keypair`
+        // drops normally later, zeroizing it.
         let profile = keypair.profile;
         let secret = keypair.secret;
         let sig = IdentityKeyPair::from_secret_bytes(keypair.sig.export_secret());
@@ -1846,7 +1888,7 @@ mod tests {
         for f in followers.iter_mut() {
             f.apply_commit(&commit).unwrap();
         }
-        TreeKemGroup::join_with_welcome(kp, &welcome).unwrap()
+        TreeKemGroup::join_with_welcome(&kp, &welcome).unwrap()
     }
 
     /// Every KEM profile — hybrid, padded PQ-pure, compact PQ-pure — must form a
@@ -1957,6 +1999,35 @@ mod tests {
         );
         // c's state is untouched — it still shares the epoch with the host.
         assert_eq!(a.group_secret(), c.group_secret());
+    }
+
+    #[test]
+    fn apply_commit_with_gates_the_delegated_committer() {
+        // INCREMENT 4c (plan 0005): committing takeover. `apply_commit_with` accepts a
+        // commit from a delegated successor (epoch-fenced) but still rejects any other
+        // non-host committer — so the handoff transfers commit authority to EXACTLY the
+        // host-authorized successor and no one else.
+        let mut a = TreeKemGroup::create();
+        let mut b = add_member(&mut a, &mut []);
+        let mut c = add_member(&mut a, &mut [&mut b]);
+        assert_ne!(b.my_leaf(), HOST_LEAF, "b is a non-host member");
+        let commit = b.update().unwrap(); // a commit authored by b (a non-host leaf)
+
+        // (1) No delegation → only the host (leaf 0) may commit → rejected (F-17 intact).
+        assert!(
+            c.apply_commit_with(&commit, None).is_err(),
+            "without a delegation a non-host commit must be rejected"
+        );
+        // (2) A delegation to a DIFFERENT leaf → b is not the authorized committer → rejected.
+        assert!(
+            c.apply_commit_with(&commit, Some((b.my_leaf() + 7, 0))).is_err(),
+            "a commit from a leaf that is not the delegate must be rejected"
+        );
+        // (3) A delegation to b from epoch 0 → b IS the sole authorized committer → applied.
+        assert!(
+            c.apply_commit_with(&commit, Some((b.my_leaf(), 0))).is_ok(),
+            "the delegated successor's commit must be accepted under the delegation"
+        );
     }
 
     #[test]
@@ -2072,7 +2143,7 @@ mod tests {
         assert_eq!(kp2.leaf_public, kp.key_package().leaf_public);
 
         // A joiner can actually use the serialized-then-deserialized Welcome.
-        let b = TreeKemGroup::join_with_welcome(kp, &welcome2).unwrap();
+        let b = TreeKemGroup::join_with_welcome(&kp, &welcome2).unwrap();
         assert_eq!(a.group_secret(), b.group_secret());
     }
 

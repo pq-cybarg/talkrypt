@@ -26,6 +26,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use super::meshcore::{encode_channel_recv_b64, parse_channel_recv_b64};
 use super::meshtastic::{encode_meshpacket, parse_meshpacket};
 use super::{MeshInbox, MeshNode, MeshPacket};
 use crate::Result;
@@ -127,6 +128,28 @@ pub fn mqtt_topic(root: &str, channel: &str, node: &str) -> String {
     format!("{root}/2/e/{channel}/{node}")
 }
 
+/// The **Meshcore** publish/subscribe topic for a channel: `<root>/mc/<channel>/<node>`.
+/// Deliberately distinct from the Meshtastic `…/2/e/…` path so the two carriages never
+/// collide on one broker. Unlike Meshtastic, this is NOT a real Meshcore-gateway
+/// interop format (Meshcore has no standardised MQTT-gateway envelope) — it is a
+/// talkrypt↔talkrypt bridge that carries Meshcore companion channel-text frames over a
+/// plain broker; talkrypt's PQ seal remains the real envelope.
+pub fn mqtt_topic_meshcore(root: &str, channel: &str, node: &str) -> String {
+    let root = root.trim_end_matches('/');
+    format!("{root}/mc/{channel}/{node}")
+}
+
+/// The broker subscribe filter for a method's channel (`…/#` wildcard over nodes).
+/// Only the real `mesh-mqtt` client subscribes; also used by tests.
+#[cfg(any(feature = "mesh-mqtt", test))]
+fn subscribe_filter(method: MqttMethod, root: &str, channel: &str) -> String {
+    let root = root.trim_end_matches('/');
+    match method {
+        MqttMethod::EncapsulatedMeshcore => format!("{root}/mc/{channel}/#"),
+        _ => format!("{root}/2/e/{channel}/#"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pluggable MQTT client seam (so the node logic is testable without a broker).
 // ---------------------------------------------------------------------------
@@ -163,6 +186,15 @@ pub enum MqttMethod {
     /// talkrypt. Latency is stop-and-wait-ARQ × fragment-count × broker RTT.
     #[default]
     EncapsulatedMeshtastic,
+    /// **Encapsulated Meshcore** (implemented): each talkrypt fragment is base64-wrapped
+    /// into a Meshcore companion channel-text frame (the same codec the BLE/serial
+    /// Meshcore adapter uses) and published on a distinct `<root>/mc/<channel>/<node>`
+    /// topic. Unlike the Meshtastic method this is NOT a real Meshcore-gateway interop
+    /// format — Meshcore has no standard MQTT-gateway envelope — so it bridges two
+    /// talkrypt apps over a plain broker rather than joining an existing Meshcore
+    /// meshnet. talkrypt's PQ seal is still the real envelope; latency profile matches
+    /// the Meshtastic method (stop-and-wait-ARQ × fragment-count × broker RTT).
+    EncapsulatedMeshcore,
     /// **PQ-MQTT (RESERVED — not implemented).** A direct, internet-tuned, PQ-secured
     /// MQTT transport (Robobus-style "PQ-MQTT"): native MQTT carriage with no
     /// Meshtastic framing, a large MTU, and a windowed/batched send path, for much
@@ -219,30 +251,50 @@ impl<C: MqttClient> MeshNode for MqttMeshNode<C> {
     }
 
     async fn send(&self, channel: u8, payload: &[u8]) -> Result<()> {
-        let mp = encode_meshpacket(channel, payload);
-        let env = encode_service_envelope(&self.cfg.channel_name, &self.cfg.gateway_id, &mp);
-        let topic = mqtt_topic(&self.cfg.root, &self.cfg.channel_name, &self.cfg.gateway_id);
-        self.client.publish(topic, env).await
+        let (topic, body) = match self.cfg.method {
+            MqttMethod::EncapsulatedMeshcore => {
+                // Meshcore companion recv-frame carrying the base64-wrapped fragment.
+                let frame = encode_channel_recv_b64(channel, payload);
+                let topic =
+                    mqtt_topic_meshcore(&self.cfg.root, &self.cfg.channel_name, &self.cfg.gateway_id);
+                (topic, frame)
+            }
+            // EncapsulatedMeshtastic (PqMqttReserved is rejected before a node exists).
+            _ => {
+                let mp = encode_meshpacket(channel, payload);
+                let env =
+                    encode_service_envelope(&self.cfg.channel_name, &self.cfg.gateway_id, &mp);
+                let topic = mqtt_topic(&self.cfg.root, &self.cfg.channel_name, &self.cfg.gateway_id);
+                (topic, env)
+            }
+        };
+        self.client.publish(topic, body).await
     }
 
     async fn subscribe(&self) -> Result<MeshInbox> {
         let mut rx = self.client.inbound();
+        let method = self.cfg.method;
         let (inbox, tx) = MeshInbox::channel();
         tokio::spawn(async move {
             while let Some((_topic, payload)) = rx.recv().await {
-                // ServiceEnvelope → inner MeshPacket → PRIVATE_APP talkrypt fragment.
-                if let Some(mp) = parse_service_envelope(&payload) {
-                    if let Some(rx) = parse_meshpacket(&mp) {
-                        if tx
-                            .send(MeshPacket {
-                                channel: rx.channel,
-                                payload: rx.payload,
-                                from: rx.from,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+                let decoded = match method {
+                    MqttMethod::EncapsulatedMeshcore => {
+                        // Meshcore companion recv-frame → (channel, talkrypt fragment).
+                        parse_channel_recv_b64(&payload)
+                            .map(|(channel, frag)| MeshPacket { channel, payload: frag, from: None })
+                    }
+                    // ServiceEnvelope → inner MeshPacket → PRIVATE_APP talkrypt fragment.
+                    _ => parse_service_envelope(&payload)
+                        .and_then(|mp| parse_meshpacket(&mp))
+                        .map(|rx| MeshPacket {
+                            channel: rx.channel,
+                            payload: rx.payload,
+                            from: rx.from,
+                        }),
+                };
+                if let Some(pkt) = decoded {
+                    if tx.send(pkt).is_err() {
+                        return;
                     }
                 }
             }
@@ -303,7 +355,7 @@ mod rumqtt {
         let mut opts = MqttOptions::new(client_id, broker_host, broker_port);
         opts.set_keep_alive(std::time::Duration::from_secs(30));
         let (client, mut eventloop) = AsyncClient::new(opts, 32);
-        let sub = format!("{}/2/e/{}/#", cfg.root.trim_end_matches('/'), cfg.channel_name);
+        let sub = super::subscribe_filter(cfg.method, &cfg.root, &cfg.channel_name);
         client
             .subscribe(sub, QoS::AtLeastOnce)
             .await
@@ -435,6 +487,63 @@ mod tests {
     fn default_method_is_encapsulated_meshtastic() {
         assert_eq!(MqttConfig::default().method, MqttMethod::EncapsulatedMeshtastic);
         assert_eq!(MqttMethod::default(), MqttMethod::EncapsulatedMeshtastic);
+    }
+
+    #[test]
+    fn meshcore_topic_and_filter_are_distinct_from_meshtastic() {
+        assert_eq!(mqtt_topic_meshcore("msh/US", "talkrypt", "!ab"), "msh/US/mc/talkrypt/!ab");
+        assert_eq!(
+            subscribe_filter(MqttMethod::EncapsulatedMeshcore, "msh/US", "talkrypt"),
+            "msh/US/mc/talkrypt/#"
+        );
+        assert_eq!(
+            subscribe_filter(MqttMethod::EncapsulatedMeshtastic, "msh/US", "talkrypt"),
+            "msh/US/2/e/talkrypt/#"
+        );
+        // The two carriages must never share a topic on one broker.
+        assert_ne!(
+            mqtt_topic_meshcore("msh/US", "c", "!n"),
+            mqtt_topic("msh/US", "c", "!n")
+        );
+    }
+
+    #[tokio::test]
+    async fn fragment_travels_over_the_meshcore_mqtt_carriage() {
+        let broker = Arc::new(LoopbackBroker::default());
+        let cfg = MqttConfig { method: MqttMethod::EncapsulatedMeshcore, ..Default::default() };
+        let sender = MqttMeshNode::new(broker.client(), cfg.clone());
+        let receiver = MqttMeshNode::new(broker.client(), cfg);
+
+        let mut inbox = receiver.subscribe().await.unwrap();
+        tokio::task::yield_now().await;
+        let frag: Vec<u8> = (0..180u8).collect(); // an opaque sealed fragment
+        sender.send(5, &frag).await.unwrap();
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), inbox.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.channel, 5);
+        assert_eq!(got.payload, frag);
+    }
+
+    /// A Meshcore receiver must NOT decode a Meshtastic ServiceEnvelope (and vice
+    /// versa) — the carriages are isolated so a shared broker can't cross-wire them.
+    #[tokio::test]
+    async fn meshcore_receiver_ignores_meshtastic_frames() {
+        let broker = Arc::new(LoopbackBroker::default());
+        let tastic =
+            MqttMeshNode::new(broker.client(), MqttConfig::default()); // EncapsulatedMeshtastic
+        let core = MqttMeshNode::new(
+            broker.client(),
+            MqttConfig { method: MqttMethod::EncapsulatedMeshcore, ..Default::default() },
+        );
+        let mut inbox = core.subscribe().await.unwrap();
+        tokio::task::yield_now().await;
+        tastic.send(3, b"meshtastic-shaped").await.unwrap();
+        // The Meshcore decoder should reject the ServiceEnvelope: nothing arrives.
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(300), inbox.next()).await;
+        assert!(timed.is_err(), "meshcore inbox wrongly decoded a meshtastic frame");
     }
 
     /// The reserved PQ-MQTT slot must refuse to connect (it is not implemented) and

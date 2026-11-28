@@ -170,6 +170,8 @@ enum Cmd {
         name_policy: Option<String>,
         #[command(flatten)]
         mesh: MeshArgs,
+        #[command(flatten)]
+        mqtt: MqttArgs,
     },
     /// Join a chat from a talkrypt:// invite URI.
     Join {
@@ -206,6 +208,71 @@ enum Cmd {
         name: Option<String>,
         #[command(flatten)]
         mesh: MeshArgs,
+        #[command(flatten)]
+        mqtt: MqttArgs,
+    },
+    /// Run a headless RELAY/bridge node: join a chat and forward its content across
+    /// every bearer you attach (peer transport + any number of mesh carries), so a
+    /// node spanning two modalities bridges them. Optionally act as a keeper/anchor
+    /// (store-and-forward for offline members). Never sends chat; relays only.
+    Relay {
+        /// The invite URI (talkrypt://...) of the chat to relay for.
+        uri: String,
+        /// Join as a TreeKEM group member (the usual case for a relay).
+        #[arg(long, default_value_t = true)]
+        group: bool,
+        /// Path to a persistent device key (see `host --device`). A relay usually
+        /// wants a stable identity; omit for an ephemeral per-run key.
+        #[arg(long)]
+        device: Option<String>,
+        /// Channel password, if the chat is password-gated (see `host --password`).
+        #[arg(long)]
+        password: Option<String>,
+        /// Dial the chat's primary transport over real Tor (required for a .onion
+        /// invite). Requires a `--features tor` build.
+        #[arg(long)]
+        tor: bool,
+        /// Also buffer opaque frames for offline members and replay on reconnect
+        /// (D1 keeper). Holds ciphertext only, never a group key.
+        #[arg(long)]
+        keeper: bool,
+        /// Also run as an anchor mailbox (D1 Layer-B): accept deposits for offline
+        /// recipients and serve them on fetch. Ciphertext only.
+        #[arg(long)]
+        anchor: bool,
+        #[command(flatten)]
+        mesh: MeshArgs,
+        #[command(flatten)]
+        mqtt: MqttArgs,
+    },
+    /// Run a headless presence BEACON: join a chat, arm a callsign, and periodically
+    /// announce presence over every attached bearer (peer + mesh) for discovery
+    /// (SUB-SPEC A CQ). Useful on a LoRa/MQTT mesh so nearby members learn you are up.
+    Beacon {
+        /// The invite URI (talkrypt://...) to beacon into.
+        uri: String,
+        /// Join as a TreeKEM group member.
+        #[arg(long, default_value_t = true)]
+        group: bool,
+        /// The callsign to announce (self-declared leading name; bare, not account-linked).
+        #[arg(long)]
+        callsign: String,
+        /// Seconds between periodic presence announcements.
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
+        /// Path to a persistent device key (see `host --device`).
+        #[arg(long)]
+        device: Option<String>,
+        /// Channel password, if the chat is password-gated.
+        #[arg(long)]
+        password: Option<String>,
+        /// Dial over real Tor (Arti). Requires a `--features tor` build.
+        #[arg(long)]
+        tor: bool,
+        #[command(flatten)]
+        mesh: MeshArgs,
+        #[command(flatten)]
+        mqtt: MqttArgs,
     },
     /// Offer to link a new device to your account (you hold the account key).
     /// Prints a one-time linking URI + QR; run `link-accept` on the new device.
@@ -411,6 +478,7 @@ async fn main() {
             name,
             name_policy,
             mesh,
+            mqtt,
         } => {
             run_host(HostArgs {
                 listen,
@@ -434,6 +502,7 @@ async fn main() {
                 name,
                 name_policy,
                 mesh,
+                mqtt,
             })
             .await
         }
@@ -448,7 +517,35 @@ async fn main() {
             tor,
             name,
             mesh,
-        } => run_join(&uri, group, account, username, device, chain, password, tor, name, mesh).await,
+            mqtt,
+        } => {
+            run_join(
+                &uri, group, account, username, device, chain, password, tor, name, mesh, mqtt,
+            )
+            .await
+        }
+        Cmd::Relay {
+            uri,
+            group,
+            device,
+            password,
+            tor,
+            keeper,
+            anchor,
+            mesh,
+            mqtt,
+        } => run_relay(&uri, group, device, password, tor, keeper, anchor, mesh, mqtt).await,
+        Cmd::Beacon {
+            uri,
+            group,
+            callsign,
+            interval,
+            device,
+            password,
+            tor,
+            mesh,
+            mqtt,
+        } => run_beacon(&uri, group, callsign, interval, device, password, tor, mesh, mqtt).await,
         Cmd::Registry { listen, channel, tor } => run_registry(listen, channel, tor).await,
         Cmd::LinkOffer {
             listen,
@@ -597,6 +694,7 @@ struct HostArgs {
     name: Option<String>,
     name_policy: Option<String>,
     mesh: MeshArgs,
+    mqtt: MqttArgs,
 }
 
 /// Shared `--mesh-*` flags for `host` / `join`: optionally carry messages over a
@@ -698,6 +796,81 @@ async fn maybe_start_mesh(core: &Core, mesh: &MeshArgs) -> Result<(), Box<dyn st
             "--mesh-serial {port} requires a build with `--features mesh-radio`"
         )
         .into())
+    }
+}
+
+/// Mesh over the INTERNET via a Meshtastic/Meshcore MQTT broker (feature `mesh-mqtt`).
+/// Lets a node (especially a `relay`) bridge across the internet without a radio.
+#[derive(clap::Args, Clone)]
+struct MqttArgs {
+    /// Also carry this chat's messages over an MQTT broker at host:port (e.g.
+    /// mqtt.example.org:1883). Off unless set. Requires `--features mesh-mqtt`.
+    #[arg(long)]
+    mqtt_broker: Option<String>,
+    /// MQTT carriage: meshtastic (default; interoperates with the Meshtastic MQTT
+    /// ecosystem via ServiceEnvelope) | meshcore (talkrypt↔talkrypt on a `/mc/` topic).
+    #[arg(long, default_value = "meshtastic")]
+    mqtt_kind: String,
+    /// Mesh channel NAME in the broker topic (Meshtastic unencrypted channel).
+    #[arg(long, default_value = "talkrypt")]
+    mqtt_channel_name: String,
+    /// Mesh channel INDEX talkrypt fragments are transmitted on.
+    #[arg(long, default_value_t = 0)]
+    mqtt_channel: u8,
+}
+
+/// If `--mqtt-broker` was given, connect to the broker and start carrying this chat's
+/// messages over it (in addition to any other bearer). A no-op when unset; errors
+/// clearly when set in a build without the `mesh-mqtt` feature.
+async fn maybe_start_mqtt(core: &Core, mqtt: &MqttArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(broker) = mqtt.mqtt_broker.clone() else {
+        return Ok(());
+    };
+    let (host, port_s) = broker
+        .rsplit_once(':')
+        .ok_or("--mqtt-broker must be host:port")?;
+    let port: u16 = port_s.parse().map_err(|_| "invalid --mqtt-broker port")?;
+    #[cfg(feature = "mesh-mqtt")]
+    {
+        use talkrypt_transport::mesh::mqtt::{connect, MqttConfig, MqttMethod};
+        use talkrypt_transport::mesh::MeshPolicy;
+        let method = match mqtt.mqtt_kind.as_str() {
+            "meshcore" => MqttMethod::EncapsulatedMeshcore,
+            "meshtastic" => MqttMethod::EncapsulatedMeshtastic,
+            other => {
+                return Err(format!("unknown --mqtt-kind '{other}' (meshtastic|meshcore)").into())
+            }
+        };
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let cfg = MqttConfig {
+            root: "msh/US".into(),
+            channel_name: mqtt.mqtt_channel_name.clone(),
+            gateway_id: format!("!{uniq:08x}"),
+            method,
+            ..Default::default()
+        };
+        let node = connect(host, port, &format!("talkrypt-{uniq:x}"), cfg).await?;
+        core.start_mesh_messaging(
+            node,
+            MeshPolicy {
+                channel: mqtt.mqtt_channel,
+                ..Default::default()
+            },
+        )
+        .await;
+        println!(
+            "mqtt: {} carriage on {host}:{port} (channel \"{}\"/{}) — messages also ride the broker",
+            mqtt.mqtt_kind, mqtt.mqtt_channel_name, mqtt.mqtt_channel
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "mesh-mqtt"))]
+    {
+        let _ = (core, host, port);
+        Err(format!("--mqtt-broker {broker} requires a build with `--features mesh-mqtt`").into())
     }
 }
 
@@ -1051,6 +1224,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
         name,
         name_policy,
         mesh,
+        mqtt,
     } = args;
     println!("{BANNER}\n");
     let kind = topology_from(&topology);
@@ -1179,6 +1353,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
     maybe_start_mesh(&core, &mesh).await?;
+    maybe_start_mqtt(&core, &mqtt).await?;
     // Show the invite as a scannable QR for in-person joining.
     println!("scan to join (or copy the URI above):\n");
     print_qr(&desc.to_uri());
@@ -1195,6 +1370,7 @@ async fn run_host(args: HostArgs) -> Result<(), Box<dyn std::error::Error>> {
     repl(core, rx, ReplState::new(account_kp, username)).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_join(
     uri: &str,
     group: bool,
@@ -1206,6 +1382,7 @@ async fn run_join(
     tor: bool,
     name: Option<String>,
     mesh: MeshArgs,
+    mqtt: MqttArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{BANNER}\n");
     let mut desc = ChatDescriptor::from_uri(uri)?;
@@ -1268,11 +1445,148 @@ async fn run_join(
 
     // Optional: also carry messages over a LoRa mesh node (--mesh-serial).
     maybe_start_mesh(&core, &mesh).await?;
+    maybe_start_mqtt(&core, &mqtt).await?;
 
     // Identity: linked chain (secondary device) / account / pseudonym.
     let account_kp = setup_identity(&core, &account, &chain, &username).await?;
     load_contacts(&core); // restore recognized accounts from previous sessions
     repl(core, rx, ReplState::new(account_kp, username)).await
+}
+
+/// Build a joining `Core` for a headless node (relay/beacon): resolve the invite,
+/// pick the transport, create the group/pairwise core, and connect. Returns the core,
+/// its event receiver, and the kept-alive `Net` (drop it and the listener dies).
+async fn join_headless(
+    uri: &str,
+    group: bool,
+    device: &Option<String>,
+    password: &Option<String>,
+    tor: bool,
+) -> Result<(Core, tokio::sync::mpsc::UnboundedReceiver<Event>, Net), Box<dyn std::error::Error>> {
+    let mut desc = ChatDescriptor::from_uri(uri)?;
+    if let Some(pw) = password {
+        desc.password = Some(ChannelPassword::new(pw.clone()));
+    }
+    // SECURITY-AUDIT F-25: an anonymity-required invite must not be joined over clearnet.
+    if desc.require_anon && !tor {
+        return Err("this invite requires an anonymizing transport; re-run with --tor".into());
+    }
+    let reg = SuiteRegistry::with_defaults();
+    let suite = reg.get_by_scheme_hash(&desc.scheme_hash()).map_err(|_| {
+        format!(
+            "this chat's crypto scheme '{}' is not registered in this build",
+            desc.resolved_suite_id()
+        )
+    })?;
+    let net = make_net(tor, "127.0.0.1:0").await?;
+    let transport = net.transport();
+    let want_group = group || desc.group;
+    let device_kp = device_identity(device)?;
+    let (core, rx) = if want_group {
+        Core::new_group(device_kp, suite, transport, desc.clone(), false)
+    } else {
+        Core::new(device_kp, suite, transport, desc.clone())
+    };
+    println!("scheme: {}", desc.resolved_suite_id());
+    println!("safety number: {}", core.identity_public().safety_number());
+    let strategy = for_kind(desc.topology);
+    strategy.establish(&core, &desc.endpoints).await?;
+    Ok((core, rx, net))
+}
+
+/// Run a headless RELAY/bridge node (the `relay` subcommand). Joins the chat, enables
+/// gossip (so it re-floods every verified frame onto all its OTHER bearers — the
+/// mechanism that bridges transport islands), attaches any mesh/MQTT carries, and
+/// optionally runs keeper/anchor store-and-forward. Never originates chat.
+#[allow(clippy::too_many_arguments)]
+async fn run_relay(
+    uri: &str,
+    group: bool,
+    device: Option<String>,
+    password: Option<String>,
+    tor: bool,
+    keeper: bool,
+    anchor: bool,
+    mesh: MeshArgs,
+    mqtt: MqttArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{BANNER}\n");
+    let (core, mut rx, _net) = join_headless(uri, group, &device, &password, tor).await?;
+    // A relay is a gossip bridge: re-flood/tee every verified frame onto its other bearers.
+    core.enable_gossip();
+    if keeper {
+        core.keeper_mode(true);
+    }
+    if anchor {
+        core.anchor_mode(true);
+    }
+    // Attach the additional bearers this node bridges onto.
+    maybe_start_mesh(&core, &mesh).await?;
+    maybe_start_mqtt(&core, &mqtt).await?;
+    println!(
+        "relay up — gossip bridge{}{}, {} peer(s). Relaying content across all bearers; \
+         Ctrl-C to stop.",
+        if keeper { " + keeper" } else { "" },
+        if anchor { " + anchor" } else { "" },
+        core.peer_count(),
+    );
+    // Headless: the engine re-floods/tees on receipt in its own read tasks; we drain the
+    // event stream (so the channel never grows) and log bridged content.
+    let mut relayed = 0u64;
+    while let Some(ev) = rx.recv().await {
+        if let Event::Message { channel, .. } = ev {
+            relayed += 1;
+            println!("[relay] bridged content frame #{relayed} on {channel}");
+        }
+    }
+    Ok(())
+}
+
+/// Run a headless presence BEACON (the `beacon` subcommand). Joins the chat, arms a
+/// self-declared callsign, sets a periodic presence cadence, and re-announces on an
+/// interval — over every attached bearer (peer + mesh), so nearby/mesh members learn
+/// this node is up (SUB-SPEC A CQ).
+#[allow(clippy::too_many_arguments)]
+async fn run_beacon(
+    uri: &str,
+    group: bool,
+    callsign: String,
+    interval: u64,
+    device: Option<String>,
+    password: Option<String>,
+    tor: bool,
+    mesh: MeshArgs,
+    mqtt: MqttArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{BANNER}\n");
+    let (core, mut rx, _net) = join_headless(uri, group, &device, &password, tor).await?;
+    maybe_start_mesh(&core, &mesh).await?;
+    maybe_start_mqtt(&core, &mqtt).await?;
+    set_bare_leading_name(&core, &Some(callsign.clone()));
+    core.set_presence_cadence(talkrypt_core::presence::PresenceCadence {
+        periodic_secs: Some(interval),
+        on_message_id: true,
+    });
+    println!("beacon up — announcing \"{callsign}\" every {interval}s. Ctrl-C to stop.");
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval.max(1)));
+    let mut count = 0u64;
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                match core.announce_presence().await {
+                    Ok(()) => { count += 1; println!("[beacon] announced \"{callsign}\" (#{count})"); }
+                    Err(e) => eprintln!("[beacon] announce failed: {e}"),
+                }
+            }
+            ev = rx.recv() => {
+                match ev {
+                    Some(_) => {} // drain
+                    None => break, // all senders gone
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Host a username registry node (the `registry` subcommand).

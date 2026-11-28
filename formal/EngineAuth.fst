@@ -174,3 +174,195 @@ let thm_relationship_gates_require_flag (acct:nat)
   : Lemma (ensures (allows Contacts acct false false == false) /\
                    (allows Friends  acct true  false == false))
   = ()
+
+(* ---------- relay-JOIN authorization (increment 3b: self-authenticating join) -------- *)
+(* Added 2026-11-25 (plan 0005 §3b). Models `handle_join_request` / `relay_join_request`: *)
+(* a joiner JOINS THROUGH a relaying peer with a `JoinRequest{device_pub,kp,sig,mac}`.    *)
+(* The committer attributes the new leaf to the VERIFIED signing device, never the relay  *)
+(* hop (closes the G2 attribution gap for joins), behind an invite-bound admission MAC.   *)
+
+/// A second, independent oracle for the invite-bound admission MAC (KMAC256 keyed by the
+/// chat `invite_token`). `mac inv dp kp` is the unique accepted tag; a party WITHOUT the
+/// invite key `inv` cannot produce it (standard MAC/PRF unforgeability). This is the cheap
+/// pre-filter checked before any ML-DSA verify or TreeKEM commit (plan 0005 I4).
+assume val mac : (inv:nat) -> (dp:nat) -> (kp:nat) -> nat
+let mac_ok (inv:nat) (dp:nat) (kp:nat) (m:nat) : bool = (m = mac inv dp kp)
+
+/// `join_transcript` = JOIN_CONTEXT | root0 | device_pub | kp, injective + domain-
+/// separated from the commit/roster transcripts (distinct context tag).
+assume val join_transcript : (root0:nat) -> (device_pub:pk) -> (kp:nat) -> msg
+assume JoinInj :
+  (forall r d k r' d' k'. {:pattern (join_transcript r d k); (join_transcript r' d' k')}
+     join_transcript r d k == join_transcript r' d' k' ==> (r==r' /\ d==d' /\ k==k'))
+
+/// The committer's `handle_join_request` acceptance decision, in DoS-order: the invite-MAC
+/// must verify (cheap admission, I4) AND the device signature must verify over the chat-
+/// bound transcript. On success the new leaf is attributed to `device_pub` — the SIGNING
+/// device — and NOT to any relay that forwarded the request.
+let accept_join_ok
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) : bool =
+  mac_ok inv device_pub kp m &&
+  verify l device_pub (join_transcript root0 device_pub kp) s
+
+/// THEOREM 10 (JOIN ADMISSION IS INVITE-BOUND — DoS pre-filter, I4). An accepted join
+/// carries a valid invite-MAC. By MAC unforgeability a party without the invite key cannot
+/// produce one, so a non-invite-holder's join is rejected at the cheap stage, before any
+/// signature verification or commit — the join DoS/DDoS gate is sound.
+let thm_join_requires_invite
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat)
+  : Lemma (requires accept_join_ok l inv root0 device_pub kp s m == true)
+          (ensures mac_ok inv device_pub kp m == true)
+  = ()
+
+/// THEOREM 11 (JOIN ATTRIBUTION IS SOUND — closes G2 for joins). An accepted join's
+/// signature verifies under `device_pub`; by EUF-CMA only the holder of that device's
+/// signing key could have produced it over this chat-bound transcript. So the committer
+/// attributes the new leaf to the actual joining DEVICE — and a relay forwarding the bytes
+/// (which holds no such key, and whose `relay_stamp` is NOT an input here) cannot cause a
+/// leaf to be attributed to a device it does not control.
+let thm_join_attribution_sound
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) (relay_stamp:pk)
+  : Lemma (requires accept_join_ok l inv root0 device_pub kp s m == true)
+          (ensures l device_pub (join_transcript root0 device_pub kp) == true)
+  = eufcma_inst l device_pub (join_transcript root0 device_pub kp) s
+
+/// THEOREM 12 (FORGED JOIN REJECTED — fail closed). If the device key never signed this
+/// join transcript, the join is NOT accepted, regardless of a valid invite-MAC or any
+/// relay stamp. A relay cannot upgrade a MAC it may know (it holds the invite too) into an
+/// accepted join for a victim device without that device's signing key.
+let thm_forged_join_rejected
+      (l:log) (inv root0:nat) (device_pub:pk) (kp:nat) (s:sig) (m:nat) (relay_stamp:pk)
+  : Lemma (requires l device_pub (join_transcript root0 device_pub kp) == false)
+          (ensures accept_join_ok l inv root0 device_pub kp s m == false)
+  = ()
+
+(* ---------- graceful committer handoff (increment 4: single authority, I1) ---------- *)
+(* Added 2026-11-25 (plan 0005 I1). Models `handle_committer_handoff` + the epoch-fenced  *)
+(* roster-authority gate. A host-signed delegation makes a SUCCESSOR leaf the sole roster  *)
+(* authority for epochs >= from_epoch, fencing out the old committer — exactly one         *)
+(* authority per epoch, so no split-brain from the graceful handoff.                        *)
+
+/// `handoff_transcript` = HANDOFF_CONTEXT | successor_leaf | from_epoch, injective.
+assume val handoff_transcript : (succ:nat) -> (fe:nat) -> msg
+assume HandoffInj :
+  (forall s f s' f'. {:pattern (handoff_transcript s f); (handoff_transcript s' f')}
+     handoff_transcript s f == handoff_transcript s' f' ==> (s==s' /\ f==f'))
+
+/// A committer handoff is HONORED only if signed by the current host (leaf 0) over the
+/// handoff transcript — `handle_committer_handoff` verifies it with `verify_host_sig`.
+let handoff_ok (l:log) (host_key:pk) (succ fe:nat) (s:sig) : bool =
+  verify l host_key (handoff_transcript succ fe) s
+
+/// THEOREM 13 (HANDOFF REQUIRES THE HOST — no self-promotion). An honored delegation is
+/// host-signed; by EUF-CMA a non-host cannot forge one, so a member cannot promote itself
+/// (or anyone else) to committer. Only the current authority may name its successor.
+let thm_handoff_requires_host (l:log) (host_key:pk) (succ fe:nat) (s:sig)
+  : Lemma (requires handoff_ok l host_key succ fe s == true)
+          (ensures l host_key (handoff_transcript succ fe) == true)
+  = eufcma_inst l host_key (handoff_transcript succ fe) s
+
+/// The roster authority leaf for `epoch`, given an optional epoch-fenced delegation to
+/// `succ` from `fe`: for epoch >= fe the SOLE authority is `succ`, else leaf 0 (host).
+let roster_authority (deleg:option (nat & nat)) (epoch:nat) : nat =
+  match deleg with
+  | Some (succ, fe) -> if epoch >= fe then succ else host_leaf
+  | None            -> host_leaf
+
+/// Accept a roster at `epoch` iff the authority-for-this-epoch's key signed it (`key_of`
+/// maps a leaf to its tree-bound sig key). This is the `verified` gate in engine.rs.
+let accept_roster_fenced
+      (l:log) (key_of:nat -> pk) (deleg:option (nat & nat)) (epoch entries:nat) (s:sig) : bool =
+  verify l (key_of (roster_authority deleg epoch)) (roster_transcript epoch entries) s
+
+/// THEOREM 14 (SINGLE AUTHORITY PER EPOCH / OLD HOST FENCED — I1). Under a delegation to
+/// `succ` from `fe`, for every epoch >= fe the roster authority is EXACTLY `succ`, and a
+/// roster is accepted at that epoch iff `succ`'s key signed it. So a roster from any other
+/// leaf — the fenced-out old host (leaf 0) included — is NOT accepted: there are never two
+/// concurrent committers, and a revived old host cannot re-assert authority. No split-brain.
+let thm_single_authority_fences_old_host
+      (l:log) (key_of:nat -> pk) (succ fe epoch entries:nat) (s:sig)
+  : Lemma (requires epoch >= fe)
+          (ensures roster_authority (Some (succ, fe)) epoch == succ /\
+                   accept_roster_fenced l key_of (Some (succ, fe)) epoch entries s ==
+                     verify l (key_of succ) (roster_transcript epoch entries) s)
+  = ()
+
+(* ---------- ungraceful quorum failover (increment 4b) ---------- *)
+(* Added 2026-11-26 (plan 0005 §4b). Models `handle_standby_designation` +                 *)
+(* `handle_promotion_vote`: the host PRE-AUTHORIZES a standby (host-signed), and a strict   *)
+(* BFT quorum (> 2/3 of the roster) of member votes ACTIVATES only that standby. A          *)
+(* malicious minority can neither pick the leaf (it is the host's) nor reach the quorum.    *)
+
+assume val standby_transcript : (standby:nat) -> (fe:nat) -> msg
+assume StandbyInj :
+  (forall s f s' f'. {:pattern (standby_transcript s f); (standby_transcript s' f')}
+     standby_transcript s f == standby_transcript s' f' ==> (s==s' /\ f==f'))
+
+/// A standby designation is honored only if signed by the host over its transcript.
+let standby_ok (l:log) (host_key:pk) (standby fe:nat) (s:sig) : bool =
+  verify l host_key (standby_transcript standby fe) s
+
+/// THEOREM 15 (STANDBY DESIGNATION REQUIRES THE HOST). The activatable standby is the
+/// host's choice; a member cannot designate one (EUF-CMA). So a quorum can only ever
+/// activate the host-authorized leaf — never a member of its own choosing.
+let thm_standby_requires_host (l:log) (host_key:pk) (standby fe:nat) (s:sig)
+  : Lemma (requires standby_ok l host_key standby fe s == true)
+          (ensures l host_key (standby_transcript standby fe) == true)
+  = eufcma_inst l host_key (standby_transcript standby fe) s
+
+/// The activation decision (`handle_promotion_vote`): the committer activates to `leaf` iff
+/// `leaf` is the host-designated standby AND the distinct member votes `votes` form a
+/// strict BFT quorum of roster size `n` (3*votes > 2*n).
+let has_designation (designated:option nat) (leaf:nat) : bool =
+  match designated with
+  | Some d -> d = leaf
+  | None   -> false
+let is_bft_quorum (votes n:nat) : bool = 3 * votes > 2 * n
+let activate_ok (designated:option nat) (leaf votes n:nat) : bool =
+  has_designation designated leaf && is_bft_quorum votes n
+
+/// THEOREM 16 (ACTIVATION NEEDS HOST DESIGNATION + BFT QUORUM). Any activation implies both
+/// a host-designated standby equal to the activated leaf AND a strict > 2/3 quorum — so a
+/// quorum without a designation promotes no one, and no promotion happens below 2/3.
+let thm_activation_needs_designation_and_quorum (designated:option nat) (leaf votes n:nat)
+  : Lemma (requires activate_ok designated leaf votes n == true)
+          (ensures (designated == Some leaf) /\ is_bft_quorum votes n == true)
+  = ()
+
+/// THEOREM 17 (A MINORITY CANNOT PROMOTE). If at most a third of the roster votes
+/// (3*votes <= n), activation is impossible regardless of designation — a malicious
+/// minority (< 1/3) can never force a committer promotion.
+let thm_minority_cannot_promote (designated:option nat) (leaf votes n:nat)
+  : Lemma (requires 3 * votes <= n)
+          (ensures activate_ok designated leaf votes n == false)
+  = ()
+
+(* ---------- committing takeover (increment 4c): commit authority under a handoff ------- *)
+(* Added 2026-11-27 (plan 0005 §4c). Models `apply_commit_with`: the committer authority  *)
+(* for an epoch is EXACTLY ONE leaf — the delegated successor when the handoff is in force, *)
+(* else the host — so a non-host successor's commit is accepted ONLY under the delegation,  *)
+(* and the old host is fenced out (the commit analogue of roster THEOREM 14, upholding I1). *)
+
+let commit_authority (deleg:option (nat & nat)) (epoch:nat) : nat =
+  match deleg with
+  | Some (succ, fe) -> if epoch >= fe then succ else host_leaf
+  | None            -> host_leaf
+
+/// Accept a commit at `epoch` from `committer` iff it is the sole authority for this epoch
+/// AND its key signed the epoch-bound commit. (`apply_commit_with` in treekem.rs.)
+let accept_commit_fenced
+      (l:log) (key_of:nat -> pk) (deleg:option (nat & nat)) (committer epoch body:nat) (s:sig) : bool =
+  committer = commit_authority deleg epoch &&
+  verify l (key_of committer) (commit_transcript epoch committer body) s
+
+/// THEOREM 18 (COMMIT AUTHORITY UNDER A HANDOFF — single committer, I1). Under a delegation
+/// to `succ` from `fe`, for epoch >= fe the commit authority is EXACTLY `succ`, and a commit
+/// from ANY other leaf — the fenced-out old host (leaf 0) included — is rejected. So the
+/// takeover transfers commit authority to exactly the host-authorized successor, never two
+/// committers at one epoch.
+let thm_commit_authority_single
+      (l:log) (key_of:nat -> pk) (succ fe epoch body:nat) (s:sig) (bad:nat)
+  : Lemma (requires epoch >= fe /\ bad <> succ)
+          (ensures commit_authority (Some (succ, fe)) epoch == succ /\
+                   accept_commit_fenced l key_of (Some (succ, fe)) bad epoch body s == false)
+  = ()
