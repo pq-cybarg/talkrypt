@@ -148,6 +148,17 @@ Decouple message delivery from any single hub, and make the group connectivity r
   content liveness); rate-limited relay stays bounded under a flood (I4).
 - `GroupAuth.fst` / `GroupAuthQROM.ec` — re-confirm: relay/shuttle adds no forgery power
   (I5); provisional members produce no accepted attributed content (I3).
+- `ProvisionalTrust.fst` (NEW, DISCHARGED) — I3: a provisional (not-in-roster) member accrues
+  ZERO trust/vouch/sybil weight; nonzero trust implies confirmed; vouchability follows
+  committer confirmation. All VCs discharged.
+- `RateBound.fst` (NEW, DISCHARGED) — the QUANTITATIVE I4 token-bucket bound: a burst admits
+  at most `tokens` (<= capacity) ops; with refill `r`, at most `tokens+r` (linear in elapsed
+  time); a drained bucket admits nothing. All VCs discharged. (Previously an assumption.)
+
+**STATUS: all five invariants I1-I5 are now FULLY machine-checked** — I1 (EngineAuth 14/18),
+I2 (PresumptiveKey), I3 (ProvisionalTrust), I4 admission (EngineAuth 10/16/17) + rate-bound
+(RateBound), I5 (EngineAuth 8/11 + GossipLiveness 7/8). No honest-scope FV gaps remain in the
+topology-resilience overhaul.
 
 Until an obligation is discharged it is marked in-file as a NEW obligation (assume/admit
 with a dated TODO) — honest-scope: never claim proven what is not.
